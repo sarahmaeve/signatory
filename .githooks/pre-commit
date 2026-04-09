@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== pre-commit: gofmt ==="
+UNFMT=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
+if [ -n "$UNFMT" ]; then
+    echo "ERROR: The following files are not formatted:"
+    echo "$UNFMT"
+    echo "Run: gofmt -w \$file"
+    exit 1
+fi
+echo "OK"
+
+echo "=== pre-commit: go vet ==="
+go vet ./...
+echo "OK"
+
+echo "=== pre-commit: test file coverage ==="
+MISSING_TESTS=()
+for pkg in $(find . -name '*.go' -not -name '*_test.go' -not -path './vendor/*' -exec dirname {} \; | sort -u); do
+    if [ -z "$(find "$pkg" -maxdepth 1 -name '*_test.go' 2>/dev/null)" ]; then
+        MISSING_TESTS+=("$pkg")
+    fi
+done
+if [ ${#MISSING_TESTS[@]} -gt 0 ]; then
+    echo "ERROR: The following packages have no test files:"
+    for pkg in "${MISSING_TESTS[@]}"; do
+        echo "  $pkg"
+    done
+    exit 1
+fi
+echo "OK"
+
+echo "=== pre-commit: go test -race ==="
+go test -race ./...
+echo "OK"
+
+echo "=== pre-commit: all checks passed ==="
