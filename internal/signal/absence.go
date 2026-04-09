@@ -90,7 +90,12 @@ func signalGroupForType(signalType string) profile.SignalGroup {
 		return profile.SignalGroupPublication
 	case "license", "ci_cd":
 		return profile.SignalGroupHygiene
+	case "last_push", "repo_age", "open_issues", "last_commit", "total_commits", "archived":
+		return profile.SignalGroupVitality
 	default:
+		// Unknown signal types default to vitality. If you add a new
+		// signal type to a collector, add it to this switch to ensure
+		// absence signals get the correct group.
 		return profile.SignalGroupVitality
 	}
 }

@@ -46,9 +46,19 @@ func OpenSQLite(path string) (*SQLite, error) {
 	// with Go's database/sql and is appropriate for a single-user CLI tool.
 	db.SetMaxOpenConns(1)
 
-	// Set pragmas for WAL mode and busy timeout.
+	// Verify WAL mode is enabled.
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set journal_mode: %w", err)
+	}
+	if journalMode != "wal" {
+		db.Close()
+		return nil, fmt.Errorf("WAL mode not supported (got %q); signatory requires WAL for safe concurrent access", journalMode)
+	}
+
+	// Set additional pragmas.
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA foreign_keys=ON",
 	} {
@@ -184,6 +194,9 @@ func (s *SQLite) GetSignalsByGroup(ctx context.Context, entityID string, group p
 
 // PutSignals inserts or updates signals.
 func (s *SQLite) PutSignals(ctx context.Context, signals []profile.Signal) error {
+	if len(signals) == 0 {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -354,7 +367,7 @@ func scanEntity(row *sql.Row) (*profile.Entity, error) {
 
 // scanSignals scans multiple signal rows.
 func scanSignals(rows *sql.Rows) ([]profile.Signal, error) {
-	var signals []profile.Signal
+	signals := []profile.Signal{}
 	for rows.Next() {
 		var sig profile.Signal
 		var group, forgery, value, collectedAt, expiresAt string

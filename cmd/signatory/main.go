@@ -58,7 +58,7 @@ type Globals struct {
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
-func (g *Globals) OpenStore() (*store.SQLite, error) {
+func (g *Globals) OpenStore() (store.Store, error) {
 	path, err := store.ResolvePath(g.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
