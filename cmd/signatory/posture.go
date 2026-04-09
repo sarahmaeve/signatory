@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -29,7 +30,7 @@ func (cmd *PostureGetCmd) Run(globals *Globals) error {
 	defer s.Close()
 
 	posture, err := s.GetPosture(context.Background(), cmd.Target)
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		fmt.Printf("No posture recorded for: %s\n", cmd.Target)
 		return nil
 	}
@@ -67,7 +68,7 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 
 	// Ensure the entity exists (create a stub if not).
 	_, err = s.GetEntity(ctx, cmd.Target)
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		entity := &profile.Entity{
 			ID:        cmd.Target,
 			Type:      profile.EntityPackage,

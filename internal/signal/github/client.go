@@ -40,9 +40,22 @@ type Client struct {
 // to a total failure.
 func NewClient(token string) *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 60 * time.Second},
-		token:      token,
-		baseURL:    "https://api.github.com",
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Strip Authorization header on cross-origin redirects to
+				// prevent token leakage if redirected to an external host.
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					req.Header.Del("Authorization")
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
+			},
+		},
+		token:   token,
+		baseURL: "https://api.github.com",
 	}
 }
 
