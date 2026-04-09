@@ -73,6 +73,62 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 	}
 }
 
+// --- SSRF Prevention (Issue #27) ---
+
+// TestSecurity_ParseRepoURL_RejectsPathTraversal verifies that crafted
+// owner/repo names containing path traversal characters are rejected.
+func TestSecurity_ParseRepoURL_RejectsPathTraversal(t *testing.T) {
+	malicious := []struct {
+		name  string
+		input string
+	}{
+		{"dot-dot in owner", "../../admin/repo"},
+		{"dot-dot in repo", "owner/../../etc/passwd"},
+		{"query injection", "owner/repo?admin=true"},
+		{"fragment injection", "owner/repo#/admin"},
+		{"encoded slash", "owner%2F..%2Fadmin/repo"},
+		{"newline in owner", "owner\n/repo"},
+		{"space in owner", "owner /repo"},
+		{"semicolon", "owner;rm -rf/repo"},
+	}
+
+	for _, tt := range malicious {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ParseRepoURL(tt.input)
+			assert.Error(t, err, "should reject malicious input: %s", tt.input)
+		})
+	}
+}
+
+// TestSecurity_ParseRepoURL_AcceptsValid verifies that legitimate
+// names with dots, hyphens, and underscores are accepted.
+func TestSecurity_ParseRepoURL_AcceptsValid(t *testing.T) {
+	valid := []struct {
+		name      string
+		input     string
+		wantOwner string
+		wantRepo  string
+	}{
+		{"simple", "owner/repo", "owner", "repo"},
+		{"with dots", "org.name/my.repo", "org.name", "my.repo"},
+		{"with hyphens", "my-org/my-repo", "my-org", "my-repo"},
+		{"with underscores", "my_org/my_repo", "my_org", "my_repo"},
+		{"with numbers", "user123/repo456", "user123", "repo456"},
+		{"full URL", "https://github.com/alecthomas/kong", "alecthomas", "kong"},
+	}
+
+	for _, tt := range valid {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, err := ParseRepoURL(tt.input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantOwner, owner)
+			assert.Equal(t, tt.wantRepo, repo)
+		})
+	}
+}
+
+// --- Token Leak Prevention (Issue #29) ---
+
 // TestSecurity_TokenNotInCollectionFailureError verifies that
 // CollectionFailure.Error() doesn't leak the token either.
 func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {

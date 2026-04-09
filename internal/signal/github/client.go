@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// validGitHubName matches valid GitHub owner and repo names.
+// GitHub allows alphanumeric, hyphens, dots, and underscores.
+var validGitHubName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 var base64Std = base64.StdEncoding
 
@@ -253,7 +259,7 @@ type searchResult struct {
 func (c *Client) GetGoModRefCount(ctx context.Context, modulePath string) (int, error) {
 	var result searchResult
 	// The search API uses a different path and rate limit pool.
-	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", modulePath), &result)
+	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", url.QueryEscape(modulePath)), &result)
 	if err != nil {
 		return 0, err
 	}
@@ -362,5 +368,19 @@ func ParseRepoURL(input string) (owner, repoName string, err error) {
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse GitHub repo from %q: expected owner/repo", input)
 	}
-	return parts[0], parts[1], nil
+
+	owner = parts[0]
+	repoName = parts[1]
+
+	// Validate characters to prevent SSRF via path traversal, query
+	// injection, or other URL manipulation. GitHub names allow only
+	// alphanumeric, hyphens, dots, and underscores.
+	if !validGitHubName.MatchString(owner) {
+		return "", "", fmt.Errorf("invalid GitHub owner name %q: contains disallowed characters", owner)
+	}
+	if !validGitHubName.MatchString(repoName) {
+		return "", "", fmt.Errorf("invalid GitHub repo name %q: contains disallowed characters", repoName)
+	}
+
+	return owner, repoName, nil
 }
