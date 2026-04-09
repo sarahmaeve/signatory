@@ -106,10 +106,11 @@ func TestAnalyzeCmd_MissingTarget(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestAnalyzeCmd_Run(t *testing.T) {
+func TestAnalyzeCmd_Run_NoData(t *testing.T) {
 	t.Parallel()
 
-	cmd := &AnalyzeCmd{Target: "lodash", Refresh: true}
+	// Without --refresh and no cached data, should prompt to use --refresh.
+	cmd := &AnalyzeCmd{Target: "alecthomas/kong", Refresh: false}
 	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db"), Verbose: false}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
