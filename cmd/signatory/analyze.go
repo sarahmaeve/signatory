@@ -67,11 +67,14 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// Use injected collectors.
 	var allSignals []profile.Signal
 	for _, collector := range globals.Collectors {
-		signals, err := collector.Collect(ctx, entity)
+		result, err := collector.Collect(ctx, entity)
 		if err != nil {
 			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
 		}
-		allSignals = append(allSignals, signals...)
+		allSignals = append(allSignals, result.Signals()...)
+
+		// Surface collection quality to the user.
+		fmt.Printf("[%s] %s\n", collector.Name(), result.Summary())
 	}
 
 	if err := s.PutSignals(ctx, allSignals); err != nil {
@@ -83,7 +86,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("update entity: %w", err)
 	}
 
-	fmt.Printf("Collected %d signals.\n\n", len(allSignals))
+	fmt.Println()
 	return cmd.displayProfile(ctx, s, entityID)
 }
 

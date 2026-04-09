@@ -171,8 +171,9 @@ func TestCollector_Collect(t *testing.T) {
 		URL:  "https://github.com/alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 	assert.NotEmpty(t, signals)
 
 	// Build a map for easier assertions.
@@ -203,8 +204,9 @@ func TestCollector_SignalValues(t *testing.T) {
 		Name: "alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	byType := make(map[string]profile.Signal)
 	for _, s := range signals {
@@ -277,8 +279,9 @@ func TestCollector_SignalMetadata(t *testing.T) {
 		Name: "alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	for _, s := range signals {
 		assert.Equal(t, "test-entity", s.EntityID, "signal %s has wrong entity ID", s.Type)
@@ -301,8 +304,9 @@ func TestCollector_ForgeryResistance(t *testing.T) {
 		Name: "alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	byType := make(map[string]profile.Signal)
 	for _, s := range signals {
@@ -413,8 +417,12 @@ func TestCollector_PartialCollection(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err, "partial collection should not return an error")
+	signals := result.Signals()
+
+	// The result should report failures.
+	assert.True(t, result.HasFailures(), "partial collection should report failures")
 
 	// Should have collected some signals and some absences.
 	var absences, collected int
@@ -465,8 +473,9 @@ func TestCollector_UsesEntityURLOverName(t *testing.T) {
 		URL:  "https://github.com/alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 	assert.NotEmpty(t, signals)
 }
 
@@ -480,8 +489,9 @@ func TestCollector_TemporalEraClassification(t *testing.T) {
 		Name: "alecthomas/kong",
 	}
 
-	signals, err := c.Collect(ctx, entity)
+	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	byType := make(map[string]profile.Signal)
 	for _, s := range signals {

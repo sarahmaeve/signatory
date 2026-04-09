@@ -61,12 +61,12 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 		Name: "owner/repo",
 	}
 
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err, "partial collection should not return error")
 
 	// The critical check: NO signal should contain the token in its
 	// serialized value. Check every signal.
-	for _, sig := range signals {
+	for _, sig := range result.Signals() {
 		valueStr := string(sig.Value)
 		assert.NotContains(t, valueStr, secretToken,
 			"signal %s (type=%s) contains the secret token in its value — TOKEN LEAK",
@@ -122,8 +122,9 @@ func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	// Find the ci_cd signal.
 	for _, sig := range signals {
@@ -189,8 +190,9 @@ func TestSecurity_ZeroCommitRepoProducesAbsence(t *testing.T) {
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/empty"}
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	// Should have absence signals for last_commit and commit_signing.
 	hasAbsenceLastCommit := false
@@ -335,8 +337,9 @@ func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {
 
 	// Collect will succeed partially. Check that the sanitized reason
 	// in any failure path doesn't leak.
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	// Also verify: if someone calls .Error() on any failure, no leak.
 	for _, sig := range signals {
@@ -385,8 +388,9 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 		Name: "owner/repo",
 	}
 
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 
 	for _, sig := range signals {
 		valueStr := string(sig.Value)

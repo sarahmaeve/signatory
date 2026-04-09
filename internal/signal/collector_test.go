@@ -27,14 +27,18 @@ type mockCollector struct {
 
 func (m *mockCollector) Name() string { return m.name }
 
-func (m *mockCollector) Collect(ctx context.Context, entity *profile.Entity) ([]profile.Signal, error) {
+func (m *mockCollector) Collect(ctx context.Context, entity *profile.Entity) (*CollectionResult, error) {
 	m.called = true
 	m.receivedCtx = ctx
 	m.receivedEntity = entity
 	if m.err != nil {
 		return nil, m.err
 	}
-	return m.signals, nil
+	var result CollectionResult
+	for _, s := range m.signals {
+		result.Collected = append(result.Collected, MakeSignal(s))
+	}
+	return &result, nil
 }
 
 // Compile-time interface check.
@@ -102,13 +106,12 @@ func TestCollector_CollectReturnsSignals(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	signals, err := collector.Collect(ctx, entity)
+	result, err := collector.Collect(ctx, entity)
 
 	require.NoError(t, err)
 	assert.True(t, collector.called)
 	assert.Equal(t, entity, collector.receivedEntity)
-	assert.Equal(t, expectedSignals, signals)
-	assert.Len(t, signals, 2)
+	assert.Len(t, result.Signals(), 2)
 }
 
 func TestCollector_CollectReturnsError(t *testing.T) {
@@ -121,9 +124,9 @@ func TestCollector_CollectReturnsError(t *testing.T) {
 	}
 
 	entity := &profile.Entity{ID: "ent-1", Name: "test"}
-	signals, err := collector.Collect(context.Background(), entity)
+	result, err := collector.Collect(context.Background(), entity)
 
-	assert.Nil(t, signals)
+	assert.Nil(t, result)
 	assert.ErrorIs(t, err, expectedErr)
 	assert.True(t, collector.called)
 }
@@ -136,11 +139,11 @@ func TestCollector_CollectReturnsEmptySlice(t *testing.T) {
 		signals: []profile.Signal{},
 	}
 
-	signals, err := collector.Collect(context.Background(), &profile.Entity{ID: "ent-1"})
+	result, err := collector.Collect(context.Background(), &profile.Entity{ID: "ent-1"})
 
 	require.NoError(t, err)
-	assert.NotNil(t, signals)
-	assert.Empty(t, signals)
+	assert.NotNil(t, result)
+	assert.Empty(t, result.Signals())
 }
 
 func TestCollector_CollectReturnsNilSlice(t *testing.T) {
@@ -151,10 +154,10 @@ func TestCollector_CollectReturnsNilSlice(t *testing.T) {
 		signals: nil,
 	}
 
-	signals, err := collector.Collect(context.Background(), &profile.Entity{ID: "ent-1"})
+	result, err := collector.Collect(context.Background(), &profile.Entity{ID: "ent-1"})
 
 	require.NoError(t, err)
-	assert.Nil(t, signals)
+	assert.Empty(t, result.Signals())
 }
 
 func TestCollector_CollectReceivesContext(t *testing.T) {
@@ -195,12 +198,12 @@ type contextAwareCollector struct {
 
 func (c *contextAwareCollector) Name() string { return c.name }
 
-func (c *contextAwareCollector) Collect(ctx context.Context, entity *profile.Entity) ([]profile.Signal, error) {
+func (c *contextAwareCollector) Collect(ctx context.Context, entity *profile.Entity) (*CollectionResult, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
-		return nil, nil
+		return &CollectionResult{}, nil
 	}
 }
 
@@ -209,12 +212,10 @@ var _ Collector = (*contextAwareCollector)(nil)
 func TestCollector_NilEntity(t *testing.T) {
 	t.Parallel()
 
-	// Ensure the interface does not panic with a nil entity --
-	// the contract allows passing nil; implementations should handle it.
 	collector := &mockCollector{name: "nil-entity"}
 
-	signals, err := collector.Collect(context.Background(), nil)
+	result, err := collector.Collect(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Nil(t, signals)
+	assert.Empty(t, result.Signals())
 	assert.Nil(t, collector.receivedEntity)
 }

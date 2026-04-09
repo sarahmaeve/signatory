@@ -89,8 +89,9 @@ func TestLive_CollectorDirectly(t *testing.T) {
 		Name: "alecthomas/kong",
 	}
 
-	signals, err := collector.Collect(ctx, entity)
+	result, err := collector.Collect(ctx, entity)
 	require.NoError(t, err)
+	signals := result.Signals()
 	assert.GreaterOrEqual(t, len(signals), 14)
 
 	// Verify signal groups are populated.

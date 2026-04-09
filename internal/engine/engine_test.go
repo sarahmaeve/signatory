@@ -51,8 +51,8 @@ type mockCollector struct {
 }
 
 func (m *mockCollector) Name() string { return m.name }
-func (m *mockCollector) Collect(ctx context.Context, entity *profile.Entity) ([]profile.Signal, error) {
-	return nil, nil
+func (m *mockCollector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
+	return &signal.CollectionResult{}, nil
 }
 
 var _ signal.Collector = (*mockCollector)(nil)
