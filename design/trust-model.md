@@ -91,8 +91,43 @@ sophisticated attackers (including nation-state actors — see
 [example-axios-attack.md]), and as AI capabilities increase, AI-generated
 contributions may be indistinguishable from legitimate ones.
 
+### Adoption Type: Direct vs. Transitive
+
+Raw adoption counts (go.mod references, npm downloads) don't distinguish
+between developers who *chose* a package and those who *inherited* it as
+a transitive dependency. The **refs-to-stars ratio** provides a heuristic:
+
+| Ratio (refs/stars) | Interpretation |
+|--------------------|---------------|
+| < 1 | Mostly direct adoption — developers actively evaluate and select this package |
+| 1–5 | Mix of direct and transitive |
+| > 10 | Mostly transitive — pulled in by a popular parent, rarely chosen directly |
+
+Transitive-only adoption is a weaker trust signal than direct adoption.
+A package with a 50:1 ratio is in many dependency trees but few humans
+have independently evaluated it — they inherited it without choosing it.
+
+Validated against signatory's own dependency evaluations:
+- mousetrap: 54:1 (transitive via Cobra — rejected)
+- kong: 0.66:1 (direct adoption — trusted-for-now)
+- testify: 3:1 (strong direct adoption — trusted-for-now)
+
+### Commit Activity Patterns
+
+Last commit date alone is insufficient. Two additional signals refine
+the vitality assessment:
+
+- **Total commit count relative to age.** A 12-year-old project with 10
+  commits (mousetrap) is qualitatively different from an 8-year-old
+  project with 467 commits (kong). Low total count indicates write-once
+  code.
+- **Activity distribution.** Years of silence followed by a burst may
+  indicate abandonment and brief revival. The nature of the burst matters:
+  substantive work (features, fixes) is a stronger signal than cosmetic
+  cleanup (updating build tags, adding go.mod).
+
 See [example-axios-attack.md] for a case study of how criticality amplified
-the impact of the axios npm supply chain attack (April 2025).
+the impact of the axios npm supply chain attack (March 2026).
 
 ## Dependency Posture Tiers
 

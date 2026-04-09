@@ -65,6 +65,9 @@ immediate investigation. See trust-model.md for the multiplier framework.
 | Dependent package count | npm registry | How many packages depend on this |
 | Presence in consumer's dep tree | Local manifest | Direct vs. transitive, depth |
 | Dependency role | Local manifest + analysis | Runtime, validation, build-only, or development — determines blast radius |
+| Adoption type (refs-to-stars ratio) | GitHub API + search | Distinguishes direct adoption from transitive inheritance |
+| Total commit count | GitHub API | Low count in old repos indicates write-once code |
+| Commit activity distribution | GitHub API | Gaps, bursts, cosmetic-vs-substantive recent activity |
 
 ## Temporal Era Classification
 

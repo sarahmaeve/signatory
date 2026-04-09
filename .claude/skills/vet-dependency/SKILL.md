@@ -92,6 +92,23 @@ When reporting adoption numbers, distinguish between **direct** and
   it. This is a weaker trust signal than direct adoption where developers
   actively selected the package.
 
+**Refs-to-stars ratio:** Calculate `go.mod references / GitHub stars` as
+a heuristic for adoption type:
+
+| Ratio | Interpretation |
+|-------|---------------|
+| < 1 | Mostly direct adoption — developers actively choose this package |
+| 1–5 | Mix of direct and transitive |
+| > 10 | Mostly transitive — dragged in by a popular parent, rarely chosen directly |
+
+Examples from signatory's own dogfood evaluations:
+- mousetrap: 14,696 refs / 269 stars = **54:1** (almost entirely transitive via Cobra)
+- kong: 2,008 refs / 3,023 stars = **0.66:1** (mostly direct, deliberately chosen)
+- testify: 79,360 refs / 25,911 stars = **3:1** (strong direct adoption with some transitive)
+
+High transitive-only adoption is a risk signal: the package is in many
+dependency trees but few humans have independently evaluated it.
+
 ### 4. Collect ecosystem-specific signals
 
 For Go modules, check:
