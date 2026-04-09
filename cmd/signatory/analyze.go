@@ -87,7 +87,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	return cmd.displayProfile(ctx, s, entityID)
 }
 
-func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s *store.SQLite, entityID string) error {
+func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s store.Store, entityID string) error {
 	entity, err := s.GetEntity(ctx, entityID)
 	if err != nil {
 		return err

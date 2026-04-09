@@ -31,5 +31,5 @@ func ResolvePath(path string) (string, error) {
 	if path == "~" {
 		return DefaultDBPath()
 	}
-	return filepath.Clean(path), nil
+	return filepath.Abs(path)
 }

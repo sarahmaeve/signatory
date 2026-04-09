@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -258,7 +259,7 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 func (c *Collector) collectAdoption(ctx context.Context, result *signal.CollectionResult,
 	entityID, owner, repoName string, stars int, now time.Time, ttl time.Duration) {
 
-	refCount, err := c.client.GetGoModRefCount(ctx, owner+"/"+repoName)
+	refCount, err := c.client.GetGoModRefCount(ctx, "github.com/"+owner+"/"+repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
@@ -413,8 +414,9 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Rate limit errors.
-	if _, ok := err.(*RateLimitError); ok {
+	// Rate limit errors (using errors.As to handle wrapped errors).
+	var rateLimitErr *RateLimitError
+	if errors.As(err, &rateLimitErr) {
 		return true
 	}
 	errMsg := err.Error()

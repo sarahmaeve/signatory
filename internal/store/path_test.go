@@ -65,8 +65,8 @@ func TestResolvePath_AbsolutePath(t *testing.T) {
 func TestResolvePath_RelativePath(t *testing.T) {
 	path, err := ResolvePath("data/signatory.db")
 	require.NoError(t, err)
-	assert.Equal(t, "data/signatory.db", path)
-	assert.False(t, strings.HasPrefix(path, "~"))
+	assert.True(t, filepath.IsAbs(path), "relative path should be converted to absolute")
+	assert.True(t, strings.HasSuffix(path, "data/signatory.db"))
 }
 
 func TestResolvePath_TrailingSlash(t *testing.T) {
