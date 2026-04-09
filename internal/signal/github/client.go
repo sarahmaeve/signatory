@@ -23,9 +23,13 @@ type Client struct {
 
 // NewClient creates a GitHub API client. If token is empty, requests
 // are unauthenticated (60 req/hr limit vs. 5000 authenticated).
+// The per-request timeout is generous (60s) because GitHub API can be
+// slow under load, and a timeout should not collapse the entire
+// collection — partial results with absence records are preferable
+// to a total failure.
 func NewClient(token string) *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second},
 		token:      token,
 		baseURL:    "https://api.github.com",
 	}

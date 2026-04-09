@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/signal"
 )
 
 // Collector gathers trust signals from the GitHub API.
@@ -31,8 +32,10 @@ func NewCollectorWithClient(client *Client) *Collector {
 // Name returns the collector identifier.
 func (c *Collector) Name() string { return "github" }
 
-// Collect gathers signals for a GitHub-hosted entity.
-// The entity URL should be a GitHub repo URL or owner/repo string.
+// Collect gathers signals for a GitHub-hosted entity. Each signal group
+// is collected independently — a failure in one (e.g., rate limiting on
+// the search API) does not prevent other signals from being collected.
+// Failed collections are recorded as absence signals.
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) ([]profile.Signal, error) {
 	target := entity.URL
 	if target == "" {
@@ -46,178 +49,290 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) ([]prof
 
 	now := time.Now().UTC()
 	ttl := 24 * time.Hour
-	var signals []profile.Signal
+	var result signal.CollectionResult
 
-	// Repo metadata — vitality, governance, criticality.
+	// Repo metadata — required. If this fails, we can't proceed.
 	r, err := c.client.GetRepo(ctx, owner, repoName)
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
 
-	signals = append(signals,
-		makeSignal(entity.ID, "last_push", profile.SignalGroupVitality,
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entity.ID, "last_push", profile.SignalGroupVitality,
 			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))}),
-		makeSignal(entity.ID, "repo_age", profile.SignalGroupVitality,
+			map[string]interface{}{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))})),
+		signal.MakeSignal(makeSignal(entity.ID, "repo_age", profile.SignalGroupVitality,
 			profile.ForgeryVeryHigh, now, ttl,
-			map[string]interface{}{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)}),
-		makeSignal(entity.ID, "stars", profile.SignalGroupCriticality,
+			map[string]interface{}{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)})),
+		signal.MakeSignal(makeSignal(entity.ID, "stars", profile.SignalGroupCriticality,
 			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.StargazersCount}),
-		makeSignal(entity.ID, "forks", profile.SignalGroupCriticality,
+			map[string]interface{}{"count": r.StargazersCount})),
+		signal.MakeSignal(makeSignal(entity.ID, "forks", profile.SignalGroupCriticality,
 			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.ForksCount}),
-		makeSignal(entity.ID, "open_issues", profile.SignalGroupVitality,
+			map[string]interface{}{"count": r.ForksCount})),
+		signal.MakeSignal(makeSignal(entity.ID, "open_issues", profile.SignalGroupVitality,
 			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.OpenIssuesCount}),
-		makeSignal(entity.ID, "archived", profile.SignalGroupVitality,
+			map[string]interface{}{"count": r.OpenIssuesCount})),
+		signal.MakeSignal(makeSignal(entity.ID, "archived", profile.SignalGroupVitality,
 			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"archived": r.Archived}),
-		makeSignal(entity.ID, "owner_type", profile.SignalGroupGovernance,
+			map[string]interface{}{"archived": r.Archived})),
+		signal.MakeSignal(makeSignal(entity.ID, "owner_type", profile.SignalGroupGovernance,
 			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"type": r.Owner.Type, "login": r.Owner.Login}),
+			map[string]interface{}{"type": r.Owner.Type, "login": r.Owner.Login})),
 	)
 
 	if r.License != nil {
-		signals = append(signals,
-			makeSignal(entity.ID, "license", profile.SignalGroupHygiene,
+		result.Collected = append(result.Collected,
+			signal.MakeSignal(makeSignal(entity.ID, "license", profile.SignalGroupHygiene,
 				profile.ForgeryLowDeclining, now, ttl,
-				map[string]interface{}{"spdx_id": r.License.SPDXID}))
+				map[string]interface{}{"spdx_id": r.License.SPDXID})))
 	}
 
-	// Contributors — governance.
-	contributors, err := c.client.GetContributors(ctx, owner, repoName)
-	if err == nil && len(contributors) > 0 {
-		topContribs := make([]map[string]interface{}, 0, len(contributors))
-		for _, contrib := range contributors {
-			topContribs = append(topContribs, map[string]interface{}{
-				"login":         contrib.Login,
-				"contributions": contrib.Contributions,
-			})
-		}
-		signals = append(signals,
-			makeSignal(entity.ID, "contributors", profile.SignalGroupGovernance,
-				profile.ForgeryHigh, now, ttl,
-				map[string]interface{}{"count": len(contributors), "top": topContribs}))
-	}
+	// Contributors — independent, failures recorded as absence.
+	c.collectContributors(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Recent commits — vitality, governance (signing).
-	commits, err := c.client.GetRecentCommits(ctx, owner, repoName)
-	if err == nil && len(commits) > 0 {
-		signedCount := 0
-		for _, cm := range commits {
-			if cm.Commit.Verification.Verified {
-				signedCount++
-			}
-		}
+	// Recent commits — independent.
+	c.collectCommits(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-		signals = append(signals,
-			makeSignal(entity.ID, "last_commit", profile.SignalGroupVitality,
-				profile.ForgeryMediumDeclining, now, ttl,
-				map[string]interface{}{
-					"date":     commits[0].Commit.Author.Date.Format(time.RFC3339),
-					"era":      string(profile.ClassifyEra(commits[0].Commit.Author.Date)),
-					"days_ago": int(now.Sub(commits[0].Commit.Author.Date).Hours() / 24),
-				}),
-			makeSignal(entity.ID, "commit_signing", profile.SignalGroupGovernance,
-				profile.ForgeryVeryHigh, now, ttl,
-				map[string]interface{}{
-					"signed_count": signedCount,
-					"total_count":  len(commits),
-					"ratio":        float64(signedCount) / float64(len(commits)),
-				}),
-		)
-	}
+	// Total commit count — independent.
+	c.collectTotalCommits(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Total commit count — vitality.
-	totalCommits, err := c.client.GetTotalCommitCount(ctx, owner, repoName)
-	if err == nil {
-		signals = append(signals,
-			makeSignal(entity.ID, "total_commits", profile.SignalGroupVitality,
-				profile.ForgeryHigh, now, ttl,
-				map[string]interface{}{"count": totalCommits}))
-	}
+	// Tags — independent.
+	c.collectTags(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Tags — publication integrity.
-	tags, err := c.client.GetTags(ctx, owner, repoName)
-	if err == nil {
-		tagNames := make([]string, 0, len(tags))
-		for _, t := range tags {
-			tagNames = append(tagNames, t.Name)
-		}
-		signals = append(signals,
-			makeSignal(entity.ID, "tags", profile.SignalGroupPublication,
-				profile.ForgeryHigh, now, ttl,
-				map[string]interface{}{"count": len(tags), "recent": tagNames}))
-	}
+	// Owner profile — independent.
+	c.collectOwnerProfile(ctx, &result, entity.ID, owner, now, ttl)
 
-	// Owner profile — governance.
-	ownerUser, err := c.client.GetUser(ctx, owner)
-	if err == nil {
-		signals = append(signals,
-			makeSignal(entity.ID, "owner_profile", profile.SignalGroupGovernance,
-				profile.ForgeryVeryHigh, now, ttl,
-				map[string]interface{}{
-					"login":            ownerUser.Login,
-					"name":             ownerUser.Name,
-					"company":          ownerUser.Company,
-					"created":          ownerUser.CreatedAt.Format(time.RFC3339),
-					"account_age_days": int(now.Sub(ownerUser.CreatedAt).Hours() / 24),
-					"public_repos":     ownerUser.PublicRepos,
-					"followers":        ownerUser.Followers,
-					"type":             ownerUser.Type,
-				}))
-	}
+	// Adoption (go.mod refs) — independent, uses search API with its own rate limit.
+	c.collectAdoption(ctx, &result, entity.ID, owner, repoName, r.StargazersCount, now, ttl)
 
-	// Adoption — criticality.
-	refCount, err := c.client.GetGoModRefCount(ctx, owner+"/"+repoName)
-	if err == nil {
-		ratio := float64(0)
-		if r.StargazersCount > 0 {
-			ratio = float64(refCount) / float64(r.StargazersCount)
-		}
-		adoptionType := "direct"
-		if ratio > 10 {
-			adoptionType = "mostly-transitive"
-		} else if ratio > 1 {
-			adoptionType = "mixed"
-		}
-		signals = append(signals,
-			makeSignal(entity.ID, "adoption", profile.SignalGroupCriticality,
-				profile.ForgeryHigh, now, ttl,
-				map[string]interface{}{
-					"go_mod_refs":   refCount,
-					"stars":         r.StargazersCount,
-					"refs_to_stars": ratio,
-					"adoption_type": adoptionType,
-				}))
-	}
+	// CI/CD presence — independent.
+	c.collectCI(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// CI/CD presence — hygiene.
-	ciSignals := c.collectCIPresence(ctx, owner, repoName)
-	if len(ciSignals) > 0 {
-		signals = append(signals,
-			makeSignal(entity.ID, "ci_cd", profile.SignalGroupHygiene,
-				profile.ForgeryMediumDeclining, now, ttl,
-				map[string]interface{}{"providers": ciSignals}))
-	}
+	// Go dependencies — independent.
+	c.collectGoDeps(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Transitive dependencies — governance (dependency count and health).
-	goModContent, err := c.client.GetFileRaw(ctx, owner, repoName, "go.mod")
-	if err == nil && goModContent != nil {
-		deps := parseGoModDeps(string(goModContent))
-		signals = append(signals,
-			makeSignal(entity.ID, "go_dependencies", profile.SignalGroupGovernance,
-				profile.ForgeryHigh, now, ttl,
-				map[string]interface{}{
-					"direct_count":   deps.directCount,
-					"indirect_count": deps.indirectCount,
-					"total_count":    deps.directCount + deps.indirectCount,
-					"direct":         deps.direct,
-				}))
+	// Convert results to signals (including absence records).
+	signals := make([]profile.Signal, 0, len(result.Collected))
+	for _, s := range result.Collected {
+		signals = append(signals, s.ToSignal())
 	}
 
 	return signals, nil
+}
+
+func (c *Collector) collectContributors(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	contributors, err := c.client.GetContributors(ctx, owner, repoName)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "contributors", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "contributors", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	topContribs := make([]map[string]interface{}, 0, len(contributors))
+	for _, contrib := range contributors {
+		topContribs = append(topContribs, map[string]interface{}{
+			"login":         contrib.Login,
+			"contributions": contrib.Contributions,
+		})
+	}
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "contributors", profile.SignalGroupGovernance,
+			profile.ForgeryHigh, now, ttl,
+			map[string]interface{}{"count": len(contributors), "top": topContribs})))
+}
+
+func (c *Collector) collectCommits(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	commits, err := c.client.GetRecentCommits(ctx, owner, repoName)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "last_commit", "github", err.Error(), isRetryable(err), now),
+			signal.MakeAbsence(entityID, "commit_signing", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "commits", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	if len(commits) == 0 {
+		return
+	}
+
+	signedCount := 0
+	for _, cm := range commits {
+		if cm.Commit.Verification.Verified {
+			signedCount++
+		}
+	}
+
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "last_commit", profile.SignalGroupVitality,
+			profile.ForgeryMediumDeclining, now, ttl,
+			map[string]interface{}{
+				"date":     commits[0].Commit.Author.Date.Format(time.RFC3339),
+				"era":      string(profile.ClassifyEra(commits[0].Commit.Author.Date)),
+				"days_ago": int(now.Sub(commits[0].Commit.Author.Date).Hours() / 24),
+			})),
+		signal.MakeSignal(makeSignal(entityID, "commit_signing", profile.SignalGroupGovernance,
+			profile.ForgeryVeryHigh, now, ttl,
+			map[string]interface{}{
+				"signed_count": signedCount,
+				"total_count":  len(commits),
+				"ratio":        float64(signedCount) / float64(len(commits)),
+			})),
+	)
+}
+
+func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	totalCommits, err := c.client.GetTotalCommitCount(ctx, owner, repoName)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "total_commits", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "total_commits", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "total_commits", profile.SignalGroupVitality,
+			profile.ForgeryHigh, now, ttl,
+			map[string]interface{}{"count": totalCommits})))
+}
+
+func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	tags, err := c.client.GetTags(ctx, owner, repoName)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "tags", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "tags", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	tagNames := make([]string, 0, len(tags))
+	for _, t := range tags {
+		tagNames = append(tagNames, t.Name)
+	}
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "tags", profile.SignalGroupPublication,
+			profile.ForgeryHigh, now, ttl,
+			map[string]interface{}{"count": len(tags), "recent": tagNames})))
+}
+
+func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner string, now time.Time, ttl time.Duration) {
+
+	ownerUser, err := c.client.GetUser(ctx, owner)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "owner_profile", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "owner_profile", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "owner_profile", profile.SignalGroupGovernance,
+			profile.ForgeryVeryHigh, now, ttl,
+			map[string]interface{}{
+				"login":            ownerUser.Login,
+				"name":             ownerUser.Name,
+				"company":          ownerUser.Company,
+				"created":          ownerUser.CreatedAt.Format(time.RFC3339),
+				"account_age_days": int(now.Sub(ownerUser.CreatedAt).Hours() / 24),
+				"public_repos":     ownerUser.PublicRepos,
+				"followers":        ownerUser.Followers,
+				"type":             ownerUser.Type,
+			})))
+}
+
+func (c *Collector) collectAdoption(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, stars int, now time.Time, ttl time.Duration) {
+
+	refCount, err := c.client.GetGoModRefCount(ctx, owner+"/"+repoName)
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "adoption", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "adoption", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+
+	ratio := float64(0)
+	if stars > 0 {
+		ratio = float64(refCount) / float64(stars)
+	}
+	adoptionType := "direct"
+	if ratio > 10 {
+		adoptionType = "mostly-transitive"
+	} else if ratio > 1 {
+		adoptionType = "mixed"
+	}
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "adoption", profile.SignalGroupCriticality,
+			profile.ForgeryHigh, now, ttl,
+			map[string]interface{}{
+				"go_mod_refs":   refCount,
+				"stars":         stars,
+				"refs_to_stars": ratio,
+				"adoption_type": adoptionType,
+			})))
+}
+
+func (c *Collector) collectCI(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	providers := c.collectCIPresence(ctx, owner, repoName)
+	if len(providers) > 0 {
+		result.Collected = append(result.Collected,
+			signal.MakeSignal(makeSignal(entityID, "ci_cd", profile.SignalGroupHygiene,
+				profile.ForgeryMediumDeclining, now, ttl,
+				map[string]interface{}{"providers": providers})))
+	} else {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "ci_cd", "github",
+				"no CI/CD configuration detected", false, now))
+	}
+}
+
+func (c *Collector) collectGoDeps(ctx context.Context, result *signal.CollectionResult,
+	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
+
+	goModContent, err := c.client.GetFileRaw(ctx, owner, repoName, "go.mod")
+	if err != nil {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "go_dependencies", "github", err.Error(), isRetryable(err), now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "go_dependencies", Source: "github", Err: err, Retryable: isRetryable(err)})
+		return
+	}
+	if goModContent == nil {
+		// Not a Go project — record absence but not as a failure.
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "go_dependencies", "github",
+				"no go.mod found (not a Go project)", false, now))
+		return
+	}
+
+	deps := parseGoModDeps(string(goModContent))
+	result.Collected = append(result.Collected,
+		signal.MakeSignal(makeSignal(entityID, "go_dependencies", profile.SignalGroupGovernance,
+			profile.ForgeryHigh, now, ttl,
+			map[string]interface{}{
+				"direct_count":   deps.directCount,
+				"indirect_count": deps.indirectCount,
+				"total_count":    deps.directCount + deps.indirectCount,
+				"direct":         deps.direct,
+			})))
 }
 
 // collectCIPresence checks for common CI/CD configuration.
@@ -251,6 +366,32 @@ func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName strin
 	}
 
 	return providers
+}
+
+// isRetryable determines if an error is likely to succeed on retry.
+// Rate limits, timeouts, and transient server errors are retryable.
+// 404s and parse errors are not.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Rate limit errors.
+	if _, ok := err.(*RateLimitError); ok {
+		return true
+	}
+	errMsg := err.Error()
+	// Timeouts and connection errors.
+	if strings.Contains(errMsg, "context deadline exceeded") ||
+		strings.Contains(errMsg, "Client.Timeout") ||
+		strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "no such host") {
+		return true
+	}
+	// Server errors (5xx).
+	if strings.Contains(errMsg, "GitHub API error 5") {
+		return true
+	}
+	return false
 }
 
 // goModDeps holds parsed dependency information from a go.mod file.

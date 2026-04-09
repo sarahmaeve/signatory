@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -156,6 +157,7 @@ func displayHuman(p *profile.Profile) error {
 		{profile.SignalGroupPosture, "Posture"},
 	}
 
+	absenceCount := 0
 	for _, g := range groupOrder {
 		sigs, ok := groups[g.group]
 		if !ok {
@@ -165,14 +167,29 @@ func displayHuman(p *profile.Profile) error {
 		for _, s := range sigs {
 			var val map[string]interface{}
 			json.Unmarshal(s.Value, &val)
-			fmt.Printf("  %-20s [%s]  ", s.Type, s.ForgeryResistance)
-			printCompactValue(val)
-			fmt.Println()
+
+			if strings.HasPrefix(s.Type, "absence:") {
+				absenceCount++
+				retryable := ""
+				if r, ok := val["retryable"].(bool); ok && r {
+					retryable = " (retryable)"
+				}
+				reason := ""
+				if r, ok := val["reason"].(string); ok {
+					reason = r
+				}
+				fmt.Printf("  %-20s [ABSENT]  %s%s\n",
+					strings.TrimPrefix(s.Type, "absence:"), reason, retryable)
+			} else {
+				fmt.Printf("  %-20s [%s]  ", s.Type, s.ForgeryResistance)
+				printCompactValue(val)
+				fmt.Println()
+			}
 		}
 		fmt.Println()
 	}
 
-	fmt.Printf("Total signals: %d\n", len(p.Signals))
+	fmt.Printf("Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
 	return nil
 }
 

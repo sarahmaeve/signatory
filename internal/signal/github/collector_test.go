@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,6 +354,84 @@ func TestCollector_RateLimitError(t *testing.T) {
 
 	var rateLimitErr *RateLimitError
 	assert.ErrorAs(t, err, &rateLimitErr)
+}
+
+func TestCollector_PartialCollection(t *testing.T) {
+	// Simulate: repo metadata works, but search API and contents API are rate-limited.
+	mux := http.NewServeMux()
+
+	// Repo works.
+	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(repo{
+			Name: "repo", FullName: "owner/repo",
+			Owner:           repoOwner{Login: "owner", Type: "User"},
+			CreatedAt:       time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+			PushedAt:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			StargazersCount: 100,
+			License:         &license{SPDXID: "MIT"},
+		})
+	})
+
+	// Contributors works.
+	mux.HandleFunc("/repos/owner/repo/contributors", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]contributor{{Login: "owner", Contributions: 50}})
+	})
+
+	// Commits works.
+	mux.HandleFunc("/repos/owner/repo/commits", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]commit{{
+			Commit: commitData{
+				Author:       commitPerson{Date: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+				Verification: verification{Verified: true},
+			},
+		}})
+	})
+
+	// Tags works.
+	mux.HandleFunc("/repos/owner/repo/tags", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]tag{{Name: "v1.0.0"}})
+	})
+
+	// User works.
+	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)})
+	})
+
+	// Search API rate-limited.
+	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", "1712700000")
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	// Contents API rate-limited (CI and go.mod checks).
+	mux.HandleFunc("/repos/owner/repo/contents/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", "1712700000")
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	c := newTestCollector(t, mux)
+	ctx := context.Background()
+
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
+	signals, err := c.Collect(ctx, entity)
+	require.NoError(t, err, "partial collection should not return an error")
+
+	// Should have collected some signals and some absences.
+	var absences, collected int
+	for _, s := range signals {
+		if strings.HasPrefix(s.Type, "absence:") {
+			absences++
+			// Verify absence metadata.
+			var val map[string]interface{}
+			json.Unmarshal(s.Value, &val)
+			assert.Equal(t, true, val["absent"])
+		} else {
+			collected++
+		}
+	}
+
+	assert.Greater(t, collected, 0, "should have some collected signals")
+	assert.Greater(t, absences, 0, "should have some absence records")
 }
 
 func TestCollector_NotFoundError(t *testing.T) {
