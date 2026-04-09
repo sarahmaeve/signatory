@@ -18,9 +18,26 @@ or GitHub repo URL).
 ### 1. Identify the target
 
 Parse $ARGUMENTS to determine:
-- The GitHub repo (derive from module path or look up from registry)
+- The source repo (GitHub, GitLab, or other host)
 - The package registry (npm, PyPI, Go modules) if applicable
 - Whether this is a direct dependency or transitive
+
+**Vanity domains:** Go modules often use vanity import paths (e.g.,
+`modernc.org/sqlite` → `gitlab.com/cznic/sqlite`). Check `pkg.go.dev`
+or fetch the module's `?go-get=1` metadata to resolve the actual repo.
+
+**Non-GitHub hosting:** If the project is on GitLab, Gitea, SourceHut,
+or another platform:
+- Note that signal collection will be **less complete** — `gh api` won't
+  work. Use WebFetch to scrape project pages for metadata.
+- The reduced visibility is itself a signal: less tooling support means
+  less automated scrutiny from the ecosystem.
+- Check if there's a GitHub mirror and whether it's active or archived.
+  An archived GitHub mirror pointing to GitLab is common (e.g.,
+  modernc.org/sqlite).
+
+**Archived repos:** If a GitHub repo is archived, check the description
+and homepage for where development has moved. Follow the redirect.
 
 ### 2. Determine the dependency role
 
@@ -109,6 +126,11 @@ Examples from signatory's own dogfood evaluations:
 High transitive-only adoption is a risk signal: the package is in many
 dependency trees but few humans have independently evaluated it.
 
+**Note on non-GitHub stars:** If the project is hosted on GitLab or
+another platform and has an archived GitHub mirror, the GitHub star
+count may be artificially low. Note this in the assessment and flag
+the ratio as potentially misleading.
+
 ### 4. Collect ecosystem-specific signals
 
 For Go modules, check:
@@ -144,6 +166,24 @@ Read `design/trust-model.md` for the full framework. Key assessments:
 **Transitive Dependencies:**
 Check the health of transitive deps. Fallow single-maintainer transitives
 are a repeating pattern (see mousetrap, go-spew, go-difflib cases).
+
+**Same-author concentration:** If multiple transitive dependencies share
+one author or organization, flag this as **correlated risk**. A
+compromise of that author's account affects all their packages
+simultaneously. This is worse than the same number of dependencies from
+independent authors. Example: modernc.org/sqlite depends on 4 other
+modernc.org/* packages, all from cznic — a single account compromise
+would affect the entire stack.
+
+**Retracted versions:** Check if the project's go.mod contains `retract`
+directives. Retraction is responsible behavior (better than leaving broken
+versions live), but a high count indicates past publish quality issues
+or instability.
+
+**Self-documented fragility:** Check if the project's README or go.mod
+contains warnings about version coupling or fragile dependencies. A
+project that warns "you must use the exact same version of X" is
+self-documenting a tight coupling risk. Note these warnings.
 
 ### 6. Produce the output document
 

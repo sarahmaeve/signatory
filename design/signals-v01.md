@@ -23,6 +23,8 @@ and derived from the trust model's core principles.
 | Org affiliation | GitHub API | Verified org membership |
 | Commit signing presence | GitHub API | GPG/SSH verified commits |
 | Maintainer account age | GitHub API | Young accounts on critical packages are anomalous |
+| Source control platform | Repo URL | GitHub, GitLab, Gitea, SourceHut, etc. — platform affects signal collection depth |
+| Dependency author concentration | go.mod / manifest | Multiple deps from same author = correlated compromise risk |
 
 ### "How was this published?" (Publication Integrity)
 

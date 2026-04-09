@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Signatory database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Editor/IDE
 # .idea/
 # .vscode/

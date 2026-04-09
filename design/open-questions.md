@@ -52,6 +52,35 @@ Options:
 
 **Decision needed** once we settle on local storage format.
 
+## Source Control Platform Support
+
+### Multi-platform signal collection
+
+Signatory's signal collection is currently GitHub-centric (`gh api`). Projects
+hosted on other platforms have reduced signal visibility:
+
+| Platform | API Access | Signal Coverage | Notes |
+|----------|-----------|----------------|-------|
+| GitHub | Full (`gh api`) | Complete | Primary platform, best tooling |
+| GitLab | REST API available | Partial | No `gh` equivalent CLI; need HTTP client or WebFetch |
+| Gitea | REST API available | Partial | Self-hosted instances vary |
+| SourceHut | Limited API | Minimal | Email-driven workflow, different model |
+| Codeberg | Gitea-based API | Partial | Community-hosted Gitea |
+| Bitbucket | REST API available | Partial | Enterprise use |
+
+**The visibility gap is itself a signal.** A project on a platform with less
+automated scrutiny receives less ecosystem-wide attention. This doesn't make
+the project less trustworthy, but it means less passive verification.
+
+**Practical impact (discovered via dogfooding):** modernc.org/sqlite lives on
+GitLab with an archived GitHub mirror. We could not query contributor graphs,
+issue counts, or PR review patterns via `gh api`. The refs-to-stars ratio was
+misleading because GitHub stars were on the archived mirror.
+
+**Decision needed:** For v0.1, support GitHub as the primary signal source.
+Design the signal collector interface to accommodate other platforms. GitLab
+support is the highest priority addition after v0.1.
+
 ## Ecosystem Providers
 
 ### Package-to-repo mapping
@@ -59,6 +88,10 @@ Options:
 How do we reliably map a published package back to its source repository across
 ecosystems? This is straightforward for some (Go modules encode the repo URL)
 and unreliable for others (PyPI `project_urls` is optional and sometimes wrong).
+
+Additional complication: vanity import domains (e.g., `modernc.org/sqlite` →
+`gitlab.com/cznic/sqlite`) require an extra resolution step. Go's `?go-get=1`
+metadata endpoint can resolve these.
 
 This is a hard problem that affects the quality of every signal we collect.
 

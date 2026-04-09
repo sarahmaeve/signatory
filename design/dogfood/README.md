@@ -29,3 +29,4 @@ the prt-scan attack targeted CI environments. Both vectors matter.
 | mousetrap | Runtime (transitive) | **Rejected** — fallow, single-maintainer | [mousetrap.md](mousetrap.md) |
 | Kong | Runtime | **Trusted-for-now** — zero deps, strong author provenance | [kong.md](kong.md) |
 | testify | Validation | **Trusted-for-now** — org-owned, formal governance, test-only | [testify.md](testify.md) |
+| modernc.org/sqlite | Runtime | **Trusted-for-now** — active, pure Go requirement, but single-maintainer governance gap | [modernc-sqlite.md](modernc-sqlite.md) |
