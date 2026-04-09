@@ -2,15 +2,64 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
+
+// mockCollector returns canned signals without network access.
+type mockCollector struct {
+	name    string
+	signals []profile.Signal
+	err     error
+}
+
+func (m *mockCollector) Name() string { return m.name }
+func (m *mockCollector) Collect(_ context.Context, entity *profile.Entity) ([]profile.Signal, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	// Return signals with the entity's ID.
+	result := make([]profile.Signal, len(m.signals))
+	for i, s := range m.signals {
+		s.EntityID = entity.ID
+		s.ID = m.name + ":" + entity.ID + ":" + s.Type
+		result[i] = s
+	}
+	return result, nil
+}
+
+func newMockCollector() *mockCollector {
+	now := time.Now().UTC()
+	return &mockCollector{
+		name: "mock",
+		signals: []profile.Signal{
+			{Type: "stars", Group: profile.SignalGroupCriticality, Source: "mock",
+				ForgeryResistance: profile.ForgeryMediumDeclining,
+				Value:             json.RawMessage(`{"count":1000}`), CollectedAt: now, ExpiresAt: now.Add(time.Hour)},
+			{Type: "last_commit", Group: profile.SignalGroupVitality, Source: "mock",
+				ForgeryResistance: profile.ForgeryMediumDeclining,
+				Value:             json.RawMessage(`{"days_ago":5}`), CollectedAt: now, ExpiresAt: now.Add(time.Hour)},
+		},
+	}
+}
+
+// testGlobals creates Globals with mock collectors and a temp database.
+func testGlobals(t *testing.T, collectors ...signal.Collector) *Globals {
+	t.Helper()
+	return &Globals{
+		DBPath:     filepath.Join(t.TempDir(), "test.db"),
+		Collectors: collectors,
+	}
+}
 
 func TestFunctional_PostureSetAndGet(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -173,6 +222,67 @@ func TestFunctional_BurnListWithEntries(t *testing.T) {
 
 	listCmd := &BurnListCmd{}
 	require.NoError(t, listCmd.Run(globals))
+}
+
+// --- ResolvePath tests ---
+
+// --- Analyze functional tests (mock collector, no network) ---
+
+func TestFunctional_AnalyzeRefreshWithMock(t *testing.T) {
+	globals := testGlobals(t, newMockCollector())
+
+	cmd := &AnalyzeCmd{Target: "owner/repo", Refresh: true}
+	require.NoError(t, cmd.Run(globals))
+
+	// Verify signals were persisted.
+	s, err := store.OpenSQLite(globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	signals, err := s.GetSignals(context.Background(), "owner/repo")
+	require.NoError(t, err)
+	assert.Len(t, signals, 2)
+}
+
+func TestFunctional_AnalyzeCachedFromMock(t *testing.T) {
+	globals := testGlobals(t, newMockCollector())
+
+	// First call with --refresh to populate cache.
+	cmd1 := &AnalyzeCmd{Target: "owner/repo", Refresh: true}
+	require.NoError(t, cmd1.Run(globals))
+
+	// Second call without --refresh reads from cache.
+	cmd2 := &AnalyzeCmd{Target: "owner/repo", Refresh: false}
+	require.NoError(t, cmd2.Run(globals))
+}
+
+func TestFunctional_AnalyzeNoDataNoRefresh(t *testing.T) {
+	globals := testGlobals(t, newMockCollector())
+
+	cmd := &AnalyzeCmd{Target: "owner/repo", Refresh: false}
+	require.NoError(t, cmd.Run(globals))
+}
+
+func TestFunctional_AnalyzeJSONOutput(t *testing.T) {
+	globals := testGlobals(t, newMockCollector())
+
+	cmd := &AnalyzeCmd{Target: "owner/repo", Refresh: true, JSON: true}
+	require.NoError(t, cmd.Run(globals))
+}
+
+func TestFunctional_AnalyzeWithPostureAndBurn(t *testing.T) {
+	globals := testGlobals(t, newMockCollector())
+
+	// Set posture first.
+	postureCmd := &PostureSetCmd{
+		Target: "owner/repo", Tier: "trusted-for-now",
+		Rationale: "Looks good",
+	}
+	require.NoError(t, postureCmd.Run(globals))
+
+	// Analyze with refresh.
+	analyzeCmd := &AnalyzeCmd{Target: "owner/repo", Refresh: true}
+	require.NoError(t, analyzeCmd.Run(globals))
 }
 
 // --- ResolvePath tests ---

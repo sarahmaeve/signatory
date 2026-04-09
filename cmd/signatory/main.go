@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/alecthomas/kong"
+	"github.com/sarahmaeve/signatory/internal/signal"
+	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -38,8 +40,9 @@ func main() {
 		},
 	)
 	err := ctx.Run(&Globals{
-		DBPath:  cli.DB,
-		Verbose: cli.Verbose,
+		DBPath:     cli.DB,
+		Verbose:    cli.Verbose,
+		Collectors: defaultCollectors(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -47,10 +50,11 @@ func main() {
 	}
 }
 
-// Globals holds flags shared across all commands.
+// Globals holds flags and dependencies shared across all commands.
 type Globals struct {
-	DBPath  string
-	Verbose bool
+	DBPath     string
+	Verbose    bool
+	Collectors []signal.Collector
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
@@ -60,4 +64,10 @@ func (g *Globals) OpenStore() (*store.SQLite, error) {
 		return nil, fmt.Errorf("resolve database path: %w", err)
 	}
 	return store.OpenSQLite(path)
+}
+
+func defaultCollectors() []signal.Collector {
+	return []signal.Collector{
+		ghcollector.NewCollector(),
+	}
 }
