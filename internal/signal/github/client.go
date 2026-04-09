@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"time"
 )
+
+var base64Std = base64.StdEncoding
 
 // Client is a minimal GitHub REST API client.
 type Client struct {
@@ -235,6 +238,69 @@ func (c *Client) GetUser(ctx context.Context, username string) (*user, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// searchResult represents a GitHub code search response.
+type searchResult struct {
+	TotalCount int `json:"total_count"`
+}
+
+// GetGoModRefCount searches for how many go.mod files reference the given module.
+func (c *Client) GetGoModRefCount(ctx context.Context, modulePath string) (int, error) {
+	var result searchResult
+	// The search API uses a different path and rate limit pool.
+	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", modulePath), &result)
+	if err != nil {
+		return 0, err
+	}
+	return result.TotalCount, nil
+}
+
+// repoContent represents a file or directory entry from the contents API.
+type repoContent struct {
+	Name string `json:"name"`
+	Type string `json:"type"` // "file" or "dir"
+	Path string `json:"path"`
+}
+
+// GetDirectoryContents fetches the contents of a directory in a repo.
+// Returns nil without error if the path does not exist.
+func (c *Client) GetDirectoryContents(ctx context.Context, owner, repoName, path string) ([]repoContent, error) {
+	var contents []repoContent
+	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &contents)
+	if err != nil && strings.Contains(err.Error(), "not found") {
+		return nil, nil
+	}
+	return contents, err
+}
+
+// GetFileContent fetches the raw content of a single file (base64-encoded).
+type fileContent struct {
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
+// GetFileRaw fetches a file's content from a repo. Returns nil without error if not found.
+func (c *Client) GetFileRaw(ctx context.Context, owner, repoName, path string) ([]byte, error) {
+	var fc fileContent
+	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &fc)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if fc.Encoding != "base64" {
+		return nil, fmt.Errorf("unexpected encoding: %s", fc.Encoding)
+	}
+
+	// GitHub base64 content has newlines — strip them before decoding.
+	cleaned := strings.ReplaceAll(fc.Content, "\n", "")
+	data, err := base64Std.DecodeString(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64 content: %w", err)
+	}
+	return data, nil
 }
 
 // parseRateLimitReset parses the X-RateLimit-Reset header.

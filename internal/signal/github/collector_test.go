@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -113,6 +114,43 @@ func mockGitHubAPI() http.Handler {
 		})
 	})
 
+	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(searchResult{TotalCount: 2008})
+	})
+
+	mux.HandleFunc("/repos/alecthomas/kong/contents/.github/workflows", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]repoContent{
+			{Name: "ci.yml", Type: "file", Path: ".github/workflows/ci.yml"},
+		})
+	})
+
+	mux.HandleFunc("/repos/alecthomas/kong/contents/renovate.json", func(w http.ResponseWriter, r *http.Request) {
+		// Return a file content response.
+		json.NewEncoder(w).Encode(fileContent{
+			Content:  "e30K", // base64 for "{}\n"
+			Encoding: "base64",
+		})
+	})
+
+	mux.HandleFunc("/repos/alecthomas/kong/contents/go.mod", func(w http.ResponseWriter, r *http.Request) {
+		gomod := `module github.com/alecthomas/kong
+
+require (
+	github.com/alecthomas/assert/v2 v2.11.0
+	github.com/alecthomas/repr v0.5.2
+)
+
+require github.com/hexops/gotextdiff v1.0.3 // indirect
+
+go 1.20
+`
+		encoded := base64.StdEncoding.EncodeToString([]byte(gomod))
+		json.NewEncoder(w).Encode(fileContent{
+			Content:  encoded,
+			Encoding: "base64",
+		})
+	})
+
 	return mux
 }
 
@@ -147,7 +185,7 @@ func TestCollector_Collect(t *testing.T) {
 		"last_push", "repo_age", "stars", "forks", "open_issues",
 		"archived", "owner_type", "license", "contributors",
 		"last_commit", "commit_signing", "total_commits", "tags",
-		"owner_profile",
+		"owner_profile", "adoption", "ci_cd", "go_dependencies",
 	}
 	for _, st := range expectedTypes {
 		assert.Contains(t, byType, st, "missing signal type: %s", st)
@@ -204,6 +242,28 @@ func TestCollector_SignalValues(t *testing.T) {
 	var contribVal map[string]interface{}
 	require.NoError(t, json.Unmarshal(byType["contributors"].Value, &contribVal))
 	assert.Equal(t, float64(3), contribVal["count"])
+
+	// Adoption and refs-to-stars ratio.
+	var adoptionVal map[string]interface{}
+	require.NoError(t, json.Unmarshal(byType["adoption"].Value, &adoptionVal))
+	assert.Equal(t, float64(2008), adoptionVal["go_mod_refs"])
+	assert.Equal(t, float64(3023), adoptionVal["stars"])
+	assert.InDelta(t, 0.66, adoptionVal["refs_to_stars"], 0.01)
+	assert.Equal(t, "direct", adoptionVal["adoption_type"])
+
+	// CI/CD presence.
+	var ciVal map[string]interface{}
+	require.NoError(t, json.Unmarshal(byType["ci_cd"].Value, &ciVal))
+	providers := ciVal["providers"].([]interface{})
+	assert.Contains(t, providers, "github-actions")
+	assert.Contains(t, providers, "renovate")
+
+	// Go dependencies.
+	var depsVal map[string]interface{}
+	require.NoError(t, json.Unmarshal(byType["go_dependencies"].Value, &depsVal))
+	assert.Equal(t, float64(2), depsVal["direct_count"])
+	assert.Equal(t, float64(1), depsVal["indirect_count"])
+	assert.Equal(t, float64(3), depsVal["total_count"])
 }
 
 func TestCollector_SignalMetadata(t *testing.T) {
@@ -357,4 +417,79 @@ func TestCollector_TemporalEraClassification(t *testing.T) {
 	var commitVal map[string]interface{}
 	require.NoError(t, json.Unmarshal(byType["last_commit"].Value, &commitVal))
 	assert.Equal(t, "modern-ai", commitVal["era"])
+}
+
+func TestParseGoModDeps(t *testing.T) {
+	tests := []struct {
+		name          string
+		content       string
+		wantDirect    int
+		wantIndirect  int
+		wantDirectPkg []string
+	}{
+		{
+			name: "standard go.mod",
+			content: `module example.com/mymod
+
+go 1.21
+
+require (
+	github.com/pkg/errors v0.9.1
+	github.com/stretchr/testify v1.9.0
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+)
+`,
+			wantDirect:    2,
+			wantIndirect:  2,
+			wantDirectPkg: []string{"github.com/pkg/errors", "github.com/stretchr/testify"},
+		},
+		{
+			name: "mixed require block",
+			content: `module example.com/mymod
+
+require (
+	github.com/direct/one v1.0.0
+	github.com/indirect/one v1.0.0 // indirect
+	github.com/direct/two v2.0.0
+)
+`,
+			wantDirect:    2,
+			wantIndirect:  1,
+			wantDirectPkg: []string{"github.com/direct/one", "github.com/direct/two"},
+		},
+		{
+			name:         "empty go.mod",
+			content:      "module example.com/mymod\n\ngo 1.21\n",
+			wantDirect:   0,
+			wantIndirect: 0,
+		},
+		{
+			name: "zero deps",
+			content: `module example.com/mymod
+
+go 1.21
+
+require (
+)
+`,
+			wantDirect:   0,
+			wantIndirect: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deps := parseGoModDeps(tt.content)
+			assert.Equal(t, tt.wantDirect, deps.directCount)
+			assert.Equal(t, tt.wantIndirect, deps.indirectCount)
+			if tt.wantDirectPkg != nil {
+				assert.Equal(t, tt.wantDirectPkg, deps.direct)
+			}
+		})
+	}
 }

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
-	"github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -63,13 +62,17 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		}
 	}
 
-	collector := github.NewCollector()
-	signals, err := collector.Collect(ctx, entity)
-	if err != nil {
-		return fmt.Errorf("collect signals: %w", err)
+	// Use injected collectors.
+	var allSignals []profile.Signal
+	for _, collector := range globals.Collectors {
+		signals, err := collector.Collect(ctx, entity)
+		if err != nil {
+			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
+		}
+		allSignals = append(allSignals, signals...)
 	}
 
-	if err := s.PutSignals(ctx, signals); err != nil {
+	if err := s.PutSignals(ctx, allSignals); err != nil {
 		return fmt.Errorf("store signals: %w", err)
 	}
 
@@ -78,7 +81,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("update entity: %w", err)
 	}
 
-	fmt.Printf("Collected %d signals.\n\n", len(signals))
+	fmt.Printf("Collected %d signals.\n\n", len(allSignals))
 	return cmd.displayProfile(ctx, s, entityID)
 }
 
