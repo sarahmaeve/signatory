@@ -64,6 +64,7 @@ immediate investigation. See trust-model.md for the multiplier framework.
 | Weekly download count | npm registry | Raw adoption metric |
 | Dependent package count | npm registry | How many packages depend on this |
 | Presence in consumer's dep tree | Local manifest | Direct vs. transitive, depth |
+| Dependency role | Local manifest + analysis | Runtime, validation, build-only, or development — determines blast radius |
 
 ## Temporal Era Classification
 
