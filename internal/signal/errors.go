@@ -3,6 +3,8 @@ package signal
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sarahmaeve/signatory/internal/profile"
 )
 
 // CollectionResult captures the outcome of a signal collection attempt,
@@ -16,6 +18,52 @@ type CollectionResult struct {
 	// Failures encountered during collection. Each entry describes
 	// what signal was being collected and why it failed.
 	Failures []CollectionFailure
+}
+
+// Signals extracts all collected signals (including absence records
+// converted to signals) as a flat slice for storage.
+func (r *CollectionResult) Signals() []profile.Signal {
+	if r == nil {
+		return nil
+	}
+	signals := make([]profile.Signal, 0, len(r.Collected))
+	for _, s := range r.Collected {
+		signals = append(signals, s.ToSignal())
+	}
+	return signals
+}
+
+// SignalCount returns the number of real signals (not absences).
+func (r *CollectionResult) SignalCount() int {
+	count := 0
+	for _, s := range r.Collected {
+		if !s.IsAbsence() {
+			count++
+		}
+	}
+	return count
+}
+
+// AbsenceCount returns the number of absence records.
+func (r *CollectionResult) AbsenceCount() int {
+	count := 0
+	for _, s := range r.Collected {
+		if s.IsAbsence() {
+			count++
+		}
+	}
+	return count
+}
+
+// RetryableCount returns the number of retryable failures.
+func (r *CollectionResult) RetryableCount() int {
+	count := 0
+	for _, f := range r.Failures {
+		if f.Retryable {
+			count++
+		}
+	}
+	return count
 }
 
 // CollectionFailure records a failed signal collection attempt.

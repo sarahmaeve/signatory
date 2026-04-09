@@ -23,18 +23,17 @@ type mockCollector struct {
 }
 
 func (m *mockCollector) Name() string { return m.name }
-func (m *mockCollector) Collect(_ context.Context, entity *profile.Entity) ([]profile.Signal, error) {
+func (m *mockCollector) Collect(_ context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	// Return signals with the entity's ID.
-	result := make([]profile.Signal, len(m.signals))
-	for i, s := range m.signals {
+	var result signal.CollectionResult
+	for _, s := range m.signals {
 		s.EntityID = entity.ID
 		s.ID = m.name + ":" + entity.ID + ":" + s.Type
-		result[i] = s
+		result.Collected = append(result.Collected, signal.MakeSignal(s))
 	}
-	return result, nil
+	return &result, nil
 }
 
 func newMockCollector() *mockCollector {

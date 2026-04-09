@@ -37,7 +37,7 @@ func (c *Collector) Name() string { return "github" }
 // is collected independently — a failure in one (e.g., rate limiting on
 // the search API) does not prevent other signals from being collected.
 // Failed collections are recorded as absence signals.
-func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) ([]profile.Signal, error) {
+func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	target := entity.URL
 	if target == "" {
 		target = entity.Name
@@ -117,13 +117,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) ([]prof
 	// Go dependencies — independent.
 	c.collectGoDeps(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Convert results to signals (including absence records).
-	signals := make([]profile.Signal, 0, len(result.Collected))
-	for _, s := range result.Collected {
-		signals = append(signals, s.ToSignal())
-	}
-
-	return signals, nil
+	return &result, nil
 }
 
 func (c *Collector) collectContributors(ctx context.Context, result *signal.CollectionResult,
