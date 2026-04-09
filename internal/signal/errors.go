@@ -26,8 +26,10 @@ type CollectionFailure struct {
 	// Source is the collector that failed (e.g., "github").
 	Source string
 
-	// Err is the underlying error.
-	Err error
+	// Reason is a sanitized, safe-to-persist description of why collection
+	// failed. This must NEVER contain raw error messages, which may include
+	// tokens, URLs with credentials, or API response bodies.
+	Reason string
 
 	// Retryable indicates whether this failure might succeed on retry
 	// (e.g., rate limiting vs. 404).
@@ -39,7 +41,7 @@ func (f CollectionFailure) Error() string {
 	if f.Retryable {
 		retry = " (retryable)"
 	}
-	return fmt.Sprintf("failed to collect %s from %s: %v%s", f.SignalType, f.Source, f.Err, retry)
+	return fmt.Sprintf("failed to collect %s from %s: %s%s", f.SignalType, f.Source, f.Reason, retry)
 }
 
 // HasFailures returns true if any signal collection failed.

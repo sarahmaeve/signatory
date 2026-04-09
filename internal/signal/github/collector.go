@@ -127,9 +127,9 @@ func (c *Collector) collectContributors(ctx context.Context, result *signal.Coll
 	contributors, err := c.client.GetContributors(ctx, owner, repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "contributors", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "contributors", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "contributors", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "contributors", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -152,10 +152,10 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 	commits, err := c.client.GetRecentCommits(ctx, owner, repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "last_commit", "github", err.Error(), isRetryable(err), now),
-			signal.MakeAbsence(entityID, "commit_signing", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "last_commit", "github", sanitizeErrorForStorage(err), isRetryable(err), now),
+			signal.MakeAbsence(entityID, "commit_signing", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "commits", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -194,9 +194,9 @@ func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.Coll
 	totalCommits, err := c.client.GetTotalCommitCount(ctx, owner, repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "total_commits", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "total_commits", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "total_commits", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "total_commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -212,9 +212,9 @@ func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionRe
 	tags, err := c.client.GetTags(ctx, owner, repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "tags", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "tags", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "tags", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "tags", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -234,9 +234,9 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 	ownerUser, err := c.client.GetUser(ctx, owner)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "owner_profile", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "owner_profile", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "owner_profile", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "owner_profile", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -261,9 +261,9 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 	refCount, err := c.client.GetGoModRefCount(ctx, owner+"/"+repoName)
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "adoption", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "adoption", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "adoption", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -310,9 +310,9 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 	goModContent, err := c.client.GetFileRaw(ctx, owner, repoName, "go.mod")
 	if err != nil {
 		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "go_dependencies", "github", err.Error(), isRetryable(err), now))
+			signal.MakeAbsence(entityID, "go_dependencies", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "go_dependencies", Source: "github", Err: err, Retryable: isRetryable(err)})
+			signal.CollectionFailure{SignalType: "go_dependencies", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 	if goModContent == nil {
@@ -366,6 +366,44 @@ func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName strin
 	}
 
 	return providers
+}
+
+// sanitizeErrorForStorage returns a safe error description for persistence.
+// Raw error messages may contain tokens, URLs with credentials, or other
+// sensitive data from HTTP responses. This function classifies the error
+// and returns only the category, never the raw content.
+func sanitizeErrorForStorage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if _, ok := err.(*RateLimitError); ok {
+		return "rate limited"
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "not found") {
+		return "not found"
+	}
+	if strings.Contains(errMsg, "context deadline exceeded") ||
+		strings.Contains(errMsg, "Client.Timeout") {
+		return "request timeout"
+	}
+	if strings.Contains(errMsg, "context canceled") {
+		return "request cancelled"
+	}
+	if strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "no such host") {
+		return "connection failed"
+	}
+	if strings.Contains(errMsg, "GitHub API error 5") {
+		return "server error"
+	}
+	if strings.Contains(errMsg, "GitHub API error 4") {
+		return "client error"
+	}
+	if strings.Contains(errMsg, "decode response") {
+		return "invalid response"
+	}
+	return "collection failed"
 }
 
 // isRetryable determines if an error is likely to succeed on retry.
