@@ -38,6 +38,12 @@ func OpenSQLite(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
+	// Restrict database file permissions to owner-only.
+	if err := os.Chmod(path, 0600); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set database permissions: %w", err)
+	}
+
 	// Limit to one connection. SQLite allows only one writer at a time;
 	// database/sql's connection pool would open multiple connections whose
 	// per-connection PRAGMA settings (busy_timeout, journal_mode) are not
@@ -154,6 +160,9 @@ func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 	if entity == nil {
 		return ErrNilInput
 	}
+	if entity.ID == "" || entity.Name == "" || entity.Type == "" {
+		return fmt.Errorf("%w: entity ID, name, and type are required", ErrNilInput)
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -262,6 +271,9 @@ func (s *SQLite) SetPosture(ctx context.Context, posture *profile.Posture) error
 	if posture == nil {
 		return ErrNilInput
 	}
+	if posture.EntityID == "" || posture.Tier == "" {
+		return fmt.Errorf("%w: posture entity ID and tier are required", ErrNilInput)
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO postures (entity_id, tier, version, rationale, set_by, set_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
@@ -301,6 +313,9 @@ func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, e
 func (s *SQLite) SetBurn(ctx context.Context, burn *profile.Burn) error {
 	if burn == nil {
 		return ErrNilInput
+	}
+	if burn.EntityID == "" || burn.Reason == "" {
+		return fmt.Errorf("%w: burn entity ID and reason are required", ErrNilInput)
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
@@ -377,6 +392,9 @@ func scanSignals(rows *sql.Rows) ([]profile.Signal, error) {
 		}
 		sig.Group = profile.SignalGroup(group)
 		sig.ForgeryResistance = profile.ForgeryResistance(forgery)
+		if !json.Valid([]byte(value)) {
+			return nil, fmt.Errorf("invalid JSON in signal %s value: %q", sig.ID, value[:min(len(value), 100)])
+		}
 		sig.Value = json.RawMessage(value)
 		var parseErr error
 		sig.CollectedAt, parseErr = time.Parse(time.RFC3339, collectedAt)

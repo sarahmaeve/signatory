@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,6 +72,144 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 			"signal %s (type=%s) contains the secret token in its value — TOKEN LEAK",
 			sig.ID, sig.Type)
 	}
+}
+
+// --- CI/CD False Negative Prevention (Issue #42) ---
+
+// TestSecurity_RateLimitedCICheckProducesRetryableAbsence verifies that
+// when CI/CD config checks are rate-limited, the result is a retryable
+// absence signal, NOT a false "no CI/CD detected" signal.
+func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
+	mux := http.NewServeMux()
+
+	// Repo succeeds.
+	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(repo{
+			Name: "repo", Owner: repoOwner{Login: "owner", Type: "User"},
+			StargazersCount: 100,
+		})
+	})
+
+	// All other endpoints succeed normally.
+	mux.HandleFunc("/repos/owner/repo/contributors", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]contributor{{Login: "owner", Contributions: 10}})
+	})
+	mux.HandleFunc("/repos/owner/repo/commits", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]commit{{
+			Commit: commitData{Author: commitPerson{Date: time.Now()}, Verification: verification{Verified: true}},
+		}})
+	})
+	mux.HandleFunc("/repos/owner/repo/tags", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]tag{})
+	})
+	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
+	})
+	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(searchResult{TotalCount: 50})
+	})
+
+	// CI/CD checks are rate-limited.
+	mux.HandleFunc("/repos/owner/repo/contents/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", "1712700000")
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := &Client{httpClient: server.Client(), token: "test", baseURL: server.URL}
+	collector := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
+	signals, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Find the ci_cd signal.
+	for _, sig := range signals {
+		if sig.Type == "absence:ci_cd" {
+			var val map[string]interface{}
+			require.NoError(t, json.Unmarshal(sig.Value, &val))
+
+			// CRITICAL: Must be retryable, not a definitive "no CI found".
+			assert.Equal(t, true, val["retryable"],
+				"rate-limited CI check should be retryable, not a definitive negative")
+			assert.NotEqual(t, "no CI/CD configuration detected", val["reason"],
+				"rate-limited CI check should NOT produce 'no CI/CD detected' — that's a false negative")
+			return
+		}
+		if sig.Type == "ci_cd" {
+			t.Fatal("rate-limited CI check should NOT produce a positive ci_cd signal")
+		}
+	}
+
+	// If we get here, there's no ci_cd or absence:ci_cd signal at all.
+	t.Fatal("expected an absence:ci_cd signal for rate-limited CI check, found none")
+}
+
+// --- Missing Absence Signals (Issue #52) ---
+
+// TestSecurity_ZeroCommitRepoProducesAbsence verifies that repos with
+// no commits produce absence signals rather than silently omitting
+// commit-related signals.
+func TestSecurity_ZeroCommitRepoProducesAbsence(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/empty", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(repo{
+			Name: "empty", Owner: repoOwner{Login: "owner", Type: "User"},
+		})
+	})
+	mux.HandleFunc("/repos/owner/empty/contributors", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]contributor{})
+	})
+	mux.HandleFunc("/repos/owner/empty/commits", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("per_page") == "1" {
+			json.NewEncoder(w).Encode([]commit{})
+			return
+		}
+		json.NewEncoder(w).Encode([]commit{}) // Empty — no commits.
+	})
+	mux.HandleFunc("/repos/owner/empty/tags", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]tag{})
+	})
+	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
+	})
+	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(searchResult{TotalCount: 0})
+	})
+	mux.HandleFunc("/repos/owner/empty/contents/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := &Client{httpClient: server.Client(), baseURL: server.URL}
+	collector := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/empty"}
+	signals, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Should have absence signals for last_commit and commit_signing.
+	hasAbsenceLastCommit := false
+	hasAbsenceCommitSigning := false
+	hasAbsenceLicense := false
+	for _, sig := range signals {
+		switch sig.Type {
+		case "absence:last_commit":
+			hasAbsenceLastCommit = true
+		case "absence:commit_signing":
+			hasAbsenceCommitSigning = true
+		case "absence:license":
+			hasAbsenceLicense = true
+		}
+	}
+
+	assert.True(t, hasAbsenceLastCommit, "zero-commit repo should have absence:last_commit")
+	assert.True(t, hasAbsenceCommitSigning, "zero-commit repo should have absence:commit_signing")
+	assert.True(t, hasAbsenceLicense, "repo with no license should have absence:license")
 }
 
 // --- Response Size Limit (Issue #28) ---
