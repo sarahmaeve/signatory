@@ -28,7 +28,10 @@ func (s *SignalOrAbsence) ToSignal() profile.Signal {
 	if s.Signal != nil {
 		return *s.Signal
 	}
-	return s.Absence.ToSignal()
+	if s.Absence != nil {
+		return s.Absence.ToSignal()
+	}
+	return profile.Signal{}
 }
 
 // AbsenceRecord documents that a signal was expected but could not be

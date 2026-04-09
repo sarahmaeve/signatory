@@ -73,6 +73,41 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 	}
 }
 
+// --- Response Size Limit (Issue #28) ---
+
+// TestSecurity_LargeResponseRejected verifies that responses exceeding
+// the size limit are rejected rather than consuming unbounded memory.
+func TestSecurity_LargeResponseRejected(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Write a response larger than any reasonable GitHub API response.
+		// We use 11MB to exceed a 10MB limit.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":"`))
+		buf := make([]byte, 1024)
+		for i := range buf {
+			buf[i] = 'x'
+		}
+		for i := 0; i < 11*1024; i++ { // 11MB of 'x'
+			w.Write(buf)
+		}
+		w.Write([]byte(`"}`))
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	client := &Client{
+		httpClient: server.Client(),
+		token:      "",
+		baseURL:    server.URL,
+	}
+
+	var result map[string]interface{}
+	err := client.get(context.Background(), "/test", &result)
+	assert.Error(t, err, "should reject response exceeding size limit")
+}
+
 // --- SSRF Prevention (Issue #27) ---
 
 // TestSecurity_ParseRepoURL_RejectsPathTraversal verifies that crafted

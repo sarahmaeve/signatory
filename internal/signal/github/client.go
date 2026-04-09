@@ -20,6 +20,11 @@ var validGitHubName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 var base64Std = base64.StdEncoding
 
+// maxResponseSize limits the maximum response body size to prevent OOM
+// from malicious or broken API servers. 10MB is generous for any
+// legitimate GitHub API response.
+const maxResponseSize = 10 * 1024 * 1024 // 10MB
+
 // Client is a minimal GitHub REST API client.
 type Client struct {
 	httpClient *http.Client
@@ -139,6 +144,9 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 	defer resp.Body.Close()
 
+	// Limit response body size to prevent OOM from malicious responses.
+	limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
+
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		resetAt := parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))
 		return &RateLimitError{ResetAt: resetAt}
@@ -149,12 +157,19 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096)) // Small limit for error bodies.
 		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		body, err := io.ReadAll(limitedBody)
+		if err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
+		if int64(len(body)) > maxResponseSize {
+			return fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
+		}
+		if err := json.Unmarshal(body, result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 	}
@@ -187,13 +202,25 @@ func (c *Client) getWithLinkHeader(ctx context.Context, path string, result inte
 		return "", &RateLimitError{ResetAt: resetAt}
 	}
 
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("not found: %s", path)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
+		body, err := io.ReadAll(limitedBody)
+		if err != nil {
+			return "", fmt.Errorf("read response: %w", err)
+		}
+		if int64(len(body)) > maxResponseSize {
+			return "", fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
+		}
+		if err := json.Unmarshal(body, result); err != nil {
 			return "", fmt.Errorf("decode response: %w", err)
 		}
 	}
