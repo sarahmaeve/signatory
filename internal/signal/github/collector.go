@@ -87,6 +87,10 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) ([]prof
 			signal.MakeSignal(makeSignal(entity.ID, "license", profile.SignalGroupHygiene,
 				profile.ForgeryLowDeclining, now, ttl,
 				map[string]interface{}{"spdx_id": r.License.SPDXID})))
+	} else {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entity.ID, "license", "github",
+				"no license detected", false, now))
 	}
 
 	// Contributors — independent, failures recorded as absence.
@@ -161,6 +165,9 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 	}
 
 	if len(commits) == 0 {
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "last_commit", "github", "no commits found", false, now),
+			signal.MakeAbsence(entityID, "commit_signing", "github", "no commits found", false, now))
 		return
 	}
 
@@ -292,13 +299,23 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 func (c *Collector) collectCI(ctx context.Context, result *signal.CollectionResult,
 	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
 
-	providers := c.collectCIPresence(ctx, owner, repoName)
+	providers, hadErrors := c.collectCIPresence(ctx, owner, repoName)
 	if len(providers) > 0 {
 		result.Collected = append(result.Collected,
 			signal.MakeSignal(makeSignal(entityID, "ci_cd", profile.SignalGroupHygiene,
 				profile.ForgeryMediumDeclining, now, ttl,
 				map[string]interface{}{"providers": providers})))
+	} else if hadErrors {
+		// We couldn't check — this is a retryable absence, not a
+		// definitive "no CI found."
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "ci_cd", "github",
+				"could not check CI/CD configuration", true, now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{SignalType: "ci_cd", Source: "github",
+				Reason: "could not check CI/CD configuration", Retryable: true})
 	} else {
+		// We checked everything and found nothing — definitive negative.
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "ci_cd", "github",
 				"no CI/CD configuration detected", false, now))
@@ -337,12 +354,14 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 }
 
 // collectCIPresence checks for common CI/CD configuration.
-func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName string) []string {
-	var providers []string
-
+// Returns the list of detected providers and whether any errors occurred
+// (so the caller can distinguish "found nothing" from "couldn't check").
+func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName string) (providers []string, hadErrors bool) {
 	// GitHub Actions.
 	workflows, err := c.client.GetDirectoryContents(ctx, owner, repoName, ".github/workflows")
-	if err == nil && len(workflows) > 0 {
+	if err != nil {
+		hadErrors = true
+	} else if len(workflows) > 0 {
 		providers = append(providers, "github-actions")
 	}
 
@@ -361,12 +380,14 @@ func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName strin
 
 	for _, cf := range ciFiles {
 		content, err := c.client.GetFileRaw(ctx, owner, repoName, cf.path)
-		if err == nil && content != nil {
+		if err != nil {
+			hadErrors = true
+		} else if content != nil {
 			providers = append(providers, cf.provider)
 		}
 	}
 
-	return providers
+	return providers, hadErrors
 }
 
 // sanitizeErrorForStorage returns a safe error description for persistence.
