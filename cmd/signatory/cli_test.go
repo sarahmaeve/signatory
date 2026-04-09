@@ -110,7 +110,7 @@ func TestAnalyzeCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &AnalyzeCmd{Target: "lodash", Refresh: true}
-	globals := &Globals{DBPath: "/tmp/test.db", Verbose: false}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db"), Verbose: false}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -139,7 +139,7 @@ func TestSurveyCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &SurveyCmd{Refresh: true}
-	globals := &Globals{DBPath: "/tmp/test.db"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -181,7 +181,7 @@ func TestCompareCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &CompareCmd{TargetA: "a", TargetB: "b"}
-	globals := &Globals{DBPath: "/tmp/test.db"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -192,9 +192,16 @@ func TestBurnCmd_ValidArgs(t *testing.T) {
 	t.Parallel()
 
 	ctx, cli := parseCLI(t, "burn", "evil-package", "--reason", "malware detected")
-	assert.Equal(t, "burn <target>", ctx.Command())
-	assert.Equal(t, "evil-package", cli.Burn.Target)
-	assert.Equal(t, "malware detected", cli.Burn.Reason)
+	assert.Equal(t, "burn add <target>", ctx.Command())
+	assert.Equal(t, "evil-package", cli.Burn.Add.Target)
+	assert.Equal(t, "malware detected", cli.Burn.Add.Reason)
+}
+
+func TestBurnCmd_ListSubcommand(t *testing.T) {
+	t.Parallel()
+
+	ctx, _ := parseCLI(t, "burn", "list")
+	assert.Equal(t, "burn list", ctx.Command())
 }
 
 func TestBurnCmd_MissingTarget(t *testing.T) {
@@ -211,11 +218,11 @@ func TestBurnCmd_MissingReason(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestBurnCmd_Run(t *testing.T) {
+func TestBurnAddCmd_Run(t *testing.T) {
 	t.Parallel()
 
-	cmd := &BurnCmd{Target: "evil-package", Reason: "malware"}
-	globals := &Globals{DBPath: "/tmp/test.db"}
+	cmd := &BurnAddCmd{Target: "evil-package", Reason: "malware"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -312,7 +319,7 @@ func TestVersionCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &VersionCmd{}
-	globals := &Globals{DBPath: "/tmp/test.db"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
