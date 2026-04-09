@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,7 +110,7 @@ func TestAnalyzeCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &AnalyzeCmd{Target: "lodash", Refresh: true}
-	globals := &Globals{DB: "/tmp/test.db", Verbose: false}
+	globals := &Globals{DBPath: "/tmp/test.db", Verbose: false}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -138,7 +139,7 @@ func TestSurveyCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &SurveyCmd{Refresh: true}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: "/tmp/test.db"}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -180,7 +181,7 @@ func TestCompareCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &CompareCmd{TargetA: "a", TargetB: "b"}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: "/tmp/test.db"}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -214,7 +215,7 @@ func TestBurnCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &BurnCmd{Target: "evil-package", Reason: "malware"}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: "/tmp/test.db"}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -284,7 +285,7 @@ func TestPostureGetCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &PostureGetCmd{Target: "lodash"}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -293,7 +294,7 @@ func TestPostureSetCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &PostureSetCmd{Target: "lodash", Tier: "vetted-frozen", Rationale: "audited"}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -311,7 +312,7 @@ func TestVersionCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &VersionCmd{}
-	globals := &Globals{DB: "/tmp/test.db"}
+	globals := &Globals{DBPath: "/tmp/test.db"}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }

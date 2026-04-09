@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/alecthomas/kong"
+	"github.com/sarahmaeve/signatory/internal/store"
 )
 
 // CLI defines signatory's command structure.
@@ -37,7 +38,7 @@ func main() {
 		},
 	)
 	err := ctx.Run(&Globals{
-		DB:      cli.DB,
+		DBPath:  cli.DB,
 		Verbose: cli.Verbose,
 	})
 	if err != nil {
@@ -48,6 +49,15 @@ func main() {
 
 // Globals holds flags shared across all commands.
 type Globals struct {
-	DB      string
+	DBPath  string
 	Verbose bool
+}
+
+// OpenStore resolves the database path and opens the SQLite store.
+func (g *Globals) OpenStore() (*store.SQLite, error) {
+	path, err := store.ResolvePath(g.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve database path: %w", err)
+	}
+	return store.OpenSQLite(path)
 }

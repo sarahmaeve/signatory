@@ -10,7 +10,7 @@ type AnalyzeCmd struct {
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
-	fmt.Printf("Analyzing: %s (refresh=%v, db=%s)\n", cmd.Target, cmd.Refresh, globals.DB)
+	fmt.Printf("Analyzing: %s (refresh=%v, db=%s)\n", cmd.Target, cmd.Refresh, globals.DBPath)
 	// TODO: wire up engine
 	return nil
 }
