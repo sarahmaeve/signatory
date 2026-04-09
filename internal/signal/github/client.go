@@ -7,12 +7,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// validGitHubName matches valid GitHub owner and repo names.
+// GitHub allows alphanumeric, hyphens, dots, and underscores.
+var validGitHubName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 var base64Std = base64.StdEncoding
+
+// maxResponseSize limits the maximum response body size to prevent OOM
+// from malicious or broken API servers. 10MB is generous for any
+// legitimate GitHub API response.
+const maxResponseSize = 10 * 1024 * 1024 // 10MB
 
 // Client is a minimal GitHub REST API client.
 type Client struct {
@@ -29,9 +40,22 @@ type Client struct {
 // to a total failure.
 func NewClient(token string) *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 60 * time.Second},
-		token:      token,
-		baseURL:    "https://api.github.com",
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Strip Authorization header on cross-origin redirects to
+				// prevent token leakage if redirected to an external host.
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					req.Header.Del("Authorization")
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
+			},
+		},
+		token:   token,
+		baseURL: "https://api.github.com",
 	}
 }
 
@@ -133,6 +157,9 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 	defer resp.Body.Close()
 
+	// Limit response body size to prevent OOM from malicious responses.
+	limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
+
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		resetAt := parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))
 		return &RateLimitError{ResetAt: resetAt}
@@ -143,12 +170,19 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096)) // Small limit for error bodies.
 		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		body, err := io.ReadAll(limitedBody)
+		if err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
+		if int64(len(body)) > maxResponseSize {
+			return fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
+		}
+		if err := json.Unmarshal(body, result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 	}
@@ -181,13 +215,25 @@ func (c *Client) getWithLinkHeader(ctx context.Context, path string, result inte
 		return "", &RateLimitError{ResetAt: resetAt}
 	}
 
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("not found: %s", path)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
+		body, err := io.ReadAll(limitedBody)
+		if err != nil {
+			return "", fmt.Errorf("read response: %w", err)
+		}
+		if int64(len(body)) > maxResponseSize {
+			return "", fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
+		}
+		if err := json.Unmarshal(body, result); err != nil {
 			return "", fmt.Errorf("decode response: %w", err)
 		}
 	}
@@ -253,7 +299,7 @@ type searchResult struct {
 func (c *Client) GetGoModRefCount(ctx context.Context, modulePath string) (int, error) {
 	var result searchResult
 	// The search API uses a different path and rate limit pool.
-	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", modulePath), &result)
+	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", url.QueryEscape(modulePath)), &result)
 	if err != nil {
 		return 0, err
 	}
@@ -362,5 +408,19 @@ func ParseRepoURL(input string) (owner, repoName string, err error) {
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse GitHub repo from %q: expected owner/repo", input)
 	}
-	return parts[0], parts[1], nil
+
+	owner = parts[0]
+	repoName = parts[1]
+
+	// Validate characters to prevent SSRF via path traversal, query
+	// injection, or other URL manipulation. GitHub names allow only
+	// alphanumeric, hyphens, dots, and underscores.
+	if !validGitHubName.MatchString(owner) {
+		return "", "", fmt.Errorf("invalid GitHub owner name %q: contains disallowed characters", owner)
+	}
+	if !validGitHubName.MatchString(repoName) {
+		return "", "", fmt.Errorf("invalid GitHub repo name %q: contains disallowed characters", repoName)
+	}
+
+	return owner, repoName, nil
 }

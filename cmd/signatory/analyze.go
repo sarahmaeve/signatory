@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -57,7 +58,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	}
 
 	// Upsert entity.
-	if _, err := s.GetEntity(ctx, entityID); err == store.ErrNotFound {
+	if _, err := s.GetEntity(ctx, entityID); errors.Is(err, store.ErrNotFound) {
 		if err := s.PutEntity(ctx, entity); err != nil {
 			return fmt.Errorf("store entity: %w", err)
 		}

@@ -237,7 +237,10 @@ func (s *SQLite) GetPosture(ctx context.Context, entityID string) (*profile.Post
 	if err != nil {
 		return nil, err
 	}
-	p.SetAt, _ = time.Parse(time.RFC3339, setAt)
+	p.SetAt, err = time.Parse(time.RFC3339, setAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse posture set_at %q: %w", setAt, err)
+	}
 	return &p, nil
 }
 
@@ -274,7 +277,10 @@ func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, e
 	if err != nil {
 		return nil, err
 	}
-	b.BurnedAt, _ = time.Parse(time.RFC3339, burnedAt)
+	b.BurnedAt, err = time.Parse(time.RFC3339, burnedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse burn burned_at %q: %w", burnedAt, err)
+	}
 	return &b, nil
 }
 
@@ -313,7 +319,11 @@ func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 		if err := rows.Scan(&b.EntityID, &b.Reason, (*string)(&b.Source), &b.SourceOrg, &burnedAt, &b.BurnedBy); err != nil {
 			return nil, err
 		}
-		b.BurnedAt, _ = time.Parse(time.RFC3339, burnedAt)
+		var parseErr error
+		b.BurnedAt, parseErr = time.Parse(time.RFC3339, burnedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse burn burned_at %q for entity %s: %w", burnedAt, b.EntityID, parseErr)
+		}
 		burns = append(burns, b)
 	}
 	return burns, rows.Err()
@@ -330,8 +340,15 @@ func scanEntity(row *sql.Row) (*profile.Entity, error) {
 	if err != nil {
 		return nil, err
 	}
-	e.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	e.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	var parseErr error
+	e.CreatedAt, parseErr = time.Parse(time.RFC3339, createdAt)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse entity created_at %q: %w", createdAt, parseErr)
+	}
+	e.UpdatedAt, parseErr = time.Parse(time.RFC3339, updatedAt)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse entity updated_at %q: %w", updatedAt, parseErr)
+	}
 	return &e, nil
 }
 
@@ -348,8 +365,15 @@ func scanSignals(rows *sql.Rows) ([]profile.Signal, error) {
 		sig.Group = profile.SignalGroup(group)
 		sig.ForgeryResistance = profile.ForgeryResistance(forgery)
 		sig.Value = json.RawMessage(value)
-		sig.CollectedAt, _ = time.Parse(time.RFC3339, collectedAt)
-		sig.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt)
+		var parseErr error
+		sig.CollectedAt, parseErr = time.Parse(time.RFC3339, collectedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse signal collected_at %q: %w", collectedAt, parseErr)
+		}
+		sig.ExpiresAt, parseErr = time.Parse(time.RFC3339, expiresAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse signal expires_at %q: %w", expiresAt, parseErr)
+		}
 		signals = append(signals, sig)
 	}
 	return signals, rows.Err()

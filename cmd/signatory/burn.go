@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -33,7 +34,7 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 
 	// Ensure the entity exists (create a stub if not).
 	_, err = s.GetEntity(ctx, cmd.Target)
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		entity := &profile.Entity{
 			ID:        cmd.Target,
 			Type:      profile.EntityPackage,
@@ -50,6 +51,9 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 
 	// Check for existing burn.
 	existing, err := s.GetBurn(ctx, cmd.Target)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("check existing burn: %w", err)
+	}
 	if err == nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s is already burned (reason: %s, by: %s, at: %s)\n",
 			cmd.Target, existing.Reason, existing.BurnedBy, existing.BurnedAt.Format(time.RFC3339))
