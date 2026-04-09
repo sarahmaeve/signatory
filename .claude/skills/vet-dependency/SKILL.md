@@ -56,7 +56,41 @@ gh api repos/{owner}/{repo}/tags --jq '.[0:5] | .[] | .name'
 
 # Adoption (approximate)
 gh api 'search/code?q={module_path}+filename:go.mod&per_page=1' --jq '.total_count'
+
+# Total commit count (low count in old repos is a signal)
+gh api 'repos/{owner}/{repo}/commits?per_page=1' -i 2>&1 | grep -i 'link:' 
+# Parse the last page number from the Link header, or count commits manually
 ```
+
+### 3a. Analyze commit history patterns
+
+Don't just check the last commit date — look at the **distribution** of
+commits over the project's lifetime:
+
+- **Total commit count:** A 10-year-old project with 10 commits is
+  different from one with 500. Very low commit counts suggest the project
+  was written once and rarely touched.
+- **Activity gaps:** Large gaps (years of silence followed by a burst)
+  may indicate the project was abandoned and briefly revived, or that a
+  new maintainer took over. Note the gap durations and what the burst
+  consisted of (feature work vs. cleanup/modernization).
+- **Nature of recent commits:** Were recent commits substantive (features,
+  fixes) or cosmetic (updating build tags, adding go.mod)? Cosmetic-only
+  activity in an otherwise fallow project is a weaker vitality signal
+  than genuine maintenance.
+
+### 3b. Assess adoption context
+
+When reporting adoption numbers, distinguish between **direct** and
+**transitive** adoption:
+
+- If a package has high go.mod reference counts but low stars, it is
+  likely pulled in as a transitive dependency of something popular, not
+  adopted directly. Note which parent dependency is driving adoption.
+- Transitive-only adoption means the package has not been independently
+  evaluated by most of its consumers — they inherited it without choosing
+  it. This is a weaker trust signal than direct adoption where developers
+  actively selected the package.
 
 ### 4. Collect ecosystem-specific signals
 
