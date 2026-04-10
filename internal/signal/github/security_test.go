@@ -83,6 +83,115 @@ func assertNoTokenInResult(t *testing.T, result *signal.CollectionResult, token 
 	}
 }
 
+// TestSecurity_GetFileRaw_RejectsMalformedPath verifies that GetFileRaw
+// validates the `path` parameter before constructing a GitHub contents
+// API URL. Issue #90: GetFileRaw and GetDirectoryContents both build
+// URLs via fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName,
+// path) with no path validation. owner/repoName are pre-validated by
+// ParseRepoURL upstream, but path was a free-form string.
+//
+// Today's callers all pass hardcoded constants ("go.mod",
+// ".github/workflows", etc.) so the bug is latent. But:
+//
+//   - A future caller that forwards user-controlled content as `path`
+//     silently becomes a path-injection or query-injection bug
+//   - Examples: "go.mod?ref=injected" appends a query string,
+//     "../../other-repo/contents/secret" attempts cross-repo path
+//     traversal, "go.mod#frag" injects a fragment, "path\x00null"
+//     could truncate the URL on some servers
+//
+// The test uses a test server that records all requests. After the
+// fix, the validator rejects malformed paths client-side and the
+// test server is never called. Each row asserts:
+//   - GetFileRaw returns an error (the validator's error)
+//   - The test server captured ZERO requests for that test (the
+//     validator fired before any HTTP call)
+//
+// Pre-fix behavior: GetFileRaw silently sends the malformed path to
+// the API. The test server responds 404 (no route). GetFileRaw
+// interprets 404 as "file not found" and returns (nil, nil) — no
+// error returned to the caller, no signal that anything is wrong.
+// The test fails on `require.Error` because err is nil.
+func TestSecurity_GetFileRaw_RejectsMalformedPath(t *testing.T) {
+	bad := []struct {
+		name string
+		path string
+	}{
+		{"empty", ""},
+		{"path traversal", "../etc/passwd"},
+		{"path traversal mid-path", "subdir/../../etc/passwd"},
+		{"just dot-dot", ".."},
+		{"query string injection", "go.mod?ref=injected"},
+		{"fragment injection", "go.mod#frag"},
+		{"null byte", "path\x00nullbyte"},
+		{"newline", "path\nnewline"},
+		{"leading slash", "/leading/slash"},
+		{"trailing slash", "trailing/slash/"},
+		{"double slash", "path//double"},
+		{"non-ASCII Cyrillic lookalike", "lod\u0430sh"},
+		{"space in path", "path with space"},
+		{"shell metacharacter", "path;rm -rf /"},
+		{"backtick", "path`whoami`"},
+		{"too long", strings.Repeat("a/", 200)},
+	}
+
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+
+			client := &Client{
+				httpClient: server.Client(),
+				token:      "test-token",
+				baseURL:    server.URL,
+			}
+
+			_, err := client.GetFileRaw(context.Background(), "owner", "repo", tc.path)
+			require.Error(t, err, "GetFileRaw must reject malformed path %q", tc.path)
+			assert.Zero(t, hits,
+				"GetFileRaw must reject the path BEFORE any HTTP request — got %d hits to the test server", hits)
+		})
+	}
+}
+
+// TestSecurity_GetDirectoryContents_RejectsMalformedPath is the
+// directory-contents counterpart. Same validator, same threat model,
+// different entry point. Smaller test set since the underlying
+// validation logic is shared with GetFileRaw above.
+func TestSecurity_GetDirectoryContents_RejectsMalformedPath(t *testing.T) {
+	bad := []string{
+		"../etc",
+		"path?ref=x",
+		"path\x00null",
+		"/leading",
+	}
+	for _, p := range bad {
+		t.Run(p, func(t *testing.T) {
+			var hits int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+
+			client := &Client{
+				httpClient: server.Client(),
+				token:      "test-token",
+				baseURL:    server.URL,
+			}
+
+			_, err := client.GetDirectoryContents(context.Background(), "owner", "repo", p)
+			require.Error(t, err, "GetDirectoryContents must reject malformed path %q", p)
+			assert.Zero(t, hits,
+				"GetDirectoryContents must reject the path BEFORE any HTTP request")
+		})
+	}
+}
+
 // TestSecurity_FindTokenInResult_DetectsKnownLeakPositions is the
 // unit test for findTokenInResult. It synthetically constructs
 // CollectionResults with the token at each known leak position and

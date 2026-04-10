@@ -18,6 +18,52 @@ import (
 // GitHub allows alphanumeric, hyphens, dots, and underscores.
 var validGitHubName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// validContentsPath constrains the `path` parameter of
+// GetDirectoryContents and GetFileRaw to a safe shape. The path is
+// concatenated directly into the GitHub contents API URL, so any
+// user-controlled bytes become URL/query/fragment/path-traversal
+// injection vectors. Today's callers all pass hardcoded constants
+// (".github/workflows", "go.mod", etc.) so the bug is latent — but
+// the function signature doesn't enforce that, and the next caller
+// forwarding user input would create the bug.
+//
+// Allowed: A-Z, a-z, 0-9, dot, underscore, slash, hyphen.
+var validContentsPath = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// maxContentsPathLength bounds the path length. GitHub contents paths
+// in real-world use are well under this; real ones are typically under
+// 50 chars. 256 is generous slack to avoid breaking unusual deep paths.
+const maxContentsPathLength = 256
+
+// validateContentsPath checks that path is safe to substitute into a
+// GitHub contents API URL. Returns nil for valid paths, an error
+// describing the violation otherwise. Issue #90.
+func validateContentsPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("contents path is empty")
+	}
+	if len(path) > maxContentsPathLength {
+		return fmt.Errorf("contents path exceeds maximum length of %d bytes (got %d)",
+			maxContentsPathLength, len(path))
+	}
+	if !validContentsPath.MatchString(path) {
+		return fmt.Errorf("contents path %q contains disallowed characters (allowed: A-Z a-z 0-9 . _ / -)", path)
+	}
+	if strings.HasPrefix(path, "/") {
+		return fmt.Errorf("contents path %q must not start with / (paths are repo-relative)", path)
+	}
+	if strings.HasSuffix(path, "/") {
+		return fmt.Errorf("contents path %q must not end with /", path)
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("contents path %q must not contain '..' (path traversal)", path)
+	}
+	if strings.Contains(path, "//") {
+		return fmt.Errorf("contents path %q must not contain '//' (empty path segment)", path)
+	}
+	return nil
+}
+
 var base64Std = base64.StdEncoding
 
 // maxResponseSize limits the maximum response body size to prevent OOM
@@ -344,6 +390,9 @@ type repoContent struct {
 // GetDirectoryContents fetches the contents of a directory in a repo.
 // Returns nil without error if the path does not exist.
 func (c *Client) GetDirectoryContents(ctx context.Context, owner, repoName, path string) ([]repoContent, error) {
+	if err := validateContentsPath(path); err != nil {
+		return nil, fmt.Errorf("invalid contents path: %w", err)
+	}
 	var contents []repoContent
 	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &contents)
 	if err != nil && strings.Contains(err.Error(), "not found") {
@@ -360,6 +409,9 @@ type fileContent struct {
 
 // GetFileRaw fetches a file's content from a repo. Returns nil without error if not found.
 func (c *Client) GetFileRaw(ctx context.Context, owner, repoName, path string) ([]byte, error) {
+	if err := validateContentsPath(path); err != nil {
+		return nil, fmt.Errorf("invalid contents path: %w", err)
+	}
 	var fc fileContent
 	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &fc)
 	if err != nil {
