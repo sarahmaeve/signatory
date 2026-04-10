@@ -39,4 +39,10 @@ design/NEXT.md
 # Editor/IDE
 # .idea/
 # .vscode/
-signatory
+
+# Built signatory binary at the repo root.
+# Anchored with leading slash so the pattern matches ONLY the root-level
+# binary, not the cmd/signatory/ source directory (which previously got
+# silently swallowed by the bare `signatory` pattern, hiding new files
+# in that directory from `git status` and `git add`).
+/signatory
