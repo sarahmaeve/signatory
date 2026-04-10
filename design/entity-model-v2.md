@@ -242,20 +242,130 @@ Reverse of the above. Note: audit log data and signal history will be
 lost on rollback — this is acceptable because rollback is a recovery
 mechanism, not a feature.
 
-## Open Questions
+## Resolved Questions
 
-1. **Actor identification for LLM.** When an LLM sets posture via MCP,
-   how is it identified? `llm:claude-opus-4.5`? The MCP session ID?
+### 1. Actor Identity: Signed Team Identity
 
-2. **Signal deduplication.** With append-only signals, a rapid series
-   of `--refresh` calls creates many near-identical records. Should we
-   deduplicate within a time window (e.g., skip if identical signal
-   exists within the last hour)?
+Actors are identified as human-LLM team identities, analogous to PGP
+identity signing. The team is the unit of trust, not the individual
+human or individual LLM.
 
-3. **Dependency version tracking.** When a version changes in the
-   manifest, should we create a new dependency row or update the
-   existing one? Current schema updates `version` and `last_seen`.
-   An alternative is append-only dependency observations too.
+Example: `team:sarah+claude-opus-4.6`
 
-4. **Audit log rotation.** The file-based log will grow indefinitely.
-   Should we rotate it? If so, based on size or time?
+A team identity can be:
+- **Created** — team starts working together
+- **Halted** — pause signing (e.g., LLM produced suspect output)
+- **Rotated** — new identity created, previous trust level resets
+  (trust must be re-earned under the new identity)
+- **Revoked / self-burned** — everything signed under this identity
+  is degraded from the revocation timestamp forward
+
+The team identity is itself an entity in the signatory model — it can
+be burned, its trust accumulates over time, and it follows the same
+"trust accumulates slowly, degrades fast" principle as any other entity.
+
+The audit log `actor` field references the team identity, not a
+free-form string. This provides cryptographic accountability for
+trust decisions.
+
+```sql
+CREATE TABLE team_identities (
+    id          TEXT PRIMARY KEY,  -- UUID
+    name        TEXT NOT NULL,     -- "sarah+claude-opus-4.6"
+    created_at  TEXT NOT NULL,
+    halted_at   TEXT,              -- NULL if active
+    revoked_at  TEXT,              -- NULL if not revoked
+    revoke_reason TEXT
+);
+```
+
+### 2. Signal Deduplication: Source-Annotated, Skip Identical
+
+Signals are append-only but deduplicated within a time window when
+the source and value are identical. The primary case is rapid
+`--refresh` or batch survey analyzing shared transitive deps.
+
+Rules:
+- Skip insert if an identical signal (same entity, type, source, and
+  value) exists within the last hour
+- Different sources are never deduplicated — our own signals are
+  privileged over inherited/external signals
+- The `source` field distinguishes: `github`, `npm-registry`,
+  `peer:acme-corp`, `hierarchy:security-team`
+
+### 3. Dependency Observations: Append-Only
+
+Each survey produces an append-only snapshot of the dependency tree.
+Dependencies are never updated in place — each observation is a new
+record:
+
+```sql
+CREATE TABLE dependency_observations (
+    id           TEXT PRIMARY KEY,  -- UUID
+    project_id   TEXT NOT NULL REFERENCES entities(id),
+    entity_id    TEXT NOT NULL REFERENCES entities(id),
+    version      TEXT NOT NULL,
+    direct       BOOLEAN NOT NULL,
+    observed_at  TEXT NOT NULL,     -- when this survey ran
+    survey_id    TEXT NOT NULL      -- groups observations from one survey
+);
+
+CREATE INDEX idx_depobs_project ON dependency_observations(project_id);
+CREATE INDEX idx_depobs_survey ON dependency_observations(survey_id);
+```
+
+This enables:
+- Diffing two surveys: "what changed between survey X and survey Y?"
+- Timeline: "when did we start depending on v1.16.0?"
+- Historical blast radius: "on date X, which projects depended on
+  this burned entity?"
+- No data loss: the record of every dependency tree state is preserved
+
+### 4. Audit Log Rotation: User's Responsibility
+
+The file-based audit log (`~/.signatory/audit.log`) grows indefinitely.
+Rotation is left to the user or their system's log management. The
+in-database audit log follows the same append-only model as signals
+and can be pruned by the user if needed.
+
+## External Data Ingestion
+
+The entity model supports ingesting data from external sources — a
+requirement for the federated burn list design and hierarchical trust.
+
+### What Can Be Ingested
+
+| Data type | Source field | Example |
+|---|---|---|
+| Signals | `peer:acme-corp`, `hierarchy:security-team` | A trusted peer's analysis of a package |
+| Burns | `BurnSourceInherited` + `SourceOrg` | A hierarchical burn list subscription |
+| Posture decisions | source annotation in audit log | "acme-corp considers this vetted-frozen" |
+| Entity profiles | `source` on entity creation | Bulk import of pre-analyzed packages |
+
+### How It Works
+
+- External data is stored alongside local data, distinguished by source
+- Local signals are privileged over external signals in display and
+  scoring
+- Burns from subscribed sources are layered (per the federated burn
+  model in trust-model.md — analysts can strip inherited burns)
+- Audit log records all ingestion events: "ingested 47 entity profiles
+  from acme-corp security team at 2026-05-01"
+
+### Trust of External Sources
+
+An external source is itself an entity in signatory. Its trustworthiness
+can be assessed, postured, and burned using the same model. Subscribing
+to a hierarchical burn list is itself a trust decision that should be
+recorded with posture and rationale.
+
+## Remaining Open Questions
+
+1. **Team identity key management.** What cryptographic mechanism
+   backs the team identity? PGP/GPG keys? SSH keys? OIDC? Or is this
+   deferred until the attestation utility layer is built?
+
+2. **Survey snapshot size.** For large projects with hundreds of
+   dependencies, append-only observations will grow quickly. Is per-
+   survey granularity correct, or should we batch at a coarser level
+   (e.g., daily)?
