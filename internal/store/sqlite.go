@@ -114,8 +114,8 @@ func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 	if entity == nil {
 		return ErrNilInput
 	}
-	if entity.ID == "" || entity.Name == "" || entity.Type == "" {
-		return fmt.Errorf("%w: entity ID, name, and type are required", ErrNilInput)
+	if entity.ID == "" || entity.ShortName == "" || entity.Type == "" {
+		return fmt.Errorf("%w: entity ID, short_name, and type are required", ErrNilInput)
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
@@ -126,7 +126,7 @@ func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 			ecosystem = excluded.ecosystem,
 			url = excluded.url,
 			updated_at = excluded.updated_at`,
-		entity.ID, string(entity.Type), entity.Name, entity.Ecosystem, entity.URL,
+		entity.ID, string(entity.Type), entity.ShortName, entity.Ecosystem, entity.URL,
 		entity.CreatedAt.Format(time.RFC3339), entity.UpdatedAt.Format(time.RFC3339))
 	return err
 }
@@ -315,7 +315,7 @@ func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 func scanEntity(row *sql.Row) (*profile.Entity, error) {
 	var e profile.Entity
 	var createdAt, updatedAt string
-	err := row.Scan(&e.ID, (*string)(&e.Type), &e.Name, &e.Ecosystem, &e.URL, &createdAt, &updatedAt)
+	err := row.Scan(&e.ID, (*string)(&e.Type), &e.ShortName, &e.Ecosystem, &e.URL, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}

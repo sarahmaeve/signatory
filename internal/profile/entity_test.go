@@ -150,7 +150,7 @@ func TestEntityJSONRoundTrip(t *testing.T) {
 	entity := Entity{
 		ID:        "pkg-123",
 		Type:      EntityPackage,
-		Name:      "lodash",
+		ShortName: "lodash",
 		Ecosystem: "npm",
 		URL:       "https://github.com/lodash/lodash",
 		CreatedAt: now,
@@ -166,7 +166,7 @@ func TestEntityJSONRoundTrip(t *testing.T) {
 
 	assert.Equal(t, entity.ID, decoded.ID)
 	assert.Equal(t, entity.Type, decoded.Type)
-	assert.Equal(t, entity.Name, decoded.Name)
+	assert.Equal(t, entity.ShortName, decoded.ShortName)
 	assert.Equal(t, entity.Ecosystem, decoded.Ecosystem)
 	assert.Equal(t, entity.URL, decoded.URL)
 	assert.True(t, entity.CreatedAt.Equal(decoded.CreatedAt))
@@ -177,9 +177,9 @@ func TestEntityJSON_OmitsEmptyFields(t *testing.T) {
 	t.Parallel()
 
 	entity := Entity{
-		ID:   "id-1",
-		Type: EntityProject,
-		Name: "myproject",
+		ID:        "id-1",
+		Type:      EntityProject,
+		ShortName: "myproject",
 	}
 
 	data, err := json.Marshal(entity)
@@ -217,7 +217,7 @@ func TestProfileJSONRoundTrip(t *testing.T) {
 		Entity: Entity{
 			ID:        "pkg-1",
 			Type:      EntityPackage,
-			Name:      "test-pkg",
+			ShortName: "test-pkg",
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
@@ -274,9 +274,9 @@ func TestProfileJSON_NilOptionalFields(t *testing.T) {
 
 	p := Profile{
 		Entity: Entity{
-			ID:   "e-1",
-			Type: EntityProject,
-			Name: "bare",
+			ID:        "e-1",
+			Type:      EntityProject,
+			ShortName: "bare",
 		},
 		Signals: nil,
 		Posture: nil,
@@ -301,9 +301,9 @@ func TestProfileJSON_EmptySignals(t *testing.T) {
 
 	p := Profile{
 		Entity: Entity{
-			ID:   "e-1",
-			Type: EntityProject,
-			Name: "test",
+			ID:        "e-1",
+			Type:      EntityProject,
+			ShortName: "test",
 		},
 		Signals: []Signal{},
 	}

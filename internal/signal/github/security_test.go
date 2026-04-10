@@ -56,9 +56,9 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "owner/repo",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "owner/repo",
 	}
 
 	result, err := collector.Collect(context.Background(), entity)
@@ -121,7 +121,7 @@ func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
 	client := &Client{httpClient: server.Client(), token: "test", baseURL: server.URL}
 	collector := NewCollectorWithClient(client)
 
-	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, ShortName: "owner/repo"}
 	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
 	signals := result.Signals()
@@ -189,7 +189,7 @@ func TestSecurity_ZeroCommitRepoProducesAbsence(t *testing.T) {
 	client := &Client{httpClient: server.Client(), baseURL: server.URL}
 	collector := NewCollectorWithClient(client)
 
-	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/empty"}
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, ShortName: "owner/empty"}
 	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
 	signals := result.Signals()
@@ -332,7 +332,7 @@ func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
-		ID: "test-entity", Type: profile.EntityPackage, Name: "owner/repo",
+		ID: "test-entity", Type: profile.EntityPackage, ShortName: "owner/repo",
 	}
 
 	// Collect will succeed partially. Check that the sanitized reason
@@ -383,9 +383,9 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "owner/repo",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "owner/repo",
 	}
 
 	result, err := collector.Collect(context.Background(), entity)

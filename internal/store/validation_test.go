@@ -19,21 +19,21 @@ var fixedTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestValidation_PutEntity_EmptyID(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "", Type: profile.EntityPackage, Name: "test"}
+	entity := &profile.Entity{ID: "", Type: profile.EntityPackage, ShortName: "test"}
 	err := s.PutEntity(context.Background(), entity)
 	assert.Error(t, err, "should reject empty ID")
 }
 
-func TestValidation_PutEntity_EmptyName(t *testing.T) {
+func TestValidation_PutEntity_EmptyShortName(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "test-id", Type: profile.EntityPackage, Name: ""}
+	entity := &profile.Entity{ID: "test-id", Type: profile.EntityPackage, ShortName: ""}
 	err := s.PutEntity(context.Background(), entity)
-	assert.Error(t, err, "should reject empty name")
+	assert.Error(t, err, "should reject empty short_name")
 }
 
 func TestValidation_PutEntity_EmptyType(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "test-id", Type: "", Name: "test"}
+	entity := &profile.Entity{ID: "test-id", Type: "", ShortName: "test"}
 	err := s.PutEntity(context.Background(), entity)
 	assert.Error(t, err, "should reject empty type")
 }

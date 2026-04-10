@@ -40,7 +40,7 @@ func (c *Collector) Name() string { return "github" }
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	target := entity.URL
 	if target == "" {
-		target = entity.Name
+		target = entity.ShortName
 	}
 
 	owner, repoName, err := ParseRepoURL(target)

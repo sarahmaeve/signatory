@@ -73,7 +73,7 @@ func (m *mockStore) FindEntity(ctx context.Context, name string, entityType prof
 		return nil, err
 	}
 	for _, e := range m.entities {
-		if e.Name == name && e.Type == entityType {
+		if e.ShortName == name && e.Type == entityType {
 			return e, nil
 		}
 	}
@@ -192,7 +192,7 @@ func TestStore_EntityRoundTrip(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "ent-1",
 		Type:      profile.EntityPackage,
-		Name:      "lodash",
+		ShortName: "lodash",
 		Ecosystem: "npm",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -223,9 +223,9 @@ func TestStore_FindEntity(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "ent-1",
-		Type: profile.EntityPackage,
-		Name: "express",
+		ID:        "ent-1",
+		Type:      profile.EntityPackage,
+		ShortName: "express",
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -242,9 +242,9 @@ func TestStore_FindEntity_WrongType(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "ent-1",
-		Type: profile.EntityPackage,
-		Name: "express",
+		ID:        "ent-1",
+		Type:      profile.EntityPackage,
+		ShortName: "express",
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 

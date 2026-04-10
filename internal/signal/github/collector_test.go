@@ -165,10 +165,10 @@ func TestCollector_Collect(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "pkg:go:github.com/alecthomas/kong",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
-		URL:  "https://github.com/alecthomas/kong",
+		ID:        "pkg:go:github.com/alecthomas/kong",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
+		URL:       "https://github.com/alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)
@@ -199,9 +199,9 @@ func TestCollector_SignalValues(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "pkg:go:github.com/alecthomas/kong",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "pkg:go:github.com/alecthomas/kong",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)
@@ -274,9 +274,9 @@ func TestCollector_SignalMetadata(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)
@@ -299,9 +299,9 @@ func TestCollector_ForgeryResistance(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)
@@ -328,9 +328,9 @@ func TestCollector_ContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	_, err := c.Collect(ctx, entity)
@@ -348,9 +348,9 @@ func TestCollector_RateLimitError(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	_, err := c.Collect(ctx, entity)
@@ -416,7 +416,7 @@ func TestCollector_PartialCollection(t *testing.T) {
 	c := newTestCollector(t, mux)
 	ctx := context.Background()
 
-	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, Name: "owner/repo"}
+	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, ShortName: "owner/repo"}
 	result, err := c.Collect(ctx, entity)
 	require.NoError(t, err, "partial collection should not return an error")
 	signals := result.Signals()
@@ -452,9 +452,9 @@ func TestCollector_NotFoundError(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "nonexistent/repo",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "nonexistent/repo",
 	}
 
 	_, err := c.Collect(ctx, entity)
@@ -467,10 +467,10 @@ func TestCollector_UsesEntityURLOverName(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "some-npm-package",
-		URL:  "https://github.com/alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "some-npm-package",
+		URL:       "https://github.com/alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)
@@ -484,9 +484,9 @@ func TestCollector_TemporalEraClassification(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test-entity",
-		Type: profile.EntityPackage,
-		Name: "alecthomas/kong",
+		ID:        "test-entity",
+		Type:      profile.EntityPackage,
+		ShortName: "alecthomas/kong",
 	}
 
 	result, err := c.Collect(ctx, entity)

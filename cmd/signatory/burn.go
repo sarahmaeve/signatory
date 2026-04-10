@@ -38,7 +38,7 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 		entity := &profile.Entity{
 			ID:        cmd.Target,
 			Type:      profile.EntityPackage,
-			Name:      cmd.Target,
+			ShortName: cmd.Target,
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),
 		}

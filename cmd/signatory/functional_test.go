@@ -113,7 +113,7 @@ func TestFunctional_PostureSetCreatesEntity(t *testing.T) {
 
 	entity, err := s.GetEntity(context.Background(), "pkg:npm:lodash")
 	require.NoError(t, err)
-	assert.Equal(t, "pkg:npm:lodash", entity.Name)
+	assert.Equal(t, "pkg:npm:lodash", entity.ShortName)
 	assert.Equal(t, profile.EntityPackage, entity.Type)
 }
 
@@ -178,7 +178,7 @@ func TestFunctional_BurnCreatesEntity(t *testing.T) {
 
 	entity, err := s.GetEntity(context.Background(), "pkg:npm:compromised")
 	require.NoError(t, err)
-	assert.Equal(t, "pkg:npm:compromised", entity.Name)
+	assert.Equal(t, "pkg:npm:compromised", entity.ShortName)
 }
 
 func TestFunctional_BurnOverwriteExisting(t *testing.T) {

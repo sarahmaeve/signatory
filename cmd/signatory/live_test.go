@@ -84,9 +84,9 @@ func TestLive_CollectorDirectly(t *testing.T) {
 	ctx := context.Background()
 
 	entity := &profile.Entity{
-		ID:   "test:alecthomas/kong",
-		Type: profile.EntityProject,
-		Name: "alecthomas/kong",
+		ID:        "test:alecthomas/kong",
+		Type:      profile.EntityProject,
+		ShortName: "alecthomas/kong",
 	}
 
 	result, err := collector.Collect(ctx, entity)

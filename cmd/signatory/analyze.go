@@ -51,7 +51,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	entity := &profile.Entity{
 		ID:        entityID,
 		Type:      profile.EntityProject,
-		Name:      cmd.Target,
+		ShortName: cmd.Target,
 		URL:       cmd.Target,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),

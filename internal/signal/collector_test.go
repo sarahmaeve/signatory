@@ -95,7 +95,7 @@ func TestCollector_CollectReturnsSignals(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "ent-1",
 		Type:      profile.EntityPackage,
-		Name:      "test-pkg",
+		ShortName: "test-pkg",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -123,7 +123,7 @@ func TestCollector_CollectReturnsError(t *testing.T) {
 		err:  expectedErr,
 	}
 
-	entity := &profile.Entity{ID: "ent-1", Name: "test"}
+	entity := &profile.Entity{ID: "ent-1", ShortName: "test"}
 	result, err := collector.Collect(context.Background(), entity)
 
 	assert.Nil(t, result)

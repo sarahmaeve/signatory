@@ -58,7 +58,7 @@ func TestEntityRoundTrip(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "pkg:npm:express",
 		Type:      profile.EntityPackage,
-		Name:      "express",
+		ShortName: "express",
 		Ecosystem: "npm",
 		URL:       "https://github.com/expressjs/express",
 		CreatedAt: now,
@@ -71,7 +71,7 @@ func TestEntityRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, entity.ID, got.ID)
 	assert.Equal(t, entity.Type, got.Type)
-	assert.Equal(t, entity.Name, got.Name)
+	assert.Equal(t, entity.ShortName, got.ShortName)
 	assert.Equal(t, entity.Ecosystem, got.Ecosystem)
 	assert.Equal(t, entity.URL, got.URL)
 	assert.Equal(t, entity.CreatedAt.Unix(), got.CreatedAt.Unix())
@@ -85,7 +85,7 @@ func TestEntityUpdate(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "pkg:npm:express",
 		Type:      profile.EntityPackage,
-		Name:      "express",
+		ShortName: "express",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -124,7 +124,7 @@ func TestFindEntity(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "pkg:npm:express",
 		Type:      profile.EntityPackage,
-		Name:      "express",
+		ShortName: "express",
 		Ecosystem: "npm",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -152,7 +152,7 @@ func TestFindEntity_WrongType(t *testing.T) {
 	entity := &profile.Entity{
 		ID:        "pkg:npm:express",
 		Type:      profile.EntityPackage,
-		Name:      "express",
+		ShortName: "express",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -169,7 +169,7 @@ func TestSignalRoundTrip(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -212,7 +212,7 @@ func TestGetSignalsByGroup(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -241,7 +241,7 @@ func TestSignalUpdate(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -279,7 +279,7 @@ func TestPostureRoundTrip(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -308,7 +308,7 @@ func TestPostureUpdate(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -354,7 +354,7 @@ func TestBurnRoundTrip(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:bad-pkg", Type: profile.EntityPackage,
-		Name: "bad-pkg", CreatedAt: now, UpdatedAt: now,
+		ShortName: "bad-pkg", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -381,7 +381,7 @@ func TestBurnInheritedWithSourceOrg(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:bad-pkg", Type: profile.EntityPackage,
-		Name: "bad-pkg", CreatedAt: now, UpdatedAt: now,
+		ShortName: "bad-pkg", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -425,7 +425,7 @@ func TestListBurns(t *testing.T) {
 	for _, name := range []string{"bad-1", "bad-2", "bad-3"} {
 		entity := &profile.Entity{
 			ID: "pkg:npm:" + name, Type: profile.EntityPackage,
-			Name: name, CreatedAt: now, UpdatedAt: now,
+			ShortName: name, CreatedAt: now, UpdatedAt: now,
 		}
 		require.NoError(t, s.PutEntity(ctx, entity))
 		burn := &profile.Burn{
@@ -456,7 +456,7 @@ func TestSignalValuePreservesJSON(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID: "pkg:npm:express", Type: profile.EntityPackage,
-		Name: "express", CreatedAt: now, UpdatedAt: now,
+		ShortName: "express", CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, s.PutEntity(ctx, entity))
 
@@ -487,7 +487,7 @@ func TestConcurrentAccess(t *testing.T) {
 			id := fmt.Sprintf("pkg:npm:pkg-%d", n)
 			entity := &profile.Entity{
 				ID: id, Type: profile.EntityPackage,
-				Name: fmt.Sprintf("pkg-%d", n), CreatedAt: now, UpdatedAt: now,
+				ShortName: fmt.Sprintf("pkg-%d", n), CreatedAt: now, UpdatedAt: now,
 			}
 			if err := s.PutEntity(ctx, entity); err != nil {
 				done <- err
