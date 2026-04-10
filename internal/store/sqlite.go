@@ -74,66 +74,13 @@ func OpenSQLite(path string) (*SQLite, error) {
 		}
 	}
 
-	s := &SQLite{db: db}
-	if err := s.migrate(); err != nil {
+	if err := migrate(db, path); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
-	return s, nil
+	return &SQLite{db: db}, nil
 }
-
-func (s *SQLite) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
-}
-
-const schema = `
-CREATE TABLE IF NOT EXISTS entities (
-	id         TEXT PRIMARY KEY,
-	type       TEXT NOT NULL,
-	name       TEXT NOT NULL,
-	ecosystem  TEXT NOT NULL DEFAULT '',
-	url        TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_entities_name_type ON entities(name, type);
-
-CREATE TABLE IF NOT EXISTS signals (
-	id                 TEXT PRIMARY KEY,
-	entity_id          TEXT NOT NULL REFERENCES entities(id),
-	type               TEXT NOT NULL,
-	signal_group       TEXT NOT NULL,
-	source             TEXT NOT NULL,
-	forgery_resistance TEXT NOT NULL,
-	value              TEXT NOT NULL,
-	collected_at       TEXT NOT NULL,
-	expires_at         TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_signals_entity ON signals(entity_id);
-CREATE INDEX IF NOT EXISTS idx_signals_entity_group ON signals(entity_id, signal_group);
-
-CREATE TABLE IF NOT EXISTS postures (
-	entity_id TEXT PRIMARY KEY REFERENCES entities(id),
-	tier      TEXT NOT NULL,
-	version   TEXT NOT NULL DEFAULT '',
-	rationale TEXT NOT NULL,
-	set_by    TEXT NOT NULL,
-	set_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS burns (
-	entity_id  TEXT PRIMARY KEY REFERENCES entities(id),
-	reason     TEXT NOT NULL,
-	source     TEXT NOT NULL,
-	source_org TEXT NOT NULL DEFAULT '',
-	burned_at  TEXT NOT NULL,
-	burned_by  TEXT NOT NULL
-);
-`
 
 // Close closes the database connection.
 func (s *SQLite) Close() error {
