@@ -226,9 +226,10 @@ func TestMigration_BackupNonexistentFile(t *testing.T) {
 // --- Rollback ---
 
 // TestMigration_RollbackDown verifies that rolling back one migration
-// at a time unwinds the schema step-by-step. With two migrations in
-// place (v1: initial schema, v2: entity-model-v2), a full rollback
-// goes v2 → v1 → v0 through two migrateDown calls.
+// at a time unwinds the schema step-by-step. With three migrations in
+// place (v1: initial schema, v2: entity-model-v2, v3: append-only
+// triggers), a full rollback walks vN → vN-1 → ... → v0 through N
+// migrateDown calls.
 func TestMigration_RollbackDown(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollback.db")
@@ -252,7 +253,22 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v2 → v1. Data should survive; name column restored.
+	// First rollback: v3 → v2. Drops the append-only triggers.
+	// Data is unaffected (triggers fire on UPDATE/DELETE, not on
+	// existing rows or schema changes).
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 2, version)
+
+	var v2ShortName string
+	err = db.QueryRow("SELECT short_name FROM entities WHERE id = 'roll-1'").Scan(&v2ShortName)
+	require.NoError(t, err, "entity should still be readable after v3 rollback")
+	assert.Equal(t, "rollback-test", v2ShortName)
+
+	// Second rollback: v2 → v1. Data should survive; name column restored.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
@@ -265,7 +281,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err, "v1 name column should be readable after rollback from v2")
 	assert.Equal(t, "rollback-test", v1Name, "v2 short_name should have been copied back to v1 name")
 
-	// Second rollback: v1 → v0. Entities table dropped.
+	// Third rollback: v1 → v0. Entities table dropped.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
@@ -431,13 +447,13 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 	`)
 	require.NoError(t, err)
 
-	// --- Up: v1 → v2. ---
+	// --- Up: v1 → vN (currently v3). ---
 	err = migrate(db, path)
 	require.NoError(t, err)
 
 	version, err := getCurrentVersion(db)
 	require.NoError(t, err)
-	assert.Equal(t, 2, version)
+	assert.Equal(t, len(migrations), version)
 
 	// Entity data should be translated: id unchanged, canonical_uri copied
 	// from id, short_name copied from name, v1 name column gone.
@@ -468,6 +484,18 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
+	// --- Down: vN → v2 (drops append-only triggers). ---
+	// This is a no-op for the data we care about — the v3 migration
+	// only adds triggers, so rolling it back leaves the v2 schema and
+	// data intact. We still walk it explicitly so the round-trip is
+	// step-by-step.
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 2, version)
+
 	// --- Down: v2 → v1. ---
 	err = migrateDown(db, path)
 	require.NoError(t, err)
@@ -493,15 +521,15 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM burns").Scan(&burnCount))
 	assert.Equal(t, 1, burnCount)
 
-	// --- Up again: v1 → v2. Second forward trip should work cleanly. ---
+	// --- Up again: v1 → vN. Second forward trip should work cleanly. ---
 	err = migrate(db, path)
 	require.NoError(t, err)
 
 	version, err = getCurrentVersion(db)
 	require.NoError(t, err)
-	assert.Equal(t, 2, version)
+	assert.Equal(t, len(migrations), version)
 
 	err = db.QueryRow("SELECT short_name FROM entities WHERE id = 'pkg:npm:express'").Scan(&shortName)
 	require.NoError(t, err)
-	assert.Equal(t, "express", shortName, "data should survive a full v1→v2→v1→v2 loop")
+	assert.Equal(t, "express", shortName, "data should survive a full v1→vN→v1→vN loop")
 }

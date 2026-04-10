@@ -34,6 +34,12 @@ var migrations = []Migration{
 		Up:          migrationV2Up,
 		Down:        migrationV2Down,
 	},
+	{
+		Version:     3,
+		Description: "append-only enforcement: triggers blocking UPDATE/DELETE on signals, dependency_observations, signal_resolutions, audit_log",
+		Up:          migrationV3Up,
+		Down:        migrationV3Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -257,6 +263,58 @@ ALTER TABLE entities DROP COLUMN description;
 
 -- Recreate the v1 index on the restored name column.
 CREATE INDEX IF NOT EXISTS idx_entities_name_type ON entities(name, type);
+`
+
+// migrationV3Up adds BEFORE UPDATE and BEFORE DELETE triggers to the
+// four append-only tables. This converts the convention documented at
+// sqlite.go:8 (signals, dependency observations, signal resolutions,
+// and audit entries are append-only) into a schema-enforced invariant.
+//
+// The triggers fire on any UPDATE or DELETE statement, regardless of
+// source — Go application code, raw SQL via the sqlite3 shell, or
+// anything else that goes through the SQLite parser. RAISE(ABORT, ...)
+// aborts the offending statement and rolls back any pending changes
+// from that statement; the surrounding transaction is not affected
+// unless the caller chooses to roll it back.
+//
+// Tables that are NOT append-only — entities, postures, burns,
+// team_identities — are intentionally left mutable. Their methods
+// (PutEntity, SetPosture, SetBurn, PutTeamIdentity) upsert.
+const migrationV3Up = `
+CREATE TRIGGER signals_no_update BEFORE UPDATE ON signals
+    BEGIN SELECT RAISE(ABORT, 'signals are append-only'); END;
+CREATE TRIGGER signals_no_delete BEFORE DELETE ON signals
+    BEGIN SELECT RAISE(ABORT, 'signals are append-only'); END;
+
+CREATE TRIGGER dependency_observations_no_update BEFORE UPDATE ON dependency_observations
+    BEGIN SELECT RAISE(ABORT, 'dependency_observations are append-only'); END;
+CREATE TRIGGER dependency_observations_no_delete BEFORE DELETE ON dependency_observations
+    BEGIN SELECT RAISE(ABORT, 'dependency_observations are append-only'); END;
+
+CREATE TRIGGER signal_resolutions_no_update BEFORE UPDATE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
+CREATE TRIGGER signal_resolutions_no_delete BEFORE DELETE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
+
+CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
+    BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
+    BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+`
+
+// migrationV3Down drops the append-only triggers, restoring the
+// pre-v3 behavior where these tables can be mutated freely. This is
+// a recovery path only — running it on a populated database removes
+// the schema-level append-only enforcement and reverts to convention.
+const migrationV3Down = `
+DROP TRIGGER IF EXISTS audit_log_no_delete;
+DROP TRIGGER IF EXISTS audit_log_no_update;
+DROP TRIGGER IF EXISTS signal_resolutions_no_delete;
+DROP TRIGGER IF EXISTS signal_resolutions_no_update;
+DROP TRIGGER IF EXISTS dependency_observations_no_delete;
+DROP TRIGGER IF EXISTS dependency_observations_no_update;
+DROP TRIGGER IF EXISTS signals_no_delete;
+DROP TRIGGER IF EXISTS signals_no_update;
 `
 
 // migrate runs all pending migrations on the database. It:
