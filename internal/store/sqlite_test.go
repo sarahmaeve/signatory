@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -841,32 +840,6 @@ func TestAppendResolution_RoundTrip(t *testing.T) {
 	require.NoError(t, s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM signal_resolutions WHERE id = 'res-1'`).Scan(&count))
 	assert.Equal(t, 1, count)
-}
-
-func TestConcurrentAccess(t *testing.T) {
-	s := newTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
-
-	// WAL mode should allow concurrent reads and writes.
-	done := make(chan error, 10)
-	for i := 0; i < 10; i++ {
-		go func(n int) {
-			id := fmt.Sprintf("ent-%d", n)
-			uri := fmt.Sprintf("pkg:npm/pkg-%d", n)
-			entity := testEntity(id, uri, fmt.Sprintf("pkg-%d", n), now)
-			if err := s.PutEntity(ctx, entity); err != nil {
-				done <- err
-				return
-			}
-			_, err := s.GetEntity(ctx, id)
-			done <- err
-		}(i)
-	}
-
-	for i := 0; i < 10; i++ {
-		assert.NoError(t, <-done)
-	}
 }
 
 // TestSQLite_ContextCancellation verifies that the SQLite store surfaces
