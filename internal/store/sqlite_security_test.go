@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,68 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
+
+// TestSecurity_DBFile_AtomicallyCreatedWith0600 verifies that the
+// SQLite database file is created with mode 0600 *atomically*, with
+// no window during which it could be world-readable. Issue #83: the
+// previous OpenSQLite flow was sql.Open → db.Ping → os.Chmod, where
+// db.Ping creates the file with the process's default umask (typically
+// 0644) and the subsequent os.Chmod narrows it to 0600. Between those
+// two calls, another user on a multi-user system could read the file
+// — and the parent directory's restrictive 0700 permissions only
+// close that window if the parent was created by this MkdirAll call;
+// MkdirAll does not narrow the perms of an existing parent dir.
+//
+// The TOCTOU window is unobservable from a normal black-box test
+// because the chmod runs synchronously before OpenSQLite returns. To
+// make the bug observable, we inject a chmodFunc that captures the
+// file's permissions immediately before delegating to the real
+// os.Chmod. The captured mode is what an attacker reading the file
+// during the window would have seen.
+//
+// Pre-fix: chmodFunc captures whatever sql.Open's underlying open(2)
+// produced (driver-dependent, typically 0644 or 0666 with default
+// umask). The test fails because the captured mode != 0600.
+//
+// Post-fix: OpenSQLite pre-creates the file via os.OpenFile with
+// mode 0600 before handing the path to sql.Open. By the time chmodFunc
+// runs, the file is already at 0600. The chmod becomes defense in
+// depth (covers existing files that had looser perms when OpenSQLite
+// was first called).
+func TestSecurity_DBFile_AtomicallyCreatedWith0600(t *testing.T) {
+	// Pre-create a parent directory with deliberately loose perms.
+	// MkdirAll inside OpenSQLite will not narrow these — that's the
+	// precondition the TOCTOU window relies on.
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "loose-parent")
+	require.NoError(t, os.MkdirAll(parent, 0755))
+
+	// Hook chmodFunc so we can see what mode the database file has at
+	// the moment os.Chmod would normally narrow it. Restore in defer
+	// regardless of test outcome — global state must not leak.
+	var capturedMode os.FileMode
+	origChmodFunc := chmodFunc
+	chmodFunc = func(name string, mode os.FileMode) error {
+		info, err := os.Stat(name)
+		if err == nil {
+			capturedMode = info.Mode().Perm()
+		}
+		return origChmodFunc(name, mode)
+	}
+	defer func() { chmodFunc = origChmodFunc }()
+
+	path := filepath.Join(parent, "test.db")
+	s, err := OpenSQLite(path)
+	require.NoError(t, err)
+	defer s.Close()
+
+	// THE CRITICAL ASSERTION: the database file must have been at 0600
+	// before the chmod ran. If it wasn't, the file was world-readable
+	// for some non-zero window, and an attacker on a multi-user system
+	// could have read it.
+	assert.Equal(t, os.FileMode(0600), capturedMode,
+		"DB file must be 0600 BEFORE chmod runs — closing the TOCTOU window during which the file would be world-readable on multi-user systems with loose parent dir perms")
+}
 
 // TestSecurity_GetLatestSignals_IsolatesEntities verifies that the
 // signal_resolutions filter inside GetLatestSignals is entity-scoped.

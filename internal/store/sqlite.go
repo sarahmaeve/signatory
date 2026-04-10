@@ -41,14 +41,47 @@ type SQLite struct {
 	db *sql.DB
 }
 
+// chmodFunc is a package-level injection point for the os.Chmod call
+// in OpenSQLite. Production code uses os.Chmod directly; tests can
+// replace this var to observe the database file's permissions
+// immediately before the chmod runs. This is the test seam that makes
+// the issue #83 TOCTOU window observable from a black-box test —
+// without it, the chmod always runs synchronously before OpenSQLite
+// returns, making the bug invisible at the post-OpenSQLite invariant
+// level.
+var chmodFunc = os.Chmod
+
 // OpenSQLite opens or creates a SQLite database at the given path.
 // It creates the parent directory if it does not exist, restricts the
 // database file to 0600 permissions, enables WAL mode and foreign keys,
 // and runs schema migrations.
+//
+// File-permission safety (#83): the database file is pre-created via
+// os.OpenFile with mode 0600 BEFORE being handed to sql.Open, so there
+// is no window during which the file is world-readable. The previous
+// implementation relied on sql.Open → db.Ping creating the file with
+// the process's default umask (typically 0644), then narrowing it via
+// os.Chmod afterward — leaving a TOCTOU window during which a co-user
+// on a multi-user system could read the database. Pre-creation closes
+// that window because mode 0600 is preserved through default umask
+// (0600 & ~0022 = 0600). The chmodFunc call below remains as defense
+// in depth for the case where the file already existed with looser
+// perms when OpenSQLite was first called.
 func OpenSQLite(path string) (*SQLite, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
+	}
+
+	// Atomically create the database file at 0600 BEFORE sql.Open.
+	// O_CREATE without O_EXCL: a no-op if the file already exists,
+	// in which case the chmodFunc call below narrows any pre-existing
+	// looser permissions. The mode 0600 is preserved through default
+	// umask 0022 because the bits don't intersect.
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600); err != nil {
+		return nil, fmt.Errorf("create database file: %w", err)
+	} else if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close pre-created database file: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", path)
@@ -61,8 +94,11 @@ func OpenSQLite(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	// Restrict database file permissions to owner-only.
-	if err := os.Chmod(path, 0600); err != nil {
+	// Defense in depth: narrow permissions if the file already existed
+	// with looser perms when OpenSQLite was called. New files are
+	// already at 0600 from the pre-create above; this is a no-op for
+	// the common case.
+	if err := chmodFunc(path, 0600); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set database permissions: %w", err)
 	}
