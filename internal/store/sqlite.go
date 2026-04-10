@@ -144,16 +144,27 @@ func (s *SQLite) FindEntityByURI(ctx context.Context, canonicalURI string) (*pro
 // updated_at fields are updated. created_at and id are immutable after
 // first insert.
 //
-// Validation: id, canonical_uri, short_name, and type must be non-empty.
-// This is a Go-layer guard — SQLite's NOT NULL constraint would catch
-// id/short_name/type, and the unique index on canonical_uri would catch
-// duplicate empties eventually, but an explicit Go error is clearer.
+// Validation:
+//
+//   - id, canonical_uri, short_name, and type must be non-empty.
+//     This is a Go-layer guard — SQLite's NOT NULL constraint would
+//     catch id/short_name/type, and the unique index on canonical_uri
+//     would catch duplicate empties eventually, but an explicit Go
+//     error is clearer.
+//   - canonical_uri must pass profile.ValidateCanonicalURI. This is
+//     the persistence-boundary defense for issue #78: even if a CLI
+//     command, library caller, or future code path forgets to validate
+//     input, the store rejects bad data (control chars, non-ASCII
+//     lookalikes, unknown schemes, excessive length).
 func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 	if entity == nil {
 		return ErrNilInput
 	}
 	if entity.ID == "" || entity.CanonicalURI == "" || entity.ShortName == "" || entity.Type == "" {
 		return fmt.Errorf("%w: entity ID, canonical URI, short name, and type are required", ErrNilInput)
+	}
+	if err := profile.ValidateCanonicalURI(entity.CanonicalURI); err != nil {
+		return fmt.Errorf("invalid canonical URI: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)

@@ -2,12 +2,68 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/profile"
 )
+
+// TestSecurity_PutEntity_RejectsMalformedCanonicalURI verifies that
+// PutEntity refuses to persist entities whose CanonicalURI contains
+// dangerous characters, unknown schemes, excessive length, or other
+// shapes that could be used for log injection, lookalike fragmentation,
+// or display spoofing. This is the persistence-boundary defense for
+// issue #78 — even if a CLI command, library caller, or future code
+// path forgets to validate input, the store rejects the bad data.
+//
+// Each row also asserts that no entity row was written by the rejected
+// PutEntity call. The validation must happen before the INSERT.
+func TestSecurity_PutEntity_RejectsMalformedCanonicalURI(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+	}{
+		{"unknown scheme", "evil:payload"},
+		{"no scheme at all", "foo/bar"},
+		{"scheme only with no body", "pkg:"},
+		{"control char NUL", "pkg:npm/foo\x00bar"},
+		{"control char newline", "pkg:npm/foo\nbar"},
+		{"control char tab", "pkg:npm/foo\tbar"},
+		{"DEL char", "pkg:npm/foo\x7fbar"},
+		{"non-ASCII Cyrillic lookalike", "pkg:npm/lod\u0430sh"}, // Cyrillic а
+		{"leading whitespace", " pkg:npm/express"},
+		{"trailing newline", "pkg:npm/express\n"},
+		{"too long", "pkg:npm/" + strings.Repeat("x", 600)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestDB(t)
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Second)
+
+			entity := &profile.Entity{
+				ID:           "ent-bad",
+				CanonicalURI: tt.uri,
+				Type:         profile.EntityPackage,
+				ShortName:    "bad-entity",
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			err := s.PutEntity(ctx, entity)
+			require.Error(t, err, "PutEntity must reject malformed canonical URI")
+
+			// The bad row must NOT have landed in the entities table —
+			// validation has to happen before the INSERT, not after.
+			_, err = s.GetEntity(ctx, "ent-bad")
+			require.Error(t, err, "rejected entity must not be readable back")
+			assert.ErrorIs(t, err, ErrNotFound)
+		})
+	}
+}
 
 // TestSecurity_GetEntity_CorruptedTimestampReturnsError verifies that a
 // malformed created_at column produces an error rather than silently

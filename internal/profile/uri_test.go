@@ -193,3 +193,69 @@ func TestNormalizeGitHubRepoInput_Rejects(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateCanonicalURI_Accepts verifies that the canonical-form
+// outputs of every Canonical*URI constructor pass validation. If this
+// test breaks, the constructors and validator have drifted apart.
+func TestValidateCanonicalURI_Accepts(t *testing.T) {
+	tests := []string{
+		CanonicalPackageURI("npm", "express"),
+		CanonicalPackageURI("pypi", "requests"),
+		CanonicalPackageURI("npm", "Express"), // case preserved
+		CanonicalRepoURI("github", "alecthomas", "kong"),
+		CanonicalRepoURI("gitlab", "acme", "secret"),
+		CanonicalIdentityURI("github", "alecthomas"),
+		CanonicalOrgURI("github", "stretchr"),
+		CanonicalPatchURI("github", "alecthomas", "kong", "593"),
+		// Real-world examples that should be accepted as-is.
+		"pkg:golang/github.com/alecthomas/kong",
+	}
+	for _, uri := range tests {
+		t.Run(uri, func(t *testing.T) {
+			assert.NoError(t, ValidateCanonicalURI(uri),
+				"valid canonical URI should not be rejected")
+		})
+	}
+}
+
+// TestValidateCanonicalURI_Rejects covers the attack vectors from
+// issue #78. Each input represents a class of malformed/malicious
+// data that must NOT be allowed to land in the entities table.
+func TestValidateCanonicalURI_Rejects(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+	}{
+		{"empty", ""},
+		{"unknown scheme", "evil:payload"},
+		{"no scheme at all", "foo/bar"},
+		{"scheme only with no body", "pkg:"},
+		{"control char NUL", "pkg:npm/foo\x00bar"},
+		{"control char newline", "pkg:npm/foo\nbar"},
+		{"control char tab", "pkg:npm/foo\tbar"},
+		{"control char escape", "pkg:npm/foo\x1bbar"},
+		{"DEL char", "pkg:npm/foo\x7fbar"},
+		{"non-ASCII Cyrillic lookalike", "pkg:npm/lod\u0430sh"}, // Cyrillic а
+		{"non-ASCII emoji", "pkg:npm/foo\U0001f4a9"},
+		{"leading whitespace", " pkg:npm/express"},
+		{"trailing whitespace", "pkg:npm/express "},
+		{"trailing newline", "pkg:npm/express\n"},
+		{"too long", "pkg:npm/" + repeatString("x", 600)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCanonicalURI(tt.uri)
+			require.Error(t, err, "malformed canonical URI must be rejected")
+		})
+	}
+}
+
+// repeatString is a small local helper to keep the test table readable
+// without pulling strings.Repeat into the test imports.
+func repeatString(s string, n int) string {
+	out := make([]byte, 0, len(s)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, s...)
+	}
+	return string(out)
+}

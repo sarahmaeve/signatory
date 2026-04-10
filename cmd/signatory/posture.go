@@ -248,7 +248,12 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 
 	// Treat the target as a canonical URI (e.g. purl) — the caller
 	// probably knows what they're doing and wants the entity created
-	// under the URI they supplied.
+	// under the URI they supplied. Validate before persisting so we
+	// fail closed on garbage input rather than wrapping arbitrary
+	// text as if it were a canonical identifier (#78).
+	if err := profile.ValidateCanonicalURI(target); err != nil {
+		return nil, fmt.Errorf("cannot resolve %q: not a parseable GitHub repo and not a valid canonical URI (expected forms: pkg:<ecosystem>/<name>, repo:<platform>/<owner>/<name>, identity:<platform>/<user>, org:<platform>/<name>, patch:<platform>/<owner>/<repo>/<id>): %w", target, err)
+	}
 	entity := &profile.Entity{
 		ID:           profile.NewEntityID(),
 		CanonicalURI: target,

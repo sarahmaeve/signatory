@@ -55,6 +55,90 @@ const (
 // plausibly a name" check.
 var validPathSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+// MaxCanonicalURILength is the hard upper bound on canonical URI length.
+// Real-world URIs are well under 100 bytes; 512 is generous slack and a
+// hard cap to prevent log/display blowup, expensive rendering, and
+// length-based DoS via attacker-supplied input.
+const MaxCanonicalURILength = 512
+
+// validURISchemes is the set of scheme prefixes ValidateCanonicalURI
+// will accept. New schemes added to this list automatically pass
+// validation; nothing else does.
+var validURISchemes = []string{
+	URISchemePackage,
+	URISchemeRepo,
+	URISchemeIdentity,
+	URISchemeOrg,
+	URISchemePatch,
+}
+
+// ValidateCanonicalURI checks that uri is safe to persist, render,
+// log, and display. It is the persistence-boundary defense for
+// issue #78 — even if a CLI command, library caller, or future code
+// path forgets to validate input, the store rejects bad data.
+//
+// The validator deliberately does NOT enforce per-scheme semantic
+// rules (those live in the Canonical*URI constructors and the
+// Normalize*Input parsers). Its job is "this string is safe at the
+// boundaries" — not "this string is a semantically perfect canonical
+// URI." The two responsibilities have different scopes; mixing them
+// would over-restrict legitimate inputs (e.g., scoped npm packages).
+//
+// Rules, in order:
+//
+//  1. Non-empty.
+//  2. Length ≤ MaxCanonicalURILength.
+//  3. No leading or trailing whitespace.
+//  4. Every byte is in the printable ASCII range [0x20, 0x7E].
+//     This single check defends against:
+//     - Control characters (NUL, newline, tab, escape) → log injection
+//     - Non-ASCII bytes → lookalike fragmentation (Cyrillic а ≠ Latin a),
+//     which is the entire reason canonical URIs were introduced (#53)
+//  5. Starts with one of the known scheme prefixes (validURISchemes).
+//  6. Has a non-empty body after the scheme.
+func ValidateCanonicalURI(uri string) error {
+	if uri == "" {
+		return fmt.Errorf("canonical URI is empty")
+	}
+	if len(uri) > MaxCanonicalURILength {
+		return fmt.Errorf("canonical URI exceeds maximum length of %d bytes (got %d)",
+			MaxCanonicalURILength, len(uri))
+	}
+	if uri != strings.TrimSpace(uri) {
+		return fmt.Errorf("canonical URI has leading or trailing whitespace")
+	}
+
+	// Single pass over bytes — anything outside printable ASCII is
+	// rejected with a specific error class so callers can tell which
+	// boundary the input crossed.
+	for i := 0; i < len(uri); i++ {
+		b := uri[i]
+		if b < 0x20 || b == 0x7F {
+			return fmt.Errorf("canonical URI contains control character (0x%02X) at position %d", b, i)
+		}
+		if b > 0x7F {
+			return fmt.Errorf("canonical URI contains non-ASCII byte (0x%02X) at position %d", b, i)
+		}
+	}
+
+	var scheme string
+	for _, s := range validURISchemes {
+		if strings.HasPrefix(uri, s) {
+			scheme = s
+			break
+		}
+	}
+	if scheme == "" {
+		return fmt.Errorf("canonical URI %q does not start with a known scheme (expected one of: %s)",
+			uri, strings.Join(validURISchemes, ", "))
+	}
+	if uri == scheme {
+		return fmt.Errorf("canonical URI %q has empty body after scheme", uri)
+	}
+
+	return nil
+}
+
 // CanonicalPackageURI returns the purl-style canonical URI for a
 // package entity. Example: CanonicalPackageURI("npm", "express") →
 // "pkg:npm/express".
