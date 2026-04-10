@@ -10,6 +10,7 @@ const (
 	EntityPackage  EntityType = "package"
 	EntityIdentity EntityType = "identity"
 	EntityPatch    EntityType = "patch"
+	EntityOrg      EntityType = "org"
 )
 
 // TemporalEra classifies when code was produced, affecting signal interpretation.
@@ -47,20 +48,67 @@ func ClassifyEra(t time.Time) TemporalEra {
 
 // Entity represents a tracked entity with its profile.
 type Entity struct {
-	ID        string     `json:"id"`
-	Type      EntityType `json:"type"`
-	Name      string     `json:"name"`
-	Ecosystem string     `json:"ecosystem,omitempty"` // e.g., "npm", "pypi"
-	URL       string     `json:"url,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID           string     `json:"id"`                      // UUID, internal primary key
+	CanonicalURI string     `json:"canonical_uri"`           // purl or signatory URI scheme
+	Type         EntityType `json:"type"`
+	Name         string     `json:"name"`                    // human-friendly short name
+	Description  string     `json:"description,omitempty"`
+	Ecosystem    string     `json:"ecosystem,omitempty"`
+	URL          string     `json:"url,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Profile is the complete trust profile for an entity, composed of signals.
 type Profile struct {
-	Entity  Entity      `json:"entity"`
-	Signals []Signal    `json:"signals"`
-	Posture *Posture    `json:"posture,omitempty"`
-	Burn    *Burn       `json:"burn,omitempty"`
-	Era     TemporalEra `json:"era,omitempty"`
+	Entity   Entity      `json:"entity"`
+	Signals  []Signal    `json:"signals"`
+	Postures []Posture   `json:"postures,omitempty"` // one per version
+	Posture  *Posture    `json:"posture,omitempty"`  // latest/default (for backward compat)
+	Burn     *Burn       `json:"burn,omitempty"`
+	Era      TemporalEra `json:"era,omitempty"`
+}
+
+// DependencyObservation records that a project depends on an entity
+// at a specific version, as observed during a survey.
+type DependencyObservation struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"project_id"`
+	EntityID   string    `json:"entity_id"`
+	Version    string    `json:"version"`
+	Direct     bool      `json:"direct"`
+	ObservedAt time.Time `json:"observed_at"`
+	SurveyID   string    `json:"survey_id"`
+}
+
+// AuditEntry records a trust-modifying action.
+type AuditEntry struct {
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Actor     string    `json:"actor"`
+	Action    string    `json:"action"`
+	EntityID  string    `json:"entity_id,omitempty"`
+	Detail    string    `json:"detail"`
+}
+
+// TeamIdentity represents a human-LLM team signing identity.
+type TeamIdentity struct {
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	CreatedAt    time.Time  `json:"created_at"`
+	HaltedAt     *time.Time `json:"halted_at,omitempty"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	RevokeReason string     `json:"revoke_reason,omitempty"`
+}
+
+// SignalResolution records a conflict resolution decision.
+type SignalResolution struct {
+	ID                 string    `json:"id"`
+	EntityID           string    `json:"entity_id"`
+	SignalType         string    `json:"signal_type"`
+	KeptSignalID       string    `json:"kept_signal_id"`
+	SupersededSignalID string    `json:"superseded_signal_id"`
+	Action             string    `json:"action"`
+	ResolvedBy         string    `json:"resolved_by"`
+	ResolvedAt         time.Time `json:"resolved_at"`
 }

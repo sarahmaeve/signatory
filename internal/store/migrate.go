@@ -28,6 +28,12 @@ var migrations = []Migration{
 		Up:          initialSchema,
 		Down:        dropInitialSchema,
 	},
+	{
+		Version:     2,
+		Description: "entity model v2: UUID PKs, canonical URI, append-only signals, versioned posture, dependency observations, audit log",
+		Up:          migrationV2Up,
+		Down:        migrationV2Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -84,6 +90,124 @@ DROP TABLE IF EXISTS burns;
 DROP TABLE IF EXISTS postures;
 DROP TABLE IF EXISTS signals;
 DROP TABLE IF EXISTS entities;
+`
+
+// migrationV2Up evolves the schema for entity model v2.
+// Key changes:
+//   - Entities: add canonical_uri, short_name, description fields
+//   - Signals: append-only (no upsert), keep existing data
+//   - Postures: versioned PK (entity_id, version)
+//   - New tables: dependency_observations, signal_resolutions, audit_log, team_identities
+const migrationV2Up = `
+-- Add new columns to entities.
+ALTER TABLE entities ADD COLUMN canonical_uri TEXT NOT NULL DEFAULT '';
+ALTER TABLE entities ADD COLUMN short_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
+
+-- Populate canonical_uri from existing id (legacy migration).
+UPDATE entities SET canonical_uri = id, short_name = name WHERE canonical_uri = '';
+
+-- Create unique index on canonical_uri.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical_uri ON entities(canonical_uri);
+
+-- Postures: recreate with composite PK (entity_id, version).
+-- SQLite cannot alter primary keys, so we recreate the table.
+CREATE TABLE postures_v2 (
+	entity_id TEXT NOT NULL REFERENCES entities(id),
+	version   TEXT NOT NULL DEFAULT '',
+	tier      TEXT NOT NULL,
+	rationale TEXT NOT NULL,
+	set_by    TEXT NOT NULL,
+	set_at    TEXT NOT NULL,
+	PRIMARY KEY (entity_id, version)
+);
+INSERT INTO postures_v2 (entity_id, version, tier, rationale, set_by, set_at)
+	SELECT entity_id, version, tier, rationale, set_by, set_at FROM postures;
+DROP TABLE postures;
+ALTER TABLE postures_v2 RENAME TO postures;
+
+-- Dependency observations (append-only).
+CREATE TABLE IF NOT EXISTS dependency_observations (
+	id          TEXT PRIMARY KEY,
+	project_id  TEXT NOT NULL REFERENCES entities(id),
+	entity_id   TEXT NOT NULL REFERENCES entities(id),
+	version     TEXT NOT NULL,
+	direct      INTEGER NOT NULL,
+	observed_at TEXT NOT NULL,
+	survey_id   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_depobs_project ON dependency_observations(project_id);
+CREATE INDEX IF NOT EXISTS idx_depobs_survey ON dependency_observations(survey_id);
+
+-- Signal resolutions (append-only conflict resolution).
+CREATE TABLE IF NOT EXISTS signal_resolutions (
+	id                   TEXT PRIMARY KEY,
+	entity_id            TEXT NOT NULL,
+	signal_type          TEXT NOT NULL,
+	kept_signal_id       TEXT NOT NULL REFERENCES signals(id),
+	superseded_signal_id TEXT NOT NULL REFERENCES signals(id),
+	action               TEXT NOT NULL,
+	resolved_by          TEXT NOT NULL,
+	resolved_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resolutions_entity ON signal_resolutions(entity_id);
+
+-- Audit log (append-only).
+CREATE TABLE IF NOT EXISTS audit_log (
+	id         TEXT PRIMARY KEY,
+	timestamp  TEXT NOT NULL,
+	actor      TEXT NOT NULL,
+	action     TEXT NOT NULL,
+	entity_id  TEXT,
+	detail     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_id);
+
+-- Team identities.
+CREATE TABLE IF NOT EXISTS team_identities (
+	id            TEXT PRIMARY KEY,
+	name          TEXT NOT NULL,
+	created_at    TEXT NOT NULL,
+	halted_at     TEXT,
+	revoked_at    TEXT,
+	revoke_reason TEXT
+);
+`
+
+const migrationV2Down = `
+-- Drop new tables.
+DROP TABLE IF EXISTS team_identities;
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS signal_resolutions;
+DROP TABLE IF EXISTS dependency_observations;
+
+-- Recreate postures with original PK (entity_id only).
+CREATE TABLE postures_v1 (
+	entity_id TEXT PRIMARY KEY REFERENCES entities(id),
+	tier      TEXT NOT NULL,
+	version   TEXT NOT NULL DEFAULT '',
+	rationale TEXT NOT NULL,
+	set_by    TEXT NOT NULL,
+	set_at    TEXT NOT NULL
+);
+-- Keep only the latest posture per entity (collapse version history).
+INSERT OR REPLACE INTO postures_v1 (entity_id, version, tier, rationale, set_by, set_at)
+	SELECT entity_id, version, tier, rationale, set_by, set_at FROM postures;
+DROP TABLE postures;
+ALTER TABLE postures_v1 RENAME TO postures;
+
+-- Remove new columns from entities.
+-- SQLite 3.35.0+ supports ALTER TABLE DROP COLUMN. The modernc driver
+-- ships SQLite 3.51+, so this is safe.
+ALTER TABLE entities DROP COLUMN canonical_uri;
+ALTER TABLE entities DROP COLUMN short_name;
+ALTER TABLE entities DROP COLUMN description;
+
+DROP INDEX IF EXISTS idx_entities_canonical_uri;
 `
 
 // migrate runs all pending migrations on the database. It:
