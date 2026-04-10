@@ -146,7 +146,24 @@ func (l *Logger) appendFile(entry *profile.AuditEntry) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
-	f, err := os.OpenFile(l.filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	// Defense in depth against symlink hijack (#81): an attacker who
+	// plants a symlink at the audit log path could otherwise redirect
+	// audit writes to an arbitrary file, turning the audit logger into
+	// a write-anywhere primitive when combined with attacker-influenced
+	// Actor/Action/Detail fields.
+	//
+	// Lstat check: rejects an existing symlink at the target path.
+	// Cross-platform but has a TOCTOU window between Lstat and OpenFile.
+	// Skipped if the path doesn't exist yet (first write creates it).
+	//
+	// O_NOFOLLOW flag: atomic, TOCTOU-free defense at open(2) time.
+	// Real on Unix (syscall.O_NOFOLLOW), 0 on other platforms — see
+	// nofollow_unix.go and nofollow_other.go.
+	if info, err := os.Lstat(l.filePath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("audit log path is a symlink, refusing to follow: %s", l.filePath)
+	}
+
+	f, err := os.OpenFile(l.filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY|nofollowFlag, 0600)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
