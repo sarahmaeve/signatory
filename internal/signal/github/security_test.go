@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,14 +17,190 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/signal"
 )
 
-// TestSecurity_TokenNotLeakedInAbsenceSignals verifies that the
-// GITHUB_TOKEN does not appear in any persisted signal data when
-// API calls fail. This is critical because absence signals are
-// stored in the database and potentially exposed via JSON output
-// or MCP.
-func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
+// findTokenInResult walks every reachable field of a CollectionResult
+// looking for the secret token. Returns (location, true) on the first
+// match, ("", false) if no field contains it. The location string
+// identifies which field carried the token so failure messages are
+// actionable.
+//
+// Issue #96: previously, TestSecurity_TokenNotLeakedInAbsenceSignals
+// only iterated result.Signals() and missed result.Failures entirely.
+// A regression that leaked the raw error (with the token embedded)
+// into the Failures slice but not into the absence signals would have
+// passed the old test. This helper closes that gap by walking BOTH
+// slices, plus performing a catch-all JSON-marshal scan as defense
+// in depth against any field added to CollectionResult in the future
+// that the per-field checks below forget to cover.
+func findTokenInResult(result *signal.CollectionResult, token string) (string, bool) {
+	if result == nil {
+		return "", false
+	}
+	for _, sig := range result.Signals() {
+		if strings.Contains(string(sig.Value), token) {
+			return fmt.Sprintf("signal[%s].Value", sig.ID), true
+		}
+		if strings.Contains(sig.ID, token) {
+			return fmt.Sprintf("signal[%s].ID", sig.ID), true
+		}
+		if strings.Contains(sig.Source, token) {
+			return fmt.Sprintf("signal[%s].Source", sig.ID), true
+		}
+		if strings.Contains(sig.Type, token) {
+			return fmt.Sprintf("signal[%s].Type", sig.ID), true
+		}
+	}
+	for i, failure := range result.Failures {
+		if strings.Contains(failure.Reason, token) {
+			return fmt.Sprintf("failure[%d].Reason", i), true
+		}
+		if strings.Contains(failure.SignalType, token) {
+			return fmt.Sprintf("failure[%d].SignalType", i), true
+		}
+		if strings.Contains(failure.Source, token) {
+			return fmt.Sprintf("failure[%d].Source", i), true
+		}
+	}
+	// Catch-all: marshal the whole thing and search the JSON. This
+	// catches any field we forgot to check above, including future
+	// fields added to CollectionResult.
+	data, err := json.Marshal(result)
+	if err == nil && strings.Contains(string(data), token) {
+		return "CollectionResult JSON serialization (some field not covered by per-field checks above)", true
+	}
+	return "", false
+}
+
+// assertNoTokenInResult fails the test if the secret token appears
+// anywhere in the CollectionResult, with a location string identifying
+// which field leaked.
+func assertNoTokenInResult(t *testing.T, result *signal.CollectionResult, token string) {
+	t.Helper()
+	if loc, found := findTokenInResult(result, token); found {
+		t.Errorf("secret token leaked at %s — TOKEN LEAK", loc)
+	}
+}
+
+// TestSecurity_FindTokenInResult_DetectsKnownLeakPositions is the
+// unit test for findTokenInResult. It synthetically constructs
+// CollectionResults with the token at each known leak position and
+// asserts the helper detects each one. This is the test of the
+// test infrastructure — the corresponding integration tests below
+// (TestSecurity_TokenNotLeaked*) verify the production code is
+// currently clean, and rely on this helper to catch any future leak.
+func TestSecurity_FindTokenInResult_DetectsKnownLeakPositions(t *testing.T) {
+	const token = "ghp_synthetic_test_token_1234567890"
+
+	makeResult := func(setup func(r *signal.CollectionResult)) *signal.CollectionResult {
+		r := &signal.CollectionResult{}
+		setup(r)
+		return r
+	}
+
+	tests := []struct {
+		name      string
+		result    *signal.CollectionResult
+		wantFound bool
+		wantLoc   string
+	}{
+		{
+			name:      "clean result",
+			result:    &signal.CollectionResult{},
+			wantFound: false,
+		},
+		{
+			name:      "nil result",
+			result:    nil,
+			wantFound: false,
+		},
+		{
+			name: "token in signal Value",
+			result: makeResult(func(r *signal.CollectionResult) {
+				r.Collected = append(r.Collected, signal.MakeSignal(profile.Signal{
+					ID:    "sig-1",
+					Type:  "stars",
+					Value: json.RawMessage(`{"secret":"` + token + `"}`),
+				}))
+			}),
+			wantFound: true,
+			wantLoc:   "Value",
+		},
+		{
+			name: "token in signal Source",
+			result: makeResult(func(r *signal.CollectionResult) {
+				r.Collected = append(r.Collected, signal.MakeSignal(profile.Signal{
+					ID:     "sig-1",
+					Type:   "stars",
+					Source: token,
+					Value:  json.RawMessage(`{}`),
+				}))
+			}),
+			wantFound: true,
+			wantLoc:   "Source",
+		},
+		{
+			name: "token in failure Reason",
+			result: makeResult(func(r *signal.CollectionResult) {
+				r.Failures = append(r.Failures, signal.CollectionFailure{
+					SignalType: "stars",
+					Source:     "github",
+					Reason:     "error with token " + token,
+				})
+			}),
+			wantFound: true,
+			wantLoc:   "failure[0].Reason",
+		},
+		{
+			name: "token in failure SignalType",
+			result: makeResult(func(r *signal.CollectionResult) {
+				r.Failures = append(r.Failures, signal.CollectionFailure{
+					SignalType: token,
+					Source:     "github",
+					Reason:     "ok",
+				})
+			}),
+			wantFound: true,
+			wantLoc:   "failure[0].SignalType",
+		},
+		{
+			name: "token in failure Source",
+			result: makeResult(func(r *signal.CollectionResult) {
+				r.Failures = append(r.Failures, signal.CollectionFailure{
+					SignalType: "stars",
+					Source:     token,
+					Reason:     "ok",
+				})
+			}),
+			wantFound: true,
+			wantLoc:   "failure[0].Source",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			loc, found := findTokenInResult(tc.result, token)
+			assert.Equal(t, tc.wantFound, found, "wrong found result")
+			if tc.wantFound {
+				assert.Contains(t, loc, tc.wantLoc,
+					"location string should identify which field leaked")
+			}
+		})
+	}
+}
+
+// TestSecurity_TokenNotLeakedInCollectionResult verifies that the
+// GITHUB_TOKEN does not appear ANYWHERE in the CollectionResult when
+// API calls fail — signals, absence signals, failures, or any future
+// field. Issue #96: the previous version of this test
+// (TestSecurity_TokenNotLeakedInAbsenceSignals) only iterated
+// result.Signals() and missed result.Failures entirely. A regression
+// that leaked the token into the Failures slice would have passed.
+//
+// Uses assertNoTokenInResult, which walks every reachable field plus
+// a JSON-marshal catch-all. See findTokenInResult for the leak
+// position list.
+func TestSecurity_TokenNotLeakedInCollectionResult(t *testing.T) {
 	secretToken := "ghp_SuperSecretToken1234567890abcdef"
 
 	// Server that returns 500 for everything except the repo endpoint
@@ -67,14 +244,14 @@ func TestSecurity_TokenNotLeakedInAbsenceSignals(t *testing.T) {
 	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err, "partial collection should not return error")
 
-	// The critical check: NO signal should contain the token in its
-	// serialized value. Check every signal.
-	for _, sig := range result.Signals() {
-		valueStr := string(sig.Value)
-		assert.NotContains(t, valueStr, secretToken,
-			"signal %s (type=%s) contains the secret token in its value — TOKEN LEAK",
-			sig.ID, sig.Type)
-	}
+	// Sanity check: collection actually produced failures so this test
+	// is exercising the failure-path coverage that #96 was about. If
+	// failures becomes empty, the test would pass trivially without
+	// catching anything in the failures slice.
+	require.NotEmpty(t, result.Failures,
+		"test setup error: expected at least one failure to exercise the failure-slice token-leak coverage")
+
+	assertNoTokenInResult(t, result, secretToken)
 }
 
 // --- CI/CD False Negative Prevention (Issue #42) ---
@@ -342,18 +519,19 @@ func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {
 	// in any failure path doesn't leak.
 	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
-	signals := result.Signals()
 
-	// Also verify: if someone calls .Error() on any failure, no leak.
-	for _, sig := range signals {
-		if strings.HasPrefix(sig.Type, "absence:") {
-			// The reason is in the JSON value — already tested above.
-			// But let's also make sure the signal ID doesn't leak.
-			assert.NotContains(t, sig.ID, secretToken,
-				"signal ID contains token")
-			assert.NotContains(t, sig.Source, secretToken,
-				"signal source contains token")
-		}
+	// Walk every reachable field of the CollectionResult — signals,
+	// absence signals, failures, plus JSON catch-all. See #96 for
+	// why this is the right shape.
+	assertNoTokenInResult(t, result, secretToken)
+
+	// Also verify CollectionFailure.Error() rendering, which is the
+	// specific scenario this test name covers (the helper above
+	// covers the field-level check; this asserts the formatted
+	// Error() string also doesn't leak).
+	for _, failure := range result.Failures {
+		assert.NotContains(t, failure.Error(), secretToken,
+			"CollectionFailure.Error() contains the secret token — TOKEN LEAK")
 	}
 }
 
@@ -393,15 +571,9 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 
 	result, err := collector.Collect(context.Background(), entity)
 	require.NoError(t, err)
-	signals := result.Signals()
 
-	for _, sig := range signals {
-		valueStr := string(sig.Value)
-		if strings.HasPrefix(sig.Type, "absence:") {
-			assert.NotContains(t, valueStr, secretToken,
-				"absence signal %s contains the secret token — TOKEN LEAK", sig.Type)
-		}
-	}
+	// Walk every reachable field of the CollectionResult — see #96.
+	assertNoTokenInResult(t, result, secretToken)
 }
 
 // TestSecurity_CheckRedirect_RefusesSchemeDowngrade verifies that the

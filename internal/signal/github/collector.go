@@ -427,10 +427,16 @@ func sanitizeErrorForStorage(err error) string {
 		strings.Contains(errMsg, "no such host") {
 		return "connection failed"
 	}
-	if strings.Contains(errMsg, "GitHub API error 5") {
+	// Match the format produced by client.get / client.getWithLinkHeader
+	// after #93's body-removal: "GitHub API returned status NNN".
+	// (The previous format "GitHub API error N: <body>" was changed in
+	// #93 to drop the attacker-influenceable body; these classifier
+	// branches were not updated at that time and silently became dead
+	// code, with all 4xx/5xx falling through to "collection failed".)
+	if strings.Contains(errMsg, "GitHub API returned status 5") {
 		return "server error"
 	}
-	if strings.Contains(errMsg, "GitHub API error 4") {
+	if strings.Contains(errMsg, "GitHub API returned status 4") {
 		return "client error"
 	}
 	if strings.Contains(errMsg, "decode response") {
