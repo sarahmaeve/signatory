@@ -33,6 +33,9 @@ go.work.sum
 *.db-wal
 *.db-shm
 
+# Local working notes
+design/NEXT.md
+
 # Editor/IDE
 # .idea/
 # .vscode/
