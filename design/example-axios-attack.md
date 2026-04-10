@@ -12,7 +12,11 @@ the maintainer's associated email to an attacker-controlled address
 and v0.30.4, adding `plain-crypto-js@4.2.1` as a malicious dependency.
 
 The attack window was approximately 3 hours (March 31, 2026, 00:21–03:20
-UTC). In that window, the compromised versions were downloaded and installed
+UTC). The actual compromise was much faster: **both release branches
+(v1.14.1 and v0.30.4) were hit within 39 minutes** of each other. The
+attacker had everything ready and pushed in rapid succession.
+
+In that window, the compromised versions were downloaded and installed
 across thousands of downstream projects and CI/CD pipelines.
 
 The attack weaponized the distribution channel itself, bypassing CI/CD

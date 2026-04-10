@@ -35,9 +35,12 @@ caught the attack at the publication layer, before any code executed.
 |--------|--------|-------|
 | Publication metadata consistency | npm registry | Compare publish patterns across versions |
 | Git tag correspondence | GitHub API + npm registry | Published version has no matching tag/commit trail |
+| **Git tag SHA stability** | **GitHub API** | **Track tag → SHA over time. SHA change on existing tag = force-push attack (Trivy case study)** |
 | New/changed dependencies between versions | npm registry | Unexpected new dependency = high-priority anomaly |
 | Dormant version branch activity | npm registry | Publication to a long-inactive version line |
 | Trusted publisher binding | npm registry | OIDC-based provenance presence/absence |
+| **`.pth` file presence (PyPI)** | **PyPI registry** | **Python interpreter-time execution vector (LiteLLM case study)** |
+| **Source code divergence vs git tag** | **Registry + GitHub** | **Published package contents differ from the git tag they claim to be** |
 
 ### "Does it look like they care?" (Hygiene)
 

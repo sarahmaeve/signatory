@@ -27,13 +27,36 @@ prt-scan GitHub Actions campaign analyzed in
 
 ### TeamPCP Campaign Timeline (March 2026)
 
-| Date | Target | Mechanism |
-|------|--------|-----------|
-| March 19 | Trivy | Stolen credentials |
-| March 20–22 | npm worm | 45+ packages compromised |
-| March 23 | Checkmarx, OpenVSX | Stolen credentials |
-| March 24 | LiteLLM PyPI v1.82.7, v1.82.8 | Stolen credentials |
-| March 27 | Telnyx PyPI v4.87.1, v4.87.2 | Stolen credentials |
+| Date | Target | Mechanism | Scope |
+|------|--------|-----------|-------|
+| March 19 | Trivy GitHub Actions | **Force-pushed to 76 of 77 tags** of `aquasecurity/trivy-action`, all 7 of `aquasecurity/setup-trivy`. Trojanized binary v0.69.4. CVE-2026-33634 (CVSS 9.4) | Wholesale tag rewriting |
+| March 20–22 | npm worm | 45+ packages compromised | Worm propagation |
+| March 23 | Checkmarx KICS, OpenVSX | Stolen credentials, attack window 12:58–16:50 UTC | `ast-github-action`, `kics-github-action` |
+| March 24 | LiteLLM PyPI v1.82.7, v1.82.8 | Stolen credentials | Two execution mechanisms |
+| March 27 | Telnyx PyPI v4.87.1, v4.87.2 | Stolen credentials | WAV file payload |
+
+### The Trivy Attack: A New Vector
+
+The Trivy compromise (March 19) introduces an attack vector that
+defeats version pinning entirely. Rather than publishing a new
+malicious version, TeamPCP **force-pushed malicious code into the
+existing git tags** of the trivy-action repository — 76 of 77 tags
+of `aquasecurity/trivy-action` and all 7 tags of `aquasecurity/setup-trivy`.
+
+**Implications:**
+- If you pinned `aquasecurity/trivy-action@v0.30.0` a month ago,
+  you're now running TeamPCP's malware — even though you didn't
+  upgrade
+- Git tag immutability is not enforced by GitHub by default — tags
+  can be deleted and recreated to point to different commits
+- A security scanner being compromised is particularly serious — it
+  has access to the very secrets it was scanning for
+- Source code review is useless against this attack — by the time
+  you review v0.30.0, the SHA it points to has already changed
+
+**Signal needed:** track tag → SHA mappings over time. If a tag
+SHA changes, that is a strong anomaly signal regardless of what
+the tag's content looks like now.
 
 A single threat actor compromised four ecosystems in nine days using
 credential reuse and automated propagation. This is the
