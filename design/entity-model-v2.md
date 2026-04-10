@@ -481,6 +481,91 @@ signal D (v1.5.1, local scan) → confirms hierarchy assessment
 Each event is a separate, immutable record. The history tells the
 complete story of how trust was established, challenged, and resolved.
 
+## Future: Internal Identity Realms (V0.2/Enterprise)
+
+The entity model supports internal identity registries as a natural
+extension. This is deferred to v0.2 — it needs user testing and
+feedback before design, and may be the differentiator between
+open-source and enterprise offerings.
+
+### Concept
+
+Organizations can register internal identities with higher provenance
+than external platform accounts:
+
+```
+identity:internal/james.park          -- verified employee
+identity:internal/maria.rodriguez     -- verified employee
+identity:github/random-contributor    -- external, unvetted
+team:internal/platform-security       -- internal review team
+team:internal/sarah.chen+claude-opus  -- internal human-LLM team
+```
+
+The `internal` realm carries a stronger provenance signal — the
+company has verified these identities through their own HR/identity
+systems, which is a much higher forgery resistance than a GitHub
+account.
+
+### Rapid Patch Triage
+
+In high-volume environments, patches arrive rapidly. Internal
+identity enables triage by contributor provenance:
+
+- Patch from `identity:internal/james.park` → verified employee,
+  known history, established posture → higher baseline trust
+- Patch from `identity:github/unknown-user123` → external, no
+  organizational verification → standard vetting required
+- Patch from `identity:internal/former-employee` → halted identity
+  → flagged for review
+
+### Identity Lifecycle
+
+Internal identities follow the same lifecycle as team identities:
+
+- **Employee departure** → halt identity → unreviewed patches lose
+  the "verified internal" signal
+- **Credential compromise** → burn identity → everything they touched
+  is flagged for re-review
+- **Contractor vs. employee** → different identity types with different
+  default trust levels
+- **Team reorganization** → rotate team identities when composition
+  changes
+
+### Realms (Cross-Platform Identity Linking)
+
+Organizations with multiple code hosting systems need to link
+identities across platforms:
+
+```
+identity:corp-github/james.park      -- corporate GitHub account
+identity:corp-gitlab/james.park      -- corporate GitLab account
+identity:verified/james.park         -- linked corporate identity
+```
+
+A realm is a namespace for identity verification. Linking identities
+across realms ("corp-github/james.park and corp-gitlab/james.park
+are the same person") is the internal equivalent of the cross-platform
+identity consistency signal from the rsc case study.
+
+### Why Deferred
+
+- No easy path to user testing or feedback for realm design currently
+- Risk of building the wrong abstraction without enterprise users
+- The v0.1 entity model (canonical URI with platform prefix) supports
+  realms as a future extension without schema changes
+- Internal identity is a superset of the open-source identity model —
+  nothing in v0.1 prevents adding it later
+- Prior art exists: similar systems have been designed for rapid PR
+  triage in high-volume environments, marking pull requests as
+  privileged or suspect based on user ID and other signals
+
+### Compatibility with V0.1
+
+The v0.1 canonical URI scheme (`identity:github/alecthomas`) already
+uses platform prefixes. Adding `identity:internal/james.park` or
+`identity:corp-github/james.park` requires no schema changes — just
+new URI patterns and the organizational infrastructure to verify them.
+
 ## Remaining Open Questions
 
 1. **Team identity key management.** What cryptographic mechanism
