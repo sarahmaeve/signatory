@@ -868,3 +868,29 @@ func TestConcurrentAccess(t *testing.T) {
 		assert.NoError(t, <-done)
 	}
 }
+
+// TestSQLite_ContextCancellation verifies that the SQLite store surfaces
+// context cancellation as an error. Cancellation propagation is provided
+// by database/sql via QueryContext / ExecContext, so three representative
+// method shapes — a row read, a write, and a slice-returning query — are
+// enough to lock in the contract for the whole store.
+func TestSQLite_ContextCancellation(t *testing.T) {
+	s := newTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Seed an entity so GetEntity has something to look up.
+	require.NoError(t, s.PutEntity(context.Background(),
+		testEntity("ent-1", "pkg:npm/seed", "seed", now)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.GetEntity(ctx, "ent-1")
+	assert.ErrorIs(t, err, context.Canceled, "GetEntity should surface context cancellation")
+
+	err = s.PutEntity(ctx, testEntity("ent-2", "pkg:npm/other", "other", now))
+	assert.ErrorIs(t, err, context.Canceled, "PutEntity should surface context cancellation")
+
+	_, err = s.GetSignals(ctx, "ent-1")
+	assert.ErrorIs(t, err, context.Canceled, "GetSignals should surface context cancellation")
+}
