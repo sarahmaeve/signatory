@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -140,12 +139,12 @@ func migrate(db *sql.DB, dbPath string) error {
 
 		// Backup before migration.
 		if dbPath != "" {
-			if err := backupDatabase(dbPath, currentVersion); err != nil {
+			if err := backupDatabase(db, dbPath, i); err != nil {
 				return fmt.Errorf("backup before migration %d: %w", m.Version, err)
 			}
 		}
 
-		// Apply in a transaction.
+		// Apply migration and record version atomically in one transaction.
 		tx, err := db.Begin()
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", m.Version, err)
@@ -156,12 +155,15 @@ func migrate(db *sql.DB, dbPath string) error {
 			return fmt.Errorf("migration %d (%s) failed: %w", m.Version, m.Description, err)
 		}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d: %w", m.Version, err)
+		if _, err := tx.Exec(
+			"INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+			m.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("record version %d: %w", m.Version, err)
 		}
 
-		if err := recordVersion(db, m.Version); err != nil {
-			return fmt.Errorf("record version %d: %w", m.Version, err)
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", m.Version, err)
 		}
 	}
 
@@ -188,7 +190,7 @@ func migrateDown(db *sql.DB, dbPath string) error {
 
 	// Backup before rollback.
 	if dbPath != "" {
-		if err := backupDatabase(dbPath, currentVersion); err != nil {
+		if err := backupDatabase(db, dbPath, currentVersion); err != nil {
 			return fmt.Errorf("backup before rollback from %d: %w", m.Version, err)
 		}
 	}
@@ -247,12 +249,23 @@ func recordVersion(db *sql.DB, version int) error {
 	return err
 }
 
-// backupDatabase copies the database file to a timestamped backup.
+// backupDatabase checkpoints the WAL and copies the database file to a
+// timestamped backup. The checkpoint ensures all committed transactions
+// are flushed to the main database file before copying.
 // Format: signatory.db.backup-v{version}-{timestamp}
-func backupDatabase(dbPath string, fromVersion int) error {
+func backupDatabase(db *sql.DB, dbPath string, fromVersion int) error {
 	backupPath := fmt.Sprintf("%s.backup-v%d-%s",
 		dbPath, fromVersion,
 		time.Now().UTC().Format("20060102-150405"))
+
+	// Checkpoint WAL to ensure all committed data is in the main file.
+	// TRUNCATE mode flushes the WAL and truncates it to zero bytes,
+	// ensuring the backup of the main file is complete.
+	if db != nil {
+		if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			return fmt.Errorf("checkpoint WAL before backup: %w", err)
+		}
+	}
 
 	src, err := os.Open(dbPath)
 	if err != nil {
@@ -263,15 +276,19 @@ func backupDatabase(dbPath string, fromVersion int) error {
 	}
 	defer src.Close()
 
-	dir := filepath.Dir(backupPath)
 	dst, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("create backup at %s: %w", dir, err)
+		return fmt.Errorf("create backup at %s: %w", backupPath, err)
 	}
-	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
 		return fmt.Errorf("copy database to backup: %w", err)
+	}
+
+	// Explicit close to catch flush errors (M1 from review).
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("finalize backup: %w", err)
 	}
 
 	return nil

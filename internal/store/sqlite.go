@@ -82,6 +82,13 @@ func OpenSQLite(path string) (*SQLite, error) {
 	return &SQLite{db: db}, nil
 }
 
+// DB returns the underlying *sql.DB for use in tests that need to
+// insert corrupted data or verify raw database state. Not for
+// production use.
+func (s *SQLite) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the database connection.
 func (s *SQLite) Close() error {
 	return s.db.Close()

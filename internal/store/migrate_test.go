@@ -157,7 +157,7 @@ func TestMigration_BackupCreatedBeforeMigration(t *testing.T) {
 	// run beyond marking it as v1, so no backup is created in this case.
 	// Backup is created when migrating FROM one version TO another.
 	// Let's just verify the backup function works directly.
-	err = backupDatabase(path, 0)
+	err = backupDatabase(nil, path, 0)
 	require.NoError(t, err)
 
 	// Find the backup file.
@@ -188,7 +188,7 @@ func TestMigration_BackupPreservesPermissions(t *testing.T) {
 	f.Close()
 	os.Chmod(path, 0600)
 
-	err = backupDatabase(path, 1)
+	err = backupDatabase(nil, path, 1)
 	require.NoError(t, err)
 
 	entries, err := os.ReadDir(dir)
@@ -205,7 +205,7 @@ func TestMigration_BackupPreservesPermissions(t *testing.T) {
 
 func TestMigration_BackupNonexistentFile(t *testing.T) {
 	// Backing up a file that doesn't exist should be a no-op.
-	err := backupDatabase("/nonexistent/path/db.sqlite", 0)
+	err := backupDatabase(nil, "/nonexistent/path/db.sqlite", 0)
 	assert.NoError(t, err)
 }
 
