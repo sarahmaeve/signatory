@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -612,6 +613,137 @@ func TestSecurity_ClientErrorDoesNotLeakBody(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestSecurity_ParseGoModDeps_RejectsOversizedInput verifies that
+// parseGoModDeps refuses to process go.mod content beyond
+// maxGoModSize. Issue #108: the previous implementation called
+// strings.Split(content, "\n") with no size check, while the upstream
+// GetFileRaw could fetch up to 10MB. An attacker controlling a repo's
+// go.mod could return 10MB of newlines and force signatory to allocate
+// ~10M empty strings, producing memory pressure and GC churn.
+//
+// Real-world go.mod files are well under 64KB (Kubernetes is around
+// 50KB; most projects are under 10KB), so the cap is generous slack.
+// Inputs above the cap are rejected with an explicit error so the
+// caller can record an absence rather than silently allocating.
+func TestSecurity_ParseGoModDeps_RejectsOversizedInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		size      int
+		wantError bool
+	}{
+		{"empty", 0, false},
+		{"small valid", 1024, false},
+		{"at limit", maxGoModSize, false},
+		{"one byte over limit", maxGoModSize + 1, true},
+		{"1MB of newlines (the documented attack)", 1 << 20, true},
+		{"10MB max-fetch DoS", 10 << 20, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build a content blob of the requested size. Use newlines
+			// because they hit the worst case for strings.Split — every
+			// byte produces a separate empty string in the result.
+			content := strings.Repeat("\n", tc.size)
+			_, err := parseGoModDeps(content)
+			if tc.wantError {
+				require.Error(t, err, "parseGoModDeps must reject oversized input")
+				assert.Contains(t, err.Error(), "exceeds maximum",
+					"error must explain the size limit was exceeded")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod is the integration
+// counterpart that verifies the collector turns parseGoModDeps's
+// oversized-input error into an absence signal (not retryable) rather
+// than failing the whole collection or recording bogus dep counts.
+//
+// Uses an httptest server that returns a giant go.mod (1MB of newlines,
+// base64-encoded inside the GitHub contents API JSON envelope).
+func TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod(t *testing.T) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(repo{
+			Name: "repo", Owner: repoOwner{Login: "owner", Type: "User"},
+			StargazersCount: 100,
+		})
+	})
+	// Stub the other endpoints so the rest of Collect() doesn't error.
+	mux.HandleFunc("/repos/owner/repo/contributors", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]contributor{{Login: "owner", Contributions: 10}})
+	})
+	mux.HandleFunc("/repos/owner/repo/commits", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]commit{{
+			Commit: commitData{Author: commitPerson{Date: time.Now()}, Verification: verification{Verified: true}},
+		}})
+	})
+	mux.HandleFunc("/repos/owner/repo/tags", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]tag{})
+	})
+	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
+	})
+	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(searchResult{TotalCount: 50})
+	})
+	// Default for any other path: 404 (CI checks etc. — they handle 404
+	// as "not present" without erroring).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	// The go.mod fetch returns a 1MB blob of newlines, base64-encoded
+	// to match GitHub's contents API response shape.
+	mux.HandleFunc("/repos/owner/repo/contents/go.mod", func(w http.ResponseWriter, r *http.Request) {
+		bigContent := strings.Repeat("\n", 1<<20) // 1MB
+		encoded := base64.StdEncoding.EncodeToString([]byte(bigContent))
+		json.NewEncoder(w).Encode(fileContent{
+			Content:  encoded,
+			Encoding: "base64",
+		})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := &Client{httpClient: server.Client(), token: "test", baseURL: server.URL}
+	collector := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:        "test-entity",
+		Type:      profile.EntityProject,
+		ShortName: "owner/repo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err, "Collect must not fail when go.mod is oversized — it's a single signal absence, not a fatal error")
+
+	// Find the go_dependencies signal in the result. It should be an
+	// absence signal with the size-limit reason and not retryable.
+	var goDepsSignal *profile.Signal
+	for i, sig := range result.Signals() {
+		if sig.Type == "absence:go_dependencies" {
+			s := result.Signals()[i]
+			goDepsSignal = &s
+			break
+		}
+	}
+	require.NotNil(t, goDepsSignal, "go_dependencies must be recorded as an absence when the file is oversized")
+
+	// The absence reason must indicate the size limit, not echo the
+	// raw parser error (which would leak the byte counts).
+	var absenceData map[string]interface{}
+	require.NoError(t, json.Unmarshal(goDepsSignal.Value, &absenceData))
+	assert.Equal(t, "go.mod too large to parse safely", absenceData["reason"],
+		"oversized go.mod must produce a structured absence reason, not the raw parser error")
+	assert.Equal(t, false, absenceData["retryable"],
+		"oversized go.mod is not retryable — the file won't shrink on retry")
 }
 
 // TestSecurity_ClientErrorPreservesStatusCode verifies the negative

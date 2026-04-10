@@ -335,7 +335,24 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 		return
 	}
 
-	deps := parseGoModDeps(string(goModContent))
+	deps, err := parseGoModDeps(string(goModContent))
+	if err != nil {
+		// Oversized go.mod (#108). Record as an absence — not retryable
+		// because the file won't shrink on retry. Sanitize the parser
+		// error so the byte counts don't leak the parsed-but-rejected
+		// content size to attackers (defense in depth).
+		result.Collected = append(result.Collected,
+			signal.MakeAbsence(entityID, "go_dependencies", "github",
+				"go.mod too large to parse safely", false, now))
+		result.Failures = append(result.Failures,
+			signal.CollectionFailure{
+				SignalType: "go_dependencies",
+				Source:     "github",
+				Reason:     "go.mod too large to parse safely",
+				Retryable:  false,
+			})
+		return
+	}
 	result.Collected = append(result.Collected,
 		signal.MakeSignal(makeSignal(entityID, "go_dependencies", profile.SignalGroupGovernance,
 			profile.ForgeryHigh, now, ttl,
@@ -456,9 +473,23 @@ type goModDeps struct {
 	direct        []string
 }
 
+// maxGoModSize bounds the input to parseGoModDeps to prevent memory
+// pressure / GC churn from a malicious or compromised upstream returning
+// a giant go.mod (e.g., 10MB of newlines, the upstream maxResponseSize
+// limit). Real-world go.mod files are well under 64KB — even Kubernetes,
+// one of the largest Go projects, has a go.mod under 50KB. 64KB is
+// generous slack with a hard cap that prevents the DoS class. Issue #108.
+const maxGoModSize = 64 * 1024
+
 // parseGoModDeps extracts dependency information from go.mod content.
-func parseGoModDeps(content string) goModDeps {
+// Returns an error if the content exceeds maxGoModSize — callers should
+// treat that as an absence signal (not retryable; the file won't shrink).
+func parseGoModDeps(content string) (goModDeps, error) {
 	var deps goModDeps
+	if len(content) > maxGoModSize {
+		return deps, fmt.Errorf("go.mod content exceeds maximum parseable size of %d bytes (got %d)",
+			maxGoModSize, len(content))
+	}
 	lines := strings.Split(content, "\n")
 	inRequire := false
 
@@ -507,7 +538,7 @@ func parseGoModDeps(content string) goModDeps {
 			}
 		}
 	}
-	return deps
+	return deps, nil
 }
 
 // makeSignal builds a Signal with a collision-resistant ID.

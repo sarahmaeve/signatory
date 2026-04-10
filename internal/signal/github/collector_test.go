@@ -573,7 +573,8 @@ require (
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			deps := parseGoModDeps(tt.content)
+			deps, err := parseGoModDeps(tt.content)
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantDirect, deps.directCount)
 			assert.Equal(t, tt.wantIndirect, deps.indirectCount)
 			if tt.wantDirectPkg != nil {
