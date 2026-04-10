@@ -1,0 +1,67 @@
+name: CI
+
+# Mirrors the local pre-commit hook (gofmt, go vet, go test -race)
+# plus a `go build ./...` compile sanity check. Triggered on every
+# push to main and every PR targeting main.
+#
+# Issue #100: pre-commit hooks defend the local developer loop, but
+# nothing enforces those checks at PR time. A contributor (human or
+# LLM) without the hook installed could push race conditions, vet
+# warnings, or unformatted code with no automated gate. This workflow
+# closes that gap.
+#
+# Race detector verification: a synthetic data race was added to
+# internal/audit/race_smoke_test.go locally, `go test -race` produced
+# a DATA RACE warning with full stack traces and exit code 1, then
+# the synthetic test was removed. The race detector catches real
+# races and CI will fail on race detection — verified before this
+# workflow was committed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR/branch when a new commit
+# arrives — saves CI minutes and gives faster feedback on the latest
+# state.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + race tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Read the Go version from go.mod so this stays in sync
+          # automatically when the project bumps Go versions.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt check
+        run: |
+          UNFMT=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
+          if [ -n "$UNFMT" ]; then
+            echo "ERROR: The following files are not formatted:"
+            echo "$UNFMT"
+            echo "Run: gofmt -w \$file"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test -race
+        run: go test -race ./...
