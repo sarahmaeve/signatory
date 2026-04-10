@@ -209,7 +209,13 @@ func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Sig
 // "Current state" means:
 //   - Latest collected_at wins for a given (type, source) pair
 //   - Signals referenced as superseded_signal_id in any signal_resolutions
-//     row are excluded (they've been explicitly overridden)
+//     row belonging to THIS entity are excluded (they've been explicitly
+//     overridden). The subquery is entity-scoped (#91): a resolution for
+//     entity A must never hide signals belonging to entity B even if the
+//     IDs happen to collide. Today's collectors generate IDs that include
+//     the entity ID as a substring so the bug is unreachable from
+//     production code paths, but the query's correctness should not depend
+//     on the collector's ID-generation scheme.
 //   - Different sources coexist — if github and peer:acme both report a
 //     signal of the same type, both are returned with their source tag,
 //     per design/entity-model-v2.md §Signal Conflict Resolution
@@ -227,10 +233,13 @@ func (s *SQLite) GetLatestSignals(ctx context.Context, entityID string) ([]profi
 		          ) AS rn
 		   FROM signals
 		   WHERE entity_id = ?
-		     AND id NOT IN (SELECT superseded_signal_id FROM signal_resolutions)
+		     AND id NOT IN (
+		       SELECT superseded_signal_id FROM signal_resolutions
+		       WHERE entity_id = ?
+		     )
 		 )
 		 WHERE rn = 1
-		 ORDER BY signal_group, type, source`, entityID)
+		 ORDER BY signal_group, type, source`, entityID, entityID)
 	if err != nil {
 		return nil, err
 	}

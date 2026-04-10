@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,83 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
+
+// TestSecurity_GetLatestSignals_IsolatesEntities verifies that the
+// signal_resolutions filter inside GetLatestSignals is entity-scoped.
+// Issue #91: the previous query had `id NOT IN (SELECT
+// superseded_signal_id FROM signal_resolutions)` with no entity_id
+// filter on the subquery, so a resolution belonging to entity A could
+// silently hide signals for entity B if the IDs collided.
+//
+// The current github/absence collectors generate IDs that include the
+// entity ID as a substring, so cross-entity collisions are effectively
+// impossible through the application layer today. But the query's
+// correctness should not depend on the collector's ID-generation
+// scheme — it should be structurally entity-scoped at the SQL level.
+//
+// This test exercises the query directly with hand-crafted IDs that
+// bypass the collector's coincidental defense, demonstrating the bug
+// even though it isn't currently reachable from production code paths.
+func TestSecurity_GetLatestSignals_IsolatesEntities(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Two entities, each with one signal of the same type.
+	entA := testEntity("ent-A", "pkg:npm/a-pkg", "a-pkg", now)
+	entB := testEntity("ent-B", "pkg:npm/b-pkg", "b-pkg", now)
+	require.NoError(t, s.PutEntity(ctx, entA))
+	require.NoError(t, s.PutEntity(ctx, entB))
+
+	// Hand-crafted signal IDs that don't follow the github collector's
+	// {source}:{entity_id}:{type}:{ts} convention. The IDs are unique
+	// (signals.id is a global PRIMARY KEY) but the strings happen to
+	// not encode the entity, simulating a future collector with a
+	// different ID scheme — or an external signal ingest pipeline.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{
+		{
+			ID: "sig-A-keeper", EntityID: "ent-A", Type: "stars",
+			Group: profile.SignalGroupCriticality, Source: "github",
+			ForgeryResistance: profile.ForgeryMediumDeclining,
+			Value:             json.RawMessage(`{"count":1}`),
+			CollectedAt:       now, ExpiresAt: now.Add(time.Hour),
+		},
+		{
+			ID: "sig-B-victim", EntityID: "ent-B", Type: "stars",
+			Group: profile.SignalGroupCriticality, Source: "github",
+			ForgeryResistance: profile.ForgeryMediumDeclining,
+			Value:             json.RawMessage(`{"count":2}`),
+			CollectedAt:       now, ExpiresAt: now.Add(time.Hour),
+		},
+	}))
+
+	// A malformed resolution: it claims to belong to ent-A but its
+	// SupersededSignalID points at ent-B's signal. AppendResolution
+	// does not validate cross-entity consistency (the FK only requires
+	// that the signal IDs exist, not that they belong to the resolution's
+	// entity). So this insert succeeds — and the global subquery in
+	// the unfixed GetLatestSignals would then hide ent-B's signal from
+	// GetLatestSignals(ent-B).
+	require.NoError(t, s.AppendResolution(ctx, &profile.SignalResolution{
+		ID:                 "res-cross",
+		EntityID:           "ent-A",
+		SignalType:         "stars",
+		KeptSignalID:       "sig-A-keeper",
+		SupersededSignalID: "sig-B-victim",
+		Action:             "keep_previous",
+		ResolvedBy:         "team:attacker",
+		ResolvedAt:         now,
+	}))
+
+	// THE CRITICAL ASSERTION: ent-B's signal must still be visible in
+	// its own latest-signals view. If this returns 0 signals, the
+	// resolution from ent-A has silently hidden it — which is the bug.
+	latestB, err := s.GetLatestSignals(ctx, "ent-B")
+	require.NoError(t, err)
+	require.Len(t, latestB, 1, "ent-B's signal must not be hidden by a resolution belonging to ent-A")
+	assert.Equal(t, "sig-B-victim", latestB[0].ID)
+	assert.Equal(t, "ent-B", latestB[0].EntityID)
+}
 
 // TestSecurity_PutEntity_RejectsMalformedCanonicalURI verifies that
 // PutEntity refuses to persist entities whose CanonicalURI contains
