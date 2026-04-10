@@ -118,7 +118,6 @@ user ID and other signals. The realm model would support this pattern.
 These require architectural discussion before implementation:
 
 - Interface segregation for Store (#59)
-- Engine constructor redesign with functional options (#6)
 - Signal.Value typed structs vs. validation layer (#2)
 - Authentication/authorization model for burns and posture (#3)
 - Entity type inference from identifiers (#40)
