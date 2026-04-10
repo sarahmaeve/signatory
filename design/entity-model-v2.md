@@ -279,19 +279,43 @@ CREATE TABLE team_identities (
 );
 ```
 
-### 2. Signal Deduplication: Source-Annotated, Skip Identical
+### 2. Signal Conflict Resolution: Prompt, Don't Silently Decide
 
-Signals are append-only but deduplicated within a time window when
-the source and value are identical. The primary case is rapid
-`--refresh` or batch survey analyzing shared transitive deps.
+Signals are append-only. When a new collection produces data that
+conflicts with a recent collection, the user is prompted to resolve
+the conflict rather than silently deduplicating or duplicating.
 
-Rules:
-- Skip insert if an identical signal (same entity, type, source, and
-  value) exists within the last hour
-- Different sources are never deduplicated — our own signals are
-  privileged over inherited/external signals
-- The `source` field distinguishes: `github`, `npm-registry`,
-  `peer:acme-corp`, `hierarchy:security-team`
+#### Resolution rules:
+
+| Scenario | Behavior |
+|---|---|
+| **Identical value, same source, within 1 hour** | Skip automatically, log "skipped identical" |
+| **Different value, same source, within 1 hour** | Prompt user: keep new / keep previous / keep both / skip |
+| **Outside time window (>1 hour)** | Append without prompting (normal case) |
+| **Different source** | Always append, never deduplicate across sources |
+
+#### CLI interaction:
+
+```
+Signal "stars" was collected 12 minutes ago (count=3023).
+New collection shows: count=3025.
+  [k]eep new  [p]revious  [b]oth  [s]kip?  k
+```
+
+#### MCP interaction:
+
+The conflict surfaces as a tool response. The LLM presents it to the
+user per the analyst/principal model: "These signals conflict with
+data collected 12 minutes ago — which should I keep?"
+
+#### Source priority:
+
+Own signals (collected by this signatory instance) are privileged over
+external signals. The `source` field distinguishes origins:
+`github`, `npm-registry`, `peer:acme-corp`, `hierarchy:security-team`.
+
+When displaying conflicting signals from different sources, own-source
+signals are shown first with higher visual prominence.
 
 ### 3. Dependency Observations: Append-Only
 
