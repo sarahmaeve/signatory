@@ -383,13 +383,111 @@ can be assessed, postured, and burned using the same model. Subscribing
 to a hierarchical burn list is itself a trust decision that should be
 recorded with posture and rationale.
 
+## Conflict Resolution Model
+
+### Append-Only Resolution
+
+Conflicts are resolved without mutating any existing records. The
+resolution model uses three event types:
+
+1. **Signal event** — the original or new data (already in signals table)
+2. **Conflict detection** — implicit: two signals of the same type
+   within the dedup window, or conflicting claims from different sources
+3. **Resolution event** — a new record documenting the decision
+
+```sql
+CREATE TABLE signal_resolutions (
+    id                   TEXT PRIMARY KEY,  -- UUID
+    entity_id            TEXT NOT NULL,
+    signal_type          TEXT NOT NULL,
+    kept_signal_id       TEXT NOT NULL REFERENCES signals(id),
+    superseded_signal_id TEXT NOT NULL REFERENCES signals(id),
+    action               TEXT NOT NULL,     -- see action vocabulary below
+    resolved_by          TEXT NOT NULL,     -- team identity reference
+    resolved_at          TEXT NOT NULL
+);
+```
+
+The "current signals" query filters out superseded signals:
+"latest signal per type that is not referenced as superseded in any
+resolution." Superseded signals remain in the database as history.
+
+### Pending state is implicit
+
+Unresolved conflicts are detected by query: conflict events (two
+signals of same type/source within window, or cross-source conflicting
+claims) that have no corresponding resolution event. No status field
+is needed — the absence of resolution IS the pending state.
+
+`survey` surfaces unresolved conflicts: "2 signal conflicts pending
+resolution — run `signatory resolve` to review."
+
+### Action Vocabulary
+
+| Action | Meaning |
+|---|---|
+| `keep_new` | Accept the newer signal, supersede the older |
+| `keep_previous` | Keep the older signal, supersede the newer |
+| `keep_both` | Both signals stand — no supersession (legitimate divergence) |
+| `skip` | Discard the newer signal entirely |
+| `pending` | Acknowledged but not yet decided — don't re-prompt until ready |
+| `accept` | Accept an external/hierarchical claim (federated resolution) |
+| `reject` | Reject an external claim, maintain local position |
+| `investigate` | Flag for deeper analysis — may trigger an analysis workflow |
+
+### Federated Conflict Resolution
+
+The same model handles conflicts between local and external trust
+claims. When ingesting data from a peer or hierarchical source:
+
+```
+CONFLICT: pkg:npm/xyz
+
+  Local (you):           BURNED at v1.4
+                         "maintainer account compromised"
+                         by team:sarah+claude, 2026-04-15
+
+  Hierarchy (acme-corp): VETTED-FROZEN at v1.5
+                         "patched, new maintainer verified"
+                         by team:security-ops, 2026-04-20
+
+  [a]ccept hierarchy  [r]eject (keep burn)
+  [p]ending           [i]nvestigate
+```
+
+This generalizes the resolution model: any two conflicting trust
+claims — regardless of whether they come from two collections, two
+sources, or a local decision vs. a hierarchical directive — are
+resolved through the same UX pattern and stored in the same
+append-only resolution table.
+
+The resolution itself is a trust decision that gets logged in the
+audit trail, with actor identification via the team identity.
+
+### Resolution Chains
+
+Resolutions can chain. If a conflict is resolved, and then a third
+claim arrives that conflicts with the resolution, a new conflict is
+detected and a new resolution is needed. The full chain is preserved:
+
+```
+signal A (v1.4, local) → conflict with signal B (v1.5, hierarchy)
+  → resolution R1: pending (by sarah+claude)
+  → resolution R2: accept hierarchy (by sarah+claude, after review)
+signal C (v1.5.1, hierarchy) → no conflict (consistent with R2)
+signal D (v1.5.1, local scan) → confirms hierarchy assessment
+```
+
+Each event is a separate, immutable record. The history tells the
+complete story of how trust was established, challenged, and resolved.
+
 ## Remaining Open Questions
 
 1. **Team identity key management.** What cryptographic mechanism
-   backs the team identity? PGP/GPG keys? SSH keys? OIDC? Or is this
-   deferred until the attestation utility layer is built?
+   backs the team identity? PGP/GPG keys? SSH keys? OIDC? Deferred
+   until the attestation utility layer is built. For v0.1, team
+   identity is recorded as a string without cryptographic backing.
 
-2. **Survey snapshot size.** For large projects with hundreds of
-   dependencies, append-only observations will grow quickly. Is per-
-   survey granularity correct, or should we batch at a coarser level
-   (e.g., daily)?
+2. **Survey snapshot sizing.** Per-survey granularity for append-only
+   dependency observations. At our scale (hundreds of deps, daily
+   surveys) this is manageable. Pruning can be added later if needed.
