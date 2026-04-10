@@ -250,6 +250,87 @@ func TestFunctional_BurnOverwriteExisting(t *testing.T) {
 	assert.Equal(t, "confirmed malware", burn.Reason)
 }
 
+// TestFunctional_BurnAuditDetailOverwriteFlagReflectsPriorBurn locks in
+// the contract that audit_log.detail.overwrite == true iff the entity
+// already had a burn before the current call. Issue #92: the prior
+// implementation computed this via `"overwrite": err == nil` at the
+// end of BurnAddCmd.Run, where `err` referred to the outer-scope GetBurn
+// result from the start of the function. The reasoning was load-bearing
+// on which specific `err` happened to be in scope at the moment the
+// audit detail map was constructed — a one-character refactor of the
+// SetBurn call (changing its `:=` to `=`, which would shadow the outer
+// err) would silently flip the meaning to "did SetBurn succeed," which
+// is always true on the success path. Every burn would then be logged
+// as an overwrite, corrupting the audit trail.
+//
+// This test catches that class of bug: a fresh burn must be logged
+// with overwrite=false, and a second burn over the same entity must be
+// logged with overwrite=true. The test reads the actual persisted
+// audit_log.detail JSON, not just the in-memory state.
+func TestFunctional_BurnAuditDetailOverwriteFlagReflectsPriorBurn(t *testing.T) {
+	tests := []struct {
+		name          string
+		preBurn       bool
+		wantOverwrite bool
+	}{
+		{name: "fresh burn", preBurn: false, wantOverwrite: false},
+		{name: "overwrite existing", preBurn: true, wantOverwrite: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			globals := testGlobals(t)
+
+			if tc.preBurn {
+				first := &BurnAddCmd{
+					Target: "pkg:npm/audit-overwrite-test",
+					Reason: "initial burn",
+				}
+				require.NoError(t, first.Run(globals))
+			}
+
+			// The burn whose audit detail we're inspecting.
+			second := &BurnAddCmd{
+				Target: "pkg:npm/audit-overwrite-test",
+				Reason: "the burn under test",
+			}
+			require.NoError(t, second.Run(globals))
+
+			// Read the most recent burn audit entry directly from the
+			// audit_log table. ORDER BY ROWID DESC uses SQLite's implicit
+			// auto-incrementing rowid which reflects insertion order —
+			// reliable even when timestamps collide at second precision
+			// and audit_log.id is a random hex string with no temporal
+			// component.
+			s, err := store.OpenSQLite(globals.DBPath)
+			require.NoError(t, err)
+			defer s.Close()
+
+			var detailJSON string
+			require.NoError(t, s.DB().QueryRowContext(context.Background(),
+				`SELECT detail FROM audit_log WHERE action = 'burn' ORDER BY ROWID DESC LIMIT 1`,
+			).Scan(&detailJSON))
+
+			var detail struct {
+				Overwrite    bool   `json:"overwrite"`
+				Reason       string `json:"reason"`
+				CanonicalURI string `json:"canonical_uri"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(detailJSON), &detail))
+
+			// Sanity check we read the right entry.
+			assert.Equal(t, "the burn under test", detail.Reason,
+				"this assertion failing means we read the wrong audit entry")
+			assert.Equal(t, "pkg:npm/audit-overwrite-test", detail.CanonicalURI)
+
+			// THE CRITICAL ASSERTION: the overwrite flag must reflect
+			// reality, not be a side effect of which `err` happens to
+			// be in scope at construction time.
+			assert.Equal(t, tc.wantOverwrite, detail.Overwrite,
+				"audit detail.overwrite must match whether a prior burn existed")
+		})
+	}
+}
+
 func TestFunctional_BurnListEmpty(t *testing.T) {
 	globals := testGlobals(t)
 

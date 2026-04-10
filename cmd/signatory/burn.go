@@ -47,11 +47,18 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	}
 
 	// Check for existing burn so we can warn the user we're overwriting.
-	existing, err := s.GetBurn(ctx, entity.ID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("check existing burn: %w", err)
+	// Use a distinctively-named variable for the GetBurn error so the
+	// "did a prior burn exist?" boolean below can't be silently broken
+	// by a future refactor that shadows or reassigns `err` (#92).
+	existing, getBurnErr := s.GetBurn(ctx, entity.ID)
+	if getBurnErr != nil && !errors.Is(getBurnErr, store.ErrNotFound) {
+		return fmt.Errorf("check existing burn: %w", getBurnErr)
 	}
-	if err == nil {
+	// Capture the meaning at the moment it's computed, in a boolean
+	// that can't be confused with any later `err`. Used below in the
+	// audit detail.
+	overwriting := getBurnErr == nil
+	if overwriting {
 		fmt.Fprintf(os.Stderr, "Warning: %s is already burned (reason: %s, by: %s, at: %s)\n",
 			entity.ShortName, existing.Reason, existing.BurnedBy, existing.BurnedAt.Format(time.RFC3339))
 		fmt.Fprintln(os.Stderr, "Overwriting with new burn.")
@@ -69,11 +76,12 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	// Audit.
+	// Audit. The `overwriting` boolean was captured immediately after
+	// the GetBurn call above; it cannot be affected by intervening code.
 	detail, _ := json.Marshal(map[string]interface{}{
 		"canonical_uri": entity.CanonicalURI,
 		"reason":        cmd.Reason,
-		"overwrite":     err == nil, // nil err above means a burn already existed
+		"overwrite":     overwriting,
 	})
 	if err := auditLog.LogAction(ctx, actor, "burn", entity.ID, string(detail)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
