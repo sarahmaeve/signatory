@@ -62,6 +62,8 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		if err := s.PutEntity(ctx, entity); err != nil {
 			return fmt.Errorf("store entity: %w", err)
 		}
+	} else if err != nil {
+		return fmt.Errorf("check entity: %w", err)
 	}
 
 	// Use injected collectors.
@@ -101,8 +103,14 @@ func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s store.Store, entity
 		return err
 	}
 
-	posture, _ := s.GetPosture(ctx, entityID)
-	burn, _ := s.GetBurn(ctx, entityID)
+	posture, err := s.GetPosture(ctx, entityID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("get posture: %w", err)
+	}
+	burn, err := s.GetBurn(ctx, entityID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("get burn: %w", err)
+	}
 
 	p := &profile.Profile{
 		Entity:  *entity,
