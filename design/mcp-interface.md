@@ -77,18 +77,6 @@ Assess the trust posture of a project's dependency tree.
 - Top anomalies or concerns (sorted by criticality × severity)
 - Dependencies with no cached data (candidates for investigation)
 
-### signatory_compare
-
-Compare trust profiles of two packages or repos side by side.
-
-**Input:**
-- `target_a` (string) — first package/repo identifier
-- `target_b` (string) — second package/repo identifier
-
-**Returns:** Side-by-side signal comparison, highlighting meaningful
-differences. Use case: the LLM is choosing between two libraries and
-wants to present a trust-informed comparison to the user.
-
 ### signatory_set_posture
 
 Record an organizational trust decision about a dependency.

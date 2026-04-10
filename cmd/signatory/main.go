@@ -18,7 +18,6 @@ type CLI struct {
 
 	Analyze AnalyzeCmd `cmd:"" help:"Analyze trust signals for a package, repo, or identity."`
 	Survey  SurveyCmd  `cmd:"" help:"Assess trust posture of a project's dependency tree."`
-	Compare CompareCmd `cmd:"" help:"Compare trust profiles of two packages or repos."`
 	Burn    BurnCmd    `cmd:"" help:"Burn an entity, degrading its trust signals."`
 	Posture PostureCmd `cmd:"" help:"Set or view dependency posture tier for an entity."`
 	Version VersionCmd `cmd:"" help:"Print version information."`

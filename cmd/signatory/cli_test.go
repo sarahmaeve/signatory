@@ -141,55 +141,17 @@ func TestSurveyCmd_WithFlags(t *testing.T) {
 	assert.True(t, cli.Survey.JSON)
 }
 
+// TestSurveyCmd_Run pins the not-implemented status of survey. When
+// survey is wired up (see design/ROADMAP.md v0.1 must-do #1), this test
+// gets replaced with a real run-and-verify test.
 func TestSurveyCmd_Run(t *testing.T) {
 	t.Parallel()
 
 	cmd := &SurveyCmd{Refresh: true}
 	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
 	err := cmd.Run(globals)
-	assert.NoError(t, err)
-}
-
-// --- Compare ---
-
-func TestCompareCmd_ValidArgs(t *testing.T) {
-	t.Parallel()
-
-	ctx, cli := parseCLI(t, "compare", "lodash", "underscore")
-	assert.Equal(t, "compare <target-a> <target-b>", ctx.Command())
-	assert.Equal(t, "lodash", cli.Compare.TargetA)
-	assert.Equal(t, "underscore", cli.Compare.TargetB)
-	assert.False(t, cli.Compare.JSON)
-}
-
-func TestCompareCmd_WithJSON(t *testing.T) {
-	t.Parallel()
-
-	_, cli := parseCLI(t, "compare", "a", "b", "--json")
-	assert.True(t, cli.Compare.JSON)
-}
-
-func TestCompareCmd_MissingBothTargets(t *testing.T) {
-	t.Parallel()
-
-	err := parseCLIExpectError(t, "compare")
-	assert.Error(t, err)
-}
-
-func TestCompareCmd_MissingSecondTarget(t *testing.T) {
-	t.Parallel()
-
-	err := parseCLIExpectError(t, "compare", "lodash")
-	assert.Error(t, err)
-}
-
-func TestCompareCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &CompareCmd{TargetA: "a", TargetB: "b"}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
+	require.Error(t, err, "survey stub must return non-zero so LLM agents detect it")
+	assert.Contains(t, err.Error(), "not implemented")
 }
 
 // --- Burn ---
@@ -372,7 +334,7 @@ func TestHelpOutput_ContainsAllCommands(t *testing.T) {
 
 	help := getHelpOutput(t)
 
-	expectedCommands := []string{"analyze", "survey", "compare", "burn", "posture", "version"}
+	expectedCommands := []string{"analyze", "survey", "burn", "posture", "version"}
 	for _, cmd := range expectedCommands {
 		assert.True(t, strings.Contains(help, cmd),
 			"help output should contain command %q, got:\n%s", cmd, help)

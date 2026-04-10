@@ -30,19 +30,16 @@ These items are required before v0.1 ships. No exceptions.
 
 5. **MCP server**
    Implement the MCP interface from `design/mcp-interface.md`:
-   7 tools (`signatory_analyze`, `signatory_survey`, `signatory_compare`,
-   `signatory_set_posture`, `signatory_burn`, `signatory_refresh`,
-   `signatory_detail`) and 4 resources (`posture`, `burns`, `profile`,
-   `unexamined`). This is how LLMs interact with signatory in coding
-   workflows — a primary interface, not a nice-to-have.
+   6 tools (`signatory_analyze`, `signatory_survey`, `signatory_set_posture`,
+   `signatory_burn`, `signatory_refresh`, `signatory_detail`) and 4
+   resources (`posture`, `burns`, `profile`, `unexamined`). This is
+   how LLMs interact with signatory in coding workflows — a primary
+   interface, not a nice-to-have.
 
 ### Housekeeping
 
 6. **LICENSE file (#22)**
    Choose and add a license. Adoption blocker.
-
-7. **`compare` command**
-   Wire the stub to actually compare two entity profiles side by side.
 
 ## V0.1 — Should-Do (if time permits)
 
