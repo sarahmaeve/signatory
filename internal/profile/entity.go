@@ -47,11 +47,18 @@ func ClassifyEra(t time.Time) TemporalEra {
 }
 
 // Entity represents a tracked entity with its profile.
+//
+// ID is an opaque UUID used as the internal primary key — stable forever,
+// never shown to humans. CanonicalURI is the external, parseable identifier
+// (purl for packages, signatory scheme for repos/identities/orgs/etc).
+// Name is a human-friendly label for display (serialized as short_name to
+// match the SQL column and the entity-model-v2 spec); Description is
+// one-line context populated from API data or user-edited project notes.
 type Entity struct {
-	ID           string     `json:"id"`                      // UUID, internal primary key
-	CanonicalURI string     `json:"canonical_uri"`           // purl or signatory URI scheme
+	ID           string     `json:"id"`            // UUID, internal primary key
+	CanonicalURI string     `json:"canonical_uri"` // purl or signatory URI scheme
 	Type         EntityType `json:"type"`
-	Name         string     `json:"name"`                    // human-friendly short name
+	Name         string     `json:"short_name"` // human-friendly label
 	Description  string     `json:"description,omitempty"`
 	Ecosystem    string     `json:"ecosystem,omitempty"`
 	URL          string     `json:"url,omitempty"`
