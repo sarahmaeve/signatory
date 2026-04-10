@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -10,14 +9,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSecurity_CorruptedTimestampReturnsError verifies that malformed
-// timestamps in the database produce an error rather than silently
-// returning zero-value times (issue #31).
-func TestSecurity_CorruptedTimestampReturnsError(t *testing.T) {
+// TestSecurity_GetEntity_CorruptedTimestampReturnsError verifies that a
+// malformed created_at column produces an error rather than silently
+// substituting a placeholder time. The previous version of this test
+// (issue #80) wrapped its assertion in `if err == nil { ... }`, which
+// meant the test passed against a regression that returned time.Now().
+// This version uses require.Error so any non-error path fails the test.
+func TestSecurity_GetEntity_CorruptedTimestampReturnsError(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 
-	// Insert an entity with a corrupted created_at.
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -25,43 +26,84 @@ func TestSecurity_CorruptedTimestampReturnsError(t *testing.T) {
 		"not-a-valid-date", time.Now().UTC().Format(time.RFC3339))
 	require.NoError(t, err)
 
-	// Reading this entity should return an error, NOT a zero-value time.
-	entity, err := s.GetEntity(ctx, "corrupt-entity")
-	if err == nil {
-		// If no error, the time should NOT be zero (which would mean
-		// the parse error was silently swallowed).
-		assert.False(t, entity.CreatedAt.IsZero(),
-			"corrupted timestamp was silently converted to zero time — data corruption hidden")
-	}
-	// If err != nil, that's the correct behavior — we detected corruption.
+	_, err = s.GetEntity(ctx, "corrupt-entity")
+	require.Error(t, err, "GetEntity must return an error on corrupted created_at")
+	assert.NotErrorIs(t, err, ErrNotFound, "corruption must not be reported as not-found")
 }
 
-// TestSecurity_CorruptedBurnTimestampReturnsError verifies burn timestamps.
-func TestSecurity_CorruptedBurnTimestampReturnsError(t *testing.T) {
+// TestSecurity_GetBurn_CorruptedTimestampReturnsError verifies that a
+// malformed burned_at column in the burns table produces an error rather
+// than silently substituting a placeholder time. A burn rendering as
+// time.Now() would be interpreted as a fresh ban; a burn rendering as
+// the zero time would be interpreted as ancient history. Both are wrong
+// and could lead an LLM agent or human reviewer to act on bogus data.
+func TestSecurity_GetBurn_CorruptedTimestampReturnsError(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Insert entity first.
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"burn-entity", "pkg:npm/burned", "package", "burned", "", "", "",
-		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
+		"burn-entity", "pkg:npm/burned", "package", "burned", "", "", "", now, now)
 	require.NoError(t, err)
 
-	// Insert a burn with a corrupted timestamp.
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"burn-entity", "compromised", "local", "", "CORRUPTED", "sarah")
 	require.NoError(t, err)
 
-	burn, err := s.GetBurn(ctx, "burn-entity")
-	if err == nil {
-		assert.False(t, burn.BurnedAt.IsZero(),
-			"corrupted burn timestamp was silently converted to zero time — "+
-				"downstream logic checking 'was this burn recent?' will make wrong decisions")
-	}
+	_, err = s.GetBurn(ctx, "burn-entity")
+	require.Error(t, err, "GetBurn must return an error on corrupted burned_at")
+	assert.NotErrorIs(t, err, ErrNotFound, "corruption must not be reported as not-found")
+}
+
+// TestSecurity_ListBurns_CorruptedTimestampReturnsError covers the second
+// burns timestamp parse path. ListBurns is independent from GetBurn (it
+// scans rows in a loop instead of a single row), and it could regress
+// separately, so it needs its own regression gate. The error must
+// propagate out of the loop — it must not be swallowed and silently
+// produce a partial result with valid rows only.
+func TestSecurity_ListBurns_CorruptedTimestampReturnsError(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"burn-entity", "pkg:npm/burned", "package", "burned", "", "", "", now, now)
+	require.NoError(t, err)
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"burn-entity", "compromised", "local", "", "CORRUPTED", "sarah")
+	require.NoError(t, err)
+
+	_, err = s.ListBurns(ctx)
+	require.Error(t, err, "ListBurns must return an error on corrupted burned_at")
+}
+
+// TestSecurity_GetTeamIdentity_CorruptedTimestampReturnsError covers the
+// team_identities created_at parse path. Team identities anchor the
+// audit log's actor field; a team identity rendering as time.Now() or
+// the zero time would corrupt downstream "when did this team start
+// operating?" logic and could let a forged team identity blend in.
+func TestSecurity_GetTeamIdentity_CorruptedTimestampReturnsError(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO team_identities (id, name, created_at, halted_at, revoked_at, revoke_reason)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"team-corrupt", "sarah+claude", "INVALID-TIMESTAMP", nil, nil, nil)
+	require.NoError(t, err)
+
+	_, err = s.GetTeamIdentity(ctx, "team-corrupt")
+	require.Error(t, err, "GetTeamIdentity must return an error on corrupted created_at")
+	assert.NotErrorIs(t, err, ErrNotFound, "corruption must not be reported as not-found")
 }
 
 // TestSecurity_ErrorsIsUsedForSentinels verifies that error comparison
@@ -102,9 +144,4 @@ func TestSecurity_ErrorsIsUsedForSentinels(t *testing.T) {
 	err = s.SetBurn(ctx, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrNilInput)
-}
-
-// Ensure the db field is accessible for raw SQL in tests.
-func rawDB(s *SQLite) *sql.DB {
-	return s.db
 }
