@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/alecthomas/kong"
+	"github.com/sarahmaeve/signatory/internal/audit"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -55,6 +56,11 @@ type Globals struct {
 	DBPath     string
 	Verbose    bool
 	Collectors []signal.Collector
+
+	// AuditFilePath overrides the audit log file path. Empty means
+	// "use the default (~/.signatory/audit.log)". Tests set this to a
+	// temp path; production leaves it empty.
+	AuditFilePath string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
@@ -64,6 +70,20 @@ func (g *Globals) OpenStore() (store.Store, error) {
 		return nil, fmt.Errorf("resolve database path: %w", err)
 	}
 	return store.OpenSQLite(path)
+}
+
+// NewAuditLogger constructs an audit logger wired to the given store
+// and the configured file path. Falls back to database-only logging
+// if the default file path cannot be resolved (e.g., $HOME unset).
+func (g *Globals) NewAuditLogger(s store.Store) *audit.Logger {
+	path := g.AuditFilePath
+	if path == "" {
+		defaultPath, err := audit.DefaultFilePath()
+		if err == nil {
+			path = defaultPath
+		}
+	}
+	return audit.New(s, path)
 }
 
 func defaultCollectors() []signal.Collector {

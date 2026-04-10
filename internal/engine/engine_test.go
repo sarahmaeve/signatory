@@ -15,23 +15,33 @@ import (
 
 // --- Mocks ---
 
+// mockStore is a no-op Store implementation for engine tests. The engine
+// tests here only care that the wiring is correct — they don't verify
+// storage semantics, so every method returns zero values. The dedicated
+// store tests in internal/store exercise the real SQLite implementation.
 type mockStore struct{}
 
 func (m *mockStore) GetEntity(ctx context.Context, id string) (*profile.Entity, error) {
 	return nil, nil
 }
-func (m *mockStore) PutEntity(ctx context.Context, entity *profile.Entity) error { return nil }
-func (m *mockStore) FindEntity(ctx context.Context, name string, entityType profile.EntityType) (*profile.Entity, error) {
+func (m *mockStore) FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error) {
 	return nil, nil
 }
+func (m *mockStore) PutEntity(ctx context.Context, entity *profile.Entity) error { return nil }
 func (m *mockStore) GetSignals(ctx context.Context, entityID string) ([]profile.Signal, error) {
 	return nil, nil
 }
-func (m *mockStore) PutSignals(ctx context.Context, signals []profile.Signal) error { return nil }
+func (m *mockStore) GetLatestSignals(ctx context.Context, entityID string) ([]profile.Signal, error) {
+	return nil, nil
+}
+func (m *mockStore) AppendSignals(ctx context.Context, signals []profile.Signal) error { return nil }
 func (m *mockStore) GetSignalsByGroup(ctx context.Context, entityID string, group profile.SignalGroup) ([]profile.Signal, error) {
 	return nil, nil
 }
-func (m *mockStore) GetPosture(ctx context.Context, entityID string) (*profile.Posture, error) {
+func (m *mockStore) GetPosture(ctx context.Context, entityID string, version string) (*profile.Posture, error) {
+	return nil, nil
+}
+func (m *mockStore) GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error) {
 	return nil, nil
 }
 func (m *mockStore) SetPosture(ctx context.Context, posture *profile.Posture) error { return nil }
@@ -41,6 +51,24 @@ func (m *mockStore) GetBurn(ctx context.Context, entityID string) (*profile.Burn
 func (m *mockStore) SetBurn(ctx context.Context, burn *profile.Burn) error { return nil }
 func (m *mockStore) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 	return nil, nil
+}
+func (m *mockStore) AppendDependencyObservations(ctx context.Context, obs []profile.DependencyObservation) error {
+	return nil
+}
+func (m *mockStore) GetLatestDependencies(ctx context.Context, projectID string) ([]profile.DependencyObservation, error) {
+	return nil, nil
+}
+func (m *mockStore) AppendAuditEntry(ctx context.Context, entry *profile.AuditEntry) error {
+	return nil
+}
+func (m *mockStore) AppendResolution(ctx context.Context, r *profile.SignalResolution) error {
+	return nil
+}
+func (m *mockStore) GetTeamIdentity(ctx context.Context, id string) (*profile.TeamIdentity, error) {
+	return nil, nil
+}
+func (m *mockStore) PutTeamIdentity(ctx context.Context, identity *profile.TeamIdentity) error {
+	return nil
 }
 func (m *mockStore) Close() error { return nil }
 

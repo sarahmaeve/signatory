@@ -1,3 +1,25 @@
+// Package store provides the persistence interface for signatory's
+// entity, signal, posture, burn, dependency, audit, and team identity
+// data. The primary implementation uses SQLite via modernc.org/sqlite.
+//
+// The SQLite implementation here follows the schema defined in
+// design/entity-model-v2.md. Key invariants:
+//
+//   - Signals, dependency observations, audit entries, and signal
+//     resolutions are APPEND-ONLY. Their Append* methods never update
+//     or delete existing rows. ID collisions fail the insert; they are
+//     not silently overwritten.
+//   - Postures are versioned: the primary key is (entity_id, version),
+//     so posture decisions for different versions of the same entity
+//     coexist. SetPosture upserts within a given (entity_id, version).
+//   - Entities use UUID IDs as the internal primary key and a
+//     canonical_uri as the external identifier. FindEntityByURI is the
+//     lookup path when the caller only knows the URI (e.g., from user
+//     input on the CLI).
+//   - Team identities have one-way lifecycle fields (halted_at,
+//     revoked_at) — once set they should not be cleared by a subsequent
+//     PutTeamIdentity. That rule lives at the caller; the store accepts
+//     what it's given.
 package store
 
 import (
@@ -9,7 +31,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // SQL driver registration.
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
@@ -20,8 +42,9 @@ type SQLite struct {
 }
 
 // OpenSQLite opens or creates a SQLite database at the given path.
-// It creates the parent directory if it does not exist and runs
-// schema migrations.
+// It creates the parent directory if it does not exist, restricts the
+// database file to 0600 permissions, enables WAL mode and foreign keys,
+// and runs schema migrations.
 func OpenSQLite(path string) (*SQLite, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -94,48 +117,74 @@ func (s *SQLite) Close() error {
 	return s.db.Close()
 }
 
-// GetEntity retrieves an entity by ID.
+// --- Entity operations ---
+
+// entityColumns is the canonical column list for SELECTs — kept as a
+// constant so GetEntity/FindEntityByURI/scanEntity stay in sync.
+const entityColumns = `id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at`
+
+// GetEntity retrieves an entity by its internal UUID.
 func (s *SQLite) GetEntity(ctx context.Context, id string) (*profile.Entity, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, type, name, ecosystem, url, created_at, updated_at FROM entities WHERE id = ?`, id)
+		`SELECT `+entityColumns+` FROM entities WHERE id = ?`, id)
 	return scanEntity(row)
 }
 
-// FindEntity retrieves an entity by name and type.
-func (s *SQLite) FindEntity(ctx context.Context, name string, entityType profile.EntityType) (*profile.Entity, error) {
+// FindEntityByURI retrieves an entity by its canonical URI (purl or
+// signatory URI scheme). This is the primary lookup path when the
+// caller only has user-supplied input like a GitHub URL or purl string.
+func (s *SQLite) FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, type, name, ecosystem, url, created_at, updated_at FROM entities WHERE name = ? AND type = ?`,
-		name, string(entityType))
+		`SELECT `+entityColumns+` FROM entities WHERE canonical_uri = ?`, canonicalURI)
 	return scanEntity(row)
 }
 
-// PutEntity inserts or updates an entity.
+// PutEntity inserts or updates an entity. On INSERT conflict on id, the
+// canonical_uri, type, short_name, description, ecosystem, url, and
+// updated_at fields are updated. created_at and id are immutable after
+// first insert.
+//
+// Validation: id, canonical_uri, short_name, and type must be non-empty.
+// This is a Go-layer guard — SQLite's NOT NULL constraint would catch
+// id/short_name/type, and the unique index on canonical_uri would catch
+// duplicate empties eventually, but an explicit Go error is clearer.
 func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 	if entity == nil {
 		return ErrNilInput
 	}
-	if entity.ID == "" || entity.ShortName == "" || entity.Type == "" {
-		return fmt.Errorf("%w: entity ID, short_name, and type are required", ErrNilInput)
+	if entity.ID == "" || entity.CanonicalURI == "" || entity.ShortName == "" || entity.Type == "" {
+		return fmt.Errorf("%w: entity ID, canonical URI, short name, and type are required", ErrNilInput)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-			type = excluded.type,
-			name = excluded.name,
-			ecosystem = excluded.ecosystem,
-			url = excluded.url,
-			updated_at = excluded.updated_at`,
-		entity.ID, string(entity.Type), entity.ShortName, entity.Ecosystem, entity.URL,
+			canonical_uri = excluded.canonical_uri,
+			type          = excluded.type,
+			short_name    = excluded.short_name,
+			description   = excluded.description,
+			ecosystem     = excluded.ecosystem,
+			url           = excluded.url,
+			updated_at    = excluded.updated_at`,
+		entity.ID, entity.CanonicalURI, string(entity.Type), entity.ShortName,
+		entity.Description, entity.Ecosystem, entity.URL,
 		entity.CreatedAt.Format(time.RFC3339), entity.UpdatedAt.Format(time.RFC3339))
 	return err
 }
 
-// GetSignals retrieves all signals for an entity.
+// --- Signal operations (append-only) ---
+
+// signalColumns is the canonical signal SELECT list.
+const signalColumns = `id, entity_id, type, signal_group, source, forgery_resistance, value, collected_at, expires_at`
+
+// GetSignals returns ALL signals for an entity in chronological order,
+// including signals that have been superseded by a resolution. Use
+// GetLatestSignals for the "current state" view.
 func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Signal, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, entity_id, type, signal_group, source, forgery_resistance, value, collected_at, expires_at
-		 FROM signals WHERE entity_id = ?`, entityID)
+		`SELECT `+signalColumns+`
+		 FROM signals WHERE entity_id = ?
+		 ORDER BY collected_at ASC`, entityID)
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +192,50 @@ func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Sig
 	return scanSignals(rows)
 }
 
-// GetSignalsByGroup retrieves signals for an entity filtered by group.
+// GetLatestSignals returns the current-state view: the most recent
+// non-superseded signal per (type, source) for an entity.
+//
+// "Current state" means:
+//   - Latest collected_at wins for a given (type, source) pair
+//   - Signals referenced as superseded_signal_id in any signal_resolutions
+//     row are excluded (they've been explicitly overridden)
+//   - Different sources coexist — if github and peer:acme both report a
+//     signal of the same type, both are returned with their source tag,
+//     per design/entity-model-v2.md §Signal Conflict Resolution
+//
+// This is the query that powers `signatory analyze` and the display
+// layer. Historical views should use GetSignals instead.
+func (s *SQLite) GetLatestSignals(ctx context.Context, entityID string) ([]profile.Signal, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+signalColumns+`
+		 FROM (
+		   SELECT `+signalColumns+`,
+		          ROW_NUMBER() OVER (
+		            PARTITION BY type, source
+		            ORDER BY collected_at DESC
+		          ) AS rn
+		   FROM signals
+		   WHERE entity_id = ?
+		     AND id NOT IN (SELECT superseded_signal_id FROM signal_resolutions)
+		 )
+		 WHERE rn = 1
+		 ORDER BY signal_group, type, source`, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSignals(rows)
+}
+
+// GetSignalsByGroup retrieves all signals for an entity filtered by
+// signal group (e.g., SignalGroupVitality). Returns the full history
+// for the group, not just the latest — use a filter over GetLatestSignals
+// if you want the current-state view.
 func (s *SQLite) GetSignalsByGroup(ctx context.Context, entityID string, group profile.SignalGroup) ([]profile.Signal, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, entity_id, type, signal_group, source, forgery_resistance, value, collected_at, expires_at
-		 FROM signals WHERE entity_id = ? AND signal_group = ?`, entityID, string(group))
+		`SELECT `+signalColumns+`
+		 FROM signals WHERE entity_id = ? AND signal_group = ?
+		 ORDER BY collected_at ASC`, entityID, string(group))
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +243,14 @@ func (s *SQLite) GetSignalsByGroup(ctx context.Context, entityID string, group p
 	return scanSignals(rows)
 }
 
-// PutSignals inserts or updates signals.
-func (s *SQLite) PutSignals(ctx context.Context, signals []profile.Signal) error {
+// AppendSignals inserts signals without upsert. ID collisions fail the
+// insert — append-only means append-only. Callers must generate unique
+// signal IDs (the design uses `{source}:{entity_id}:{type}:{collected_at}`
+// which makes accidental collisions essentially impossible).
+//
+// The batch is committed as a single transaction: either all signals
+// land or none do.
+func (s *SQLite) AppendSignals(ctx context.Context, signals []profile.Signal) error {
 	if len(signals) == 0 {
 		return nil
 	}
@@ -164,63 +258,76 @@ func (s *SQLite) PutSignals(ctx context.Context, signals []profile.Signal) error
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck // rollback error is meaningless after commit
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO signals (id, entity_id, type, signal_group, source, forgery_resistance, value, collected_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET
-			type = excluded.type,
-			signal_group = excluded.signal_group,
-			source = excluded.source,
-			forgery_resistance = excluded.forgery_resistance,
-			value = excluded.value,
-			collected_at = excluded.collected_at,
-			expires_at = excluded.expires_at`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, sig := range signals {
-		valueBytes, err := json.Marshal(sig.Value)
-		if err != nil {
-			return fmt.Errorf("marshal signal value: %w", err)
+		if !json.Valid(sig.Value) {
+			return fmt.Errorf("append signal %s: invalid JSON value", sig.ID)
 		}
-		_, err = stmt.ExecContext(ctx,
+		if _, err := stmt.ExecContext(ctx,
 			sig.ID, sig.EntityID, sig.Type, string(sig.Group),
-			sig.Source, string(sig.ForgeryResistance), string(valueBytes),
-			sig.CollectedAt.Format(time.RFC3339), sig.ExpiresAt.Format(time.RFC3339))
-		if err != nil {
-			return err
+			sig.Source, string(sig.ForgeryResistance), string(sig.Value),
+			sig.CollectedAt.Format(time.RFC3339), sig.ExpiresAt.Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("append signal %s: %w", sig.ID, err)
 		}
 	}
-
 	return tx.Commit()
 }
 
-// GetPosture retrieves the posture for an entity.
-func (s *SQLite) GetPosture(ctx context.Context, entityID string) (*profile.Posture, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT entity_id, tier, version, rationale, set_by, set_at FROM postures WHERE entity_id = ?`, entityID)
+// --- Posture operations (versioned) ---
 
-	var p profile.Posture
-	var setAt string
-	err := row.Scan(&p.EntityID, (*string)(&p.Tier), &p.Version, &p.Rationale, &p.SetBy, &setAt)
-	if err == sql.ErrNoRows {
-		return nil, ErrNotFound
-	}
+// postureColumns is the canonical posture SELECT list.
+const postureColumns = `entity_id, version, tier, rationale, set_by, set_at`
+
+// GetPosture retrieves the posture for an entity at a specific version.
+// Use empty string for the "unversioned" posture (set without --version).
+// Returns ErrNotFound if no posture exists for the exact (entity_id,
+// version) pair. For "latest across all versions" semantics, call
+// GetPostures and pick the first result.
+func (s *SQLite) GetPosture(ctx context.Context, entityID string, version string) (*profile.Posture, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+postureColumns+` FROM postures
+		 WHERE entity_id = ? AND version = ?`, entityID, version)
+	return scanPosture(row)
+}
+
+// GetPostures returns all postures for an entity, ordered newest-first
+// by set_at. The CLI uses this to implement "latest + hint about other
+// versions" display.
+func (s *SQLite) GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+postureColumns+` FROM postures
+		 WHERE entity_id = ?
+		 ORDER BY set_at DESC`, entityID)
 	if err != nil {
 		return nil, err
 	}
-	p.SetAt, err = time.Parse(time.RFC3339, setAt)
-	if err != nil {
-		return nil, fmt.Errorf("parse posture set_at %q: %w", setAt, err)
+	defer rows.Close()
+
+	var postures []profile.Posture
+	for rows.Next() {
+		p, err := scanPostureRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		postures = append(postures, *p)
 	}
-	return &p, nil
+	return postures, rows.Err()
 }
 
-// SetPosture inserts or updates a posture.
+// SetPosture inserts or updates a posture for a given (entity_id,
+// version) pair. Re-calling with the same pair replaces the earlier
+// posture's tier, rationale, set_by, and set_at — this is intentional:
+// revising a vetted decision with a new rationale is a normal edit,
+// not a conflict. The per-version PK means different versions coexist.
 func (s *SQLite) SetPosture(ctx context.Context, posture *profile.Posture) error {
 	if posture == nil {
 		return ErrNilInput
@@ -229,23 +336,25 @@ func (s *SQLite) SetPosture(ctx context.Context, posture *profile.Posture) error
 		return fmt.Errorf("%w: posture entity ID and tier are required", ErrNilInput)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO postures (entity_id, tier, version, rationale, set_by, set_at)
+		`INSERT INTO postures (entity_id, version, tier, rationale, set_by, set_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(entity_id) DO UPDATE SET
-			tier = excluded.tier,
-			version = excluded.version,
+		 ON CONFLICT(entity_id, version) DO UPDATE SET
+			tier      = excluded.tier,
 			rationale = excluded.rationale,
-			set_by = excluded.set_by,
-			set_at = excluded.set_at`,
-		posture.EntityID, string(posture.Tier), posture.Version, posture.Rationale,
+			set_by    = excluded.set_by,
+			set_at    = excluded.set_at`,
+		posture.EntityID, posture.Version, string(posture.Tier), posture.Rationale,
 		posture.SetBy, posture.SetAt.Format(time.RFC3339))
 	return err
 }
 
-// GetBurn retrieves the burn for an entity.
+// --- Burn operations ---
+
+// GetBurn retrieves the burn for an entity, or ErrNotFound if none.
 func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT entity_id, reason, source, source_org, burned_at, burned_by FROM burns WHERE entity_id = ?`, entityID)
+		`SELECT entity_id, reason, source, source_org, burned_at, burned_by
+		 FROM burns WHERE entity_id = ?`, entityID)
 
 	var b profile.Burn
 	var burnedAt string
@@ -263,7 +372,10 @@ func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, e
 	return &b, nil
 }
 
-// SetBurn inserts or updates a burn.
+// SetBurn inserts or updates a burn for an entity. Burns are a one-per-
+// entity decision (unlike postures, they are not versioned) because a
+// compromised maintainer compromises the entity's identity, not a
+// specific version.
 func (s *SQLite) SetBurn(ctx context.Context, burn *profile.Burn) error {
 	if burn == nil {
 		return ErrNilInput
@@ -275,17 +387,17 @@ func (s *SQLite) SetBurn(ctx context.Context, burn *profile.Burn) error {
 		`INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(entity_id) DO UPDATE SET
-			reason = excluded.reason,
-			source = excluded.source,
+			reason     = excluded.reason,
+			source     = excluded.source,
 			source_org = excluded.source_org,
-			burned_at = excluded.burned_at,
-			burned_by = excluded.burned_by`,
+			burned_at  = excluded.burned_at,
+			burned_by  = excluded.burned_by`,
 		burn.EntityID, burn.Reason, string(burn.Source), burn.SourceOrg,
 		burn.BurnedAt.Format(time.RFC3339), burn.BurnedBy)
 	return err
 }
 
-// ListBurns retrieves all burns.
+// ListBurns returns all recorded burns.
 func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT entity_id, reason, source, source_org, burned_at, burned_by FROM burns`)
@@ -311,11 +423,222 @@ func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 	return burns, rows.Err()
 }
 
-// scanEntity scans a single entity row.
+// --- Dependency observations (append-only) ---
+
+// AppendDependencyObservations records a batch of dependency observations
+// from a single survey. All observations in a batch share a survey_id
+// (enforced by the caller, not the store). Pure insert — no upsert.
+func (s *SQLite) AppendDependencyObservations(ctx context.Context, obs []profile.DependencyObservation) error {
+	if len(obs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO dependency_observations (id, project_id, entity_id, version, direct, observed_at, survey_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, o := range obs {
+		direct := 0
+		if o.Direct {
+			direct = 1
+		}
+		if _, err := stmt.ExecContext(ctx,
+			o.ID, o.ProjectID, o.EntityID, o.Version, direct,
+			o.ObservedAt.Format(time.RFC3339), o.SurveyID); err != nil {
+			return fmt.Errorf("append observation %s: %w", o.ID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// GetLatestDependencies returns the observations from the most recent
+// survey for a project — i.e. the current dependency tree as of that
+// survey. Returns nil (not ErrNotFound) if no surveys have been recorded.
+func (s *SQLite) GetLatestDependencies(ctx context.Context, projectID string) ([]profile.DependencyObservation, error) {
+	// Resolve the latest survey_id for this project.
+	var surveyID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT survey_id FROM dependency_observations
+		 WHERE project_id = ?
+		 ORDER BY observed_at DESC
+		 LIMIT 1`, projectID).Scan(&surveyID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, project_id, entity_id, version, direct, observed_at, survey_id
+		 FROM dependency_observations
+		 WHERE project_id = ? AND survey_id = ?`, projectID, surveyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var observations []profile.DependencyObservation
+	for rows.Next() {
+		var o profile.DependencyObservation
+		var direct int
+		var observedAt string
+		if err := rows.Scan(&o.ID, &o.ProjectID, &o.EntityID, &o.Version, &direct, &observedAt, &o.SurveyID); err != nil {
+			return nil, err
+		}
+		o.Direct = direct != 0
+		parsed, parseErr := time.Parse(time.RFC3339, observedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse observation observed_at %q: %w", observedAt, parseErr)
+		}
+		o.ObservedAt = parsed
+		observations = append(observations, o)
+	}
+	return observations, rows.Err()
+}
+
+// --- Audit log (append-only) ---
+
+// AppendAuditEntry writes a single audit log entry. EntityID is
+// optional — non-entity actions (e.g., a global survey) leave it empty
+// and it's stored as SQL NULL.
+func (s *SQLite) AppendAuditEntry(ctx context.Context, entry *profile.AuditEntry) error {
+	if entry == nil {
+		return ErrNilInput
+	}
+	if entry.ID == "" || entry.Actor == "" || entry.Action == "" {
+		return fmt.Errorf("%w: audit entry ID, actor, and action are required", ErrNilInput)
+	}
+	var entityID sql.NullString
+	if entry.EntityID != "" {
+		entityID = sql.NullString{String: entry.EntityID, Valid: true}
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (id, timestamp, actor, action, entity_id, detail)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		entry.ID, entry.Timestamp.Format(time.RFC3339), entry.Actor, entry.Action, entityID, entry.Detail)
+	return err
+}
+
+// --- Signal resolutions (append-only) ---
+
+// AppendResolution writes a conflict resolution record. The referenced
+// kept_signal_id and superseded_signal_id must exist in the signals
+// table (enforced by FK). Once superseded, a signal is excluded from
+// GetLatestSignals but remains in GetSignals for history.
+func (s *SQLite) AppendResolution(ctx context.Context, r *profile.SignalResolution) error {
+	if r == nil {
+		return ErrNilInput
+	}
+	if r.ID == "" || r.EntityID == "" || r.KeptSignalID == "" || r.SupersededSignalID == "" || r.Action == "" {
+		return fmt.Errorf("%w: resolution requires ID, entity_id, kept_signal_id, superseded_signal_id, and action", ErrNilInput)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO signal_resolutions (id, entity_id, signal_type, kept_signal_id, superseded_signal_id, action, resolved_by, resolved_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.EntityID, r.SignalType, r.KeptSignalID, r.SupersededSignalID,
+		r.Action, r.ResolvedBy, r.ResolvedAt.Format(time.RFC3339))
+	return err
+}
+
+// --- Team identities ---
+
+// GetTeamIdentity retrieves a team identity by ID, or ErrNotFound if
+// none exists. Halted and revoked timestamps are nullable in the
+// database; they're returned as nil *time.Time if not set.
+func (s *SQLite) GetTeamIdentity(ctx context.Context, id string) (*profile.TeamIdentity, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, name, created_at, halted_at, revoked_at, revoke_reason
+		 FROM team_identities WHERE id = ?`, id)
+
+	var t profile.TeamIdentity
+	var createdAt string
+	var haltedAt, revokedAt, revokeReason sql.NullString
+	err := row.Scan(&t.ID, &t.Name, &createdAt, &haltedAt, &revokedAt, &revokeReason)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	t.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse team identity created_at %q: %w", createdAt, err)
+	}
+	if haltedAt.Valid {
+		parsed, perr := time.Parse(time.RFC3339, haltedAt.String)
+		if perr != nil {
+			return nil, fmt.Errorf("parse team identity halted_at %q: %w", haltedAt.String, perr)
+		}
+		t.HaltedAt = &parsed
+	}
+	if revokedAt.Valid {
+		parsed, perr := time.Parse(time.RFC3339, revokedAt.String)
+		if perr != nil {
+			return nil, fmt.Errorf("parse team identity revoked_at %q: %w", revokedAt.String, perr)
+		}
+		t.RevokedAt = &parsed
+	}
+	if revokeReason.Valid {
+		t.RevokeReason = revokeReason.String
+	}
+	return &t, nil
+}
+
+// PutTeamIdentity inserts or updates a team identity. Halted and
+// revoked timestamps + revoke reason are written whenever provided;
+// the store does not enforce one-way lifecycle semantics (that is a
+// caller/command-layer concern, since the correct response to a
+// rollback is context-dependent).
+func (s *SQLite) PutTeamIdentity(ctx context.Context, t *profile.TeamIdentity) error {
+	if t == nil {
+		return ErrNilInput
+	}
+	if t.ID == "" || t.Name == "" {
+		return fmt.Errorf("%w: team identity ID and name are required", ErrNilInput)
+	}
+
+	var haltedAt, revokedAt, revokeReason sql.NullString
+	if t.HaltedAt != nil {
+		haltedAt = sql.NullString{String: t.HaltedAt.Format(time.RFC3339), Valid: true}
+	}
+	if t.RevokedAt != nil {
+		revokedAt = sql.NullString{String: t.RevokedAt.Format(time.RFC3339), Valid: true}
+	}
+	if t.RevokeReason != "" {
+		revokeReason = sql.NullString{String: t.RevokeReason, Valid: true}
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO team_identities (id, name, created_at, halted_at, revoked_at, revoke_reason)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			name          = excluded.name,
+			halted_at     = excluded.halted_at,
+			revoked_at    = excluded.revoked_at,
+			revoke_reason = excluded.revoke_reason`,
+		t.ID, t.Name, t.CreatedAt.Format(time.RFC3339), haltedAt, revokedAt, revokeReason)
+	return err
+}
+
+// --- Row-scan helpers ---
+
+// scanEntity scans a single entity row and parses timestamps. The
+// column order must match entityColumns.
 func scanEntity(row *sql.Row) (*profile.Entity, error) {
 	var e profile.Entity
 	var createdAt, updatedAt string
-	err := row.Scan(&e.ID, (*string)(&e.Type), &e.ShortName, &e.Ecosystem, &e.URL, &createdAt, &updatedAt)
+	err := row.Scan(&e.ID, &e.CanonicalURI, (*string)(&e.Type), &e.ShortName, &e.Description,
+		&e.Ecosystem, &e.URL, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -334,7 +657,8 @@ func scanEntity(row *sql.Row) (*profile.Entity, error) {
 	return &e, nil
 }
 
-// scanSignals scans multiple signal rows.
+// scanSignals scans multiple signal rows. Callers are responsible for
+// deferring rows.Close().
 func scanSignals(rows *sql.Rows) ([]profile.Signal, error) {
 	signals := []profile.Signal{}
 	for rows.Next() {
@@ -362,6 +686,40 @@ func scanSignals(rows *sql.Rows) ([]profile.Signal, error) {
 		signals = append(signals, sig)
 	}
 	return signals, rows.Err()
+}
+
+// scanPosture scans a single posture row from a *sql.Row (single-result
+// query). scanPostureRow is the *sql.Rows counterpart for iteration.
+func scanPosture(row *sql.Row) (*profile.Posture, error) {
+	var p profile.Posture
+	var setAt string
+	err := row.Scan(&p.EntityID, &p.Version, (*string)(&p.Tier), &p.Rationale, &p.SetBy, &setAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.SetAt, err = time.Parse(time.RFC3339, setAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse posture set_at %q: %w", setAt, err)
+	}
+	return &p, nil
+}
+
+// scanPostureRow scans a single posture row from a *sql.Rows iterator.
+func scanPostureRow(rows *sql.Rows) (*profile.Posture, error) {
+	var p profile.Posture
+	var setAt string
+	if err := rows.Scan(&p.EntityID, &p.Version, (*string)(&p.Tier), &p.Rationale, &p.SetBy, &setAt); err != nil {
+		return nil, err
+	}
+	parsed, parseErr := time.Parse(time.RFC3339, setAt)
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse posture set_at %q for %s: %w", setAt, p.EntityID, parseErr)
+	}
+	p.SetAt = parsed
+	return &p, nil
 }
 
 // Compile-time interface check.

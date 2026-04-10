@@ -111,7 +111,12 @@ func TestAnalyzeCmd_Run_NoData(t *testing.T) {
 
 	// Without --refresh and no cached data, should prompt to use --refresh.
 	cmd := &AnalyzeCmd{Target: "alecthomas/kong", Refresh: false}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db"), Verbose: false}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+		Verbose:       false,
+	}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -222,8 +227,12 @@ func TestBurnCmd_MissingReason(t *testing.T) {
 func TestBurnAddCmd_Run(t *testing.T) {
 	t.Parallel()
 
-	cmd := &BurnAddCmd{Target: "evil-package", Reason: "malware"}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
+	cmd := &BurnAddCmd{Target: "pkg:npm/evil-package", Reason: "malware"}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -292,8 +301,12 @@ func TestPostureSetCmd_AllValidTiers(t *testing.T) {
 func TestPostureGetCmd_Run(t *testing.T) {
 	t.Parallel()
 
-	cmd := &PostureGetCmd{Target: "lodash"}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
+	cmd := &PostureGetCmd{Target: "pkg:npm/lodash"}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }
@@ -301,8 +314,12 @@ func TestPostureGetCmd_Run(t *testing.T) {
 func TestPostureSetCmd_Run(t *testing.T) {
 	t.Parallel()
 
-	cmd := &PostureSetCmd{Target: "lodash", Tier: "vetted-frozen", Rationale: "audited"}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
+	cmd := &PostureSetCmd{Target: "pkg:npm/lodash", Tier: "vetted-frozen", Rationale: "audited", Version: "4.17.21"}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
 	err := cmd.Run(globals)
 	assert.NoError(t, err)
 }

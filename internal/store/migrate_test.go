@@ -48,8 +48,8 @@ func TestMigration_IdempotentReopen(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = s1.db.Exec(
-		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
-		 VALUES ('test-1', 'package', 'test', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES ('test-1', 'pkg:npm/test', 'package', 'test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 	s1.Close()
 
@@ -58,11 +58,11 @@ func TestMigration_IdempotentReopen(t *testing.T) {
 	require.NoError(t, err)
 	defer s2.Close()
 
-	var name string
+	var shortName string
 	err = s2.db.QueryRowContext(context.Background(),
-		"SELECT name FROM entities WHERE id = 'test-1'").Scan(&name)
+		"SELECT short_name FROM entities WHERE id = 'test-1'").Scan(&shortName)
 	require.NoError(t, err)
-	assert.Equal(t, "test", name)
+	assert.Equal(t, "test", shortName)
 
 	// Version should still be correct.
 	var version int
@@ -74,6 +74,12 @@ func TestMigration_IdempotentReopen(t *testing.T) {
 
 // --- Legacy database upgrade ---
 
+// TestMigration_LegacyDatabaseUpgraded verifies that a database
+// created with the original v1 schema (no schema_version table) is
+// correctly detected and upgraded all the way to the current version.
+// Critically, it verifies that the v1 `name` column data is carried
+// forward into the v2 `short_name` column by the migrationV2Up
+// UPDATE statement, not silently lost.
 func TestMigration_LegacyDatabaseUpgraded(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.db")
@@ -84,24 +90,33 @@ func TestMigration_LegacyDatabaseUpgraded(t *testing.T) {
 	_, err = db.Exec(initialSchema)
 	require.NoError(t, err)
 
-	// Insert data.
+	// Insert data using v1 schema (has `name` column).
 	_, err = db.Exec(
 		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
 		 VALUES ('legacy-1', 'package', 'legacy-pkg', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 	db.Close()
 
-	// Open with OpenSQLite — should detect legacy and upgrade.
+	// Open with OpenSQLite — should detect legacy and upgrade through
+	// the whole chain (legacy v1 → marked as v1 → migrated to v2).
 	s, err := OpenSQLite(path)
 	require.NoError(t, err)
 	defer s.Close()
 
-	// Data preserved.
-	var name string
+	// Data preserved in the new columns: canonical_uri populated from
+	// legacy id, short_name populated from legacy name.
+	var shortName, canonicalURI string
 	err = s.db.QueryRowContext(context.Background(),
-		"SELECT name FROM entities WHERE id = 'legacy-1'").Scan(&name)
+		"SELECT short_name, canonical_uri FROM entities WHERE id = 'legacy-1'").Scan(&shortName, &canonicalURI)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-pkg", name)
+	assert.Equal(t, "legacy-pkg", shortName, "v1 name should have been copied to v2 short_name")
+	assert.Equal(t, "legacy-1", canonicalURI, "v1 id should have been copied to v2 canonical_uri")
+
+	// V1 name column should be gone.
+	var dummy string
+	err = s.db.QueryRowContext(context.Background(),
+		"SELECT name FROM pragma_table_info('entities') WHERE name = 'name'").Scan(&dummy)
+	assert.Equal(t, sql.ErrNoRows, err, "v1 name column should be dropped after v2 migration")
 
 	// Version table exists and is current.
 	var version int
@@ -141,7 +156,7 @@ func TestMigration_BackupCreatedBeforeMigration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "backup-test.db")
 
-	// Create a legacy database (no version table) so migration will run.
+	// Create a legacy v1 database — tables exist, no schema_version.
 	db, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	_, err = db.Exec(initialSchema)
@@ -152,29 +167,28 @@ func TestMigration_BackupCreatedBeforeMigration(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	// Open with OpenSQLite — migration should create a backup.
-	// Note: for a legacy DB detected as v1, no additional migrations
-	// run beyond marking it as v1, so no backup is created in this case.
-	// Backup is created when migrating FROM one version TO another.
-	// Let's just verify the backup function works directly.
-	err = backupDatabase(nil, path, 0)
+	// Open with OpenSQLite — the detector marks the DB as v1, then the
+	// v2 migration runs and creates a backup before touching the schema.
+	s, err := OpenSQLite(path)
 	require.NoError(t, err)
+	defer s.Close()
 
-	// Find the backup file.
+	// Find the v2 migration's pre-migration backup. The backup is named
+	// .backup-vN- where N is the zero-based index of the migration being
+	// applied — v2 is index 1, so we expect `.backup-v1-`.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 
 	backupFound := false
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "backup-test.db.backup-v0-") {
+		if strings.HasPrefix(e.Name(), "backup-test.db.backup-v1-") {
 			backupFound = true
-			// Verify backup has content.
 			info, err := e.Info()
 			require.NoError(t, err)
 			assert.Greater(t, info.Size(), int64(0), "backup should not be empty")
 		}
 	}
-	assert.True(t, backupFound, "backup file should exist")
+	assert.True(t, backupFound, "v2 migration should create a pre-migration backup")
 }
 
 func TestMigration_BackupPreservesPermissions(t *testing.T) {
@@ -211,45 +225,59 @@ func TestMigration_BackupNonexistentFile(t *testing.T) {
 
 // --- Rollback ---
 
+// TestMigration_RollbackDown verifies that rolling back one migration
+// at a time unwinds the schema step-by-step. With two migrations in
+// place (v1: initial schema, v2: entity-model-v2), a full rollback
+// goes v2 → v1 → v0 through two migrateDown calls.
 func TestMigration_RollbackDown(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollback.db")
 
-	// Open to create and migrate.
 	db, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
+	// Migrate all the way up.
 	err = migrate(db, path)
 	require.NoError(t, err)
 
-	// Verify at version 1.
 	version, err := getCurrentVersion(db)
 	require.NoError(t, err)
-	assert.Equal(t, 1, version)
+	assert.Equal(t, len(migrations), version)
 
-	// Insert data.
+	// Insert data using v2 schema (short_name, canonical_uri).
 	_, err = db.Exec(
-		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
-		 VALUES ('roll-1', 'package', 'rollback-test', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// Roll back.
+	// First rollback: v2 → v1. Data should survive; name column restored.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
-	// Version should be 0.
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, version)
+
+	var v1Name string
+	err = db.QueryRow("SELECT name FROM entities WHERE id = 'roll-1'").Scan(&v1Name)
+	require.NoError(t, err, "v1 name column should be readable after rollback from v2")
+	assert.Equal(t, "rollback-test", v1Name, "v2 short_name should have been copied back to v1 name")
+
+	// Second rollback: v1 → v0. Entities table dropped.
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
 	version, err = getCurrentVersion(db)
 	require.NoError(t, err)
 	assert.Equal(t, 0, version)
 
-	// Tables should be dropped.
 	var count int
 	err = db.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entities'").Scan(&count)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count, "entities table should be dropped after rollback")
+	assert.Equal(t, 0, count, "entities table should be dropped after rolling back to v0")
 }
 
 func TestMigration_RollbackAtVersionZero(t *testing.T) {
@@ -285,17 +313,18 @@ func TestMigration_RollbackCreatesBackup(t *testing.T) {
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
-	// Should have created a backup.
+	// migrateDown uses `currentVersion` as the backup's fromVersion, so
+	// rolling back from v2 produces a `.backup-v2-` file.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 
 	backupFound := false
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".backup-v1-") {
+		if strings.Contains(e.Name(), ".backup-v2-") {
 			backupFound = true
 		}
 	}
-	assert.True(t, backupFound, "rollback should create a backup")
+	assert.True(t, backupFound, "rollback from v2 should create a .backup-v2- file")
 }
 
 // --- Migration consistency ---
@@ -317,7 +346,7 @@ func TestMigration_VersionsAreSequential(t *testing.T) {
 
 func TestMigration_UpDownRoundTrip(t *testing.T) {
 	// Apply all migrations, then roll them all back, then apply again.
-	// This verifies up/down are truly reversible.
+	// This verifies up/down are truly reversible at the schema level.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roundtrip.db")
 
@@ -350,4 +379,129 @@ func TestMigration_UpDownRoundTrip(t *testing.T) {
 	version, err = getCurrentVersion(db)
 	require.NoError(t, err)
 	assert.Equal(t, len(migrations), version)
+}
+
+// TestMigration_V2DataRoundTrip is the data-preservation version of
+// TestMigration_UpDownRoundTrip. It starts at v1, seeds realistic legacy
+// data, migrates up to v2, verifies the data was correctly translated,
+// rolls back to v1, verifies the v1 schema is readable again, and
+// re-applies v2. This is the regression gate for migration v2.
+//
+// What we verify survives:
+//   - Entity id → canonical_uri copy on up-path
+//   - Entity name → short_name copy on up-path
+//   - Entity id unchanged through both paths
+//   - short_name → name copy on down-path
+//   - Posture rows carried through the PK change
+//   - Burn rows untouched (they weren't part of v2's entity changes)
+//   - Signal rows untouched (v2 is append-only but schema is same as v1)
+func TestMigration_V2DataRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data-roundtrip.db")
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	// --- Start at v1 with seed data. ---
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		version INTEGER NOT NULL, applied_at TEXT NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(initialSchema)
+	require.NoError(t, err)
+	require.NoError(t, recordVersion(db, 1))
+
+	_, err = db.Exec(`
+		INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at) VALUES
+			('pkg:npm:express', 'package', 'express', 'npm', 'https://github.com/expressjs/express',
+			 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			('pkg:npm:lodash', 'package', 'lodash', 'npm', '',
+			 '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z');
+
+		INSERT INTO signals (id, entity_id, type, signal_group, source, forgery_resistance, value, collected_at, expires_at)
+		VALUES ('sig-1', 'pkg:npm:express', 'stars', 'criticality', 'github', 'medium-declining',
+		        '{"count":65000}', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');
+
+		INSERT INTO postures (entity_id, tier, version, rationale, set_by, set_at)
+		VALUES ('pkg:npm:express', 'vetted-frozen', '4.18.2', 'audited', 'sarah', '2026-01-01T00:00:00Z');
+
+		INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
+		VALUES ('pkg:npm:lodash', 'dry run burn', 'local', '', '2026-01-03T00:00:00Z', 'sarah');
+	`)
+	require.NoError(t, err)
+
+	// --- Up: v1 → v2. ---
+	err = migrate(db, path)
+	require.NoError(t, err)
+
+	version, err := getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 2, version)
+
+	// Entity data should be translated: id unchanged, canonical_uri copied
+	// from id, short_name copied from name, v1 name column gone.
+	var shortName, canonicalURI string
+	err = db.QueryRow("SELECT short_name, canonical_uri FROM entities WHERE id = 'pkg:npm:express'").
+		Scan(&shortName, &canonicalURI)
+	require.NoError(t, err)
+	assert.Equal(t, "express", shortName)
+	assert.Equal(t, "pkg:npm:express", canonicalURI)
+
+	// v1 name column should be gone.
+	var col string
+	err = db.QueryRow(
+		`SELECT name FROM pragma_table_info('entities') WHERE name = 'name'`).Scan(&col)
+	assert.Equal(t, sql.ErrNoRows, err, "v1 name column should not exist after v2 up")
+
+	// Signals and burns untouched.
+	var sigCount, burnCount int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM signals").Scan(&sigCount))
+	assert.Equal(t, 1, sigCount)
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM burns").Scan(&burnCount))
+	assert.Equal(t, 1, burnCount)
+
+	// Posture survived the PK change.
+	var postureCount int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM postures WHERE entity_id = 'pkg:npm:express' AND version = '4.18.2'").
+		Scan(&postureCount))
+	assert.Equal(t, 1, postureCount)
+
+	// --- Down: v2 → v1. ---
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, version)
+
+	// Entity data restored: v1 name column is back, populated from short_name.
+	var name string
+	err = db.QueryRow("SELECT name FROM entities WHERE id = 'pkg:npm:express'").Scan(&name)
+	require.NoError(t, err)
+	assert.Equal(t, "express", name, "v1 name should have been restored from v2 short_name")
+
+	// v2 columns should be gone.
+	err = db.QueryRow(
+		`SELECT name FROM pragma_table_info('entities') WHERE name = 'canonical_uri'`).Scan(&col)
+	assert.Equal(t, sql.ErrNoRows, err, "v2 canonical_uri column should not exist after rollback")
+
+	// Signals and burns still there.
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM signals").Scan(&sigCount))
+	assert.Equal(t, 1, sigCount)
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM burns").Scan(&burnCount))
+	assert.Equal(t, 1, burnCount)
+
+	// --- Up again: v1 → v2. Second forward trip should work cleanly. ---
+	err = migrate(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 2, version)
+
+	err = db.QueryRow("SELECT short_name FROM entities WHERE id = 'pkg:npm:express'").Scan(&shortName)
+	require.NoError(t, err)
+	assert.Equal(t, "express", shortName, "data should survive a full v1→v2→v1→v2 loop")
 }

@@ -510,13 +510,20 @@ func parseGoModDeps(content string) goModDeps {
 	return deps
 }
 
+// makeSignal builds a Signal with a collision-resistant ID.
+//
+// The ID format is {source}:{entity_id}:{signal_type}:{collected_at_nanos}
+// per design/entity-model-v2.md §Signal ID Scheme. Including the
+// collected_at nanos makes re-runs of the same collection append
+// cleanly instead of colliding — which matters now that the store is
+// append-only (AppendSignals rejects duplicate IDs).
 func makeSignal(entityID, signalType string, group profile.SignalGroup,
 	forgery profile.ForgeryResistance, collectedAt time.Time, ttl time.Duration,
 	value map[string]interface{}) profile.Signal {
 
 	valueBytes, _ := json.Marshal(value)
 	return profile.Signal{
-		ID:                fmt.Sprintf("github:%s:%s", entityID, signalType),
+		ID:                fmt.Sprintf("github:%s:%s:%d", entityID, signalType, collectedAt.UnixNano()),
 		EntityID:          entityID,
 		Type:              signalType,
 		Group:             group,

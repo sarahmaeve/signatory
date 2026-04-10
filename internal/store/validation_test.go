@@ -19,21 +19,40 @@ var fixedTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestValidation_PutEntity_EmptyID(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "", Type: profile.EntityPackage, ShortName: "test"}
+	entity := &profile.Entity{
+		ID: "", CanonicalURI: "pkg:npm/test",
+		Type: profile.EntityPackage, ShortName: "test",
+	}
 	err := s.PutEntity(context.Background(), entity)
 	assert.Error(t, err, "should reject empty ID")
 }
 
+func TestValidation_PutEntity_EmptyCanonicalURI(t *testing.T) {
+	s := newTestDB(t)
+	entity := &profile.Entity{
+		ID: "test-id", CanonicalURI: "",
+		Type: profile.EntityPackage, ShortName: "test",
+	}
+	err := s.PutEntity(context.Background(), entity)
+	assert.Error(t, err, "should reject empty canonical URI")
+}
+
 func TestValidation_PutEntity_EmptyShortName(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "test-id", Type: profile.EntityPackage, ShortName: ""}
+	entity := &profile.Entity{
+		ID: "test-id", CanonicalURI: "pkg:npm/test",
+		Type: profile.EntityPackage, ShortName: "",
+	}
 	err := s.PutEntity(context.Background(), entity)
 	assert.Error(t, err, "should reject empty short_name")
 }
 
 func TestValidation_PutEntity_EmptyType(t *testing.T) {
 	s := newTestDB(t)
-	entity := &profile.Entity{ID: "test-id", Type: "", ShortName: "test"}
+	entity := &profile.Entity{
+		ID: "test-id", CanonicalURI: "pkg:npm/test",
+		Type: "", ShortName: "test",
+	}
 	err := s.PutEntity(context.Background(), entity)
 	assert.Error(t, err, "should reject empty type")
 }
@@ -68,7 +87,7 @@ func TestValidation_SetBurn_EmptyReason(t *testing.T) {
 
 // --- Issue #45: FK violation context ---
 
-func TestValidation_PutSignals_ForeignKeyViolation(t *testing.T) {
+func TestValidation_AppendSignals_ForeignKeyViolation(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 
@@ -81,7 +100,7 @@ func TestValidation_PutSignals_ForeignKeyViolation(t *testing.T) {
 		ExpiresAt:         fixedTime.Add(time.Hour),
 	}}
 
-	err := s.PutSignals(ctx, signals)
+	err := s.AppendSignals(ctx, signals)
 	assert.Error(t, err, "should reject signal referencing nonexistent entity")
 }
 

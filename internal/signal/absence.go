@@ -65,8 +65,10 @@ func (a *AbsenceRecord) ToSignal() profile.Signal {
 		"retryable": a.Retryable,
 	})
 
+	// Signal ID includes collected_at nanos per the v2 spec so that
+	// re-runs append instead of colliding with earlier absence records.
 	return profile.Signal{
-		ID:                fmt.Sprintf("%s:%s:absence:%s", a.Source, a.EntityID, a.SignalType),
+		ID:                fmt.Sprintf("%s:%s:absence:%s:%d", a.Source, a.EntityID, a.SignalType, a.CollectedAt.UnixNano()),
 		EntityID:          a.EntityID,
 		Type:              "absence:" + a.SignalType,
 		Group:             signalGroupForType(a.SignalType),

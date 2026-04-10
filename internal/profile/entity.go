@@ -1,6 +1,30 @@
 package profile
 
-import "time"
+import (
+	"crypto/rand"
+	"fmt"
+	"time"
+)
+
+// NewEntityID generates a random UUIDv4-style string for use as an
+// Entity.ID. The v2 model uses opaque UUIDs as the internal primary
+// key so that renaming or re-normalizing an entity's canonical URI
+// doesn't require cascading FK updates across signals, postures,
+// burns, dependency observations, audit log, and resolutions.
+//
+// Format: 8-4-4-4-12 hex, RFC 4122 version 4 variant. On the
+// astronomically unlikely event that crypto/rand.Read fails, this
+// panics — the caller is creating a new entity and cannot proceed
+// without an ID, so there is no meaningful fallback.
+func NewEntityID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("profile: crypto/rand.Read failed: %v", err))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4.
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant.
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
 
 // EntityType classifies what kind of entity a profile describes.
 type EntityType string

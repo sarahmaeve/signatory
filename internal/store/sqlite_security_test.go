@@ -17,11 +17,11 @@ func TestSecurity_CorruptedTimestampReturnsError(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 
-	// Insert an entity with a valid timestamp first.
+	// Insert an entity with a corrupted created_at.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"corrupt-entity", "package", "corrupt", "", "",
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"corrupt-entity", "pkg:npm/corrupt", "package", "corrupt", "", "", "",
 		"not-a-valid-date", time.Now().UTC().Format(time.RFC3339))
 	require.NoError(t, err)
 
@@ -43,9 +43,9 @@ func TestSecurity_CorruptedBurnTimestampReturnsError(t *testing.T) {
 
 	// Insert entity first.
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO entities (id, type, name, ecosystem, url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"burn-entity", "package", "burned", "", "",
+		`INSERT INTO entities (id, canonical_uri, type, short_name, description, ecosystem, url, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"burn-entity", "pkg:npm/burned", "package", "burned", "", "", "",
 		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
 	require.NoError(t, err)
 
@@ -82,7 +82,7 @@ func TestSecurity_ErrorsIsUsedForSentinels(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound,
 		"GetEntity should return an error matchable via errors.Is(err, ErrNotFound)")
 
-	_, err = s.GetPosture(ctx, "nonexistent")
+	_, err = s.GetPosture(ctx, "nonexistent", "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrNotFound)
 
