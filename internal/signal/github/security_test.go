@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -540,4 +541,109 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	u, err := url.Parse(raw)
 	require.NoError(t, err, "url.Parse(%q)", raw)
 	return u
+}
+
+// TestSecurity_ClientErrorDoesNotLeakBody verifies that error responses
+// from the GitHub API never echo the response body content into the
+// returned error string. Issue #93: client.get and client.getWithLinkHeader
+// embedded up to 4096 bytes of attacker-influenceable body into
+// `fmt.Errorf("GitHub API error %d: %s", status, body)`. The error then
+// propagated through collector.Collect → analyze.go → main.go's
+// fmt.Fprintln(os.Stderr, err), landing in CI logs, SIEM ingest pipelines,
+// and LLM agent transcripts that treat error output as ground truth.
+//
+// sanitizeErrorForStorage existed and was called on the absence-signal
+// path, but NOT on the GetRepo abort-collection path that fails fastest.
+// The cleanest fix is to drop the body at the source — the status code
+// is the only useful structured signal for the caller; the body is
+// attacker-controlled bytes that should never reach stderr.
+//
+// The test exercises both code paths:
+//
+//   - GetRepo → client.get (line 192) → error embedded body
+//   - GetContributors → client.getWithLinkHeader (line 242) → same bug
+//
+// And it sweeps the relevant non-OK status codes that hit the buggy
+// path. 403/429 are excluded because they return RateLimitError without
+// reading the body. 404 is excluded because it returns "not found: <path>"
+// without reading the body either. The remaining non-OK statuses
+// (401, 422, 500, 502, 503) all hit the body-embedding path.
+func TestSecurity_ClientErrorDoesNotLeakBody(t *testing.T) {
+	const sentinel = "LEAKED-INTERNAL-IP-10.0.0.42-DO-NOT-DISCLOSE"
+	body := []byte(`{"error":"server error","debug":"` + sentinel + `","internal_email":"oncall@example.internal"}`)
+
+	statuses := []int{401, 422, 500, 502, 503}
+
+	for _, status := range statuses {
+		t.Run("status_"+strconv.Itoa(status), func(t *testing.T) {
+			mux := http.NewServeMux()
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				w.Write(body)
+			}
+			mux.HandleFunc("/repos/owner/repo", handler)
+			mux.HandleFunc("/repos/owner/repo/contributors", handler)
+
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			client := &Client{
+				httpClient: server.Client(),
+				token:      "test-token",
+				baseURL:    server.URL,
+			}
+
+			t.Run("GetRepo (client.get path)", func(t *testing.T) {
+				_, err := client.GetRepo(context.Background(), "owner", "repo")
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), sentinel,
+					"GetRepo error must not leak response body content (%d)", status)
+				assert.NotContains(t, err.Error(), "oncall@example.internal",
+					"GetRepo error must not leak any body content (%d)", status)
+			})
+
+			t.Run("GetContributors (client.getWithLinkHeader path)", func(t *testing.T) {
+				_, err := client.GetContributors(context.Background(), "owner", "repo")
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), sentinel,
+					"GetContributors error must not leak response body content (%d)", status)
+				assert.NotContains(t, err.Error(), "oncall@example.internal",
+					"GetContributors error must not leak any body content (%d)", status)
+			})
+		})
+	}
+}
+
+// TestSecurity_ClientErrorPreservesStatusCode verifies the negative
+// invariant of the #93 fix: even after dropping the body, the error
+// must still tell the caller WHICH status code occurred so isRetryable
+// and other classifiers can do their job, and so a human reading the
+// stderr knows whether they're looking at a 5xx (server problem) or a
+// 4xx (client problem). If this test breaks, the body-stripping fix
+// went too far and removed useful structured information.
+func TestSecurity_ClientErrorPreservesStatusCode(t *testing.T) {
+	statuses := []int{401, 422, 500, 502, 503}
+
+	for _, status := range statuses {
+		t.Run("status_"+strconv.Itoa(status), func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})
+
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			client := &Client{
+				httpClient: server.Client(),
+				token:      "test-token",
+				baseURL:    server.URL,
+			}
+
+			_, err := client.GetRepo(context.Background(), "owner", "repo")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), strconv.Itoa(status),
+				"error must include the status code so callers can classify")
+		})
+	}
 }

@@ -190,8 +190,15 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096)) // Small limit for error bodies.
-		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
+		// Issue #93: do NOT include the response body in the error.
+		// The body is attacker-influenceable bytes (a malicious or
+		// compromised upstream can echo secrets, internal IPs, email
+		// addresses, or controlled tokens) and the error propagates
+		// up to stderr via main.go's Fprintln, where it lands in CI
+		// logs, SIEM ingest, and LLM agent transcripts that treat
+		// stderr as ground truth. Drop the body entirely; the status
+		// code is the only piece a caller actually needs to classify.
+		return fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
 	if result != nil {
@@ -240,8 +247,9 @@ func (c *Client) getWithLinkHeader(ctx context.Context, path string, result inte
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(body))
+		// Issue #93: drop the response body — see client.get above
+		// for the rationale.
+		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
 	if result != nil {
