@@ -94,21 +94,39 @@ DROP TABLE IF EXISTS entities;
 
 // migrationV2Up evolves the schema for entity model v2.
 // Key changes:
-//   - Entities: add canonical_uri, short_name, description fields
-//   - Signals: append-only (no upsert), keep existing data
-//   - Postures: versioned PK (entity_id, version)
-//   - New tables: dependency_observations, signal_resolutions, audit_log, team_identities
+//   - Entities: drop v1 `name`, add canonical_uri, short_name, description.
+//     Per design/entity-model-v2.md, short_name + description replace the
+//     old single-purpose name column.
+//   - Signals: append-only (no upsert), keep existing data.
+//   - Postures: versioned PK (entity_id, version).
+//   - New tables: dependency_observations, signal_resolutions, audit_log,
+//     team_identities.
+//
+// Index sequencing note: SQLite's ALTER TABLE DROP COLUMN refuses to drop
+// a column that is referenced by an index. The v1 schema has
+// idx_entities_name_type ON entities(name, type), so we must drop that
+// index *before* dropping the name column, otherwise the migration fails.
 const migrationV2Up = `
--- Add new columns to entities.
+-- Add new columns to entities (keep v1 name column for now — we copy
+-- from it below before dropping).
 ALTER TABLE entities ADD COLUMN canonical_uri TEXT NOT NULL DEFAULT '';
 ALTER TABLE entities ADD COLUMN short_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
 
--- Populate canonical_uri from existing id (legacy migration).
+-- Populate canonical_uri and short_name from legacy data. Only rows with
+-- empty canonical_uri are touched, so re-running is a no-op (defensive
+-- even though migrations run once).
 UPDATE entities SET canonical_uri = id, short_name = name WHERE canonical_uri = '';
 
--- Create unique index on canonical_uri.
+-- Drop the v1 index that references name, then drop the name column
+-- itself. Order matters: SQLite blocks DROP COLUMN if any index still
+-- references the column.
+DROP INDEX IF EXISTS idx_entities_name_type;
+ALTER TABLE entities DROP COLUMN name;
+
+-- V2 indexes per the entity-model-v2.md spec.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical_uri ON entities(canonical_uri);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 
 -- Postures: recreate with composite PK (entity_id, version).
 -- SQLite cannot alter primary keys, so we recreate the table.
@@ -178,14 +196,35 @@ CREATE TABLE IF NOT EXISTS team_identities (
 );
 `
 
+// migrationV2Down rolls back migration v2 to a readable v1 state.
+//
+// Rollback semantics per design/entity-model-v2.md:246 — rollback is a
+// recovery mechanism, not a feature. Data only present in v2 (audit log,
+// dependency observations, signal resolutions, team identities, posture
+// version history) is lost on rollback. The v1 `entities` and `signals`
+// tables are fully restored, and `postures` collapses to one row per
+// entity by keeping whichever row SQLite returns last (order-insensitive
+// rollback — the user gets a working v1 schema, not a time machine).
+//
+// Order matters here too. To restore the v1 `name` column we must:
+//  1. Drop the v2 indexes that reference canonical_uri / type
+//  2. Re-add the `name` column
+//  3. Copy short_name → name so v1 code can read it
+//  4. Drop the v2 columns
+//  5. Recreate the v1 index on (name, type)
+//
+// Dropping v2 indexes before v2 columns avoids the same DROP COLUMN
+// "column in use by index" error that bit us on the up-path.
 const migrationV2Down = `
--- Drop new tables.
+-- Drop v2-only tables (their data is lost by design).
 DROP TABLE IF EXISTS team_identities;
 DROP TABLE IF EXISTS audit_log;
 DROP TABLE IF EXISTS signal_resolutions;
 DROP TABLE IF EXISTS dependency_observations;
 
--- Recreate postures with original PK (entity_id only).
+-- Recreate postures with original PK (entity_id only). Version history
+-- is collapsed — we keep one row per entity, whichever the SELECT
+-- yields last. This is acceptable loss for a recovery rollback.
 CREATE TABLE postures_v1 (
 	entity_id TEXT PRIMARY KEY REFERENCES entities(id),
 	tier      TEXT NOT NULL,
@@ -194,20 +233,30 @@ CREATE TABLE postures_v1 (
 	set_by    TEXT NOT NULL,
 	set_at    TEXT NOT NULL
 );
--- Keep only the latest posture per entity (collapse version history).
 INSERT OR REPLACE INTO postures_v1 (entity_id, version, tier, rationale, set_by, set_at)
 	SELECT entity_id, version, tier, rationale, set_by, set_at FROM postures;
 DROP TABLE postures;
 ALTER TABLE postures_v1 RENAME TO postures;
 
--- Remove new columns from entities.
+-- Drop v2 entity indexes before dropping v2 columns — SQLite DROP
+-- COLUMN fails if the column is referenced by an index.
+DROP INDEX IF EXISTS idx_entities_type;
+DROP INDEX IF EXISTS idx_entities_canonical_uri;
+
+-- Restore v1 name column and populate it from short_name so v1 code
+-- can still read these rows.
+ALTER TABLE entities ADD COLUMN name TEXT NOT NULL DEFAULT '';
+UPDATE entities SET name = short_name;
+
+-- Drop the v2-only entity columns.
 -- SQLite 3.35.0+ supports ALTER TABLE DROP COLUMN. The modernc driver
 -- ships SQLite 3.51+, so this is safe.
 ALTER TABLE entities DROP COLUMN canonical_uri;
 ALTER TABLE entities DROP COLUMN short_name;
 ALTER TABLE entities DROP COLUMN description;
 
-DROP INDEX IF EXISTS idx_entities_canonical_uri;
+-- Recreate the v1 index on the restored name column.
+CREATE INDEX IF NOT EXISTS idx_entities_name_type ON entities(name, type);
 `
 
 // migrate runs all pending migrations on the database. It:
