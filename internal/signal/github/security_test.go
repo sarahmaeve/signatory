@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -399,4 +400,144 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 				"absence signal %s contains the secret token — TOKEN LEAK", sig.Type)
 		}
 	}
+}
+
+// TestSecurity_CheckRedirect_RefusesSchemeDowngrade verifies that the
+// http.Client redirect policy refuses to follow a redirect from HTTPS
+// to a non-HTTPS URL. Issue #89: the previous policy only stripped
+// the Authorization header on cross-origin redirects (different host)
+// — it had no scheme check at all. A 302 from https://api.github.com
+// to http://api.github.com (same host, scheme downgrade) would have
+// been followed with the Authorization header still attached, leaking
+// the bearer token over plaintext to any network observer.
+//
+// This is a unit test of checkRedirect directly. The corresponding
+// integration test below (TestSecurity_GitHubClient_*) verifies the
+// end-to-end behavior through net/http's redirect machinery.
+//
+// Each row crafts a request whose URL.Scheme is something other than
+// "https" and asserts that checkRedirect returns an error. Because
+// returning an error from CheckRedirect aborts the redirect chain
+// before any further request is sent, no token can leak.
+func TestSecurity_CheckRedirect_RefusesSchemeDowngrade(t *testing.T) {
+	httpsVia := mustParseURL(t, "https://api.github.com/repos/x/y")
+	via := []*http.Request{{URL: httpsVia, Header: http.Header{"Authorization": []string{"Bearer secret-token"}}}}
+
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{"same host downgrade to http", "http://api.github.com/redirected"},
+		{"different host downgrade to http", "http://attacker.example/exfiltrate"},
+		{"file scheme", "file:///etc/passwd"},
+		{"javascript scheme", "javascript:alert(1)"},
+		{"empty scheme", "//api.github.com/redirected"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			next := &http.Request{
+				URL:    mustParseURL(t, tc.target),
+				Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
+			}
+			err := checkRedirect(next, via)
+			require.Error(t, err, "checkRedirect must reject non-HTTPS redirect target %q", tc.target)
+		})
+	}
+}
+
+// TestSecurity_CheckRedirect_AllowsLegitimate verifies the negative
+// case: legitimate redirects (same host HTTPS → HTTPS, or cross-origin
+// HTTPS → HTTPS with auth stripped) must continue to work after the
+// scheme-downgrade fix. This locks in that the fix didn't accidentally
+// break the existing redirect-following behavior.
+func TestSecurity_CheckRedirect_AllowsLegitimate(t *testing.T) {
+	httpsVia := mustParseURL(t, "https://api.github.com/repos/x/y")
+	via := []*http.Request{{URL: httpsVia, Header: http.Header{"Authorization": []string{"Bearer secret-token"}}}}
+
+	t.Run("same host https redirect keeps auth", func(t *testing.T) {
+		next := &http.Request{
+			URL:    mustParseURL(t, "https://api.github.com/repos/x/y/contents/go.mod"),
+			Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
+		}
+		err := checkRedirect(next, via)
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer secret-token", next.Header.Get("Authorization"),
+			"same-host redirect must keep auth header")
+	})
+
+	t.Run("cross-origin https redirect strips auth", func(t *testing.T) {
+		next := &http.Request{
+			URL:    mustParseURL(t, "https://codeload.github.com/x/y/tarball/main"),
+			Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
+		}
+		err := checkRedirect(next, via)
+		require.NoError(t, err)
+		assert.Empty(t, next.Header.Get("Authorization"),
+			"cross-origin redirect must strip auth header")
+	})
+}
+
+// TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect is the end-to-end
+// integration counterpart to TestSecurity_CheckRedirect_RefusesSchemeDowngrade.
+// It uses real httptest TLS and HTTP servers to verify that a Client
+// going through net/http's redirect machinery refuses to follow an
+// HTTPS→HTTP redirect AND that the bearer token never reaches the
+// HTTP target server.
+func TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect(t *testing.T) {
+	const secretToken = "ghp_secret_token_that_must_not_leak"
+
+	// HTTP target server (the redirect destination). If the redirect
+	// were followed, this server would receive the request and we'd
+	// see the Authorization header. With the fix in place, the redirect
+	// is refused and this handler is never called.
+	var capturedAuth string
+	var hits int
+	httpTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		capturedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer httpTarget.Close()
+
+	// HTTPS source server. Returns a 302 redirecting to the HTTP target
+	// (same scheme would be `https`, the bug allows scheme downgrade).
+	httpsSource := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpTarget.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer httpsSource.Close()
+
+	// Construct a Client that uses the production checkRedirect AND
+	// trusts the test TLS server's self-signed cert (via httpsSource.Client()
+	// which returns a pre-configured *http.Client).
+	// We have to copy the production CheckRedirect into this httpClient
+	// because httpsSource.Client() doesn't set one — it returns a default
+	// client that follows redirects unconditionally.
+	testHTTPClient := httpsSource.Client()
+	testHTTPClient.CheckRedirect = checkRedirect
+
+	client := &Client{
+		httpClient: testHTTPClient,
+		token:      secretToken,
+		baseURL:    httpsSource.URL,
+	}
+
+	// Make any request through the client. The request goes to httpsSource,
+	// which redirects to httpTarget. With the fix, the client returns an
+	// error from the redirect handler and never reaches httpTarget.
+	var ignored map[string]interface{}
+	err := client.get(context.Background(), "/repos/owner/repo", &ignored)
+	require.Error(t, err, "client must return an error when the redirect chain hits a non-HTTPS URL")
+
+	// THE CRITICAL ASSERTION: the HTTP target server was never reached.
+	// The redirect was refused before any plaintext request was sent.
+	assert.Zero(t, hits, "HTTP target server must not have been hit — redirect should have been refused")
+	assert.Empty(t, capturedAuth, "Authorization header must never reach an HTTP URL — token leak otherwise")
+}
+
+// mustParseURL is a small test helper that fails the test on parse error.
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err, "url.Parse(%q)", raw)
+	return u
 }

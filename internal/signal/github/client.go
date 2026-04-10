@@ -41,22 +41,42 @@ type Client struct {
 func NewClient(token string) *Client {
 	return &Client{
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// Strip Authorization header on cross-origin redirects to
-				// prevent token leakage if redirected to an external host.
-				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-					req.Header.Del("Authorization")
-				}
-				if len(via) >= 10 {
-					return fmt.Errorf("too many redirects")
-				}
-				return nil
-			},
+			Timeout:       60 * time.Second,
+			CheckRedirect: checkRedirect,
 		},
 		token:   token,
 		baseURL: "https://api.github.com",
 	}
+}
+
+// checkRedirect is the http.Client redirect policy used by NewClient
+// and the security tests. It enforces three invariants in order:
+//
+//  1. Refuse any redirect target that is not HTTPS (#89). Scheme
+//     downgrade has no legitimate reason in the GitHub API context —
+//     continuing would either leak the bearer token over plaintext
+//     (the documented bug) or produce an unauthenticated request
+//     that masks the misconfiguration. Refusing the redirect makes
+//     the failure loud rather than silent.
+//  2. Strip the Authorization header on cross-origin redirects (still
+//     HTTPS at this point because of rule 1). The bearer token must
+//     never reach an external host even over HTTPS — the token grants
+//     access to api.github.com specifically.
+//  3. Limit redirect chains to <10 hops.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	// Rule 1: refuse any non-HTTPS redirect target.
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-HTTPS URL %s (token leak prevention)", req.URL.Redacted())
+	}
+	// Rule 2: strip Authorization on cross-origin redirects.
+	if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+		req.Header.Del("Authorization")
+	}
+	// Rule 3: bound the redirect chain.
+	if len(via) >= 10 {
+		return fmt.Errorf("too many redirects")
+	}
+	return nil
 }
 
 // repo represents GitHub repository metadata.
