@@ -17,8 +17,66 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// MaxTeamIdentityLength is the hard upper bound on a normalized team
+// identity, including the "team:" prefix. Real-world identities are
+// well under 50 characters; 133 (5 for "team:" + 128 body) is generous
+// slack and a hard cap to prevent log/display blowup, expensive
+// rendering, and length-based DoS from attacker-controlled input.
+const MaxTeamIdentityLength = 133
+
+// validIdentityBody restricts the post-"team:" portion of an identity
+// to a printable, ASCII-only character set: alphanumerics plus the
+// separators "._+-" used by the human+llm format from
+// design/entity-model-v2.md §Actor Identity. Underscore is included
+// because Unix usernames can contain it (the fallback uses $USER
+// directly).
+//
+// ASCII-only is the deliberate v0.1 choice — same reasoning as #78's
+// ValidateCanonicalURI: lookalike fragmentation via Cyrillic/Greek
+// homoglyphs would split audit ownership across visually-identical
+// near-duplicates, defeating the purpose of identifying who took an
+// action. If a future need for non-ASCII names emerges, the right
+// answer is Unicode NFC normalization at the boundary.
+var validIdentityBody = regexp.MustCompile(`^[A-Za-z0-9_.+-]{1,128}$`)
+
+// ValidateIdentity checks that s is safe to persist as an actor field
+// in audit_log, posture.set_by, burn.burned_by, and signal_resolutions.
+// resolved_by. It is the input-boundary defense for issue #101 — every
+// path that produces a team identity (env var, ~/.signatory/team file,
+// $USER fallback) routes through this validator before the result is
+// returned from Current().
+//
+// Rules, in order:
+//
+//  1. Length 1..MaxTeamIdentityLength bytes.
+//  2. Starts with the literal "team:" prefix (Current normalizes
+//     missing prefixes; this validator runs after that step).
+//  3. The post-"team:" body matches validIdentityBody.
+//
+// Rule 3 implicitly catches control characters (NUL, newline, tab,
+// escape sequences), non-ASCII bytes (lookalike fragmentation), and
+// shell-metacharacter injection.
+func ValidateIdentity(s string) error {
+	if s == "" {
+		return fmt.Errorf("team identity is empty")
+	}
+	if len(s) > MaxTeamIdentityLength {
+		return fmt.Errorf("team identity exceeds maximum length of %d bytes (got %d)",
+			MaxTeamIdentityLength, len(s))
+	}
+	if !strings.HasPrefix(s, "team:") {
+		return fmt.Errorf("team identity %q does not start with required \"team:\" prefix", s)
+	}
+	body := strings.TrimPrefix(s, "team:")
+	if !validIdentityBody.MatchString(body) {
+		return fmt.Errorf("team identity %q has invalid body — must match [A-Za-z0-9_.+-]{1,128}", s)
+	}
+	return nil
+}
 
 // Current returns the team identity string for this session.
 //
@@ -32,18 +90,34 @@ import (
 // that un-configured sessions are visibly distinguishable in the audit
 // log from properly-configured human+LLM team runs.
 //
-// Current never returns an error — resolution always produces a string.
-// An unreadable config file or unset env fall through to the next step.
-func Current() string {
+// The resolved identity is validated via ValidateIdentity before being
+// returned (#101 — env var and team file contents must not flow into
+// audit_log.actor / posture.set_by / etc. unsanitized). A validation
+// failure surfaces immediately at command startup so the user notices
+// and can fix their configuration, rather than corrupting the audit
+// trail silently.
+func Current() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("SIGNATORY_TEAM")); v != "" {
-		return normalize(v)
+		s := normalize(v)
+		if err := ValidateIdentity(s); err != nil {
+			return "", fmt.Errorf("SIGNATORY_TEAM env var: %w", err)
+		}
+		return s, nil
 	}
 
 	if v, ok := readTeamFile(); ok {
-		return normalize(v)
+		s := normalize(v)
+		if err := ValidateIdentity(s); err != nil {
+			return "", fmt.Errorf("~/.signatory/team file: %w", err)
+		}
+		return s, nil
 	}
 
-	return fallback()
+	s := fallback()
+	if err := ValidateIdentity(s); err != nil {
+		return "", fmt.Errorf("fallback team identity from $USER: %w", err)
+	}
+	return s, nil
 }
 
 // readTeamFile returns the first non-blank line of ~/.signatory/team,

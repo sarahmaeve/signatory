@@ -23,7 +23,9 @@ func TestCurrent_EnvVarTakesPrecedence(t *testing.T) {
 	withHome(t)
 	t.Setenv("SIGNATORY_TEAM", "team:sarah+claude-opus-4.6")
 
-	assert.Equal(t, "team:sarah+claude-opus-4.6", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:sarah+claude-opus-4.6", got)
 }
 
 func TestCurrent_EnvVarNormalized(t *testing.T) {
@@ -31,7 +33,9 @@ func TestCurrent_EnvVarNormalized(t *testing.T) {
 	withHome(t)
 	t.Setenv("SIGNATORY_TEAM", "sarah+claude-opus-4.6")
 
-	assert.Equal(t, "team:sarah+claude-opus-4.6", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:sarah+claude-opus-4.6", got)
 }
 
 func TestCurrent_ReadsTeamFile(t *testing.T) {
@@ -45,7 +49,9 @@ func TestCurrent_ReadsTeamFile(t *testing.T) {
 		[]byte("team:sarah+claude-opus-4.6\n"),
 		0600))
 
-	assert.Equal(t, "team:sarah+claude-opus-4.6", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:sarah+claude-opus-4.6", got)
 }
 
 func TestCurrent_TeamFileNormalizedAndCommentsIgnored(t *testing.T) {
@@ -59,7 +65,9 @@ func TestCurrent_TeamFileNormalizedAndCommentsIgnored(t *testing.T) {
 		[]byte("# comment line\n\nsarah+claude-opus-4.6\n"),
 		0600))
 
-	assert.Equal(t, "team:sarah+claude-opus-4.6", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:sarah+claude-opus-4.6", got)
 }
 
 func TestCurrent_FallsBackToUserUnassisted(t *testing.T) {
@@ -67,7 +75,9 @@ func TestCurrent_FallsBackToUserUnassisted(t *testing.T) {
 	t.Setenv("SIGNATORY_TEAM", "")
 	t.Setenv("USER", "testuser")
 
-	assert.Equal(t, "team:testuser+unassisted", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:testuser+unassisted", got)
 }
 
 func TestCurrent_FallbackUnknown(t *testing.T) {
@@ -76,7 +86,9 @@ func TestCurrent_FallbackUnknown(t *testing.T) {
 	t.Setenv("USER", "")
 	t.Setenv("USERNAME", "")
 
-	assert.Equal(t, "team:unknown+unassisted", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:unknown+unassisted", got)
 }
 
 // TestCurrent_EmptyTeamFileFallsThrough verifies that an empty team
@@ -91,5 +103,7 @@ func TestCurrent_EmptyTeamFileFallsThrough(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "team"), []byte("\n  \n"), 0600))
 
-	assert.Equal(t, "team:testuser+unassisted", Current())
+	got, err := Current()
+	require.NoError(t, err)
+	assert.Equal(t, "team:testuser+unassisted", got)
 }

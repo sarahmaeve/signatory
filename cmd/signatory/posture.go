@@ -139,7 +139,10 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 
 	ctx := context.Background()
 	auditLog := globals.NewAuditLogger(s)
-	actor := identity.Current()
+	actor, err := identity.Current()
+	if err != nil {
+		return fmt.Errorf("resolve team identity: %w", err)
+	}
 
 	entity, err := ensureEntity(ctx, s, cmd.Target)
 	if err != nil {

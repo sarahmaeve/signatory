@@ -36,7 +36,10 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 
 	ctx := context.Background()
 	auditLog := globals.NewAuditLogger(s)
-	actor := identity.Current()
+	actor, err := identity.Current()
+	if err != nil {
+		return fmt.Errorf("resolve team identity: %w", err)
+	}
 
 	// Normalize user input to a canonical URI. This is the one place
 	// where free-form input crosses into stable internal identifiers —
