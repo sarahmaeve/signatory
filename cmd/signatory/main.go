@@ -16,13 +16,16 @@ type CLI struct {
 	DB      string `help:"Path to signatory database." default:"~/.signatory/signatory.db" type:"path" env:"SIGNATORY_DB"`
 	Verbose bool   `help:"Verbose output." short:"v"`
 
-	Analyze     AnalyzeCmd     `cmd:"" help:"Analyze trust signals for a package, repo, or identity."`
-	Survey      SurveyCmd      `cmd:"" help:"Assess trust posture of a project's dependency tree."`
-	Burn        BurnCmd        `cmd:"" help:"Burn an entity, degrading its trust signals."`
-	Posture     PostureCmd     `cmd:"" help:"Set or view dependency posture tier for an entity."`
-	FormatCheck FormatCheckCmd `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
-	Ingest      IngestCmd      `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
-	Version     VersionCmd     `cmd:"" help:"Print version information."`
+	Analyze         AnalyzeCmd         `cmd:"" help:"Analyze trust signals for a package, repo, or identity."`
+	Survey          SurveyCmd          `cmd:"" help:"Assess trust posture of a project's dependency tree."`
+	Burn            BurnCmd            `cmd:"" help:"Burn an entity, degrading its trust signals."`
+	Posture         PostureCmd         `cmd:"" help:"Set or view dependency posture tier for an entity."`
+	FormatCheck     FormatCheckCmd     `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
+	Ingest          IngestCmd          `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
+	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
+	ShowFindings    ShowFindingsCmd    `cmd:"show-findings" help:"Query findings across ingested analyst outputs."`
+	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
+	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 
 var (

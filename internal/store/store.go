@@ -48,6 +48,12 @@ type Store interface {
 	// Analyst output ingestion (append-only, idempotent on content_hash).
 	IngestAnalystOutput(ctx context.Context, out *exchange.AnalystOutput, sourcePath string) (*IngestResult, error)
 
+	// Analyst output queries (read path).
+	ListAnalystOutputs(ctx context.Context, filter AnalystOutputFilter) ([]AnalystOutputSummary, error)
+	GetAnalystOutput(ctx context.Context, outputID string) (*exchange.AnalystOutput, error)
+	ListFindings(ctx context.Context, filter FindingFilter) ([]FindingSummary, error)
+	ListMethodologyPatterns(ctx context.Context, filter MethodologyPatternFilter) ([]MethodologyPatternSummary, error)
+
 	// Close releases database resources.
 	Close() error
 }
