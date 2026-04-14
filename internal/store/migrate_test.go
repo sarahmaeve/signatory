@@ -253,9 +253,19 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v3 → v2. Drops the append-only triggers.
-	// Data is unaffected (triggers fire on UPDATE/DELETE, not on
-	// existing rows or schema changes).
+	// First rollback: v4 → v3. Drops the analyst-output stream
+	// tables and signal_evidence; removes the signals.details column.
+	// The v3-and-earlier data we care about (entities, signals,
+	// burns) is unaffected.
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 3, version)
+
+	// Second rollback: v3 → v2. Drops the append-only triggers.
+	// Data is unaffected.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
@@ -268,7 +278,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err, "entity should still be readable after v3 rollback")
 	assert.Equal(t, "rollback-test", v2ShortName)
 
-	// Second rollback: v2 → v1. Data should survive; name column restored.
+	// Third rollback: v2 → v1. Data should survive; name column restored.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
@@ -281,7 +291,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err, "v1 name column should be readable after rollback from v2")
 	assert.Equal(t, "rollback-test", v1Name, "v2 short_name should have been copied back to v1 name")
 
-	// Third rollback: v1 → v0. Entities table dropped.
+	// Fourth rollback: v1 → v0. Entities table dropped.
 	err = migrateDown(db, path)
 	require.NoError(t, err)
 
@@ -484,7 +494,19 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v2 (drops append-only triggers). ---
+	// --- Down: vN → v3 (drops analyst-output stream + signal evidence). ---
+	// The v4 migration adds new tables that have no v3 precedent;
+	// rolling back drops them and removes the signals.details column.
+	// The v2 entity/signal data we care about for this test is
+	// untouched.
+	err = migrateDown(db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(db)
+	require.NoError(t, err)
+	assert.Equal(t, 3, version)
+
+	// --- Down: v3 → v2 (drops append-only triggers). ---
 	// This is a no-op for the data we care about — the v3 migration
 	// only adds triggers, so rolling it back leaves the v2 schema and
 	// data intact. We still walk it explicitly so the round-trip is

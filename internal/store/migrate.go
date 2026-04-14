@@ -41,6 +41,12 @@ var migrations = []Migration{
 		Up:          migrationV3Up,
 		Down:        migrationV3Down,
 	},
+	{
+		Version:     4,
+		Description: "analyst-output stream: tables for AnalystOutput / Finding / PositiveAbsence / Observation / MethodologyCatalog / Citation; signals.details JSON column; signal_evidence table",
+		Up:          migrationV4Up,
+		Down:        migrationV4Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -316,6 +322,364 @@ DROP TRIGGER IF EXISTS dependency_observations_no_delete;
 DROP TRIGGER IF EXISTS dependency_observations_no_update;
 DROP TRIGGER IF EXISTS signals_no_delete;
 DROP TRIGGER IF EXISTS signals_no_update;
+`
+
+// migrationV4Up adds the analyst-output stream — the tables that
+// hold structured `exchange.AnalystOutput` documents per
+// design/ingestion-plan.md — and the proposed signals.details
+// JSON column + signal_evidence table from
+// design/signal-storage-evolution.md. Lands together because they
+// constitute one logical schema update (richer storage for both
+// streams: signals get JSON details + raw evidence; AnalystOutput
+// gets a parallel structured stream).
+//
+// All new tables are append-only (triggers below). They use
+// foreign keys into the existing entities table; identity entities
+// are referenced by canonical_uri-driven lookup at insert time.
+//
+// Re-ingestion idempotency is enforced by analyst_outputs.content_hash
+// being UNIQUE.
+const migrationV4Up = `
+-- ===== signals enrichment =====
+ALTER TABLE signals ADD COLUMN details TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS signal_evidence (
+    id           TEXT PRIMARY KEY,
+    signal_id    TEXT NOT NULL REFERENCES signals(id),
+    kind         TEXT NOT NULL,
+    origin       TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    content      BLOB NOT NULL,
+    captured_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_signal ON signal_evidence(signal_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_kind ON signal_evidence(kind);
+
+-- ===== analyst-output stream =====
+
+-- Top-level envelope. One row per ingested AnalystOutput.
+CREATE TABLE IF NOT EXISTS analyst_outputs (
+    id              TEXT PRIMARY KEY,
+    entity_id       TEXT NOT NULL REFERENCES entities(id),
+    analyst_id      TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    prompt_version  TEXT NOT NULL DEFAULT '',
+    invoked_at      TEXT NOT NULL,
+    ingested_at     TEXT NOT NULL,
+    round           INTEGER NOT NULL DEFAULT 1,
+    target_commit   TEXT NOT NULL DEFAULT '',
+    round_notes     TEXT NOT NULL DEFAULT '',
+    source_path     TEXT NOT NULL DEFAULT '',
+    content_hash    TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_outputs_entity ON analyst_outputs(entity_id);
+CREATE INDEX IF NOT EXISTS idx_outputs_analyst_target ON analyst_outputs(analyst_id, entity_id, invoked_at);
+
+-- One row per Finding within an output.
+CREATE TABLE IF NOT EXISTS findings (
+    id                  TEXT PRIMARY KEY,
+    output_id           TEXT NOT NULL REFERENCES analyst_outputs(id),
+    finding_local_id    TEXT NOT NULL,
+    verdict             TEXT NOT NULL,
+    rationale           TEXT NOT NULL,
+    severity_default    TEXT NOT NULL,
+    design_intent       INTEGER NOT NULL DEFAULT 0,
+    category            TEXT NOT NULL,
+    signal_type         TEXT NOT NULL DEFAULT '',
+    answers_question    TEXT NOT NULL DEFAULT '',
+    UNIQUE (output_id, finding_local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_findings_output ON findings(output_id);
+CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity_default);
+CREATE INDEX IF NOT EXISTS idx_findings_signal_type ON findings(signal_type);
+
+-- Conditional severity overrides per (host_isolation, platform).
+CREATE TABLE IF NOT EXISTS finding_severity_contexts (
+    finding_id      TEXT NOT NULL REFERENCES findings(id),
+    host_isolation  TEXT NOT NULL DEFAULT '',
+    platform        TEXT NOT NULL DEFAULT '',
+    value           TEXT NOT NULL,
+    PRIMARY KEY (finding_id, host_isolation, platform)
+);
+
+-- Supersession: this finding revises one or more priors.
+CREATE TABLE IF NOT EXISTS finding_supersedes (
+    finding_id      TEXT NOT NULL REFERENCES findings(id),
+    prior_id        TEXT NOT NULL,
+    prior_round     INTEGER NOT NULL DEFAULT 0,
+    kind            TEXT NOT NULL,
+    PRIMARY KEY (finding_id, prior_id)
+);
+
+-- Per-Finding prerequisites (ordered list).
+CREATE TABLE IF NOT EXISTS finding_prerequisites (
+    finding_id  TEXT NOT NULL REFERENCES findings(id),
+    seq         INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    PRIMARY KEY (finding_id, seq)
+);
+
+-- Per-Finding remediation hints (ordered list).
+CREATE TABLE IF NOT EXISTS finding_remediation_hints (
+    finding_id  TEXT NOT NULL REFERENCES findings(id),
+    seq         INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    PRIMARY KEY (finding_id, seq)
+);
+
+-- Cross-references between findings within the same output.
+CREATE TABLE IF NOT EXISTS finding_related (
+    finding_id  TEXT NOT NULL REFERENCES findings(id),
+    related_id  TEXT NOT NULL,
+    PRIMARY KEY (finding_id, related_id)
+);
+
+-- Positive absences (pattern checked, not found).
+CREATE TABLE IF NOT EXISTS positive_absences (
+    id                  TEXT PRIMARY KEY,
+    output_id           TEXT NOT NULL REFERENCES analyst_outputs(id),
+    pattern_checked     TEXT NOT NULL,
+    description         TEXT NOT NULL,
+    confidence          TEXT NOT NULL,
+    pattern_ref         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_absences_output ON positive_absences(output_id);
+
+-- Observations: trust-model commentary that doesn't fit Finding shape.
+CREATE TABLE IF NOT EXISTS observations (
+    id                      TEXT PRIMARY KEY,
+    output_id               TEXT NOT NULL REFERENCES analyst_outputs(id),
+    observation_local_id    TEXT NOT NULL,
+    title                   TEXT NOT NULL,
+    body                    TEXT NOT NULL,
+    category                TEXT NOT NULL,
+    signal_type             TEXT NOT NULL DEFAULT '',
+    UNIQUE (output_id, observation_local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_observations_output ON observations(output_id);
+
+-- Methodology catalog: one per output.
+CREATE TABLE IF NOT EXISTS methodology_catalogs (
+    output_id           TEXT PRIMARY KEY REFERENCES analyst_outputs(id),
+    source_analyst_id   TEXT NOT NULL,
+    source_model        TEXT NOT NULL,
+    source_invoked_at   TEXT NOT NULL,
+    notes               TEXT NOT NULL DEFAULT ''
+);
+
+-- Methodology patterns within a catalog.
+CREATE TABLE IF NOT EXISTS methodology_patterns (
+    id                       TEXT PRIMARY KEY,
+    output_id                TEXT NOT NULL REFERENCES analyst_outputs(id),
+    pattern_local_id         TEXT NOT NULL,
+    signal_group             TEXT NOT NULL,
+    description              TEXT NOT NULL,
+    pattern_text             TEXT NOT NULL DEFAULT '',
+    grep_precision           TEXT NOT NULL,
+    reasoning_depth          TEXT NOT NULL,
+    miss_mode                TEXT NOT NULL DEFAULT '',
+    false_positive_notes     TEXT NOT NULL DEFAULT '',
+    -- hit_on_target is nullable via convention: -1=null, 0=false, 1=true
+    -- (SQLite doesn't enforce a real BOOLEAN type; we use INTEGER)
+    hit_on_target            INTEGER NOT NULL DEFAULT -1,
+    UNIQUE (output_id, pattern_local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_patterns_signal_group ON methodology_patterns(signal_group);
+CREATE INDEX IF NOT EXISTS idx_patterns_hit ON methodology_patterns(hit_on_target);
+
+-- Pattern composition.
+CREATE TABLE IF NOT EXISTS methodology_pattern_composes (
+    pattern_id      TEXT NOT NULL REFERENCES methodology_patterns(id),
+    composes_with   TEXT NOT NULL,
+    PRIMARY KEY (pattern_id, composes_with)
+);
+
+-- Citations: polymorphic FK via parent_kind + parent_id.
+-- parent_kind in {finding, positive_absence, observation, methodology_pattern}.
+CREATE TABLE IF NOT EXISTS citations (
+    id              TEXT PRIMARY KEY,
+    parent_kind     TEXT NOT NULL,
+    parent_id       TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    path            TEXT NOT NULL DEFAULT '',
+    -- line_start / line_end as INTEGER nullables: -1 means null (Citation
+    -- uses Scope alternative when line_start is unset).
+    line_start      INTEGER NOT NULL DEFAULT -1,
+    line_end        INTEGER NOT NULL DEFAULT -1,
+    scope_kind      TEXT NOT NULL DEFAULT '',
+    scope_path      TEXT NOT NULL DEFAULT '',
+    commit_sha      TEXT NOT NULL DEFAULT '',
+    quoted          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_citations_parent ON citations(parent_kind, parent_id);
+CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
+
+-- Top-level supersession: output supersedes prior outputs.
+CREATE TABLE IF NOT EXISTS output_supersedes (
+    output_id       TEXT NOT NULL REFERENCES analyst_outputs(id),
+    prior_id        TEXT NOT NULL,
+    prior_round     INTEGER NOT NULL DEFAULT 0,
+    kind            TEXT NOT NULL,
+    PRIMARY KEY (output_id, prior_id)
+);
+
+-- Output reframes_from: free-text notes on cross-analyst engagement.
+CREATE TABLE IF NOT EXISTS output_reframes_from (
+    output_id   TEXT NOT NULL REFERENCES analyst_outputs(id),
+    seq         INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    PRIMARY KEY (output_id, seq)
+);
+
+-- ===== append-only triggers =====
+-- Same pattern as migration v3. Every new table is append-only;
+-- query layer filters to current state.
+
+CREATE TRIGGER signal_evidence_no_update BEFORE UPDATE ON signal_evidence
+    BEGIN SELECT RAISE(ABORT, 'signal_evidence is append-only'); END;
+CREATE TRIGGER signal_evidence_no_delete BEFORE DELETE ON signal_evidence
+    BEGIN SELECT RAISE(ABORT, 'signal_evidence is append-only'); END;
+
+CREATE TRIGGER analyst_outputs_no_update BEFORE UPDATE ON analyst_outputs
+    BEGIN SELECT RAISE(ABORT, 'analyst_outputs are append-only'); END;
+CREATE TRIGGER analyst_outputs_no_delete BEFORE DELETE ON analyst_outputs
+    BEGIN SELECT RAISE(ABORT, 'analyst_outputs are append-only'); END;
+
+CREATE TRIGGER findings_no_update BEFORE UPDATE ON findings
+    BEGIN SELECT RAISE(ABORT, 'findings are append-only'); END;
+CREATE TRIGGER findings_no_delete BEFORE DELETE ON findings
+    BEGIN SELECT RAISE(ABORT, 'findings are append-only'); END;
+
+CREATE TRIGGER finding_severity_contexts_no_update BEFORE UPDATE ON finding_severity_contexts
+    BEGIN SELECT RAISE(ABORT, 'finding_severity_contexts are append-only'); END;
+CREATE TRIGGER finding_severity_contexts_no_delete BEFORE DELETE ON finding_severity_contexts
+    BEGIN SELECT RAISE(ABORT, 'finding_severity_contexts are append-only'); END;
+
+CREATE TRIGGER finding_supersedes_no_update BEFORE UPDATE ON finding_supersedes
+    BEGIN SELECT RAISE(ABORT, 'finding_supersedes are append-only'); END;
+CREATE TRIGGER finding_supersedes_no_delete BEFORE DELETE ON finding_supersedes
+    BEGIN SELECT RAISE(ABORT, 'finding_supersedes are append-only'); END;
+
+CREATE TRIGGER finding_prerequisites_no_update BEFORE UPDATE ON finding_prerequisites
+    BEGIN SELECT RAISE(ABORT, 'finding_prerequisites are append-only'); END;
+CREATE TRIGGER finding_prerequisites_no_delete BEFORE DELETE ON finding_prerequisites
+    BEGIN SELECT RAISE(ABORT, 'finding_prerequisites are append-only'); END;
+
+CREATE TRIGGER finding_remediation_hints_no_update BEFORE UPDATE ON finding_remediation_hints
+    BEGIN SELECT RAISE(ABORT, 'finding_remediation_hints are append-only'); END;
+CREATE TRIGGER finding_remediation_hints_no_delete BEFORE DELETE ON finding_remediation_hints
+    BEGIN SELECT RAISE(ABORT, 'finding_remediation_hints are append-only'); END;
+
+CREATE TRIGGER finding_related_no_update BEFORE UPDATE ON finding_related
+    BEGIN SELECT RAISE(ABORT, 'finding_related are append-only'); END;
+CREATE TRIGGER finding_related_no_delete BEFORE DELETE ON finding_related
+    BEGIN SELECT RAISE(ABORT, 'finding_related are append-only'); END;
+
+CREATE TRIGGER positive_absences_no_update BEFORE UPDATE ON positive_absences
+    BEGIN SELECT RAISE(ABORT, 'positive_absences are append-only'); END;
+CREATE TRIGGER positive_absences_no_delete BEFORE DELETE ON positive_absences
+    BEGIN SELECT RAISE(ABORT, 'positive_absences are append-only'); END;
+
+CREATE TRIGGER observations_no_update BEFORE UPDATE ON observations
+    BEGIN SELECT RAISE(ABORT, 'observations are append-only'); END;
+CREATE TRIGGER observations_no_delete BEFORE DELETE ON observations
+    BEGIN SELECT RAISE(ABORT, 'observations are append-only'); END;
+
+CREATE TRIGGER methodology_catalogs_no_update BEFORE UPDATE ON methodology_catalogs
+    BEGIN SELECT RAISE(ABORT, 'methodology_catalogs are append-only'); END;
+CREATE TRIGGER methodology_catalogs_no_delete BEFORE DELETE ON methodology_catalogs
+    BEGIN SELECT RAISE(ABORT, 'methodology_catalogs are append-only'); END;
+
+CREATE TRIGGER methodology_patterns_no_update BEFORE UPDATE ON methodology_patterns
+    BEGIN SELECT RAISE(ABORT, 'methodology_patterns are append-only'); END;
+CREATE TRIGGER methodology_patterns_no_delete BEFORE DELETE ON methodology_patterns
+    BEGIN SELECT RAISE(ABORT, 'methodology_patterns are append-only'); END;
+
+CREATE TRIGGER methodology_pattern_composes_no_update BEFORE UPDATE ON methodology_pattern_composes
+    BEGIN SELECT RAISE(ABORT, 'methodology_pattern_composes are append-only'); END;
+CREATE TRIGGER methodology_pattern_composes_no_delete BEFORE DELETE ON methodology_pattern_composes
+    BEGIN SELECT RAISE(ABORT, 'methodology_pattern_composes are append-only'); END;
+
+CREATE TRIGGER citations_no_update BEFORE UPDATE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
+CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
+
+CREATE TRIGGER output_supersedes_no_update BEFORE UPDATE ON output_supersedes
+    BEGIN SELECT RAISE(ABORT, 'output_supersedes are append-only'); END;
+CREATE TRIGGER output_supersedes_no_delete BEFORE DELETE ON output_supersedes
+    BEGIN SELECT RAISE(ABORT, 'output_supersedes are append-only'); END;
+
+CREATE TRIGGER output_reframes_from_no_update BEFORE UPDATE ON output_reframes_from
+    BEGIN SELECT RAISE(ABORT, 'output_reframes_from are append-only'); END;
+CREATE TRIGGER output_reframes_from_no_delete BEFORE DELETE ON output_reframes_from
+    BEGIN SELECT RAISE(ABORT, 'output_reframes_from are append-only'); END;
+`
+
+// migrationV4Down rolls back the analyst-output stream and the
+// signal enrichment additions. Data in the dropped tables is lost
+// — they're net-new in v4 with no v3 precedent to roll back into.
+//
+// The signals.details column drop is the only data-loss in the
+// existing-table modification; existing signals rows survive with
+// their original columns intact.
+const migrationV4Down = `
+-- Drop triggers first so DROP TABLE works.
+DROP TRIGGER IF EXISTS output_reframes_from_no_delete;
+DROP TRIGGER IF EXISTS output_reframes_from_no_update;
+DROP TRIGGER IF EXISTS output_supersedes_no_delete;
+DROP TRIGGER IF EXISTS output_supersedes_no_update;
+DROP TRIGGER IF EXISTS citations_no_delete;
+DROP TRIGGER IF EXISTS citations_no_update;
+DROP TRIGGER IF EXISTS methodology_pattern_composes_no_delete;
+DROP TRIGGER IF EXISTS methodology_pattern_composes_no_update;
+DROP TRIGGER IF EXISTS methodology_patterns_no_delete;
+DROP TRIGGER IF EXISTS methodology_patterns_no_update;
+DROP TRIGGER IF EXISTS methodology_catalogs_no_delete;
+DROP TRIGGER IF EXISTS methodology_catalogs_no_update;
+DROP TRIGGER IF EXISTS observations_no_delete;
+DROP TRIGGER IF EXISTS observations_no_update;
+DROP TRIGGER IF EXISTS positive_absences_no_delete;
+DROP TRIGGER IF EXISTS positive_absences_no_update;
+DROP TRIGGER IF EXISTS finding_related_no_delete;
+DROP TRIGGER IF EXISTS finding_related_no_update;
+DROP TRIGGER IF EXISTS finding_remediation_hints_no_delete;
+DROP TRIGGER IF EXISTS finding_remediation_hints_no_update;
+DROP TRIGGER IF EXISTS finding_prerequisites_no_delete;
+DROP TRIGGER IF EXISTS finding_prerequisites_no_update;
+DROP TRIGGER IF EXISTS finding_supersedes_no_delete;
+DROP TRIGGER IF EXISTS finding_supersedes_no_update;
+DROP TRIGGER IF EXISTS finding_severity_contexts_no_delete;
+DROP TRIGGER IF EXISTS finding_severity_contexts_no_update;
+DROP TRIGGER IF EXISTS findings_no_delete;
+DROP TRIGGER IF EXISTS findings_no_update;
+DROP TRIGGER IF EXISTS analyst_outputs_no_delete;
+DROP TRIGGER IF EXISTS analyst_outputs_no_update;
+DROP TRIGGER IF EXISTS signal_evidence_no_delete;
+DROP TRIGGER IF EXISTS signal_evidence_no_update;
+
+-- Drop tables in reverse-FK order.
+DROP TABLE IF EXISTS output_reframes_from;
+DROP TABLE IF EXISTS output_supersedes;
+DROP TABLE IF EXISTS citations;
+DROP TABLE IF EXISTS methodology_pattern_composes;
+DROP TABLE IF EXISTS methodology_patterns;
+DROP TABLE IF EXISTS methodology_catalogs;
+DROP TABLE IF EXISTS observations;
+DROP TABLE IF EXISTS positive_absences;
+DROP TABLE IF EXISTS finding_related;
+DROP TABLE IF EXISTS finding_remediation_hints;
+DROP TABLE IF EXISTS finding_prerequisites;
+DROP TABLE IF EXISTS finding_supersedes;
+DROP TABLE IF EXISTS finding_severity_contexts;
+DROP TABLE IF EXISTS findings;
+DROP TABLE IF EXISTS analyst_outputs;
+DROP TABLE IF EXISTS signal_evidence;
+
+-- Drop the v4 column from signals. Existing signal rows are
+-- preserved; the details column is removed.
+ALTER TABLE signals DROP COLUMN details;
 `
 
 // migrate runs all pending migrations on the database. It:
