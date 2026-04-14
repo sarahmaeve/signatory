@@ -254,6 +254,21 @@ downgraded a prior threat assessment.
 | `analyst_self_correction` | governance | very-high | 9 | positive. **Meta-signal about the analyst, not the target.** When an analysis round explicitly supersedes a prior round's finding based on deeper grounding, that's a signal about analyst quality — analysts that revise their own assessments when the evidence warrants produce higher-fidelity output than ones that defend prior positions. Record as metadata on the analysis, not as a signal on the target. Feeds `design/mcp-dual-analyst-architecture.md`'s schema design. |
 | `positive_absence_signal` | hygiene | medium | 5 | positive. Distinct from *unexamined absence*. When an analyst explicitly checks for a known-bad pattern (SQL injection shape, `unwrap` on network boundaries, git-pinned deps) and records "checked, not present," that's a different epistemic state than "not examined." Signatory's signal bookkeeping should distinguish these. Implementation: a `positive_absences` field on analyst output, cross-referenced against the checking-analyst's methodology catalog. |
 
+### From the thefuck synthesis
+
+These two signals were surfaced *only* at synthesis time during the
+thefuck dual-analyst engagement (see `design/analysis/thefuck.md`).
+Neither raw analyst output contained them; both emerged from
+integrating the two perspectives. They are therefore distinct from
+the prior signal types in an important way: they are
+**synthesis-only** signals that the synthesist role is responsible
+for emitting, not the per-analyst roles.
+
+| Type | Group | Forgery resistance | Weight (1-10) | Polarity |
+|------|-------|-------------------|---------------|----------|
+| `fallow_status_amplifier` | criticality | n/a | 8 | amplifier (negative-direction). Sibling to `criticality` in mechanism but distinct in driver. When a project's vitality has dropped below a maintained threshold (no commits in 12+ months, no releases in 24+ months, open PRs unreviewed for 6+ months), every other negative finding's *effective* severity is amplified because the remediation path is closed. A `low` severity hygiene gap on a maintained project is "watch this on the next release"; the same gap on a fallow project is "permanent until forked." Mechanism: severity-multiplier overlay applied at synthesis time. The thefuck engagement is the reference case — provenance F001 (high-severity vitality finding) lifted the effective severity of security F002-F009 from "could be tightened upstream" to "won't be tightened, so account for it now." |
+| `dual_analyst_self_confirmation` | governance | very-high | 9 | positive (when present). When both analysts independently report the absence of the same pattern (e.g., security-side "no telemetry" + provenance-side "no hardcoded callbacks in URL grep"), confidence in the absence compounds beyond either alone. The mechanism is information-theoretic: two independent-method false negatives are exponentially less likely than one. The thefuck engagement's "no telemetry" signal is the reference case — security F010 (positive: full source-tree URL grep returned no phone-home) and provenance positive-absence (no hardcoded callback patterns) converged on the same conclusion via different methods. Implementation: synthesist computes the intersection of positive_absences and `severity: positive` findings across all analyst inputs, emits one `dual_analyst_self_confirmation` for each pattern that appears in two or more independent analyst outputs. Cross-references all originating findings/absences. |
+
 ### A meta-observation about signal design
 
 The `per_developer_commit_signing_ratio` vs. `web_flow_signing_ratio`
