@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 
+	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
 
@@ -43,6 +44,9 @@ type Store interface {
 	// Team identities
 	GetTeamIdentity(ctx context.Context, id string) (*profile.TeamIdentity, error)
 	PutTeamIdentity(ctx context.Context, identity *profile.TeamIdentity) error
+
+	// Analyst output ingestion (append-only, idempotent on content_hash).
+	IngestAnalystOutput(ctx context.Context, out *exchange.AnalystOutput, sourcePath string) (*IngestResult, error)
 
 	// Close releases database resources.
 	Close() error
