@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,6 +210,290 @@ func TestFormatCheck_KongIntegration_InvalidFormatRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, strings.ToLower(err.Error()), "format")
 }
+
+// --- Summary mode tests ---
+
+func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
+	// Construct an AnalystOutput with known prose in verdict /
+	// rationale and verify those don't appear in the summary
+	// output. Identifying fields (IDs, categories, severities,
+	// counts) MUST appear.
+	verdict := "VERDICT_PROSE_SHOULD_NOT_APPEAR_IN_SUMMARY"
+	rationale := "RATIONALE_PROSE_SHOULD_NOT_APPEAR_IN_SUMMARY"
+	roundNotes := "ROUND_NOTES_BODY_SHOULD_NOT_APPEAR_IN_SUMMARY"
+	lineStart := 1
+	signalType := "test_signal"
+
+	out := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "test-analyst",
+			Model:     "test-model",
+			InvokedAt: "2026-04-14T00:00:00Z",
+			Round:     2,
+		},
+		Target:       "pkg:test/example",
+		TargetCommit: "abc123",
+		Findings: []exchange.Finding{
+			{
+				ID:           "F001",
+				Verdict:      verdict,
+				Rationale:    rationale,
+				Severity:     exchange.Severity{Default: exchange.SeverityHigh},
+				Category:     "test_category",
+				SignalType:   &signalType,
+				DesignIntent: true,
+				Citations: []exchange.Citation{
+					{Path: "src/main.rs", LineStart: &lineStart},
+					{Path: "src/lib.rs", LineStart: &lineStart},
+				},
+				Prerequisites:    []string{"prereq one"},
+				RemediationHints: []string{"fix one", "fix two", "fix three"},
+				Supersedes: []exchange.Supersession{
+					{PriorID: "F-prior", PriorRound: 1, Kind: exchange.SupersessionKindCorrects},
+				},
+			},
+		},
+		Supersedes: []exchange.Supersession{
+			{PriorID: "r1", PriorRound: 1, Kind: exchange.SupersessionKindRefines},
+		},
+		RoundNotes: roundNotes,
+	}
+
+	var buf bytes.Buffer
+	printSummary(&buf, "/tmp/test.json", "json", out)
+	got := buf.String()
+
+	// Prose must not appear.
+	assert.NotContains(t, got, verdict, "verdict should be excluded from summary")
+	assert.NotContains(t, got, rationale, "rationale should be excluded from summary")
+	assert.NotContains(t, got, roundNotes, "round_notes body should be excluded from summary")
+
+	// Structural data MUST appear.
+	assert.Contains(t, got, "F001", "finding ID")
+	assert.Contains(t, got, "high", "severity value")
+	assert.Contains(t, got, "test_category", "category")
+	assert.Contains(t, got, "test_signal", "signal type")
+	assert.Contains(t, got, "[design_intent]", "design_intent flag")
+	assert.Contains(t, got, "[supersedes 1]", "supersedes count")
+	assert.Contains(t, got, "cite/prereq/fix: 2/1/3", "structured counts")
+	assert.Contains(t, got, "test-analyst / test-model (round 2)", "attribution line")
+	assert.Contains(t, got, "target: pkg:test/example", "target")
+	assert.Contains(t, got, "target_commit: abc123", "target_commit when present")
+	assert.Contains(t, got, "supersedes 1 prior", "top-level supersedes")
+	assert.Contains(t, got, "round_notes:", "round_notes presence indicator")
+	// Length indicator should reflect actual length, not the body.
+	assert.Contains(t, got, fmt.Sprintf("%d chars", len(roundNotes)))
+}
+
+func TestPrintSummary_PositiveAbsences_ConfidenceAndPattern(t *testing.T) {
+	out := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+		},
+		Target:   "pkg:test/x",
+		Findings: []exchange.Finding{},
+		PositiveAbsences: []exchange.PositiveAbsence{
+			{
+				PatternChecked: "use of pickle.load on network data",
+				Description:    "DESCRIPTION_PROSE_SHOULD_NOT_APPEAR",
+				Confidence:     exchange.ConfidenceThoroughlyReviewed,
+			},
+			{
+				PatternChecked: "subprocess shell=True with user input",
+				Description:    "ANOTHER_DESCRIPTION_PROSE",
+				Confidence:     exchange.ConfidenceSpotChecked,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, "/tmp/test.json", "json", out)
+	got := buf.String()
+
+	assert.Contains(t, got, "[thoroughly_reviewed] use of pickle.load on network data")
+	assert.Contains(t, got, "[spot_checked] subprocess shell=True with user input")
+	assert.NotContains(t, got, "DESCRIPTION_PROSE_SHOULD_NOT_APPEAR",
+		"positive_absence description is prose; should be excluded")
+}
+
+func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
+	hit := true
+	out := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+		},
+		Target:   "pkg:test/x",
+		Findings: []exchange.Finding{},
+		MethodologyTrace: &exchange.MethodologyCatalog{
+			Source: exchange.AgentAttribution{
+				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			},
+			Notes: "NOTES_PROSE_SHOULD_NOT_APPEAR",
+			Patterns: []exchange.MethodologyPattern{
+				{
+					ID: "MP-A-01", SignalGroup: "alpha",
+					Description: "pattern A1",
+					CollectorHint: exchange.CollectorHint{
+						GrepPrecision: exchange.GrepPrecisionHigh, ReasoningDepth: exchange.ReasoningDepthNone,
+					},
+					Pattern: stringPtr("rg foo"), HitOnAtuin: &hit,
+				},
+				{
+					ID: "MP-A-02", SignalGroup: "alpha",
+					Description: "pattern A2",
+					CollectorHint: exchange.CollectorHint{
+						GrepPrecision: exchange.GrepPrecisionHigh, ReasoningDepth: exchange.ReasoningDepthNone,
+					},
+					Pattern: stringPtr("rg bar"), HitOnAtuin: &hit,
+				},
+				{
+					ID: "MP-B-01", SignalGroup: "beta",
+					Description: "pattern B1",
+					CollectorHint: exchange.CollectorHint{
+						GrepPrecision: exchange.GrepPrecisionUseless, ReasoningDepth: exchange.ReasoningDepthMultiHop,
+					},
+				},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, "/tmp/test.json", "json", out)
+	got := buf.String()
+
+	assert.Contains(t, got, "methodology_trace (3 patterns)")
+	assert.Contains(t, got, "alpha (2): MP-A-01, MP-A-02")
+	assert.Contains(t, got, "beta (1): MP-B-01")
+	assert.NotContains(t, got, "NOTES_PROSE_SHOULD_NOT_APPEAR",
+		"methodology notes are prose; should be excluded from summary")
+}
+
+func TestPrintSummary_OmitsAbsentSections(t *testing.T) {
+	// A document with only findings should not print empty
+	// section headers for positive_absences, observations, or
+	// methodology_trace.
+	verdict := "v"
+	rationale := "r"
+	lineStart := 1
+	out := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+		},
+		Target: "pkg:test/x",
+		Findings: []exchange.Finding{
+			{
+				ID: "F001", Verdict: verdict, Rationale: rationale,
+				Severity:  exchange.Severity{Default: exchange.SeverityLow},
+				Category:  "c",
+				Citations: []exchange.Citation{{Path: "p", LineStart: &lineStart}},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, "/tmp/test.json", "json", out)
+	got := buf.String()
+
+	assert.NotContains(t, got, "positive_absences")
+	assert.NotContains(t, got, "observations")
+	assert.NotContains(t, got, "methodology_trace")
+	assert.NotContains(t, got, "round_notes")
+}
+
+func TestPrintSummary_ConditionalSeverity(t *testing.T) {
+	verdict := "v"
+	rationale := "r"
+	lineStart := 1
+	out := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+		},
+		Target: "pkg:test/x",
+		Findings: []exchange.Finding{
+			{
+				ID: "F001", Verdict: verdict, Rationale: rationale,
+				Severity: exchange.Severity{
+					Default: exchange.SeverityMedium,
+					ByContext: []exchange.ContextualSeverity{
+						{Context: exchange.ContextSpec{HostIsolation: "single_user"}, Value: exchange.SeverityLow},
+						{Context: exchange.ContextSpec{HostIsolation: "shared_host"}, Value: exchange.SeverityMedium},
+						{Context: exchange.ContextSpec{HostIsolation: "ci_runner"}, Value: exchange.SeverityHigh},
+					},
+				},
+				Category:  "c",
+				Citations: []exchange.Citation{{Path: "p", LineStart: &lineStart}},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, "/tmp/test.json", "json", out)
+	got := buf.String()
+	assert.Contains(t, got, "[medium +3 ctx]",
+		"conditional severity should show count of context overrides")
+}
+
+func TestPrintSummary_SortedDeterminism(t *testing.T) {
+	// The methodology_trace section sorts by signal_group; the
+	// output should be byte-identical across runs even when input
+	// patterns are in different orders.
+	hit := true
+	makeOut := func(patterns []exchange.MethodologyPattern) *exchange.AnalystOutput {
+		return &exchange.AnalystOutput{
+			Attribution: exchange.AgentAttribution{
+				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			},
+			Target:   "pkg:test/x",
+			Findings: []exchange.Finding{},
+			MethodologyTrace: &exchange.MethodologyCatalog{
+				Source: exchange.AgentAttribution{
+					AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+				},
+				Patterns: patterns,
+			},
+		}
+	}
+	mp := func(id, group string) exchange.MethodologyPattern {
+		return exchange.MethodologyPattern{
+			ID: id, SignalGroup: group, Description: "x",
+			CollectorHint: exchange.CollectorHint{
+				GrepPrecision: exchange.GrepPrecisionUseless, ReasoningDepth: exchange.ReasoningDepthOneHop,
+			},
+			HitOnAtuin: &hit,
+		}
+	}
+	a := makeOut([]exchange.MethodologyPattern{
+		mp("M1", "zeta"), mp("M2", "alpha"), mp("M3", "beta"),
+	})
+	b := makeOut([]exchange.MethodologyPattern{
+		mp("M3", "beta"), mp("M1", "zeta"), mp("M2", "alpha"),
+	})
+	var bufA, bufB bytes.Buffer
+	printSummary(&bufA, "/tmp/test.json", "json", a)
+	printSummary(&bufB, "/tmp/test.json", "json", b)
+	assert.Equal(t, bufA.String(), bufB.String(),
+		"summary output must be deterministic regardless of input order")
+}
+
+func TestFormatCheck_SummaryFlag_Integration(t *testing.T) {
+	// End-to-end through Run() — confirms --summary path works
+	// without errors. We don't assert on stdout content here
+	// (Run prints to os.Stdout directly); printSummary is tested
+	// in isolation above.
+	path := writeTempFile(t, "valid.json", minimalValidJSON)
+	cmd := &FormatCheckCmd{File: path, Format: "auto", Summary: true}
+	require.NoError(t, cmd.Run(&Globals{}))
+}
+
+func TestFormatCheck_KongIntegration_SummaryFlag(t *testing.T) {
+	path := writeTempFile(t, "valid.json", minimalValidJSON)
+	_, cli := parseCLI(t, "format-check", path, "--summary")
+	assert.True(t, cli.FormatCheck.Summary)
+	assert.False(t, cli.FormatCheck.Quiet)
+
+	_, cli = parseCLI(t, "format-check", path, "-s")
+	assert.True(t, cli.FormatCheck.Summary, "short flag -s should set Summary")
+}
+
+// stringPtr is a tiny helper for constructing *string fields in test
+// fixtures inline.
+func stringPtr(s string) *string { return &s }
 
 func TestParseAnalystOutput_RoundsTripsConcrete(t *testing.T) {
 	// Sanity check the helper against a known-good document.
