@@ -20,6 +20,7 @@ type CLI struct {
 	Survey          SurveyCmd          `cmd:"" help:"Assess trust posture of a project's dependency tree."`
 	Burn            BurnCmd            `cmd:"" help:"Burn an entity, degrading its trust signals."`
 	Posture         PostureCmd         `cmd:"" help:"Set or view dependency posture tier for an entity."`
+	Init            InitCmd            `cmd:"" help:"Scaffold ./templates/, ./filestore/, and signatory.config.toml in a project."`
 	FormatCheck     FormatCheckCmd     `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
 	Ingest          IngestCmd          `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
 	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
