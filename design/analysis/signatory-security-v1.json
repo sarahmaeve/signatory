@@ -1,0 +1,368 @@
+{
+  "attribution": {
+    "analyst_id": "external-sec-v1",
+    "model": "claude-opus-4-6",
+    "prompt_version": "security-review-go-v1",
+    "invoked_at": "2026-04-14T16:00:00Z",
+    "round": 1
+  },
+  "target": "https://github.com/sarahmaeve/signatory",
+  "target_commit": "b55e5ef0b046f505cbc0ab971c553cbb2603c1ab",
+  "findings": [
+    {
+      "id": "F001",
+      "verdict": "IngestAnalystOutput auto-creates entities for arbitrary targets in the analyst JSON, letting any ingested document spawn new project entries that downstream listings and posture decisions treat as first-class.",
+      "rationale": "`ensureEntityForTarget` (internal/store/analyst_output.go:211-245) creates a new `entities` row whenever the AnalystOutput's `target` field does not already match an existing entity, defaulting `type = EntityProject`. The only gate is `normalizeTargetToCanonicalURI`, which accepts any of five scheme prefixes (`pkg:`, `repo:`, `identity:`, `org:`, `patch:`) or a GitHub URL. `ValidateCanonicalURI` (internal/profile/uri.go:99) enforces printable-ASCII bytes and length, but imposes no semantic check that the named project actually exists or belongs in the graph.\n\nConsequence: anyone who tricks a user into running `signatory ingest file.json` against an attacker-crafted document can silently add entities like `pkg:cargo/<lookalike-name>` to the local store. Once present, those entities will appear in `signatory show-analyses`, be surfaced as analyzed targets, and accumulate findings the operator didn't explicitly audit. The append-only trigger on `analyst_outputs` makes removal difficult after the fact.\n\nThis is the central trust-boundary concern asked about in the intake question. Signatory's premise is that ingested analyst output is data-to-review, not data-to-trust, but the ingestion path already produces side effects (entity creation, analyst_output row insertion, auto-incremented counts) before a human sees the content. A `--dry-run` flag on `signatory ingest` or a staging table that requires `signatory ingest confirm <id>` would turn this from an implicit auto-commit into a reviewable two-step. The severity is capped at `low` because the attack requires social-engineering the user into an explicit ingest action, but the shape of the side effect is worth a mitigation before signatory's dataset is shared across teams or machines.",
+      "severity": {"default": "low"},
+      "category": "trust_boundary_side_effects",
+      "signal_type": "default_on_risky_features",
+      "citations": [
+        {"path": "internal/store/analyst_output.go", "line_start": 211, "line_end": 245, "quoted": "ensureEntityForTarget creates a new entities row when the target does not match"},
+        {"path": "internal/store/analyst_output.go", "line_start": 93, "line_end": 96, "quoted": "entityID, err := s.ensureEntityForTarget(ctx, out.Target)"},
+        {"path": "cmd/signatory/ingest.go", "line_start": 29, "line_end": 80}
+      ],
+      "remediation_hints": [
+        "Add --dry-run to `signatory ingest` that validates and reports what would be inserted without writing",
+        "Require --create-entity (or a confirmation prompt) when ingest would create a new entities row instead of matching an existing one",
+        "Surface 'NEW entity created' distinctly from 'existing entity reused' in the ingest summary so the operator notices"
+      ]
+    },
+    {
+      "id": "F002",
+      "verdict": "The citations table uses a polymorphic parent_kind/parent_id scheme with no CHECK constraint on parent_kind and no foreign-key enforcement, so malformed or orphan citations can be inserted without catching the mistake at the schema layer.",
+      "rationale": "Migration v4 defines `citations` with `parent_kind TEXT NOT NULL, parent_id TEXT NOT NULL` (internal/store/migrate.go:500-514). The intent documented one line above says `parent_kind in {finding, positive_absence, observation, methodology_pattern}`, but that constraint is not expressed as a `CHECK` clause, and SQLite's foreign-key support cannot express a polymorphic FK.\n\nThe Go-layer `insertCitations` (internal/store/analyst_output.go:557-590) is disciplined — it only passes one of four literal string constants — so there is no current bug. But the schema accepts `parent_kind = 'xxx'` or `parent_kind = ''` from any SQL source (including migrations, tests, or a future Go caller that forwards user input). The loader at `loadCitations` (analyst_output_query.go:633) reads only via the parent_kind string it was given, so orphan citations with an unrecognized kind would be invisible via the normal read path — they would persist indefinitely, cost storage, and surface unexpectedly if a future query relaxes the kind filter.\n\nThis is defense-in-depth territory: the Go code is correct today, but a `CHECK (parent_kind IN ('finding','positive_absence','observation','methodology_pattern'))` on the column would catch the class of mistake at the point it happens rather than letting it silently write. Same pattern applies to `finding_supersedes.prior_id` and `output_supersedes.prior_id`, which are declared as `TEXT NOT NULL` but have no FK to `findings.id` / `analyst_outputs.id` and no existence check; a crafted analyst output can claim to supersede any prior UUID, real or not, and the query layer happily renders `has_supersedes=true` on the resulting row.",
+      "severity": {"default": "low"},
+      "design_intent": false,
+      "category": "schema_integrity",
+      "citations": [
+        {"path": "internal/store/migrate.go", "line_start": 498, "line_end": 516, "quoted": "Citations: polymorphic FK via parent_kind + parent_id"},
+        {"path": "internal/store/migrate.go", "line_start": 406, "line_end": 413, "quoted": "finding_supersedes with prior_id TEXT NOT NULL and no FK"},
+        {"path": "internal/store/migrate.go", "line_start": 518, "line_end": 525, "quoted": "output_supersedes with prior_id TEXT NOT NULL and no FK"},
+        {"path": "internal/store/analyst_output.go", "line_start": 557, "line_end": 590}
+      ],
+      "remediation_hints": [
+        "Add CHECK (parent_kind IN ('finding','positive_absence','observation','methodology_pattern')) on citations",
+        "Add a validation pass that checks finding_supersedes.prior_id references an existing findings.id (or at least warns at ingest time)"
+      ]
+    },
+    {
+      "id": "F003",
+      "verdict": "Ingest and format-check read analyst-output files with unbounded os.ReadFile, so a malicious or accidentally-huge local file can OOM signatory at ingest time.",
+      "rationale": "`cmd/signatory/ingest.go:30` and `cmd/signatory/format_check.go:41` both call `os.ReadFile(cmd.File)` with no size limit. The GitHub client is bounded at 10 MB (`internal/signal/github/client.go:72`), but the local-file paths that the user-facing CLI commands use are not.\n\nThe adversary model here is weak because the file is on local disk (not network-sourced), but this is still a relevant DoS shape. An operator who is socially engineered into running `signatory ingest /tmp/dropped.json` against a 100 GB file loses the process to OOM before validation runs. The markdown parser uses `yaml.Unmarshal` which will also happily attempt to parse arbitrarily-deep nested structures, exposing yaml.v3's own recursion semantics to untrusted input.\n\nSeverity is `low` because the attack requires a file to already be on disk and a user action to invoke; but the fix is trivial (`io.LimitReader` or `os.Stat` check against a 10–50 MB cap on both the ingest and format-check paths) and would close the shape entirely.",
+      "severity": {"default": "low"},
+      "category": "input_size_limits",
+      "citations": [
+        {"path": "cmd/signatory/ingest.go", "line_start": 30, "line_end": 33, "quoted": "raw, err := os.ReadFile(cmd.File)"},
+        {"path": "cmd/signatory/format_check.go", "line_start": 41, "line_end": 44},
+        {"path": "internal/exchange/markdown.go", "line_start": 86, "line_end": 106}
+      ],
+      "remediation_hints": [
+        "Cap analyst-output file size to e.g. 25 MB before reading fully into memory (os.Stat first, then LimitReader)",
+        "Consider streaming JSON validation via json.Decoder on an io.LimitReader rather than the Marshal-entire-struct path"
+      ]
+    },
+    {
+      "id": "F004",
+      "verdict": "JSON ingest rejects unknown fields via DisallowUnknownFields, but the markdown ingest path uses yaml.Unmarshal with default permissive behavior, so typos or injected fields in markdown frontmatter are silently dropped rather than surfaced.",
+      "rationale": "`parseAnalystOutput` (cmd/signatory/format_check.go:248-263) branches on format. The JSON branch sets `dec.DisallowUnknownFields()` and will fail a document with an unknown key. The markdown branch calls `exchange.UnmarshalMarkdown` (internal/exchange/markdown.go:86-106) which uses `yaml.Unmarshal` with no strict-mode setting; yaml.v3 silently ignores fields that don't map to a Go struct field.\n\nThe consequence is asymmetric schema enforcement: a document with a `maliciously_injected_field: ...` in JSON fails format-check; the same payload in markdown passes. For signatory's threat model (where the analyst-output format is a trust surface between analyst agents and the store), that asymmetry is worth closing — it lets a producer hide unrecognized keys from the consumer's schema-drift detector by choosing the markdown serialization.\n\nNot a direct exploit today (no code reads unknown fields, so the dropped data is merely absent), but the whole point of DisallowUnknownFields is to catch schema drift before it becomes version skew. The asymmetry defeats that purpose on half the ingest paths.",
+      "severity": {"default": "informational"},
+      "category": "schema_drift_detection",
+      "citations": [
+        {"path": "cmd/signatory/format_check.go", "line_start": 248, "line_end": 263, "quoted": "dec.DisallowUnknownFields() set on the JSON path but no strict mode on the markdown path"},
+        {"path": "internal/exchange/markdown.go", "line_start": 86, "line_end": 106, "quoted": "yaml.Unmarshal(frontmatter, &out) — default permissive"}
+      ],
+      "remediation_hints": [
+        "Use yaml.Decoder with KnownFields(true) instead of yaml.Unmarshal on the markdown ingest path",
+        "Add a regression test that feeds a markdown document with an unknown key and asserts format-check fails it"
+      ]
+    },
+    {
+      "id": "F005",
+      "verdict": "The content_hash idempotency check relies on Go's non-canonical json.Marshal output, so semantically-identical documents ingested from different runtime paths (e.g., markdown-origin vs. JSON-origin with a whitespace or encoding difference) may produce different hashes and re-ingest as duplicates.",
+      "rationale": "`analystOutputContentHash` (internal/store/analyst_output.go:150-157) hashes the output of `json.Marshal(out)`. Go's json.Marshal is deterministic FOR A GIVEN STRUCT VALUE (fields emit in declaration order, no sorting needed because there are no maps), but it is not canonical JSON. Distinctions that survive the Marshal round-trip include:\n\n- Nil slice vs empty slice: `Findings: nil` marshals as `\"findings\":null` while `Findings: []` marshals as `\"findings\":[]`. The YAML unmarshaller and the JSON unmarshaller treat the two the same on decode, but the re-encoded Marshal output differs.\n- Whether omitempty fields are zero (emitted-as-absent) vs explicitly-zero-but-present — the Unmarshal side doesn't distinguish them, but Marshal produces different bytes.\n- Pointer-to-string vs nil pointer-to-string for the `*string` optional fields.\n\nConsequence: the claimed idempotency promise (re-ingesting the same analyst output is a no-op) may silently fail when the same semantic document enters the store via different serializations. The code comment at analyst_output.go:148-149 acknowledges this is approximate and notes \"that would matter if hashes were exchanged across instances\"; but the second ingest from markdown where the first came from JSON would produce two rows with the same content but different content_hash values. That bloats storage and breaks the append-only invariant's assumption that content_hash is the content identity.\n\nThe fix is a deterministic canonicalization step (JCS / RFC 8785, or a hand-rolled sort + pointer-normalized encoder). Severity is `low` because the current single-user, single-machine dogfood scope rarely hits the serialization split; but the v1 → v2 cross-instance signature story (design/npm-plan suggests this direction) will depend on content_hash being a real content identity.",
+      "severity": {"default": "low"},
+      "design_intent": true,
+      "category": "content_hash_canonicalization",
+      "citations": [
+        {"path": "internal/store/analyst_output.go", "line_start": 144, "line_end": 157, "quoted": "We do NOT need a normalized canonical form (jcs / JSC) for v1"},
+        {"path": "internal/store/migrate.go", "line_start": 374, "quoted": "content_hash TEXT NOT NULL UNIQUE"}
+      ],
+      "remediation_hints": [
+        "Introduce a canonicalize(out) step that normalizes nil/empty slices and empty pointer-strings before hashing",
+        "If v2 adds cross-instance exchange, switch to RFC 8785 JSON Canonicalization Scheme (JCS)"
+      ]
+    },
+    {
+      "id": "F006",
+      "verdict": "normalizeTargetForQuery in the read path does not apply the same GitHub-URL normalization that ensureEntityForTarget applies on the write path, so an analyst output ingested via `https://github.com/foo/bar` cannot be looked up by passing the same URL to `signatory show-analyses`.",
+      "rationale": "`ensureEntityForTarget` (internal/store/analyst_output.go:211-245) wraps the target through `NormalizeGitHubRepoInput` when it looks like a GitHub URL, canonicalizing it to `repo:github/foo/bar`. `normalizeTargetForQuery` (cmd/signatory/show.go:200-217) does NOT — it passes canonical scheme prefixes through unchanged but otherwise returns the input verbatim. The comment in show.go claims \"the store wraps the raw target through profile.NormalizeGitHubRepoInput when the canonical-form lookup misses,\" but `FindEntityByURI` (internal/store/sqlite.go:172-176) does a literal SQL match on `canonical_uri` with no normalization fallback.\n\nConsequence: a user who ingests analyst outputs via a GitHub URL and later queries via the same URL gets an empty result. The write/read paths agree on the canonical form, they just disagree on what input gets normalized to that form. This isn't a security bug in the usual sense, but in the trust-decision context (\"have we seen this target before?\") a false \"no results\" answer is a correctness signal that leans toward under-surfacing risk — the operator might conclude \"no existing analyses\" when there is one, and re-run an expensive analysis or, worse, form a trust decision without checking.",
+      "severity": {"default": "informational"},
+      "category": "ux_consistency_trust_lookup",
+      "citations": [
+        {"path": "cmd/signatory/show.go", "line_start": 200, "line_end": 217, "quoted": "the store wraps the raw target through profile.NormalizeGitHubRepoInput when the canonical-form lookup misses"},
+        {"path": "internal/store/sqlite.go", "line_start": 172, "line_end": 176, "quoted": "FindEntityByURI does a literal SELECT ... WHERE canonical_uri = ?"},
+        {"path": "internal/store/analyst_output.go", "line_start": 247, "line_end": 269, "quoted": "normalizeTargetToCanonicalURI — the write-path normalization"}
+      ],
+      "remediation_hints": [
+        "Extract normalizeTargetToCanonicalURI from analyst_output.go to a shared location and call it from normalizeTargetForQuery",
+        "Or: fold the GitHub-URL fallback into FindEntityByURI directly so both read and write paths share one implementation"
+      ]
+    },
+    {
+      "id": "F007",
+      "verdict": "Signatory's defensive posture on the hottest security-adjacent surfaces is notably tight: the GitHub HTTP client enforces HTTPS on redirects, strips Authorization on cross-origin, caps response bodies at 10 MB, and suppresses response body content in error messages to prevent attacker-controlled bytes from polluting stderr/CI logs.",
+      "rationale": "This is a positive finding. `internal/signal/github/client.go:98-126` implements a `checkRedirect` that refuses any non-HTTPS redirect target (not just scheme downgrade — the rule fires on ANY non-HTTPS, closing a class of bypass), strips the `Authorization` header on cross-origin redirects, and bounds redirect chains to <10. Response bodies are capped by `io.LimitReader` at 10 MB (client.go:227, 302). Error messages for non-2xx responses do NOT include the response body (client.go:239-247), with an explicit rationale pointing at issue #93: the response is attacker-influenceable and could echo secrets or controlled tokens into CI log sinks. The contents-API path variable is regex-validated against path-traversal and character-injection (client.go:31-65), and GitHub owner/repo names are also regex-validated (client.go:19, 498-503).\n\nThis is the level of HTTP-client hardening I would expect to see on a mature supply-chain project, not a v0.1 prototype. The presence of design-intent comments citing specific issue numbers (#78, #82, #83, #89, #90, #92, #93, #101) on each hardening measure suggests a consistent post-hoc security-review loop that feeds into concrete fixes. That is a positive signal about the team's operational posture; it elevates trust in the *process* that produces this code, which is the more durable thing.",
+      "severity": {"default": "positive"},
+      "category": "defensive_http_client_posture",
+      "signal_type": "data_minimization_policy",
+      "citations": [
+        {"path": "internal/signal/github/client.go", "line_start": 98, "line_end": 126, "quoted": "checkRedirect enforces HTTPS, strips Authorization cross-origin, bounds redirects"},
+        {"path": "internal/signal/github/client.go", "line_start": 239, "line_end": 247, "quoted": "do NOT include the response body in the error... attacker-influenceable bytes"},
+        {"path": "internal/signal/github/client.go", "line_start": 31, "line_end": 65, "quoted": "validateContentsPath — regex + explicit .. / // / leading-slash / trailing-slash rejection"},
+        {"path": "internal/signal/github/client.go", "line_start": 215, "line_end": 264, "quoted": "client.get with 10MB body cap and no error-body echo"}
+      ]
+    },
+    {
+      "id": "F008",
+      "verdict": "Schema-level append-only enforcement via SQLite BEFORE UPDATE/DELETE triggers converts documented convention into an actual invariant that blocks any mutation attempt, including direct sqlite3 shell access, before it can rewrite history.",
+      "rationale": "Migration v3 (internal/store/migrate.go:290-310) and v4 (migrate.go:535-617) install `BEFORE UPDATE` and `BEFORE DELETE` triggers on every append-only table: `signals`, `dependency_observations`, `signal_resolutions`, `audit_log`, plus every v4 analyst-output stream table (`analyst_outputs`, `findings`, `finding_*`, `positive_absences`, `observations`, `methodology_catalogs`, `methodology_patterns`, `methodology_pattern_composes`, `citations`, `output_supersedes`, `output_reframes_from`). The trigger body `SELECT RAISE(ABORT, 'X is append-only')` aborts the offending statement regardless of origin.\n\nThis is a positive design choice: the documented convention at `internal/store/sqlite.go:8` (\"signals... are append-only\") was enforceable only via code discipline in the pre-v3 state. A future code path, an errant raw SQL tool invocation, or an attacker with write-access to the DB file and sqlite3 could silently have rewritten history. Moving enforcement into the schema means the threat model now requires the attacker to either drop the triggers first (visible in sqlite_master) or replace the database file entirely (detectable via the backup chain at migrate.go:874-918).\n\nThe append_only_security_test.go suite regression-tests every trigger on every table, confirming the enforcement is not silently broken by a future migration. That's a good shape.",
+      "severity": {"default": "positive"},
+      "category": "append_only_enforcement",
+      "signal_type": "sync_integrity_protection_split",
+      "citations": [
+        {"path": "internal/store/migrate.go", "line_start": 275, "line_end": 310, "quoted": "migrationV3Up — triggers blocking UPDATE/DELETE on signals, dependency_observations, signal_resolutions, audit_log"},
+        {"path": "internal/store/migrate.go", "line_start": 535, "line_end": 617, "quoted": "migrationV4Up append-only triggers on all analyst-output stream tables"},
+        {"path": "internal/store/append_only_security_test.go", "line_start": 1, "line_end": 159, "quoted": "regression tests verifying every trigger aborts mutation"}
+      ]
+    }
+  ],
+  "positive_absences": [
+    {
+      "pattern_checked": "use of os/exec, exec.Command, or exec.LookPath anywhere in production code",
+      "description": "A supply-chain trust tool that shells out to subprocesses would open command-injection and PATH-hijack risk. Grep across the entire repo found no exec/subprocess usage outside design documents. The tool operates entirely via in-process SQLite and the GitHub REST API.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "exhaustive"
+    },
+    {
+      "pattern_checked": "import \"unsafe\", cgo (import \"C\"), or runtime.SetFinalizer usage in production code",
+      "description": "These are the usual Go escape hatches from memory safety and the type system; they belong on the audit list for a tool that handles potentially-adversarial data. None present outside of the modernc.org/sqlite driver (pure Go, no cgo). No signatory code uses unsafe or cgo.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "func init() doing network, filesystem, env-read, or spawn side effects",
+      "description": "init() functions run at import time and can't be disabled; they're the Go equivalent of module-import side effects. Grep across the codebase found zero init() functions in any signatory package. Constructor functions (New*, Open*) are the sole initialization path.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "exhaustive"
+    },
+    {
+      "pattern_checked": "SQL string concatenation or fmt.Sprintf of attacker-influenceable values into queries",
+      "description": "All SQL statements in internal/store/*.go use parameter placeholders (`?`) for any value that could originate from user input or ingested data. The three fmt.Sprintf sites in analyst_output_query.go interpolate only (a) static SQL fragments (table names and column names, all hardcoded callers), (b) integer LIMIT values (typed int, no injection vector), and (c) pre-built placeholder strings derived from slice length (not user text). No untrusted-string SQL concatenation found.",
+      "citations": [
+        {"path": "internal/store/analyst_output_query.go", "line_start": 105, "quoted": "LIMIT %d — filter.Limit is typed int"},
+        {"path": "internal/store/analyst_output_query.go", "line_start": 596, "line_end": 598, "quoted": "loadOrderedTexts table/parentCol are hardcoded string-literal callers"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "tls.Config{InsecureSkipVerify: true} or MinVersion omitted/downgraded",
+      "description": "The only TLS-relevant code path is the GitHub HTTP client, which uses the default http.DefaultTransport config (modern TLS, cert verification). No tls.Config overrides anywhere in the tree.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "math/rand used for security-relevant randomness",
+      "description": "The only random-byte source is crypto/rand in the audit logger ID generation (internal/audit/logger.go:206-215). No math/rand usage in the codebase at all.",
+      "citations": [
+        {"path": "internal/audit/logger.go", "line_start": 206, "line_end": 215, "quoted": "newID() uses crypto/rand.Read with a time-based fallback"}
+      ],
+      "confidence": "exhaustive"
+    },
+    {
+      "pattern_checked": "network servers, listening sockets, or HTTP handlers exposed by signatory itself",
+      "description": "Signatory is a CLI-only tool. No http.ListenAndServe, net.Listen, or handler registration in the production code. The only network egress is the outbound GitHub API client. There is no signatory-exposed local service that could be attacked cross-process.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "go:embed directives bundling keys, tokens, or default credentials into the binary",
+      "description": "No //go:embed directives anywhere in the source tree. No embedded certificates, seed data, or default config.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}}
+      ],
+      "confidence": "exhaustive"
+    }
+  ],
+  "observations": [
+    {
+      "id": "O001",
+      "title": "Analyst-output ingestion is the primary new trust surface in v0.1; it transforms signatory from a passive collector into an actor that persists externally-produced data.",
+      "body": "Migration v4 and the analyst_output.go / analyst_output_query.go files add a whole new ingest path that crosses a trust boundary the earlier architecture did not. Previously signatory only wrote data it had collected itself (GitHub API responses validated at boundary) or the operator had explicitly typed (burn reason, posture rationale). Now it accepts a JSON or markdown document produced by another agent (possibly LLM, possibly external analyst) and persists its claims — including side effects like entity creation, findings with category/signal_type that flow into `ListFindings` queries, and methodology patterns that influence Layer 1 collector design.\n\nThe schema-level enforcement (append-only triggers, content_hash UNIQUE, validation at `out.Validate()`) is sound, but the semantic trust relationship is shifting: 'ingested analyst output' is now a data source that will materially affect what signatory tells a human operator, and no cryptographic signing backs the claim that a given document came from a specific analyst (per design/entity-model-v2.md the PGP-backed signing is explicitly deferred). For v0.1's stated scope (solo dev, local dogfood), this is acceptable; for v1.0+ cross-team or cross-machine use, a signing story on AnalystOutput becomes load-bearing.\n\nThis isn't a bug but it's the single largest change in attack surface shape that migration v4 introduces, and it's worth tracking as v0.1 → v1.0 design scope widens.",
+      "category": "trust_boundary_evolution",
+      "citations": [
+        {"path": "internal/store/analyst_output.go", "line_start": 38, "line_end": 142},
+        {"path": "internal/store/migrate.go", "line_start": 327, "line_end": 618},
+        {"path": "design/handoffs/security-review-go-v1.md", "scope": {"kind": "file", "path": "design/handoffs/security-review-go-v1.md"}}
+      ]
+    }
+  ],
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "external-sec-v1",
+      "model": "claude-opus-4-6",
+      "invoked_at": "2026-04-14T16:00:00Z"
+    },
+    "notes": "Patterns applied during this pass; hit_on_target reflects whether the pattern surfaced a finding on signatory specifically.",
+    "patterns": [
+      {
+        "id": "MP-GO-SQL-01",
+        "signal_group": "sql_injection_surface",
+        "description": "fmt.Sprintf or string concatenation building SQL queries from values that could originate from user input or ingested documents.",
+        "pattern": "rg --type go 'fmt\\.Sprintf.*(SELECT|INSERT|UPDATE|DELETE|WHERE|FROM)' internal/ cmd/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop", "miss_mode": "false_positive_heavy"},
+        "false_positive_notes": "Matches any query-building Sprintf; need to check whether interpolated values come from user input.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-SQL-02",
+        "signal_group": "sql_injection_surface",
+        "description": "SQL construction with %s or + for table names, column names, or ORDER BY clauses — parameter placeholders don't help for identifiers.",
+        "pattern": "rg --type go 'FROM %s|ORDER BY.*%s|SELECT.*%s' internal/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "composes_with": ["MP-GO-SQL-01"],
+        "false_positive_notes": "Identifier interpolation is safe when all callers pass string literals; must trace callers.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-FS-01",
+        "signal_group": "filesystem_safety",
+        "description": "os.ReadFile / ioutil.ReadAll without size cap on paths that accept user input.",
+        "pattern": "rg --type go 'os\\.ReadFile|io\\.ReadAll' cmd/ internal/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "ReadAll on a LimitReader is safe; need to check the reader source.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-FS-02",
+        "signal_group": "filesystem_safety",
+        "description": "os.Create / os.OpenFile with mode 0o644 / 0o666 / 0 for sensitive files (keys, tokens, DBs, audit logs).",
+        "pattern": "rg --type go 'os\\.OpenFile.*0[0-9]{3}|os\\.Create\\b'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Mode constants may be unrelated to sensitive files; inspect context.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-NET-01",
+        "signal_group": "network_egress",
+        "description": "Hardcoded URLs and tls.Config{InsecureSkipVerify: true} / MinVersion omission.",
+        "pattern": "rg --type go 'InsecureSkipVerify|MinVersion|https?://[a-zA-Z0-9./-]+\\.(com|io|org)'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "URLs in comments and test fixtures are common FPs.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-NET-02",
+        "signal_group": "network_egress",
+        "description": "http.Client without explicit CheckRedirect policy can leak Authorization on cross-origin 3xx and follow scheme downgrades.",
+        "pattern": "rg --type go 'http\\.Client\\{' internal/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "composes_with": ["MP-GO-NET-01"],
+        "false_positive_notes": "Must trace each http.Client construction and check for CheckRedirect.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-EXEC-01",
+        "signal_group": "subprocess_execution",
+        "description": "os/exec usage with user-influenced first-arg or shell invocation.",
+        "pattern": "rg --type go 'exec\\.Command|exec\\.LookPath|exec\\.CommandContext'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Hardcoded-command subprocess is usually safe; flag any user-arg-in-first-position.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-INIT-01",
+        "signal_group": "import_time_side_effects",
+        "description": "func init() with network, filesystem, env, or spawn side effects.",
+        "pattern": "rg --type go --multiline 'func\\s+init\\s*\\(\\s*\\)\\s*\\{'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "init() itself is common and benign; need body inspection for side effects.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-UNSAFE-01",
+        "signal_group": "memory_safety_escapes",
+        "description": "import \"unsafe\", cgo imports, runtime.SetFinalizer on resource-holding types.",
+        "pattern": "rg --type go '^\\s*import\\s+\"unsafe\"|^\\s*import\\s+\"C\"|runtime\\.SetFinalizer'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "unsafe in stdlib-like helpers (e.g., atomic byte-slice work) is less alarming than in data-handling code.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-CRYPTO-01",
+        "signal_group": "cryptographic_primitives",
+        "description": "math/rand for security-relevant randomness; crypto/md5 or crypto/sha1 for security-relevant hashes.",
+        "pattern": "rg --type go '\"math/rand\"|\"crypto/md5\"|\"crypto/sha1\"'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "math/rand is fine for non-security uses (sampling, test data); need to check the use site.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-SCHEMA-01",
+        "signal_group": "sqlite_schema_integrity",
+        "description": "Polymorphic FK columns (parent_kind + parent_id, or type + ref_id) without CHECK constraints on the discriminator.",
+        "pattern": "rg --type go 'parent_kind|parent_type|ref_kind' internal/store/migrate.go",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "Requires reading the migration SQL + inspecting CHECK clauses.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-SCHEMA-02",
+        "signal_group": "sqlite_schema_integrity",
+        "description": "Append-only intent documented in comments but not enforced by BEFORE UPDATE/DELETE triggers.",
+        "pattern": "rg --type go 'append-only|APPEND-ONLY|append_only' internal/store/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "composes_with": ["MP-GO-SCHEMA-01"],
+        "false_positive_notes": "Text mentioning 'append-only' needs to be paired with trigger presence check.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-INGEST-01",
+        "signal_group": "data_ingestion_trust_boundary",
+        "description": "User-supplied JSON/YAML ingestion paths that auto-create entities, auto-link rows, or produce persistent side effects before human review.",
+        "pattern": "rg --type go 'ensureEntity|autoCreate|FindOrCreate' internal/store/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "Upsert / get-or-create is a common legitimate pattern; risk depends on what data flows through.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-INGEST-02",
+        "signal_group": "data_ingestion_trust_boundary",
+        "description": "JSON decoders with DisallowUnknownFields vs YAML decoders with default permissive behavior — asymmetric schema-drift detection.",
+        "pattern": "rg --type go 'DisallowUnknownFields|KnownFields|yaml\\.Unmarshal|yaml\\.NewDecoder'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Mixed formats are common; look for cases where the same input type has dual serialization paths.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-CONTENT-HASH-01",
+        "signal_group": "content_addressing",
+        "description": "Content-hash idempotency that depends on non-canonical JSON marshalling (nil-vs-empty-slice, omitempty-vs-zero, pointer nullability).",
+        "pattern": "rg --type go 'sha256.*json\\.Marshal|json\\.Marshal.*sha256|content_hash'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "Hashing serialized JSON is common; risk depends on whether same-semantics-different-serialization happens in the domain.",
+        "hit_on_target": true
+      }
+    ]
+  },
+  "round_notes": "TL;DR on the intake question:\n\n> Could a compromise of signatory itself enable supply-chain attacks against the projects it analyzes?\n\nShort answer: **marginally, via the new analyst-output ingestion path, but not in a way that touches the analyzed projects' own code**. Signatory has no write-access to any analyzed project (it reads GitHub's public API and the local filesystem; it never modifies upstream repos, never pushes commits, never operates on the analyzed project's machine). A compromised signatory release could:\n\n1. **Plant biased trust signals** in the local store: auto-created entities from crafted analyst outputs (F001) + schema integrity gaps (F002) give a supply-chain attacker who gets the user to `signatory ingest <crafted>.json` the ability to poison the local trust dataset — e.g., insert a 'positive' security finding for a malicious package to bias downstream posture decisions. This attacks the *operator's trust decisions*, not the analyzed projects.\n2. **OOM the user's machine at ingest time** (F003) via an unbounded local file read — local DoS, low impact.\n3. **Silently drop injected markdown fields** (F004) via yaml.Unmarshal's permissive default — schema-drift detector asymmetry.\n\nThe hottest-reviewed paths — internal/store/analyst_output.go, migration v4, internal/store/analyst_output_query.go — are **structurally sound**: parameter placeholders throughout, append-only triggers enforce the documented invariant (F008), no SQL injection vectors, no subprocess surface, no unsafe/cgo, no init-time side effects. The polymorphic FK in citations (F002) and the supersedes tables are an integrity-check-deferred pattern, but the Go-layer callers are disciplined; risk is defense-in-depth rather than currently-exploitable.\n\nThe hardening posture on the GitHub HTTP client (F007) and the schema-level append-only enforcement (F008) both register as positive findings. The code shows a consistent pattern of post-hoc security review feeding into concrete fixes (issue numbers #78/#82/#83/#89/#90/#92/#93/#101 cited inline), which is a durable signal about team operational discipline.\n\nBottom line: the v4 ingest path introduces a new trust boundary that the earlier architecture did not have (observation O001), but the boundary is implemented carefully. The main residual risks are *user-in-the-loop* — a social-engineering attack that gets an operator to ingest a crafted file can bias their local trust state. Mitigation is cheap (`--dry-run` on ingest, CHECK on parent_kind, size cap on file reads). No critical or high-severity issues."
+}

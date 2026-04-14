@@ -1,0 +1,337 @@
+{
+  "attribution": {
+    "analyst_id": "signatory-provenance",
+    "model": "claude-opus-4-6",
+    "prompt_version": "provenance-review-v1",
+    "invoked_at": "2026-04-14T20:45:00Z",
+    "round": 1
+  },
+  "target": "https://github.com/sarahmaeve/signatory",
+  "target_commit": "b55e5ef0b046f505cbc0ab971c553cbb2603c1ab",
+  "round_notes": "Provenance analysis of signatory (this repo) against its own trust model. The dominant signal is that this is a five-day-old prototype with an irreducible bus factor of one, zero published releases, zero signed commits, no branch protection, 69 open self-filed issues, and a private-on-GitHub posture that makes most external verification impossible for a third party today. Almost every trust signal signatory itself emphasizes as high-value (release cadence, distinct-contributor count, tag signing, CI supply-chain gating, trusted publisher bindings, cryptographic commit attribution) is either structurally unavailable for a project this young or not yet wired up.\n\nOffsetting these: a real, long-tenured maintainer identity (sarahmaeve / Sarah Murphy, GitHub account since 2011-11-07); a mostly clean Go dependency tree with no git pins, no replace directives, and explicit dogfooded posture decisions per dependency; a CI workflow that enforces gofmt/vet/build/race on every push and PR; an Apache 2.0 license; and a strikingly mature adversarial-review process (three code reviews, 69 open + 53 closed issues in five days) that demonstrates the author is applying the project's own rigor to itself. The composition is 'solo-dev greenfield prototype with strong hygiene and explicit trust-model self-awareness' — not a supply-chain hazard today, but not yet adoptable by anyone other than the author as anything more than a vendored reference implementation.\n\n**Answering the intake question directly:**\n\nProvenance can answer the parts of the question about: (a) commit history shape and what it says about maturity; (b) governance posture (who can push, what gates exist); (c) release posture (there is none); (d) identity graph of the one maintainer; (e) supply-chain hygiene at the metadata/CI/config layer. Provenance **cannot** answer the question about whether the implementation of signatory's own trust logic is correct, whether the SQLite store has integrity bugs, whether the GitHub collector has token-leak bugs, or whether the code that `signatory analyze`s with is itself sound — that is the security analyst's territory, and the ~20 visible `Fix #NN` commits plus the three archived adversarial reviews strongly suggest that territory is where a careful adopter's scrutiny should land.\n\nVerdict for an adopting organization: **not adoptable as a dependency today**. A single-maintainer, private, release-less, five-day-old Go module cannot pass signatory's own trust model at anything above 'unknown provenance'. The correct posture under the project's own taxonomy would be: vendor the source, pin to a reviewed SHA, accept that future patches require a fork or an upstream-and-wait cycle, and do not connect a CI runner to re-resolve it from a registry (there is no registry path anyway — it is not a published Go module in any proxy sense yet).",
+  "findings": [
+    {
+      "id": "F001",
+      "verdict": "The project has no published releases, no tags of any kind, and no semver presence; adopters have no reviewable artifact and no immutable pin point beyond a raw git SHA.",
+      "rationale": "`gh api repos/sarahmaeve/signatory/releases` returns `[]` and `gh api repos/sarahmaeve/signatory/tags` returns `[]`. `git for-each-ref refs/tags` is empty on the local clone. There is no `v0.1.0` or equivalent. The ROADMAP in `design/ROADMAP.md` and the README both discuss v0.1 as an ongoing goal; the codebase is self-described as pre-release.\n\nConsequence for the trust model: signatory's own per-dependency dogfood records (see `design/dogfood/kong.md`, `design/dogfood/modernc-sqlite.md`) treat latest-release + release-cadence as a primary positive signal. signatory does not yet satisfy its own check. Any adopter pinning this project must pin to a raw SHA, which is a weaker commitment surface than a signed-tag pin and exposes the adopter to surreptitious force-push rewrite if branch protection is absent (see F003).",
+      "severity": {"default": "medium", "by_context": [{"context": {"host_isolation": "ci_runner"}, "value": "high"}]},
+      "category": "publication_integrity",
+      "signal_type": "tag_signing_status",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git for-each-ref refs/tags returns zero results; gh api .../releases returns []; gh api .../tags returns []"}
+      ],
+      "remediation_hints": [
+        "Cut a v0.1.0-alpha tag as a signed annotated tag once the v0.1 scope in design/ROADMAP.md is met.",
+        "Until then, any consumer must pin to an explicit commit SHA and record that SHA in their own posture file; do not pin to a branch name."
+      ]
+    },
+    {
+      "id": "F002",
+      "verdict": "No commits are cryptographically signed; the 9 of 86 GitHub API commits that register as 'verified' are web-flow merges signed by GitHub's own key, not by the maintainer, and ~90% of history (including every commit in the last 5 days) is plain unsigned.",
+      "rationale": "Raw distribution (`gh api repos/sarahmaeve/signatory/commits?per_page=100`):\n\n- 77 of 86 commits: `verification.reason == \"unsigned\"` (committer: sarahmaeve, local git)\n- 9 of 86 commits: `verification.reason == \"valid\"` (committer: web-flow — GitHub's own merge-button signing key)\n- Zero commits signed by a maintainer-controlled GPG, SSH, or gitsign key.\n\nAll 9 web-flow commits are clustered in a 2-hour window on 2026-04-09 (the initial burst of PR-based work); every commit since 2026-04-10 is pushed directly to main unsigned. Local `git log --format='%G?' --all` reports 94 'N' entries (git cannot even evaluate signatures — there is no GPG binary on this host).\n\nThis matters doubly for signatory. The project's `design/trust-model.md` explicitly lists commit signing among the forgery-resistant signals that survive AI-authored content, and `design/signals-v01.md` names `per_developer_commit_signing_ratio` as a governance signal. signatory's own `per_developer_commit_signing_ratio` against signatory is 0%. The project does not satisfy its own signal.",
+      "severity": {"default": "medium"},
+      "category": "governance",
+      "signal_type": "per_developer_commit_signing_ratio",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api commits per_page=100 groups: unsigned=77, valid=9 (all committer=web-flow)"},
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%G?' --all | sort | uniq -c returns '94 N'"}
+      ],
+      "remediation_hints": [
+        "Configure a signing key (SSH with allowed_signers, GPG, or sigstore gitsign) and enable git config commit.gpgsign=true for this repo.",
+        "Enable the 'Require signed commits' branch protection rule on main once this is private-to-public.",
+        "Retroactively sign the v0.1.0 tag so the first release tag carries a maintainer-attested cryptographic anchor even if history does not."
+      ]
+    },
+    {
+      "id": "F003",
+      "verdict": "Main branch has no protection rules at all, so a single credential compromise on the sole maintainer's account yields unreviewed force-push rights with no recovery anchor; recent workflow has been direct push to main rather than PR-gated.",
+      "rationale": "`gh api repos/sarahmaeve/signatory/branches/main` reports `protected: false`. `gh api repos/sarahmaeve/signatory/branches/main/protection` returns HTTP 403 with message 'Upgrade to GitHub Pro or make this repository public to enable this feature' — branch protection is not merely unset, it is unavailable for this repo's plan/visibility combination.\n\nBehavioral shape from `git log`: the first 8 merges (PRs #25, #26, #64, #65, #66, #67, #68, #76) all landed on 2026-04-09 via `Merge pull request` commits committed by `web-flow`. Every commit after 2026-04-10 (22 commits on 2026-04-10 plus 21 commits on 2026-04-14) is a direct push to main with no PR. The author has demonstrated awareness of PR-gated workflow but abandoned it once the project stabilized into solo-dev-velocity mode.\n\nCombined with F002 (no commit signing) and F005 (bus factor = 1), the effective compromise model is: whoever controls sarahmaeve's GitHub credential can rewrite the entire project history silently. There is no independent attestation layer.",
+      "severity": {"default": "medium", "by_context": [{"context": {"host_isolation": "ci_runner"}, "value": "high"}]},
+      "category": "governance",
+      "signal_type": "effective_maintainer_concentration",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api repos/sarahmaeve/signatory/branches/main returns {protected: false}"},
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "branch protection API returns HTTP 403: 'Upgrade to GitHub Pro or make this repository public'"}
+      ],
+      "remediation_hints": [
+        "Flip the repo to public (the license is already Apache 2.0 and README is adoption-facing) or upgrade the plan; either unlocks branch protection.",
+        "Once unlocked, require: signed commits, linear history, PR-gated merges, 1 approving review (self-approval alternatives documented in design/), and CI passing before merge.",
+        "Until then, every consumer should treat any commit between their last-audited SHA and HEAD as requiring fresh review."
+      ]
+    },
+    {
+      "id": "F004",
+      "verdict": "The repository is private on GitHub, so external adopters cannot inspect history, issues, or CI runs without access — the trust signals signatory's own analyze command would rely on are not externally queryable today.",
+      "rationale": "`gh api repos/sarahmaeve/signatory` returns `visibility: private`. The README and LICENSE position this as an open-source tool ('Supply chain trust analysis for an AI-native world', Apache-2.0), but the artifact itself is not currently publicly readable. Consequence: anyone who runs `signatory analyze signatory` today against the live GitHub API gets no commit history, no contributor graph, no issue corpus, no CI state. The entire provenance signal set is walled off behind repo ACLs.\n\nThis is a deployment-lifecycle issue (v0.1 is pre-release and the author may be reasonably withholding from public review until baseline hygiene lands) rather than a compromise indicator, but it does mean the project cannot self-evaluate against its own trust model externally right now. It also means that a third party asked to evaluate signatory based on metadata cannot do so without an access grant — the analysis in this document was only possible from inside the author's environment.",
+      "severity": {"default": "medium"},
+      "category": "trust_model_observation",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api repos/sarahmaeve/signatory returns {visibility: private, stargazers_count: 0, forks_count: 0}"}
+      ],
+      "remediation_hints": [
+        "Flip to public before soliciting external adoption, or document clearly in README that this is currently a private-alpha.",
+        "Once public, a GitHub-scoped observer can run signatory's own pipeline against signatory — which is the intended dogfood loop."
+      ]
+    },
+    {
+      "id": "F005",
+      "verdict": "Bus factor is irreducibly one: a single author (sarahmaeve) has 100% of commits, 100% of issue filings, 100% of PR filings, and is the sole entry in contributors; the project has no second human or bot contributor of any kind.",
+      "rationale": "`gh api repos/sarahmaeve/signatory/contributors` returns a single-element array: `{login: sarahmaeve, contributions: 86}`. Local `git log --format='%an <%ae>' --all | sort | uniq -c` returns exactly two entries, both identifying the same human under slightly different configured names (85 'Sarah <sarahmaeve@users.noreply.github.com>', 9 'Sarah Murphy <sarahmaeve@users.noreply.github.com>'). No `.mailmap` is present to reconcile these, but the email-domain consistency confirms single-author.\n\nAll 69 open issues and 53 closed issues were filed by sarahmaeve (owner author_association). All 8 merged PRs originate from sarahmaeve branches. There is no Dependabot, no Renovate, no bot account, and no `.github/dependabot.yml`.\n\nFor the signatory trust model, this is the most consequential signal: every other governance control (signing, branch protection, release process, review) is downstream of bus factor. signatory's own dogfood file for `kong.md` writes 'Bus factor ~2, healthy contributor base' as a positive; signatory's own file would have to write 'bus factor 1, no external contributors' — a negative.\n\nThis does not condemn a five-day-old project; it does mean the project fails its own 'is anyone home besides you?' check.",
+      "severity": {"default": "high", "by_context": [{"context": {"host_isolation": "single_user"}, "value": "medium"}]},
+      "category": "governance",
+      "signal_type": "effective_maintainer_concentration",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api contributors returns [{login: sarahmaeve, contributions: 86}] — single element"},
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%an <%ae>' --all unique to a single email: sarahmaeve@users.noreply.github.com"}
+      ],
+      "remediation_hints": [
+        "Add a CONTRIBUTING.md and open the 'good first issue' and 'help wanted' labels (both already exist per the label list but are unused).",
+        "Until external contribution begins, adopters should treat this as a personal project and not bind production integrity to it without a vendored fork.",
+        "Enable Dependabot or Renovate to at least get an automated second actor surfacing dep updates — tests the PR-review path and increases visible contributor count without requiring humans."
+      ]
+    },
+    {
+      "id": "F006",
+      "verdict": "The project has no SECURITY.md, no CODEOWNERS, no CONTRIBUTING.md, no code of conduct, no issue/PR templates, and no security advisories surface — GitHub's community-health score is 28%.",
+      "rationale": "`gh api repos/sarahmaeve/signatory/community/profile` returns `health_percentage: 28` with every `files.*` slot null except `license` and `readme`. Direct filesystem check (`ls CODEOWNERS SECURITY.md .github/CODEOWNERS .github/SECURITY.md CONTRIBUTING.md CODE_OF_CONDUCT.md`) confirms all are absent. `gh api repos/sarahmaeve/signatory/security-advisories` returns HTTP 404 (feature disabled / repo too new).\n\nImpact is dual:\n\n1. Responsible-disclosure path is undefined. There is no documented address for reporting a vulnerability in signatory itself. The project's threat model explicitly notes it is a target (see the dogfood-engagement briefing for this very analysis); the absence of a disclosure channel is a concrete gap between the stated threat model and the operationalized response posture.\n\n2. Adopter-facing hygiene is incomplete. A security-conscious organization doing intake on a new dependency uses CODEOWNERS and SECURITY.md as baseline triage inputs. Their absence is a low-severity hygiene gap individually but a signal that the project's operational maturity is younger than its design-documentation maturity.\n\nThe design corpus is rich (`design/` has ~30 documents including a full threat model, trust-model spec, roadmap); the github.com governance surface is threadbare. That asymmetry is itself a provenance signal — the author is doing meticulous design work but has not yet translated it into the github.com-level controls that external reviewers and automated scorecarders use.",
+      "severity": {"default": "low"},
+      "category": "hygiene",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api community/profile: health_percentage=28, files.{contributing,code_of_conduct,security,pull_request_template}=null"}
+      ],
+      "remediation_hints": [
+        "Add SECURITY.md with a reporting address (private email or GitHub security advisories, once the repo is public).",
+        "Add a minimal CODEOWNERS listing sarahmaeve against the whole repo — mechanical but documents governance state honestly.",
+        "Add a CONTRIBUTING.md that names the pre-commit hook expectations already documented in .github/workflows/ci.yml."
+      ]
+    },
+    {
+      "id": "F007",
+      "verdict": "The CI workflow does no supply-chain gating of its own dependencies — no govulncheck, no dependency vulnerability scan, no OpenSSF Scorecard step, no SBOM emission, and actions pinned by major tag (@v4, @v5) rather than by SHA.",
+      "rationale": "`.github/workflows/ci.yml` is the sole workflow (one workflow per `gh api actions/workflows`). It runs four steps: gofmt check, go vet, go build, go test -race. It does not run:\n\n- `govulncheck ./...` — despite signatory itself being a Go project that analyses vuln posture of other projects.\n- `go mod verify` or any check that go.sum has not been silently amended.\n- Any third-party SCA (e.g., OSSF Scorecard, dependency-review-action).\n- SBOM or attestation emission (no syft, no cosign, no sigstore / slsa-framework step).\n\nAction versions used: `actions/checkout@v4`, `actions/setup-go@v5`. Both are floating major-version tags, not SHA-pinned. GitHub moves those tags, and a successful compromise of an action repo can backdoor every build using it. signatory's own `signal-type-registry.md` names `ci_action_pin_tightness` as a signal explicitly — and signatory's own CI would fail that check.\n\nThe workflow is well-shaped for what it does (mirrors the pre-commit hook, explains its reasoning inline, uses concurrency cancellation correctly). The gap is scope, not craft.",
+      "severity": {"default": "low", "by_context": [{"context": {"host_isolation": "ci_runner"}, "value": "medium"}]},
+      "category": "hygiene",
+      "signal_type": "ci_supply_chain_gate",
+      "citations": [
+        {"path": ".github/workflows/ci.yml", "line_start": 33, "line_end": 67, "quoted": "jobs.test steps: Checkout (actions/checkout@v4), setup-go (actions/setup-go@v5), gofmt, vet, build, test -race"}
+      ],
+      "remediation_hints": [
+        "Add `govulncheck ./...` as a CI step — it is free, it is by golang.org/x/vuln, and it gates against published Go CVEs.",
+        "SHA-pin actions/checkout and actions/setup-go (use e.g. @08eba0b27e820071cde6df949e0beb9ba4906955 plus a # v4.x.x comment for readability).",
+        "Add a dependency-review or syft-based SBOM emission step on release tags once F001 is addressed."
+      ]
+    }
+  ],
+  "positive_absences": [
+    {
+      "pattern_checked": "git-pinned dependencies, replace directives, or alternative module sources in go.mod",
+      "description": "go.mod declares 4 direct requires and 11 indirect, all resolving via the standard module proxy path. No `replace` directives, no `git+` URLs, no gitlab/self-hosted proxies, no local path overrides. go.sum is 69 lines — a compact, canonical transitive closure. The four direct deps are industry-standard: alecthomas/kong (CLI), stretchr/testify (tests), yaml.v3, modernc.org/sqlite. Each has a dogfood-documented posture decision in design/dogfood/.",
+      "citations": [
+        {"path": "go.mod", "line_start": 1, "line_end": 24, "quoted": "module github.com/sarahmaeve/signatory\\nrequire (alecthomas/kong, stretchr/testify, yaml.v3, modernc.org/sqlite)"},
+        {"scope": {"kind": "file", "path": "go.sum"}, "quoted": "69 lines, every entry is a canonical proxy.golang.org-serveable path"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "`postinstall` / `preinstall` / go:generate with external-download side effects",
+      "description": "No install-time scripts. Go modules do not have npm-style `postinstall` at all, and the Makefile / scripts/ directory does not fetch from the network at build time. `scripts/smoke-analyze.sh` is the only shell script and it exec's the locally-built signatory binary against local fixtures; it does not curl / pip / npm install anything.",
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "Telemetry, metrics-shipping, or 'phone home' imports in the runtime dependency tree",
+      "description": "Runtime dep set after transitive closure: kong, yaml, testify (test-only), modernc sqlite + its C-to-Go support libraries (libc, mathutil, memory, strftime, bigfft), google/uuid, go-isatty, go-humanize, hashicorp/golang-lru, go-difflib, gotextdiff, golang.org/x/{mod,sync,sys,tools}, go-spew. No segment/datadog/sentry/posthog/mixpanel client; no opentelemetry exporter; no analytics library. The tool is designed to run locally against a single SQLite file and the dependency tree matches that posture.",
+      "citations": [
+        {"scope": {"kind": "file", "path": "go.sum"}, "quoted": "No entries matching sentry|segment|datadog|posthog|mixpanel|opentelemetry|honeycomb"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "Unclaimed or typosquat-style maintainer identity",
+      "description": "Maintainer is `sarahmaeve` on GitHub (account created 2011-11-07, 14+ years tenure, display name 'Sarah Murphy'), tied to the noreply email `sarahmaeve@users.noreply.github.com` across 100% of commits. The repository is under the author's personal namespace, not a freshly-registered org. Account has 28 followers and 13 public repos — a real human with a trail, not a burner.\n\nThe identity graph is shallow (no .mailmap, no cross-platform profile links in github.com/sarahmaeve — bio/blog/company are all null) but it is not suspicious. The identity matches a standard long-tenure solo-dev GitHub profile, not a typosquat.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "gh api users/sarahmaeve: {created_at: 2011-11-07, followers: 28, public_repos: 13, name: 'Sarah Murphy'}"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "Accelerating-dependency-bloat pattern (go.mod churn, large indirect tree)",
+      "description": "15 total modules (4 direct + 11 indirect). The indirect tree is dominated by the pure-Go SQLite driver (modernc.org/*) which is a single-author package family but a deliberate choice documented in design/dogfood/modernc-sqlite.md; the rest are stdlib-grade Go libs. For comparison, a typical npm project at this scope has 200-1000+ transitive modules. The go.sum delta over the lifetime of the project is minimal because composition was chosen up-front and has not churned.",
+      "citations": [
+        {"path": "go.mod", "line_start": 1, "line_end": 24, "quoted": "4 direct, 11 indirect, no replace directives"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    }
+  ],
+  "observations": [
+    {
+      "id": "O1",
+      "title": "The project applies its own adversarial-review discipline to itself, and the paper trail shows",
+      "body": "signatory has 69 open and 53 closed issues over 5 days of existence, with 8 merged PRs, a `review-v2-entity` label carrying most of them, and three archived adversarial code reviews (`design/codereviews/review-1-post-v2-security-db-opus.md`, `review-2-post-v2-blind-tests-opus.md`, `review-3-post-v2-tests-sonnet.md`) that were commissioned specifically to find regressions in the author's own work. Commit messages follow a disciplined `Fix #NN: <intent>` pattern, consistently explain the *why* of the fix, and visibly reference the security-test-first rule the author has documented as a personal practice.\n\nConcrete examples from `git log`:\n- `Fix #108: Cap parseGoModDeps input size to prevent DoS via large go.mod`\n- `Fix #83: Atomically create DB file at 0600 to close TOCTOU window`\n- `Fix #89: Refuse non-HTTPS redirect targets to prevent token leak`\n- `Fix #101: Validate team identity at the input boundary`\n\nEach of these maps to a filed issue with a body (owner author_association) documenting the finding. The commit message + issue + test + fix pattern is being executed with rigor.\n\n**Trust-model read:** this is not a compromise indicator; it is the opposite. It demonstrates that the author applies the project's own 'TDD for security fixes' and 'test quality over test existence' principles (both recorded as personal methodology) to the project itself. The shape matches a single-person engagement where the author is also acting as adversarial reviewer. It does not replace the trust benefits of an independent contributor — but for a v0.1 prototype, it is materially above baseline for solo-dev hygiene.\n\n**Caveat:** this is all self-generated signal. An adversarial interpretation — a hostile maintainer could file their own bugs, commit their own fixes, and produce exactly this shape as camouflage — is not defeated by any of the above. The forgery-resistant signals that *would* defeat that interpretation (signed commits, independent review, release tags signed by a key rotated out-of-band) are exactly the ones F001-F003 flag as absent.",
+      "category": "trust_model_observation",
+      "signal_type": "commit_activity_shape",
+      "citations": [
+        {"scope": {"kind": "dir", "path": "design/codereviews"}, "quoted": "Three adversarial review reports plus a README process document"},
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%s' | grep -c '^Fix #' reveals consistent Fix #NN commit-message discipline"}
+      ]
+    },
+    {
+      "id": "O2",
+      "title": "Commit-activity shape: not fallow, but a 3-session burst pattern that reads 'design document becoming code' rather than 'project on a sustainable cadence'",
+      "body": "All 94 commits are clustered into three discrete days:\n\n- 2026-04-09: 51 commits — initial-commit burst, design docs, project skeleton, PR-based workflow\n- 2026-04-10: 22 commits — adversarial-review findings being resolved as `Fix #NN` direct pushes to main\n- 2026-04-14: 21 commits — a separate burst that introduces the dual-analyst exchange model, schema serialization, the format-check CLI, and two handoff templates (including the template driving this analysis)\n\nThe 3-day gap between 04-10 and 04-14 is not long enough to be a fallow signal (per signatory's own `commit_activity_shape` definition, fallow is 'no commits for months + no release for years'), but the burst pattern tells a specific story: this is a project being built in evening/weekend design sprints, not on a sustained daily cadence. For a five-day-old personal project this is the expected shape; for an adopting organization, the trust-model interpretation is 'cadence not yet established, treat any extrapolation of future responsiveness as unsupported by the evidence available.'\n\nThe pushed_at field (`2026-04-14T20:39:06Z`, minutes before this analysis began) confirms the project is alive and actively worked on as of the analysis commit.",
+      "category": "trust_model_observation",
+      "signal_type": "commit_activity_shape",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log commit-date histogram: 51 on 2026-04-09, 22 on 2026-04-10, 21 on 2026-04-14"}
+      ]
+    },
+    {
+      "id": "O3",
+      "title": "Reflexive-target read: signatory's design materials explicitly anticipate its own trust evaluation, and the gaps F001-F007 identify match the project's declared roadmap",
+      "body": "The project's own design directory contains a file that is structurally the analysis this document produces: `design/example-analysis-output.md`. The trust-model doc enumerates the signals expected to be weak on a five-day-old solo project (`per_developer_commit_signing_ratio`, `tag_signing_status`, `effective_maintainer_concentration`, `ci_action_pin_tightness`). None of F001-F007 should surprise the project author — indeed, the handoff that drove this analysis explicitly requests a rigorous-as-if-external application of the trust model.\n\nThis is a distinctive shape. Most provenance targets do not document, in their own repo, the exact signal set an analyst would use against them. That signatory does is not by itself a trust signal (it is metadata about metadata), but it is a prerequisite for a meaningful dogfood loop: the project can self-evaluate, surface gaps, prioritize which to close, and re-evaluate. The current run establishes the v0 baseline; subsequent runs measure whether the project's cadence actually closes the signaled gaps.\n\n**Recommendation texture:** the gaps flagged here are all fixable without changing the project's design. F001 (no releases) and F003 (no branch protection) are blocked on the visibility-flip (F004). F002 (no commit signing) is a single local-config change. F005 (bus factor 1) is the only one that requires external engagement and is structurally bounded by the project's age. F006 (community-health files) and F007 (CI supply-chain gates) are one-PR fixes each. The project is positioned to pass its own trust model within a few weeks of focused hygiene work, if the author chooses to prioritize that over feature velocity.",
+      "category": "trust_model_observation",
+      "citations": [
+        {"scope": {"kind": "dir", "path": "design"}, "quoted": "30+ design documents including trust-model.md, signals-v01.md, signal-type-registry.md, example-analysis-output.md"}
+      ]
+    }
+  ],
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "signatory-provenance",
+      "model": "claude-opus-4-6",
+      "prompt_version": "provenance-review-v1",
+      "invoked_at": "2026-04-14T20:45:00Z",
+      "round": 1
+    },
+    "notes": "Patterns applied for this engagement. `hit_on_target: true` means the pattern surfaced an actual finding, positive absence, or observation above; `false` means the pattern was checked and produced no signal (either because the target is structurally too young to have the surface area, or because the target is clean on that axis).",
+    "patterns": [
+      {
+        "id": "MP-GO-VITAL-01",
+        "signal_group": "vitality",
+        "description": "Commit-activity shape: distribution across days, presence/absence of fallow gaps.",
+        "pattern": "git log --format='%ai' | awk '{print $1}' | sort | uniq -c",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "A young project looks indistinguishable from a briefly-active-then-abandoned project in the first week; age-normalization matters.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-VITAL-02",
+        "signal_group": "vitality",
+        "description": "Time since first commit as age-of-project floor.",
+        "pattern": "git log --reverse --format='%ai' | head -1",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-GOV-01",
+        "signal_group": "governance",
+        "description": "Per-developer commit-signing ratio via GitHub API verification field.",
+        "pattern": "gh api repos/{owner}/{repo}/commits?per_page=100 --jq '[.[] | .commit.verification.reason] | group_by(.) | map({key: .[0], count: length})'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "web-flow 'valid' entries are GitHub server-side signing of merges, not maintainer signing; must be decomposed.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-GOV-02",
+        "signal_group": "governance",
+        "description": "Effective maintainer concentration via contributor + author-email distribution.",
+        "pattern": "gh api repos/{owner}/{repo}/contributors && git log --format='%an <%ae>' --all | sort | uniq -c",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-GOV-03",
+        "signal_group": "governance",
+        "description": "Branch protection state on the default branch.",
+        "pattern": "gh api repos/{owner}/{repo}/branches/{default}/protection (403 / 404 / rules payload)",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Private repos on free plans cannot have branch protection; must read the 403 message as 'disabled by plan' not 'disabled by choice'.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-PUB-01",
+        "signal_group": "publication_integrity",
+        "description": "Release and tag presence; distinguishes annotated-signed, annotated-unsigned, lightweight, absent.",
+        "pattern": "gh api repos/{owner}/{repo}/releases && git for-each-ref refs/tags --format='%(objecttype)'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-PUB-02",
+        "signal_group": "publication_integrity",
+        "description": "Module-proxy presence via proxy.golang.org/@latest — distinguishes 'published Go module' from 'github-hosted Go code'.",
+        "pattern": "curl -s https://proxy.golang.org/{module-path}/@latest",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "A private repo without a v0 tag may still have an @latest entry if accessed once; absence is the stronger signal.",
+        "hit_on_target": false
+      },
+      {
+        "id": "MP-GO-HYG-01",
+        "signal_group": "hygiene",
+        "description": "CI action pinning — SHA vs floating major tag.",
+        "pattern": "grep -E 'uses: [^@]+@v[0-9]+' .github/workflows/*.yml",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-HYG-02",
+        "signal_group": "hygiene",
+        "description": "CI supply-chain gate — presence of govulncheck, dependency-review, OSSF Scorecard, SBOM step.",
+        "pattern": "grep -E 'govulncheck|dependency-review|scorecard|syft|cosign' .github/workflows/*.yml",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-HYG-03",
+        "signal_group": "hygiene",
+        "description": "Community health surface — SECURITY.md, CODEOWNERS, CONTRIBUTING.md, issue templates.",
+        "pattern": "gh api repos/{owner}/{repo}/community/profile && ls SECURITY.md CODEOWNERS CONTRIBUTING.md .github/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-DEP-01",
+        "signal_group": "dependency_composition",
+        "description": "go.mod replace directives, git pins, alternative module sources.",
+        "pattern": "grep -E '^replace |git\\+https|//.*indirect' go.mod && wc -l go.sum",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "Legitimate development forks may use replace; the signal is presence-and-unexplained, not presence-at-all.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-DEP-02",
+        "signal_group": "dependency_composition",
+        "description": "Telemetry / metrics / analytics library in transitive closure.",
+        "pattern": "grep -E 'sentry|segment|datadog|posthog|mixpanel|opentelemetry|honeycomb' go.sum",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-ID-01",
+        "signal_group": "identity_graph",
+        "description": "Mailmap presence and cross-email author reconciliation.",
+        "pattern": "ls .mailmap && git log --format='%an <%ae>' --all | sort -u",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Absence of .mailmap is not itself negative on a solo project with a single email; the signal is 'do multiple emails exist that aren't reconciled?'",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-ID-02",
+        "signal_group": "identity_graph",
+        "description": "Maintainer profile surface — tenure, followers, repo count, cross-platform links.",
+        "pattern": "gh api users/{login} --jq '{created_at, followers, public_repos, blog, twitter_username, email, company}'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Empty blog/twitter/company fields are neutral for solo devs, negative for claimed-corporate projects.",
+        "hit_on_target": true
+      },
+      {
+        "id": "MP-GO-PROC-01",
+        "signal_group": "process",
+        "description": "Adversarial-review artifacts — commissioned reviews, labeled issue cohorts, fix-back commit discipline.",
+        "pattern": "ls design/codereviews/ && git log --format='%s' | grep -c '^Fix #'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "A 'Fix #NN' pattern can be camouflage; confirms only that a process is running, not that it is adversarial in practice.",
+        "hit_on_target": true
+      }
+    ]
+  }
+}
