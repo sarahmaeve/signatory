@@ -112,7 +112,7 @@
       "invoked_at": "2026-04-14T10:00:00Z",
       "round": 2
     },
-    "notes": "Twelve patterns spanning the collector-hint spectrum, drawn from the round-2 §B catalog. Some are one-hop greps (MP-IPC-02, MP-FILE-01); some require multi-hop tracing through transport → parsing → dispatch (MP-CAP-01); some narrow a universe but need human or LLM triage (MP-NET-02, MP-ENV-01). The `hit_on_atuin` field marks which patterns actually produced a finding in this engagement, so the catalog doubles as validation data for future collector implementations.",
+    "notes": "Twelve patterns spanning the collector-hint spectrum, drawn from the round-2 §B catalog. Some are one-hop greps (MP-IPC-02, MP-FILE-01); some require multi-hop tracing through transport → parsing → dispatch (MP-CAP-01); some narrow a universe but need human or LLM triage (MP-NET-02, MP-ENV-01). The `hit_on_target` field marks which patterns actually produced a finding in this engagement, so the catalog doubles as validation data for future collector implementations.",
     "patterns": [
       {
         "id": "MP-NET-01",
@@ -121,7 +121,7 @@
         "pattern": "rg --type rust 'https?://[a-zA-Z0-9./-]+\\.(atuin|anthropic|inflection)\\.' crates/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Hits in tests, doc comments, and help-text strings produce noise. Scope to function bodies by filtering lines preceded by `///` or inside `#[cfg(test)]` blocks.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-NET-02",
@@ -130,7 +130,7 @@
         "pattern": "rg --type rust 'reqwest::(Client|get|post)' crates/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Every fetch matches; collector narrows the universe but human or LLM triage needed to distinguish 'happens during update-check tick' from 'happens because user ran atuin login'.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-NET-03",
@@ -139,7 +139,7 @@
         "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
         "composes_with": ["MP-NET-01", "MP-NET-02"],
         "false_positive_notes": "Not grep-automatable: requires tracing from user-facing action to URL-construction and noticing the URL is NOT derived from settings. Surfaces as a finding only on source review.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-IPC-01",
@@ -148,7 +148,7 @@
         "pattern": "rg --type rust '(TcpListener|UnixListener)::bind' crates/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "The bind itself is trivially findable; whether an Interceptor is attached downstream requires following the Server::builder() chain.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-IPC-02",
@@ -157,7 +157,7 @@
         "pattern": "rg --type rust -A 10 'UnixListener::bind' crates/ | rg -B 10 'set_permissions' -v",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Permissions may be set on the parent directory rather than the socket; collector should flag the shape, not claim exploit.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-FILE-01",
@@ -166,7 +166,7 @@
         "pattern": "rg --type rust 'File::create\\([^)]*(key|token|session|credentials)' crates/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Misses OpenOptions::new().write(true).create(true).open(...) idioms and tokio::fs::File::create; extend the pattern accordingly.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-FILE-02",
@@ -175,7 +175,7 @@
         "pattern": "rg --type rust 'temp_dir\\(\\)\\.join\\(format!' crates/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "On macOS temp_dir() is user-private; severity varies by platform. Collector should note platform-conditional severity.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-DEF-01",
@@ -184,7 +184,7 @@
         "pattern": "rg --type rust '\\.unwrap_or\\(true\\)' crates/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Hits on every unwrap_or(true); narrows only slightly. Cross-reference against struct field names containing `enabled` or capability-verb nouns to prioritize.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-ENV-01",
@@ -194,7 +194,7 @@
         "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
         "composes_with": ["MP-CAP-01"],
         "false_positive_notes": "Every env::var read matches; the reasoning step is whether the branch it enables weakens any security invariant. Most env reads are benign (HOME, XDG_CONFIG_HOME, ATUIN_SESSION).",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-CAP-01",
@@ -202,7 +202,7 @@
         "description": "Remote-instructed tool dispatch (SSE, MCP, etc.) that does not gate incoming tool names against a client-hardcoded enum before permission resolution. Miss case = the client blindly dispatches on server-chosen strings.",
         "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
         "false_positive_notes": "Not detectable by grep alone; requires tracing the SSE/MCP frame handler to the tool-call dispatch and verifying a bounded match{} on tool names. LLM-grade analysis task.",
-        "hit_on_atuin": false
+        "hit_on_target": false
       },
       {
         "id": "MP-SUP-01",
@@ -211,7 +211,7 @@
         "pattern": "test -f deny.toml && ! rg -q 'cargo-deny|cargo deny|cargo-audit' .github/ .depot/ scripts/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "External CI (Branch Protection required-checks, GitHub Apps) can enforce without leaving a trace in-repo; collector should flag as probable-unenforced, not definitive.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-SUP-02",
@@ -220,7 +220,7 @@
         "pattern": "! rg -q 'cargo publish|cargo-release' .github/ .depot/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Some projects publish via cargo-release with OIDC; collector should check for that variant too. Absence of both patterns is the real signal.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       }
     ]
   }

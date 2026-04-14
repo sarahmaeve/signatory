@@ -188,7 +188,7 @@
         "pattern": "git log -1 --format='%ai' && grep -i 'maintained\\|actively\\|stable' README.md",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Very mature small libraries can be legitimately 'done' with no recent commits; collector should compare against a threshold tuned to project size and dependency role.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-VITAL-02",
@@ -197,7 +197,7 @@
         "pattern": "curl -s https://pypi.org/pypi/{package}/json | jq '.urls[0].upload_time' && git log -1 --format='%ai'",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Some projects deliberately don't release every commit (e.g., release-on-feature-completion). Compare the gap against the project's own historical cadence.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-VITAL-03",
@@ -206,7 +206,7 @@
         "pattern": "for y in 2020 2021 2022 2023 2024 2025; do git log --format='%an' --since=\"$y-01-01\" --until=\"$y-12-31\" | wc -l; done",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "First-year projects always have a year-over-year drop after the initial push. Apply only to projects ≥3 years old.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PUB-01",
@@ -215,7 +215,7 @@
         "pattern": "ls release.py Makefile justfile 2>/dev/null && rg -q 'id-token.*write' .github/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Some projects use both — a local script for emergencies plus a CI workflow for normal releases. Collector should report both signals separately.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PUB-02",
@@ -224,7 +224,7 @@
         "pattern": "git for-each-ref refs/tags --format='%(objecttype)' | sort | uniq -c",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "None — this is a deterministic property of git refs.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PUB-03",
@@ -233,7 +233,7 @@
         "pattern": "curl -s https://pypi.org/pypi/{package}/json | jq '.urls[].digests, .urls[].attestations'",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "PyPI's attestation API is newer than many projects; absence is the norm, not the alarm. Combine with publication-cadence to interpret.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-GOV-01",
@@ -242,7 +242,7 @@
         "pattern": "git log --format='%G?' -200 | sort | uniq -c",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "GPG must be installed locally for `%G?` to populate; a missing GPG installation produces uniform 'N' regardless of actual signing. Detect via `command -v gpg` first.",
-        "hit_on_atuin": true,
+        "hit_on_target": true,
         "composes_with": ["MP-PY-PUB-02"]
       },
       {
@@ -252,7 +252,7 @@
         "pattern": "git log --format='%an' --all | sort | uniq -c | sort -rn",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Identity-graph noise — `.mailmap` absence causes single people to appear under multiple author names, inflating the contributor count. Apply mailmap or detect via duplicate emails before computing the share.",
-        "hit_on_atuin": true,
+        "hit_on_target": true,
         "composes_with": ["MP-PY-VITAL-03"]
       },
       {
@@ -262,7 +262,7 @@
         "pattern": "gh api users/{login} && curl -s https://pypi.org/pypi/{package}/json | jq '.info.author_email'",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Privacy-conscious developers may legitimately use noreply emails or pseudonyms; absence is a weaker signal than mismatch.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-IDENT-02",
@@ -271,7 +271,7 @@
         "pattern": "test -f .mailmap",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Many small projects don't have a `.mailmap` and don't need one (no duplicate identities). Pair with the bus-factor pattern to interpret meaning.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-SUP-01",
@@ -280,7 +280,7 @@
         "pattern": "rg -i 'git\\+https?://|--index-url|--extra-index-url' requirements*.txt pyproject.toml",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Some projects intentionally pin to a fork via git URL; collector should flag rather than reject.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-SUP-02",
@@ -289,7 +289,7 @@
         "pattern": "rg -l 'pip-audit|safety|pyup' .github/workflows/ && test -f .github/dependabot.yml",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "External CI (Branch Protection, GitHub Apps) can enforce without leaving a trace; collector should flag as probable-unenforced, not definitive.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-RESP-01",
@@ -298,7 +298,7 @@
         "pattern": "gh api 'repos/{owner}/{repo}/pulls?state=open&sort=created&direction=desc' --jq '.[] | {number, created_at, days_open: ((now - (.created_at | fromdateiso8601))/86400|floor)}'",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Some projects intentionally leave PRs open for community discussion; check the PR comment count to differentiate triaged-but-pending from genuinely-stalled.",
-        "hit_on_atuin": false
+        "hit_on_target": false
       },
       {
         "id": "MP-PY-PYPROJ-01",
@@ -307,7 +307,7 @@
         "pattern": "test -f pyproject.toml && ! test -f setup.py",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Some legitimately-maintained projects still use setup.py for backward compat; combine with VITAL-01 / VITAL-03 to interpret.",
-        "hit_on_atuin": true,
+        "hit_on_target": true,
         "composes_with": ["MP-PY-VITAL-01", "MP-PY-VITAL-03"]
       }
     ]

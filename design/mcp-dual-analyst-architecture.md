@@ -871,7 +871,7 @@ type MethodologyPattern struct {
     CollectorHint      CollectorHint  `json:"collector_hint"`    // CHANGED: struct, not enum
     ComposesWith       []string       `json:"composes_with,omitempty"` // NEW
     FalsePositiveNotes string         `json:"false_positive_notes,omitempty"`
-    HitOnAtuin         *bool          `json:"hit_on_atuin,omitempty"`
+    HitOnTarget        *bool          `json:"hit_on_target,omitempty"`
 }
 ```
 

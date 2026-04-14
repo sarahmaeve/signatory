@@ -53,6 +53,14 @@ resolution to be precise.
    citations (`scope: {kind: "crate", path: "..."}`) with `Path`
    omitted since `Scope` now carries the path.
 
+5. **`MethodologyPattern.hit_on_atuin` → `hit_on_target`:** post-trial
+   field rename to remove engagement-specific naming. The semantics
+   are unchanged — the field still records whether the pattern
+   surfaced a finding on the target being analyzed. The name
+   `hit_on_atuin` was a known schema quirk during the atuin and
+   thefuck engagements (see commit history for the rename); this
+   fixture and all other v1 fixtures now use the cleaned name.
+
 ### Why migrate rather than round-trip the original?
 
 The exchange package implements the post-revision v1 schema. The

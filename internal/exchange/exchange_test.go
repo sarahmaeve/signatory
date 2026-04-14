@@ -203,8 +203,8 @@ func TestAtuinTrial_PositiveAbsences_UseScopeRefs(t *testing.T) {
 		confidences["server-side plain-text password storage or weak password hashing"])
 }
 
-func TestAtuinTrial_MethodologyCatalog_HitOnAtuinFlag(t *testing.T) {
-	// Validates that MethodologyPattern.HitOnAtuin distinguishes
+func TestAtuinTrial_MethodologyCatalog_HitOnTargetFlag(t *testing.T) {
+	// Validates that MethodologyPattern.HitOnTarget distinguishes
 	// patterns that produced findings on this engagement (most
 	// patterns) from patterns that didn't (MP-CAP-01, the multi-hop
 	// AI capability-gating trace, which fired as a positive
@@ -215,8 +215,8 @@ func TestAtuinTrial_MethodologyCatalog_HitOnAtuinFlag(t *testing.T) {
 	hits := 0
 	misses := 0
 	for _, p := range out.MethodologyTrace.Patterns {
-		require.NotNil(t, p.HitOnAtuin, "pattern %s missing hit_on_atuin", p.ID)
-		if *p.HitOnAtuin {
+		require.NotNil(t, p.HitOnTarget, "pattern %s missing hit_on_target", p.ID)
+		if *p.HitOnTarget {
 			hits++
 		} else {
 			misses++

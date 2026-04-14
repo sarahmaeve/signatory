@@ -172,7 +172,7 @@ type MethodologyPattern struct {
 	CollectorHint      CollectorHint `json:"collector_hint" yaml:"collector_hint"`
 	ComposesWith       []string      `json:"composes_with,omitempty" yaml:"composes_with,omitempty"`
 	FalsePositiveNotes string        `json:"false_positive_notes,omitempty" yaml:"false_positive_notes,omitempty"`
-	HitOnAtuin         *bool         `json:"hit_on_atuin,omitempty" yaml:"hit_on_atuin,omitempty"`
+	HitOnTarget        *bool         `json:"hit_on_target,omitempty" yaml:"hit_on_target,omitempty"`
 }
 
 // CollectorHint is a multi-axis classification of a methodology

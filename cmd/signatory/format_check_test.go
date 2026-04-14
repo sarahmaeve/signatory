@@ -335,7 +335,7 @@ func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
 					CollectorHint: exchange.CollectorHint{
 						GrepPrecision: exchange.GrepPrecisionHigh, ReasoningDepth: exchange.ReasoningDepthNone,
 					},
-					Pattern: stringPtr("rg foo"), HitOnAtuin: &hit,
+					Pattern: stringPtr("rg foo"), HitOnTarget: &hit,
 				},
 				{
 					ID: "MP-A-02", SignalGroup: "alpha",
@@ -343,7 +343,7 @@ func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
 					CollectorHint: exchange.CollectorHint{
 						GrepPrecision: exchange.GrepPrecisionHigh, ReasoningDepth: exchange.ReasoningDepthNone,
 					},
-					Pattern: stringPtr("rg bar"), HitOnAtuin: &hit,
+					Pattern: stringPtr("rg bar"), HitOnTarget: &hit,
 				},
 				{
 					ID: "MP-B-01", SignalGroup: "beta",
@@ -455,7 +455,7 @@ func TestPrintSummary_SortedDeterminism(t *testing.T) {
 			CollectorHint: exchange.CollectorHint{
 				GrepPrecision: exchange.GrepPrecisionUseless, ReasoningDepth: exchange.ReasoningDepthOneHop,
 			},
-			HitOnAtuin: &hit,
+			HitOnTarget: &hit,
 		}
 	}
 	a := makeOut([]exchange.MethodologyPattern{

@@ -267,7 +267,7 @@
       "invoked_at": "2026-04-14T12:50:00Z",
       "round": 1
     },
-    "notes": "Python CLI with shell-integration surface. Prioritized patterns that pay off for 'developer runs this on their workstation' rather than 'exposed service'. Field `hit_on_atuin` retained per the documented schema quirk.",
+    "notes": "Python CLI with shell-integration surface. Prioritized patterns that pay off for 'developer runs this on their workstation' rather than 'exposed service'. Field `hit_on_target` (renamed from `hit_on_atuin` post-engagement per signatory schema cleanup).",
     "patterns": [
       {
         "id": "MP-PY-NET-01",
@@ -276,7 +276,7 @@
         "pattern": "rg --type py -n 'https?://|requests\\.|urllib|urlopen|sentry_sdk|segment|posthog|rollbar' thefuck/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop", "miss_mode": "false_positive_heavy"},
         "false_positive_notes": "Hits comments and help text. Filter to module-scope import lines or string literals.",
-        "hit_on_atuin": false
+        "hit_on_target": false
       },
       {
         "id": "MP-PY-SUBPROC-01",
@@ -286,7 +286,7 @@
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
         "composes_with": ["MP-PY-ENV-01"],
         "false_positive_notes": "Most `shell=True` hits need a one-hop reasoning check on the string passed — is it attacker-influenced?",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PICKLE-01",
@@ -295,7 +295,7 @@
         "pattern": "rg --type py -n 'pickle\\.load|shelve\\.open|dill\\.load|cloudpickle\\.load|yaml\\.load\\(' thefuck/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
         "false_positive_notes": "`pickle.dumps` without a matching `loads` is safe. `yaml.safe_load` / `Loader=SafeLoader` passes.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-TEMPFILE-01",
@@ -305,7 +305,7 @@
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "composes_with": ["MP-PY-FILEPERM-01"],
         "false_positive_notes": "Many hits are reads, not writes — need to read the call site.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PLUGIN-01",
@@ -315,7 +315,7 @@
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
         "composes_with": ["MP-PY-SUBPROC-01"],
         "false_positive_notes": "entry_points-based discovery is safer because package names are explicit; name-pattern globs are the risky variant.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-FILEPERM-01",
@@ -324,7 +324,7 @@
         "pattern": "rg --type py -n 'os\\.open\\([^)]*\\)|\\.write_text\\(|\\.write_bytes\\(' thefuck/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Only matters when the path is shared or the content is sensitive.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-ENV-01",
@@ -334,7 +334,7 @@
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "composes_with": ["MP-PY-SUBPROC-01"],
         "false_positive_notes": "Most env reads are benign (XDG, HISTFILE, PS1); focus on vars that feed subprocess calls or shell-string formatting.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-INSTALL-01",
@@ -343,7 +343,7 @@
         "pattern": "rg -n 'cmdclass|setup_requires|post_install|\\.pth$' setup.py MANIFEST.in",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
         "false_positive_notes": "Declarative `setup(...)` is safe; look for custom classes inheriting `setuptools.Command`.",
-        "hit_on_atuin": false
+        "hit_on_target": false
       },
       {
         "id": "MP-PY-DEBUG-01",
@@ -352,7 +352,7 @@
         "pattern": "rg --type py -n 'debug\\(.*env|pformat\\(settings|format\\(.*os\\.environ|Received output' thefuck/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Structured loggers that apply redaction pass. Plain `format()` of env dict is the risky pattern.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-SIDEEFFECT-01",
@@ -361,7 +361,7 @@
         "pattern": "rg --type py -n 'def side_effect|os\\.remove|shutil\\.rmtree|\\.unlink\\(' thefuck/rules/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Narrow — thefuck only has 3 side-effect rules, all worth reading.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-PATHCHECK-01",
@@ -370,7 +370,7 @@
         "pattern": "rg --type py -n 'startswith\\(.*getcwd|startswith\\(.*base|commonpath' thefuck/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "`commonpath`-based checks pass; naked `startswith` is the bug.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-CONFIRM-01",
@@ -379,7 +379,7 @@
         "pattern": "rg --type py -nL 'enabled_by_default\\s*=\\s*False' thefuck/rules/ | xargs rg -l 'rm |--no-verify|--force|--no-preserve-root|sudo '",
         "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
         "false_positive_notes": "High false-positive rate — most matches are the rule *detecting* a dangerous command, not *suggesting* one. Manual review required.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       },
       {
         "id": "MP-PY-SECRET-01",
@@ -388,7 +388,7 @@
         "pattern": "rg --type py -in 'keyring|netrc|credential|password|token|api_key|api_token|\\bsecret\\b' thefuck/",
         "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
         "false_positive_notes": "Lots of false positives in docstrings and help text; confirm on import lines.",
-        "hit_on_atuin": false
+        "hit_on_target": false
       },
       {
         "id": "MP-PY-RERUN-01",
@@ -397,7 +397,7 @@
         "pattern": "rg --type py -n 'Popen\\(.*shell\\s*=\\s*True|os\\.system\\(.*\\$' thefuck/output_readers/",
         "collector_hint": {"grep_precision": "high", "reasoning_depth": "multi_hop"},
         "false_positive_notes": "Narrow; easily distinguishable from pipeline-reading use of shell=True.",
-        "hit_on_atuin": true
+        "hit_on_target": true
       }
     ]
   },
