@@ -1,0 +1,315 @@
+{
+  "attribution": {
+    "analyst_id": "signatory-provenance",
+    "model": "claude-opus-4-6",
+    "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
+    "invoked_at": "2026-04-14T20:30:00Z",
+    "round": 1
+  },
+  "target": "https://github.com/nvbn/thefuck",
+  "target_commit": "HEAD-as-of-2024-01-25",
+  "round_notes": "Provenance analysis of `thefuck`, a Python CLI for shell-command correction. Run in parallel with the security analyst (output at /tmp/thefuck-security-v1.json, not consulted before emitting this document). The dominant trust signal is project vitality: the repo is fallow (last commit 2024-01-25, last PyPI release 2022-01-02) despite 96K stars and an 11-year history. The maintainer's identity is strong (15-year GitHub tenure, public, cross-platform), but a fallow popular tool has a specific risk profile: any undiscovered vulnerability has years of unpatched window, and the dormant publisher account is a high-value account-takeover target. The user's specific question — 'likelihood of leaking credentials or code?' — is mostly the security analyst's beat. Provenance can say: the publisher chain (local-maintainer twine upload) and the absence of release signing are the unguarded paths by which a hostile release could reach users; whether the current code itself leaks is a code-reading question.",
+  "findings": [
+    {
+      "id": "F001",
+      "verdict": "The project is effectively unmaintained: no PyPI release in over 4 years (3.32 on 2022-01-02), no commits in the past 21 months, and 5+ pull requests filed in March 2026 sit unreviewed despite contributor activity continuing.",
+      "rationale": "Vitality signals over the project's 11-year history show a clear inflection. Year-by-year commit counts on `master`:\n\n- 2018: 21 commits (Vladimir Iakovlev) + a long tail of contributors\n- 2019-2020: ~15 commits/year; Pablo Santiago Blum de Aguiar (scorphus) emerges as a real co-maintainer\n- 2021: 13 commits, mostly scorphus\n- 2022: 7 commits, mostly scorphus\n- 2023: 14 commits (scorphus 8, Hugo van Kemenade 5, one other)\n- 2024: **1 commit** (Alan Gabbianelli, README typo fix)\n- 2025: **0 commits**\n- 2026: 0 commits, but at least 5 open pull requests (#1564, #1563, #1562, #1558, #1557 from March 2026)\n\nLast PyPI release `3.32` was uploaded `2022-01-02T21:46:52` (per pypi.org/pypi/thefuck/json). Last GitHub commit was `2024-01-25` per `git log --format='%G?'`.\n\nOpen issue [#1566](https://github.com/nvbn/thefuck/issues/1566) (`2026-04-05`) literally asks 'Is this project not be maintained so long?' — community confirmation, not just metadata inference.\n\nThe project's *historical* health is unambiguously good (1,651 commits, 201 distinct authors over 11 years, ~96K stars, 3,910 forks). The trust concern isn't the past; it's that anyone installing `thefuck` today is installing software that has had no security maintenance window for 2+ years. Any vulnerability surfaced by the parallel security review — even a low-severity one — has no realistic remediation path beyond forking.\n\nSeverity rationale: 'high' rather than 'medium' because the tool intercepts shell commands on developer workstations (high blast radius if compromised) and the unpatched-window is multi-year (compounds smaller vulnerabilities into real risk).",
+      "severity": {"default": "high"},
+      "category": "vitality_unmaintained",
+      "signal_type": "commit_activity_shape",
+      "citations": [
+        {"path": "thefuck/__init__.py", "scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%an' --since=2024-01-01 produces 1 commit total in 2024 and 0 in 2025/2026"},
+        {"path": "setup.py", "line_start": 34, "line_end": 34, "quoted": "VERSION = '3.32'  -- hardcoded version, last bumped 2022"}
+      ],
+      "prerequisites": [
+        "User adopts thefuck for ongoing use rather than a one-off install"
+      ],
+      "remediation_hints": [
+        "Pin to a specific known-good version and accept that future security patches will require a fork",
+        "Subscribe to PyPI's security advisory feed for the package as the primary alert mechanism since the maintainer cannot be relied on for a CVE response",
+        "Consider migrating to an actively-maintained alternative if one fits the use case"
+      ]
+    },
+    {
+      "id": "F002",
+      "verdict": "PyPI publishing is a maintainer-local operation via `release.py`, which calls `twine upload` from the maintainer's environment with no CI gating, OIDC trusted publishing, or release signing.",
+      "rationale": "`release.py` at the repo root (38 lines, included in the repo) is the publish script. It:\n\n1. Reads `setup.py`, increments the patch version\n2. Commits the bump, tags, pushes to GitHub\n3. Sets `CONVERT_README=true` and runs `python setup.py sdist bdist_wheel`\n4. Runs `twine upload dist/*` to PyPI\n\nNo `pyproject.toml`-declared build backend; no GitHub Actions workflow that publishes to PyPI; no use of PyPI Trusted Publishing (which would require an `id-token: write` workflow + a registered publisher on pypi.org). The publisher API token therefore lives on at least one machine — almost certainly the maintainer's — as a long-lived credential.\n\nThis is the worst-case configuration for publish-side trust per signatory's `registry_publish_origin` signal: `local_maintainer_machine` rather than `oidc_ci`. A compromise of the maintainer's local environment (laptop, dotfiles repo, password manager export, etc.) is a direct path to publishing a malicious release.\n\nMitigating factor: no release has been published since 2022. If the API token has expired or was rotated to PyPI's mandatory-2FA regime (introduced January 2024 for new tokens), the actual exposure may have decayed. But the project's `release.py` documents the *intended* publish flow, and that flow remains the path of least resistance if the maintainer ever returns to publishing.\n\nThis is the primary publisher-side answer to the user's 'leak credentials or code?' question: the path by which a hostile release could reach `pip install thefuck` users is gated only by the maintainer's local environment. There is no signing chain to invalidate, no attestation to fail, no CI provenance to mismatch.",
+      "severity": {"default": "medium"},
+      "category": "publication_integrity",
+      "signal_type": "registry_publish_origin",
+      "citations": [
+        {"path": "release.py", "line_start": 1, "line_end": 38, "quoted": "from subprocess import call ... call('twine upload dist/*', shell=True, env=env)"},
+        {"path": ".github/workflows/test.yml", "scope": {"kind": "file", "path": ".github/workflows/test.yml"}, "quoted": "Only test workflow exists; no publish workflow with id-token: write"}
+      ],
+      "prerequisites": [
+        "Project resumes publishing (currently dormant; if it never publishes again, this surface remains latent)"
+      ],
+      "remediation_hints": [
+        "Migrate to PyPI Trusted Publishing: register the GitHub repo as a trusted publisher on PyPI, add a release workflow with `id-token: write`, and revoke the long-lived API token",
+        "Move release artifact construction to a CI workflow with `actions/attest-build-provenance` for SLSA-style provenance",
+        "If the project remains dormant, consider yanking the package or transferring maintainership to avoid abandoned-credential risk"
+      ]
+    },
+    {
+      "id": "F003",
+      "verdict": "All 83 release tags are lightweight commit-pointer refs; none are annotated, none are GPG-signed.",
+      "rationale": "`git for-each-ref refs/tags --format='%(objecttype)'` returns 83 occurrences of `commit`, zero of `tag`. Lightweight tags are mutable refs; annotated tags carry their own object with author, message, and (when `git tag -s` is used) a GPG signature.\n\nFor a published Python package, signed annotated tags are the canonical cryptographic anchor for 'this commit is the v3.32 release.' Their absence means: an attacker who could push to the repo could move any tag to point at any commit, and there would be no signature to invalidate. Combined with F002 (local-maintainer publish), the release-integrity chain has no cryptographic links.\n\nLow severity in isolation — most popular Python projects don't sign tags either, and the reputational/scrutiny cost of moving a tag on a 96K-star repo is high. The signal value is mostly that the standard-low-cost-fix is absent.",
+      "severity": {"default": "low"},
+      "category": "publication_integrity",
+      "signal_type": "tag_signing_status",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git for-each-ref refs/tags --format='%(objecttype)' returns 83 'commit' entries, 0 'tag' entries"}
+      ],
+      "remediation_hints": [
+        "Use `git tag -a -s VERSION` for future releases (blocked on F001 — there are no future releases currently)"
+      ]
+    },
+    {
+      "id": "F004",
+      "verdict": "Per-developer commit signing is essentially absent: 200 of 200 most recent commits show no signature locally; only one of the last 15 commits carries GitHub's `verified: true` (which itself only attests web-flow merge signing, not author identity).",
+      "rationale": "`git log --format='%G?' -200` returns `N` (no signature) for every one of the 200 most recent commits when checked locally. The GitHub API returns `verified: true` for only one of the last 15 commits (Gerardo Grignoli, `#1329: Add support for Windows CMD...`); the other 14 are `verified: false`. Even the one verified commit is most likely web-flow signing (a PR merged via the GitHub UI is signed by GitHub's internal key, not by the committer).\n\nThe forgery-resistance reading per signatory's trust model: commits to `thefuck` cannot be cryptographically attributed to their claimed authors. A compromise of the maintainer's GitHub account would be a direct path to merging arbitrary code with no signature mismatch to detect. Coupled with the project's fallow status (no human reviewing each PR closely), the human-supervision layer that normally catches such compromises is also absent.\n\nLow severity because (a) signing absence is the norm in the Python ecosystem, (b) the project is currently dormant so the active-attack surface is small, and (c) the maintainer's identity is strong by other measures (see F006 / observation O1).",
+      "severity": {"default": "low"},
+      "category": "governance",
+      "signal_type": "per_developer_commit_signing_ratio",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%G?' -200 produces 200 'N' entries"}
+      ]
+    },
+    {
+      "id": "F005",
+      "verdict": "The CI pipeline runs only test and lint jobs; no dependency vulnerability scanning, no lockfile audit, no Dependabot, no CodeQL, no security policy enforcement.",
+      "rationale": "`.github/workflows/test.yml` is the only workflow in the repo. It runs `pytest`, `flake8`, and a Docker-based functional test against Python 3.7-3.12. There is no `pip-audit`, no `safety`, no Dependabot configuration (`.github/dependabot.yml` absent), no CodeQL workflow, no GitHub security advisory automation visible in CI.\n\nThis means: a known-vulnerable transitive dependency in `requirements.txt` (which lists `psutil`, `colorama`, `six`, `pexpect`, `pypandoc` and more for testing) would not surface via CI. Combined with F001 (no maintainer activity), there is no automated mechanism to flag vulnerabilities that emerge during the project's dormancy.\n\nThis is the Python analog of the cargo-deny-declared-but-unenforced gap signatory found in atuin, except worse: there's no policy file at all. The signal value is the absence of even an aspirational document.",
+      "severity": {"default": "low"},
+      "category": "supply_chain_hygiene",
+      "signal_type": "ci_supply_chain_gate",
+      "citations": [
+        {"path": ".github/workflows/test.yml", "scope": {"kind": "file", "path": ".github/workflows/test.yml"}, "quoted": "only `Tests` workflow; jobs: test, test-deprecated, lint via flake8 — no security scanning steps"}
+      ],
+      "remediation_hints": [
+        "Add a Dependabot config (`.github/dependabot.yml`) for pip ecosystem with weekly updates",
+        "Add a `pip-audit` step to the test workflow",
+        "Both fixes are <10 lines each; cost is approximately zero"
+      ]
+    },
+    {
+      "id": "F006",
+      "verdict": "Effective bus factor is one (the original maintainer), and that one is currently inactive; the only previous co-maintainer (scorphus) was also active 2019-2023 and has not contributed since.",
+      "rationale": "Author distribution from `git log --format='%an' --all`:\n\n- Vladimir Iakovlev (`nvbn`): 509 + 422 = 931 commits (the dual count is because of two `author.name` strings for the same identity — both `Vladimir Iakovlev` and `nvbn`, mapping to the same `nvbn.rm@gmail.com` per his GitHub profile)\n- Pablo Santiago Blum de Aguiar (`scorphus`): 122 + 18 = 140 commits (same dual-name pattern, 'Pablo Aguiar' and 'Pablo Santiago Blum de Aguiar')\n- mcarton: 122 commits\n- Joseph Frazier: 88 commits\n- Long tail of 197 other contributors\n\nThat is a meaningful contributor base — 201 distinct authors total — but the day-to-day-shipping bus factor is currently zero. The original maintainer hasn't merged a PR in years; the secondary maintainer (scorphus) has been silent since 2023. The five open March-2026 PRs (#1564, #1563, #1562, #1558, #1557) are all small fixes from outside contributors waiting for review. There's no internal maintainer pipeline to review them.\n\nMedium severity in this conditional-context sense: low risk for a maintained project, medium risk for *this* project because the bus-factor concern compounds with the unmaintained-status concern (F001). A single account compromise here would be an undetected one for an extended period.\n\nNote: there's no `.mailmap` file in the repo, which is why both `nvbn`/`Vladimir Iakovlev` and `scorphus`/`Pablo Aguiar`/`Pablo Santiago Blum de Aguiar` show as separate authors in the git log. Adding a `.mailmap` would be a low-cost hygiene improvement (and a positive identity-graph signal per signatory's model), but its absence isn't itself a security issue.",
+      "severity": {
+        "default": "medium",
+        "by_context": [
+          {"context": {"host_isolation": "single_user"}, "value": "low"},
+          {"context": {"host_isolation": "shared_host"}, "value": "medium"},
+          {"context": {"host_isolation": "ci_runner"}, "value": "medium"}
+        ]
+      },
+      "category": "governance",
+      "signal_type": "effective_maintainer_concentration",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%an' --all | sort | uniq -c | sort -rn"}
+      ],
+      "remediation_hints": [
+        "Maintainer succession (transfer to active user) would be the upstream fix; for adopters, this is mostly informational"
+      ]
+    }
+  ],
+  "positive_absences": [
+    {
+      "pattern_checked": "git-pinned dependencies in requirements.txt or setup.py install_requires",
+      "description": "Searched for any `git+https://` or `git@` references in requirements.txt and setup.py's install_requires/extras_require. None found. All declared dependencies (`psutil`, `colorama`, `six`, `pathlib2`, `decorator`, `pyte`, `win_unicode_console`) resolve via PyPI. This means a hostile transitive dependency would have to land via the public PyPI index — which has organization-scale scrutiny — rather than via a less-monitored git URL or alternative registry.",
+      "citations": [
+        {"path": "requirements.txt", "scope": {"kind": "file", "path": "requirements.txt"}, "quoted": "all entries are bare PyPI package names: flake8, pytest, mock, pytest-mock, wheel, setuptools>=17.1, pexpect, pypandoc, pytest-benchmark, pytest-docker-pexpect, twine"},
+        {"path": "setup.py", "line_start": 36, "line_end": 41, "quoted": "install_requires = ['psutil', 'colorama', 'six']  -- bare PyPI names"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "alternative package registry sources (non-PyPI index URLs)",
+      "description": "Checked setup.py, requirements.txt, and tox.ini for `--index-url`, `--extra-index-url`, or any non-PyPI source declaration. None found. The build resolves entirely from the canonical PyPI index. Combined with the prior absence, the package's resolution surface is exactly 'PyPI' — narrower than projects that mix sources.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "no --index-url or --extra-index-url declarations in any pip-config-adjacent file"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "license declaration mismatch between LICENSE.md, setup.py, and PyPI metadata",
+      "description": "All three sources declare MIT license: `LICENSE.md` contains an MIT license text, `setup.py` line 61 declares `license='MIT'`, and PyPI metadata returns `'License': 'MIT'`. License declarations are consistent across declarations, which removes one common audit gotcha (mismatched license claims that complicate compliance).",
+      "citations": [
+        {"path": "LICENSE.md", "scope": {"kind": "file", "path": "LICENSE.md"}},
+        {"path": "setup.py", "line_start": 61, "line_end": 61, "quoted": "license='MIT'"}
+      ],
+      "confidence": "thoroughly_reviewed"
+    },
+    {
+      "pattern_checked": "maintainer-account compromise indicators in recent activity",
+      "description": "Inspected the most recent 15 commit author identities and the open-PR contributor set. All recent commits are from previously-known contributors (no new account suddenly producing prolific commits, no unusual force-pushes, no rewrites of older history visible in `git log --all`). The recent-activity profile is consistent with a fallow project receiving small drive-by fixes — not consistent with takeover-style activity.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "recent commit authors: Alan Gabbianelli (1, 2024-01-25), Pablo Santiago Blum de Aguiar (multiple, 2023), Gerardo Grignoli (1, 2023) — all matching prior contributor patterns"}
+      ],
+      "confidence": "spot_checked"
+    }
+  ],
+  "observations": [
+    {
+      "id": "O1",
+      "title": "Maintainer identity is strong despite project being fallow",
+      "body": "Vladimir Iakovlev (`nvbn`) has a high-quality, forgery-resistant identity profile in signatory's trust model:\n\n- GitHub account created 2011-10-09 (15 years tenure)\n- 2,081 followers, 101 public repos — established public presence\n- Personal blog at `nvbn.github.io` (cross-platform identity consistency)\n- Real name (Vladimir Iakovlev), location (Amsterdam, NL), bio (Software Developer)\n- Email `nvbn.rm@gmail.com` is consistently used across the GitHub profile, setup.py author field, and git commit history\n\nThis matters for the 'is this person who they claim to be?' question: very few of the trust-model failure modes for new accounts apply here. The XZ-style 'long con' or 'fabricated identity' threats are implausible for an account this established.\n\n**However**, this is not a defense against account-takeover. A long-tenured, high-reputation, currently-dormant account is *exactly* the high-value target for an attacker with persistence: the reputational cost of a compromised release is borne by the rightful identity, not the attacker. Combined with F001 (project fallow) and F002 (local-maintainer publish), the relevant scenario isn't 'is nvbn malicious?' but 'what happens if someone gets nvbn's PyPI token or GitHub session?'\n\nThis observation is informational — it shifts the security framing from 'identity risk' to 'account-takeover risk' but doesn't itself argue for or against adoption.",
+      "category": "trust_model_observation",
+      "signal_type": "identity_domain_consistency",
+      "citations": [
+        {"path": "setup.py", "line_start": 58, "line_end": 59, "quoted": "author='Vladimir Iakovlev', author_email='nvbn.rm@gmail.com'"}
+      ]
+    },
+    {
+      "id": "O2",
+      "title": "Co-maintainer trajectory matches project decline",
+      "body": "Pablo Santiago Blum de Aguiar (`scorphus`) was the project's effective second maintainer 2019-2023. His commit volume by year:\n\n- 2019: 9 commits (most-active human contributor that year)\n- 2020: 3 commits\n- 2021: 13 commits (most-active)\n- 2022: 3 commits (most-active)\n- 2023: 8 commits (most-active)\n- 2024-2026: 0 commits\n\nHis activity ending in late 2023 correlates directly with the project's transition to fallow status — when both nvbn and scorphus stopped reviewing, the project went into the maintenance gap that persists today.\n\nThis is a textbook 'co-maintainer departure' shape. It is not a trust signal in either direction (people stop maintaining things; that's normal), but it provides the causal explanation for F001 and informs what kind of revival would be needed: not just 'someone resumes commits' but 'someone resumes the review-and-merge work that the bus factor of the project rests on.'\n\nThe 5 open March-2026 pull requests (each from different contributors who already have small contribution histories — `juliosuas`, `shakthi-1307`, `nazt`, `junagent`, `ReinerBRO`) suggest the *contributor* pipeline is still healthy. The bottleneck is the *maintainer* layer above it.",
+      "category": "trust_model_observation",
+      "signal_type": "effective_maintainer_concentration",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --author='Pablo' --format='%ad' --date=short produces no entries after 2023-12-31"}
+      ]
+    }
+  ],
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "signatory-provenance",
+      "model": "claude-opus-4-6",
+      "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
+      "invoked_at": "2026-04-14T20:30:00Z",
+      "round": 1
+    },
+    "notes": "Provenance methodology patterns for Python CLI / library targets. Many overlap with the Rust patterns from the atuin engagement (commit signing, tag signing, identity graph) — the differences are mostly ecosystem-specific (PyPI vs crates.io publish, setup.py vs Cargo.toml dependency declarations, requirements.txt vs Cargo.lock for transitive composition). The catalog's dual purpose: feed signatory's Layer 1 deterministic-collector backlog AND validate that the methodology generalizes across ecosystems.",
+    "patterns": [
+      {
+        "id": "MP-PY-VITAL-01",
+        "signal_group": "vitality",
+        "description": "Last commit date relative to claimed-active status — when a project's README implies active maintenance but the most recent commit is months/years old, flag the gap.",
+        "pattern": "git log -1 --format='%ai' && grep -i 'maintained\\|actively\\|stable' README.md",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Very mature small libraries can be legitimately 'done' with no recent commits; collector should compare against a threshold tuned to project size and dependency role.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-VITAL-02",
+        "signal_group": "vitality",
+        "description": "Last PyPI release date vs. last GitHub commit date — large gaps between the two indicate either out-of-sync release process or local-maintainer publish that's stalled.",
+        "pattern": "curl -s https://pypi.org/pypi/{package}/json | jq '.urls[0].upload_time' && git log -1 --format='%ai'",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Some projects deliberately don't release every commit (e.g., release-on-feature-completion). Compare the gap against the project's own historical cadence.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-VITAL-03",
+        "signal_group": "vitality",
+        "description": "Year-by-year commit distribution — flag projects whose activity dropped >5x year-over-year, especially when the drop coincides with a previous maintainer becoming inactive.",
+        "pattern": "for y in 2020 2021 2022 2023 2024 2025; do git log --format='%an' --since=\"$y-01-01\" --until=\"$y-12-31\" | wc -l; done",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "First-year projects always have a year-over-year drop after the initial push. Apply only to projects ≥3 years old.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PUB-01",
+        "signal_group": "publication_integrity",
+        "description": "PyPI publish path: workflow-OIDC-based vs. local-maintainer-twine. Look for `release.py` / `Makefile`-style local publish scripts AND for absence of `id-token: write` in any GitHub workflow.",
+        "pattern": "ls release.py Makefile justfile 2>/dev/null && rg -q 'id-token.*write' .github/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "Some projects use both — a local script for emergencies plus a CI workflow for normal releases. Collector should report both signals separately.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PUB-02",
+        "signal_group": "publication_integrity",
+        "description": "Tag annotation status — `git for-each-ref refs/tags --format='%(objecttype)'` should return `tag` for annotated/signed tags, `commit` for lightweight. Lightweight-only is a publication-integrity gap.",
+        "pattern": "git for-each-ref refs/tags --format='%(objecttype)' | sort | uniq -c",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "None — this is a deterministic property of git refs.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PUB-03",
+        "signal_group": "publication_integrity",
+        "description": "PyPI Trusted Publishing presence — check the package's PyPI metadata for attestation fields and check the GitHub repo for the `id-token: write` workflow plus the trusted-publisher claim.",
+        "pattern": "curl -s https://pypi.org/pypi/{package}/json | jq '.urls[].digests, .urls[].attestations'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "PyPI's attestation API is newer than many projects; absence is the norm, not the alarm. Combine with publication-cadence to interpret.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-GOV-01",
+        "signal_group": "governance",
+        "description": "Per-developer commit signing — locally check `git log --format='%G?'` distribution. Differentiate from GitHub's `verified` flag, which conflates web-flow signing with per-developer signing.",
+        "pattern": "git log --format='%G?' -200 | sort | uniq -c",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "GPG must be installed locally for `%G?` to populate; a missing GPG installation produces uniform 'N' regardless of actual signing. Detect via `command -v gpg` first.",
+        "hit_on_atuin": true,
+        "composes_with": ["MP-PY-PUB-02"]
+      },
+      {
+        "id": "MP-PY-GOV-02",
+        "signal_group": "governance",
+        "description": "Effective bus factor — author distribution by year over a multi-year window. Flag projects where the top-1 author share exceeds 50% AND the top-1 author hasn't committed in 12+ months.",
+        "pattern": "git log --format='%an' --all | sort | uniq -c | sort -rn",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Identity-graph noise — `.mailmap` absence causes single people to appear under multiple author names, inflating the contributor count. Apply mailmap or detect via duplicate emails before computing the share.",
+        "hit_on_atuin": true,
+        "composes_with": ["MP-PY-VITAL-03"]
+      },
+      {
+        "id": "MP-PY-IDENT-01",
+        "signal_group": "identity_graph",
+        "description": "Cross-platform identity consistency for the maintainer — match the GitHub bio against email domains, blog URLs, package metadata. Strong identities have multiple consistent surfaces.",
+        "pattern": "gh api users/{login} && curl -s https://pypi.org/pypi/{package}/json | jq '.info.author_email'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Privacy-conscious developers may legitimately use noreply emails or pseudonyms; absence is a weaker signal than mismatch.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-IDENT-02",
+        "signal_group": "identity_graph",
+        "description": "Mailmap presence — `.mailmap` file collapses author identity duplicates. Its absence inflates contributor counts and obscures bus-factor analysis.",
+        "pattern": "test -f .mailmap",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "Many small projects don't have a `.mailmap` and don't need one (no duplicate identities). Pair with the bus-factor pattern to interpret meaning.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-SUP-01",
+        "signal_group": "supply_chain_hygiene",
+        "description": "Lockfile composition — `pip-tools`-generated `requirements.txt` or `pyproject.toml` lockfile entries should resolve to PyPI; flag any `git+https://` entries, alternative `--index-url`, or vendored wheels.",
+        "pattern": "rg -i 'git\\+https?://|--index-url|--extra-index-url' requirements*.txt pyproject.toml",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "Some projects intentionally pin to a fork via git URL; collector should flag rather than reject.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-SUP-02",
+        "signal_group": "supply_chain_hygiene",
+        "description": "CI supply-chain gating — check workflows for `pip-audit`, `safety`, `pyup`, Dependabot config, CodeQL workflow. Absence is the signal.",
+        "pattern": "rg -l 'pip-audit|safety|pyup' .github/workflows/ && test -f .github/dependabot.yml",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "External CI (Branch Protection, GitHub Apps) can enforce without leaving a trace; collector should flag as probable-unenforced, not definitive.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-RESP-01",
+        "signal_group": "responsiveness",
+        "description": "Open-PR aging — recent open PRs from outside contributors that have not been triaged within typical-cadence windows are a vitality signal independent of commit rate.",
+        "pattern": "gh api 'repos/{owner}/{repo}/pulls?state=open&sort=created&direction=desc' --jq '.[] | {number, created_at, days_open: ((now - (.created_at | fromdateiso8601))/86400|floor)}'",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Some projects intentionally leave PRs open for community discussion; check the PR comment count to differentiate triaged-but-pending from genuinely-stalled.",
+        "hit_on_atuin": false
+      },
+      {
+        "id": "MP-PY-PYPROJ-01",
+        "signal_group": "modernization",
+        "description": "`pyproject.toml` presence vs. legacy `setup.py` — projects still on `setup.py` in 2025+ are typically not actively maintained, since PEP 621 / PEP 517 migration is a routine cleanup task done during maintenance.",
+        "pattern": "test -f pyproject.toml && ! test -f setup.py",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Some legitimately-maintained projects still use setup.py for backward compat; combine with VITAL-01 / VITAL-03 to interpret.",
+        "hit_on_atuin": true,
+        "composes_with": ["MP-PY-VITAL-01", "MP-PY-VITAL-03"]
+      }
+    ]
+  }
+}

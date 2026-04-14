@@ -34,6 +34,7 @@ Analyses here:
 | Target | Ecosystem | Role | Posture | File |
 |--------|-----------|------|---------|------|
 | atuin | Rust / CLI app | Development + Shell-augment + AI-agent runtime + Hosted-service coupled | Analysis only (API + local clone + 2 rounds of external security review, 2026-04-14) | [atuin.md](atuin.md) |
+| thefuck | Python / CLI app | Development tool (shell-augment / command interception) | Analysis only (dual-analyst structured emission v1, 2026-04-14) | [thefuck.md](thefuck.md) |
 
 ### Supporting primary-source documents
 
@@ -43,3 +44,5 @@ Analyses here:
 | [atuin-security-review-external-round2.md](atuin-security-review-external-round2.md) | External security review, round 2, verbatim | Response to signatory's follow-up handoff document; includes a material self-correction of round 1, a new medium-severity sync-censorship finding, and methodology artifacts (grep catalog + positive-absence list). Integrated into atuin.md §"2026-04-14 Extended (3)" |
 | [atuin-schema-trial-response.json](atuin-schema-trial-response.json) | Schema-validation trial emission, JSON | First real test fixture for signatory's `internal/exchange/` package. Security analyst emitted three findings, 12-pattern methodology catalog, and two positive absences against the proposed schema. Used by Go round-trip tests as the reference instance. |
 | [atuin-schema-trial-feedback.md](atuin-schema-trial-feedback.md) | Schema-validation trial feedback, verbatim | Security analyst's meta-feedback on the schema: which fields were absent/unused, whether the verdict-rationale split works, whether structured emission is worth the overhead. Drove schema revisions in `../mcp-dual-analyst-architecture.md` §"Schema revisions post-trial." |
+| [thefuck-security-v1.json](thefuck-security-v1.json) | Security analyst output (v1 schema, structured), verbatim | Fresh-agent run with the security-review handoff at `/tmp/security-review-handoff.md`. 10 findings, 5 positive absences, 14 methodology patterns. Passes `signatory format-check`. Integrated into `thefuck.md`. |
+| [thefuck-provenance-v1.json](thefuck-provenance-v1.json) | Provenance analyst output (v1 schema, structured), verbatim | Signatory provenance methodology emitting v1 JSON in parallel to the security run. 6 findings, 4 positive absences, 2 observations, 14 methodology patterns. Passes `signatory format-check`. Integrated into `thefuck.md`. |

@@ -1,0 +1,405 @@
+{
+  "attribution": {
+    "analyst_id": "external-sec-v1",
+    "model": "claude-opus-4-6",
+    "prompt_version": "signatory-v1",
+    "invoked_at": "2026-04-14T12:50:00Z",
+    "round": 1
+  },
+  "target": "https://github.com/nvbn/thefuck",
+  "target_commit": "c7e7e1d884d3bb241ea6448f72a989434c2a35ec",
+  "findings": [
+    {
+      "id": "F001",
+      "verdict": "Any Python package matching `thefuck_contrib_*` anywhere on `sys.path` has every file under its `rules/` subdirectory auto-loaded and executed on each `thefuck` invocation, turning the plugin model into an unauthenticated code-execution sink for typosquatted/compromised siblings.",
+      "rationale": "`corrector.get_rules_import_paths` enumerates `sys.path` and globs for any directory matching `thefuck_contrib_*`, then yields its `rules` subdirectory. `get_loaded_rules` passes every `*.py` child to `Rule.from_path`, which calls `conf.load_source(name, str(path))` — a thin wrapper around `importlib.util.spec_from_file_location` / `exec_module`, i.e. arbitrary module execution at import time.\n\nThis is a documented plugin mechanism (README 'Third-party packages with rules'), but the implementation does *not* require the user to register/allow-list specific contrib packages — it trusts the name prefix and `sys.path` ordering. An attacker who lands a `thefuck_contrib_*` distribution into the interpreter (via PyPI typosquat, malicious wheel pinned by a transitive dependency, or `pip install --user` in a shared venv) achieves code execution every time the user runs `fuck`, independent of rule selection, because the import itself happens before `is_enabled`/`match` are consulted.\n\nFor developer workstations where `thefuck` is installed and the invocation pattern is 'press `fuck` on random command failures', this is a reliable, high-frequency persistence hook disguised as a fix-suggestion tool.",
+      "severity": {"default": "medium"},
+      "design_intent": true,
+      "category": "plugin_discovery",
+      "signal_type": "plugin_discovery_by_path",
+      "citations": [
+        {"path": "thefuck/corrector.py", "line_start": 22, "line_end": 37, "quoted": "for path in sys.path:\n        for contrib_module in Path(path).glob('thefuck_contrib_*'):\n            contrib_rules = contrib_module.joinpath('rules')\n            if contrib_rules.is_dir():\n                yield contrib_rules"},
+        {"path": "thefuck/types.py", "line_start": 141, "line_end": 146, "quoted": "rule_module = load_source(name, str(path))"},
+        {"path": "thefuck/conf.py", "line_start": 8, "line_end": 17, "quoted": "import importlib.util\n    def load_source(name, pathname, _file=None):\n        module_spec = importlib.util.spec_from_file_location(name, pathname)\n        module = importlib.util.module_from_spec(module_spec)\n        module_spec.loader.exec_module(module)"}
+      ],
+      "remediation_hints": [
+        "Require an explicit opt-in list in user settings (e.g. `enabled_contrib_packages = ['thefuck_contrib_foo']`) and refuse to import contrib packages not on that list",
+        "Verify the contrib package was loaded from a trusted site-packages location before scanning for rules",
+        "Consider switching to declared `entry_points` rather than name-prefix globbing so the user sees the package in their normal dependency surface"
+      ],
+      "related_findings": ["F002"]
+    },
+    {
+      "id": "F002",
+      "verdict": "The rule cache is a `shelve.open` (pickle-backed) database at `~/.cache/thefuck`, so anyone with write access to that path — a co-tenant container, an NFS peer, a malicious process running as the same user — can land arbitrary code execution on the next `thefuck` invocation.",
+      "rationale": "`utils.Cache._setup_db` computes `cache_path = Path(cache_dir).joinpath('thefuck')` with `cache_dir = $XDG_CACHE_HOME | ~/.cache` and then calls `shelve.open(cache_path)`. `shelve` is pickle-on-disk; every `self._db[key]` read triggers `pickle.loads` on whatever bytes are stored for that key.\n\nThe cache entries are produced by rules decorated with `@cache('somefile')` — e.g. `react_native_command_unrecognized` (`package.json`), `grunt_task_not_found` (`Gruntfile.js`), `gulp_not_task` (`gulpfile.js`), Fish alias/function caches. An attacker who can write the shelve file (but does not control the user's Python process) can replace values with a pickle payload (`__reduce__`) that executes on load.\n\nOn a single-user workstation with default permissions this is `low` — attacker already needs user-level write to `~/.cache`. But thefuck runs often in containerized dev environments, devcontainers, and shared CI runners where `~/.cache` mount semantics are not always user-private. A second thefuck process at different privilege (e.g. user vs. `sudo thefuck`? not a supported flow but users do it) would also deserialize the attacker's entry.",
+      "severity": {
+        "default": "low",
+        "by_context": [
+          {"context": {"host_isolation": "container"}, "value": "medium"},
+          {"context": {"host_isolation": "ci_runner"}, "value": "medium"},
+          {"context": {"host_isolation": "multi_user"}, "value": "medium"}
+        ]
+      },
+      "category": "deserialization",
+      "signal_type": "data_minimization_policy",
+      "citations": [
+        {"path": "thefuck/utils.py", "line_start": 199, "line_end": 265, "quoted": "self._db = shelve.open(cache_path)"},
+        {"path": "thefuck/utils.py", "line_start": 246, "line_end": 265, "quoted": "if self._db.get(key, {}).get('etag') == etag:\n            return self._db[key]['value']"}
+      ],
+      "remediation_hints": [
+        "Replace `shelve` with a safer on-disk key-value format (sqlite with JSON values, or `diskcache` with `disk=Disk(None)` to force non-pickle encoding)",
+        "If pickle-on-disk is retained, restrict the cache file mode to 0o600 on create and verify ownership before read",
+        "Store only scalar values (strings/ints) that don't require pickle at all"
+      ]
+    },
+    {
+      "id": "F003",
+      "verdict": "Experimental instant mode writes the entire interactive shell session's TTY output to a `/tmp` file created with inherit-umask permissions, exposing command output — including anything the shell renders, like `cat ~/.aws/credentials` or git diffs containing tokens — to any local user whose read access is allowed by the user's umask.",
+      "rationale": "Instant-mode's bash/zsh alias writes `thefuck-script-log-<uuid4>.log` into `gettempdir()` and runs `thefuck --shell-logger <log>`, which in `entrypoints/shell_logger.py` opens the log via `os.open(output, os.O_CREAT | os.O_TRUNC | os.O_RDWR)` with no `mode=` argument. Python defaults to `0o777` subject to the process umask — on a typical Linux workstation with `umask 022` the resulting mode is `0o644`, world-readable.\n\nThe log is an mmap'd 1 MiB ring that receives everything written to the PTY master by the child shell. Because `echo`-off prompts (sudo, ssh, git credential helpers) suppress character echo, typed passwords are *not* captured — but the log does capture every rendered line of stdout/stderr for the entire shell session. That includes `cat`ed credential files, `env` output when user debugs, `aws sts get-caller-identity` responses, GitHub token in `gh auth status`, the contents of just-`git clone`d files, etc.\n\nRandom uuid4 in the filename prevents pre-creation attacks but does not prevent a co-located user from simply listing `/tmp` and reading the log. This is the strongest 'credentials/code leakage' vector in the codebase — directly answering the user's intake question.",
+      "severity": {
+        "default": "low",
+        "by_context": [
+          {"context": {"host_isolation": "shared_host"}, "value": "medium"},
+          {"context": {"host_isolation": "multi_user"}, "value": "medium"},
+          {"context": {"host_isolation": "single_user"}, "value": "low"}
+        ]
+      },
+      "design_intent": false,
+      "category": "filesystem_permissions",
+      "signal_type": "secret_file_permission_hygiene",
+      "prerequisites": [
+        "user has enabled experimental instant mode with --enable-experimental-instant-mode",
+        "system has a shared /tmp (Linux default) and other local users",
+        "user's umask allows group/other read"
+      ],
+      "citations": [
+        {"path": "thefuck/entrypoints/shell_logger.py", "line_start": 64, "line_end": 79, "quoted": "fd = os.open(output, os.O_CREAT | os.O_TRUNC | os.O_RDWR)\n    os.write(fd, b'\\x00' * const.LOG_SIZE_IN_BYTES)\n    buffer = mmap.mmap(fd, const.LOG_SIZE_IN_BYTES, mmap.MAP_SHARED, mmap.PROT_WRITE)\n    return_code = _spawn(os.environ['SHELL'], partial(_read, buffer))"},
+        {"path": "thefuck/shells/bash.py", "line_start": 46, "line_end": 54, "quoted": "log_path = os.path.join(\n                gettempdir(), 'thefuck-script-log-{}'.format(uuid4().hex))"},
+        {"path": "thefuck/shells/zsh.py", "line_start": 50, "line_end": 59, "quoted": "log_path = os.path.join(\n                gettempdir(), 'thefuck-script-log-{}'.format(uuid4().hex))"}
+      ],
+      "remediation_hints": [
+        "Pass an explicit `mode=0o600` to `os.open` so the log is user-only regardless of umask",
+        "Place the log under `$XDG_RUNTIME_DIR` (root-0700 per-user) instead of `/tmp`",
+        "Redact known credential patterns before writing to the ring, or at minimum warn users in README that instant mode persists rendered session output"
+      ]
+    },
+    {
+      "id": "F004",
+      "verdict": "The `ssh_known_hosts` rule, enabled by default, offers to silently delete the offending line from the user's known_hosts file whenever ssh prints 'REMOTE HOST IDENTIFICATION HAS CHANGED' — habitually confirming thefuck's suggestion bypasses one of ssh's strongest MITM protections.",
+      "rationale": "`rules/ssh_known_hosts.py` matches on the literal strings `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`, `WARNING: POSSIBLE DNS SPOOFING DETECTED!`, or a host-key mismatch warning. Its `side_effect` reads the file path and line number ssh reported ('Offending key for IP in /home/user/.ssh/known_hosts:42'), opens the file, and deletes that line before re-running the ssh command.\n\nThe rule is enabled by default (no `enabled_by_default = False`). thefuck always requires explicit user confirmation (`require_confirmation = True` default, enforced in `ui.select_command`), so this is not exploitable without a user keystroke. But the UX is 'type `fuck`, press Enter' — a user who has learned the thefuck 'enter to accept' rhythm will silently disable their MITM alarm, which is precisely when it's firing for real. The fingerprint being deleted is attacker-attested via ssh's textual output, but ssh itself is trusted so there's no path-traversal injection here.\n\nThe side-effect is not reversible without restoring from backup. Worth flagging as a design choice that trades security-by-default for developer convenience.",
+      "severity": {"default": "low"},
+      "design_intent": true,
+      "category": "security_ux",
+      "signal_type": "default_on_risky_features",
+      "citations": [
+        {"path": "thefuck/rules/ssh_known_hosts.py", "line_start": 1, "line_end": 38, "quoted": "def side_effect(old_cmd, command):\n    offending_pattern = re.compile(\n        r'(?:Offending (?:key for IP|\\S+ key)|Matching host key) in ([^:]+):(\\d+)',\n        re.MULTILINE)\n    offending = offending_pattern.findall(old_cmd.output)\n    for filepath, lineno in offending:\n        with open(filepath, 'r') as fh:\n            lines = fh.readlines()\n            del lines[int(lineno) - 1]\n        with open(filepath, 'w') as fh:\n            fh.writelines(lines)"}
+      ],
+      "remediation_hints": [
+        "Ship the rule as `enabled_by_default = False` so only users who explicitly opt in get the MITM-bypass UX",
+        "Display a distinct severity prompt ('this will delete a host-key pinning — continue?') rather than the standard confirm",
+        "Back up the edited known_hosts file before rewriting"
+      ]
+    },
+    {
+      "id": "F005",
+      "verdict": "Default (non-instant) mode unconditionally re-executes the user's previous failed command through `Popen(script, shell=True, ...)` in order to capture stdout/stderr, meaning any side-effecting command (network POST, `rm`, `scp`, migrations) is duplicated every time the user invokes `fuck`.",
+      "rationale": "`output_readers/rerun.py` is the default strategy (unless `settings.instant_mode` or an external shell_logger socket is set): when `types.Command.from_raw_script` is built, `output_readers.get_output` calls `rerun.get_output(script, expanded)`, which does `Popen(expanded, shell=True, stdin=PIPE, stdout=PIPE, stderr=STDOUT, env=env)`. The command runs with a 3-second timeout (`settings.wait_command`, 15s for 'slow_commands'), after which children are killed.\n\n`shell=True` here is not a shell-injection sink — `expanded` is the user's own history line, so there's no attacker-controlled interpolation. The risk is 'action amplification': a failed `curl -X POST ...` that actually reached the server, a `kubectl delete ...` that partially applied, or a `git push` that landed a ref before failing a hook — all get silently re-executed when thefuck scrapes output. Slow networked commands are killed after the timeout, potentially mid-request.\n\nThis is core product behavior and clearly documented (the README explicitly notes re-run as the motivation for instant mode). Flagging it as design_intent so downstream users adopting thefuck in CI / automation contexts know the default strategy is 'run the failing thing twice'.",
+      "severity": {"default": "medium"},
+      "design_intent": true,
+      "category": "action_amplification",
+      "signal_type": "default_on_risky_features",
+      "citations": [
+        {"path": "thefuck/output_readers/rerun.py", "line_start": 46, "line_end": 72, "quoted": "result = Popen(expanded, shell=True, stdin=PIPE,\n                       stdout=PIPE, stderr=STDOUT, env=env)\n        if _wait_output(result, is_slow):\n            output = result.stdout.read().decode('utf-8', errors='replace')"},
+        {"path": "thefuck/output_readers/__init__.py", "line_start": 5, "line_end": 21, "quoted": "if shell_logger.is_available():\n        return shell_logger.get_output(script)\n    if settings.instant_mode:\n        return read_log.get_output(script)\n    else:\n        return rerun.get_output(script, expanded)"},
+        {"path": "thefuck/types.py", "line_start": 67, "line_end": 82, "quoted": "output = get_output(script, expanded)\n        return cls(expanded, output)"}
+      ],
+      "remediation_hints": [
+        "Prompt the user before re-running commands that match a destructive-verb heuristic (`rm`, `mv`, `DELETE`, `DROP`, `curl -X (POST|PUT|DELETE|PATCH)`, `kubectl delete`, `aws * delete*`)",
+        "Document this behavior more prominently in the README security section",
+        "Default shell_logger/instant-mode when supported to avoid the re-run entirely"
+      ],
+      "related_findings": ["F006", "F007"]
+    },
+    {
+      "id": "F006",
+      "verdict": "Running thefuck with `--debug` or `THEFUCK_DEBUG=true` formats the entire process environment — including AWS/GH/GitLab/PyPI tokens and other credential-bearing vars — into stderr via `pformat(settings)` and `logs.debug_time(...with env: {env}...)`.",
+      "rationale": "`entrypoints/fix_command.py` does `logs.debug(u'Run with settings: {}'.format(pformat(settings)))`. `output_readers/rerun.py` does `logs.debug_time(u'Call: {}; with env: {}; is slow: {}'.format(script, env, is_slow))` where `env = dict(os.environ); env.update(settings.env)`. Both write to stderr with `debug=True`.\n\nFurther, `logs.debug(u'Received output: {}'.format(output))` dumps captured command stderr/stdout — which, combined with the forced `GIT_TRACE=1` (see F007), can render git credential URLs verbatim into the debug stream. Users frequently copy/paste debug output into bug reports or Stack Overflow questions; anything dumped here is a plausible credential-leak channel.\n\nDebug is off by default and explicitly opt-in, so this is `low`, but the size and location of the leak merit calling out so users know not to share `--debug` output.",
+      "severity": {"default": "low"},
+      "category": "secret_leakage",
+      "signal_type": "data_minimization_policy",
+      "citations": [
+        {"path": "thefuck/entrypoints/fix_command.py", "line_start": 29, "line_end": 40, "quoted": "logs.debug(u'Run with settings: {}'.format(pformat(settings)))"},
+        {"path": "thefuck/output_readers/rerun.py", "line_start": 54, "line_end": 69, "quoted": "env = dict(os.environ)\n    env.update(settings.env)\n    ...\n    with logs.debug_time(u'Call: {}; with env: {}; is slow: {}'.format(\n            script, env, is_slow)):"},
+        {"path": "thefuck/output_readers/rerun.py", "line_start": 66, "line_end": 70, "quoted": "logs.debug(u'Received output: {}'.format(output))"}
+      ],
+      "remediation_hints": [
+        "Redact any env var whose name matches a conventional secret regex (`(?i)(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH)`) before logging",
+        "Log the env var *names* but not the values, or only explicitly whitelisted vars",
+        "Add a README note warning users that `--debug` output should not be pasted into public bug reports"
+      ],
+      "related_findings": ["F005", "F007"]
+    },
+    {
+      "id": "F007",
+      "verdict": "Re-run forces `GIT_TRACE=1` on every subprocess, so any git command that embeds credentials in a URL (`https://user:token@host/repo`) will have the token written to stderr, captured into `Command.output`, and exposed to debug logging and to rule-matching logic.",
+      "rationale": "`const.DEFAULT_SETTINGS` pins `'env': {'LC_ALL': 'C', 'LANG': 'C', 'GIT_TRACE': '1'}`, and `output_readers/rerun.py` applies that overlay to `os.environ` for every subprocess. `GIT_TRACE=1` makes git print its trace (argv, config reads, credential helper interactions) to stderr; thefuck captures stderr via `stderr=STDOUT` and stores it in `Command.output`.\n\nThe output is then consumed by ~25 git rules (`rules/git_*`) and made available to any future rule author. In debug mode it's echoed to the terminal (F006); in instant mode it's persisted to the `/tmp` log (F003); if an `alter_history` push writes the suggested correction to history, the original credential URL from the history source is what gets added, not the trace output — but the captured trace may still surface via debug or instant-mode log.\n\nThis is likely a deliberate choice to get git to emit the 'trace: alias expansion:' line consumed by `specific/git.py`, so flagging as design_intent but worth an audit because forcing GIT_TRACE widens exposure beyond just alias detection.",
+      "severity": {"default": "low"},
+      "design_intent": true,
+      "category": "secret_leakage",
+      "signal_type": "silent_privilege_escalation_via_env_var",
+      "citations": [
+        {"path": "thefuck/const.py", "line_start": 46, "line_end": 46, "quoted": "'env': {'LC_ALL': 'C', 'LANG': 'C', 'GIT_TRACE': '1'},"},
+        {"path": "thefuck/output_readers/rerun.py", "line_start": 54, "line_end": 56, "quoted": "env = dict(os.environ)\n    env.update(settings.env)"},
+        {"path": "thefuck/specific/git.py", "line_start": 17, "line_end": 28, "quoted": "if command.output and 'trace: alias expansion:' in command.output:"}
+      ],
+      "remediation_hints": [
+        "Scope `GIT_TRACE=1` to only the subprocess invocations that actually need alias expansion (i.e. when `is_app(command, 'git', 'hub')`)",
+        "Redact credential patterns (`https://[^:]+:[^@]+@`) from captured output before storing it on `Command`",
+        "Drop GIT_TRACE entirely and parse the shell alias output via a different mechanism"
+      ],
+      "related_findings": ["F005", "F006"]
+    },
+    {
+      "id": "F008",
+      "verdict": "The default-enabled `git_hook_bypass` rule always offers `git commit/push/am --no-verify` as a correction whenever any of those subcommands appear in the failing script, normalizing hook bypass — including bypass of pre-commit secret scanners and supply-chain lint gates.",
+      "rationale": "`rules/git_hook_bypass.py` matches on the mere presence of `am`, `commit`, or `push` in `script_parts` and has no output-based filter (`requires_output = False`). It has no `enabled_by_default = False`, so it participates in the default ruleset, with `priority = 1100` (slightly below the 1000 default, so ranked after other fixes but still surfaced as an alternate choice when the user scrolls with ↑/↓).\n\nOrganizations that rely on pre-commit hooks for secret detection, license checks, or commit-signing enforcement have just given developers a one-keystroke opt-out labeled as a helpful correction. Requires user confirmation, but the UX nudges toward acceptance. This is distinct from F004 in that the suggested bypass isn't destructive to a security artifact — it's a workflow-layer bypass — so severity is low but notable.",
+      "severity": {"default": "low"},
+      "design_intent": true,
+      "category": "security_ux",
+      "signal_type": "default_on_risky_features",
+      "citations": [
+        {"path": "thefuck/rules/git_hook_bypass.py", "line_start": 1, "line_end": 28, "quoted": "hooked_commands = (\"am\", \"commit\", \"push\")\n\n@git_support\ndef match(command):\n    return any(\n        hooked_command in command.script_parts for hooked_command in hooked_commands\n    )\n\n@git_support\ndef get_new_command(command):\n    ...\n    return replace_argument(\n        command.script, hooked_command, hooked_command + \" --no-verify\"\n    )\n\n\npriority = 1100\nrequires_output = False"}
+      ],
+      "remediation_hints": [
+        "Change to `enabled_by_default = False` so only users who explicitly accept the trade-off see the suggestion",
+        "Gate the match on an output signature that suggests the hook is broken rather than functioning",
+        "Add a distinct side-effect warning in the prompt"
+      ],
+      "related_findings": ["F004"]
+    },
+    {
+      "id": "F009",
+      "verdict": "`rules/dirty_untar.py` and `rules/dirty_unzip.py` guard their destructive `os.remove` side-effects with `os.path.abspath(f).startswith(os.getcwd())`, a string-prefix check that is unsafe against sibling directories whose names begin with the same characters as cwd.",
+      "rationale": "Both rules extract archive entries and then iterate them, calling `os.remove(file)` if `os.path.abspath(file).startswith(os.getcwd())`. For cwd `/home/alice/proj` and an archive containing `../proj-backup/secret.key`, `os.path.abspath('../proj-backup/secret.key')` resolves to `/home/alice/proj-backup/secret.key`, which `startswith('/home/alice/proj')` is True because of the missing separator — the check lets the delete through into a sibling directory.\n\nExploit requires the attacker to craft the archive AND the victim to extract it in a directory whose name is a prefix of a sibling they want to damage. Narrow, but the fix is trivial (`os.path.commonpath` or ensuring `cwd` ends with `os.sep`) and worth mentioning because the current check reads as if it enforces containment but doesn't.",
+      "severity": {"default": "low"},
+      "category": "path_traversal",
+      "signal_type": "temp_file_predictability",
+      "citations": [
+        {"path": "thefuck/rules/dirty_untar.py", "line_start": 41, "line_end": 53, "quoted": "def side_effect(old_cmd, command):\n    with tarfile.TarFile(_tar_file(old_cmd.script_parts)[0]) as archive:\n        for file in archive.getnames():\n            if not os.path.abspath(file).startswith(os.getcwd()):\n                # it's unsafe to overwrite files outside of the current directory\n                continue\n\n            try:\n                os.remove(file)"},
+        {"path": "thefuck/rules/dirty_unzip.py", "line_start": 45, "line_end": 57, "quoted": "def side_effect(old_cmd, command):\n    with zipfile.ZipFile(_zip_file(old_cmd), 'r') as archive:\n        for file in archive.namelist():\n            if not os.path.abspath(file).startswith(os.getcwd()):\n                # it's unsafe to overwrite files outside of the current directory\n                continue\n\n            try:\n                os.remove(file)"}
+      ],
+      "remediation_hints": [
+        "Replace `startswith(cwd)` with `os.path.commonpath([abs_path, cwd]) == cwd`",
+        "Or append `os.sep` to cwd before the startswith comparison"
+      ]
+    },
+    {
+      "id": "F010",
+      "verdict": "thefuck ships no telemetry, no auto-update check, and no hardcoded network endpoints — a tighter-than-expected posture for a CLI of this age and popularity.",
+      "rationale": "A full-tree search for http(s) URLs in `thefuck/` returns only README/issue-tracker references inside comments or warn-messages. There is no `requests.`, `urllib.urlopen`, `http.client`, Sentry/posthog/segment/rollbar import, or phone-home ping anywhere in the package. Network activity is exclusively the result of re-running the user's own failing command through `rerun.py` — not thefuck-initiated. That eliminates an entire class of 'compromised release → exfil on every execution' risks; the provenance analyst's supply-chain posture is what matters, not a latent callback here.",
+      "severity": {"default": "positive"},
+      "category": "network_posture",
+      "signal_type": "unbypassable_hosted_callback",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "thefuck/"}, "quoted": "No http(s):// URLs found except in comments/help text; no requests/urllib/http.client imports."}
+      ],
+      "remediation_hints": []
+    }
+  ],
+  "positive_absences": [
+    {
+      "pattern_checked": "install-time code execution (setup.py `cmdclass`, `.pth` files, `setup_requires` side effects, post-install scripts)",
+      "description": "`setup.py` is a plain declarative `setup(...)` call with no custom `cmdclass`, no `install_requires` shenanigans, and no `.pth` files shipped. MANIFEST.in only includes `LICENSE.md` and `fastentrypoints.py`. `fastentrypoints` monkey-patches setuptools' `ScriptWriter` *during setup.py execution* to emit faster console entry points — this is install-time code, but it's the well-known ninjaaron/fast-entry_points shim and does not run on subsequent interpreter starts. No `.pth` stealth-execution vector.",
+      "citations": [
+        {"path": "setup.py", "line_start": 1, "line_end": 76},
+        {"path": "fastentrypoints.py", "line_start": 1, "line_end": 85},
+        {"path": "MANIFEST.in", "line_start": 1, "line_end": 3}
+      ],
+      "confidence": "thoroughly_reviewed",
+      "pattern_ref": "MP-PY-INSTALL-01"
+    },
+    {
+      "pattern_checked": "unsafe deserialization of network-sourced or cross-user data (`yaml.load` without SafeLoader, `pickle.load(socket)`, `dill`/`cloudpickle`/`joblib`)",
+      "description": "No YAML usage anywhere. Pickle is used in two places: `pickle.dumps` for memoize cache keys (dumps only, never loads) and indirectly via `shelve.open(cache_path)` which reads `~/.cache/thefuck` (see F002). No pickle/dill/cloudpickle/joblib reads from network, stdin, or anywhere an attacker without local user-write could reach.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "thefuck/"}, "quoted": "pickle is imported only in utils.py; shelve only in utils.py; no yaml/dill/cloudpickle/joblib imports."}
+      ],
+      "confidence": "thoroughly_reviewed",
+      "pattern_ref": "MP-PY-PICKLE-01"
+    },
+    {
+      "pattern_checked": "credential storage / keyring / netrc / password files written by thefuck",
+      "description": "No `keyring`, `netrc`, or credential-manager imports anywhere in `thefuck/`. thefuck does not persist credentials of any kind; the only files it creates under user home are `$XDG_CONFIG_HOME/thefuck/settings.py` (user-owned config), `$XDG_CONFIG_HOME/thefuck/rules/` (user rules), and the shelve cache `$XDG_CACHE_HOME/thefuck` (see F002). No on-disk representation of secrets is maintained by thefuck itself.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "thefuck/"}, "quoted": "grep for netrc|keyring|credential|password|token|api_key|api_token|secret returned no matches."}
+      ],
+      "confidence": "thoroughly_reviewed",
+      "pattern_ref": "MP-PY-SECRET-01"
+    },
+    {
+      "pattern_checked": "shell=True with attacker-interpolated strings, `os.system(user_input)`, or `executable=` with attacker path",
+      "description": "Only two `shell=True` call sites exist in the installed package: `output_readers/rerun.py` (the documented re-run behavior, see F005) and `README.md` example code. The string passed is `expanded`, which is the user's own history line (alias-expanded), not attacker input. No `os.system`, no `executable=` with an externally-derived path. `os.execlp(shell, shell)` in `shell_logger._spawn` uses `os.environ['SHELL']` — attacker-controllable if the env is tainted, but by that point the attacker already controls the shell environment.",
+      "citations": [
+        {"scope": {"kind": "tree", "path": "thefuck/"}, "quoted": "Enumerated all shell=True, os.system, Popen, execlp call sites."}
+      ],
+      "confidence": "thoroughly_reviewed",
+      "pattern_ref": "MP-PY-SUBPROC-01"
+    },
+    {
+      "pattern_checked": "destructive defaults without confirmation",
+      "description": "`const.DEFAULT_SETTINGS['require_confirmation']` is `True`, and `ui.select_command` enforces it via `for action in read_actions(): ... ACTION_SELECT/ACTION_ABORT`. `-y/--yes` and `-r/--repeat` are mutually exclusive (`argument_parser._add_conflicting_arguments` with an explicit comment 'too dangerous to use -y and -r together'). The two rules that would be catastrophic — `rm_root` and `git_push_force` — are both marked `enabled_by_default = False`. This is tighter than default for the category and worth marking as a positive.",
+      "citations": [
+        {"path": "thefuck/const.py", "line_start": 31, "line_end": 47, "quoted": "'require_confirmation': True"},
+        {"path": "thefuck/argument_parser.py", "line_start": 54, "line_end": 64, "quoted": "\"\"\"It's too dangerous to use `-y` and `-r` together.\"\"\""},
+        {"path": "thefuck/rules/rm_root.py", "line_start": 3, "line_end": 3, "quoted": "enabled_by_default = False"},
+        {"path": "thefuck/rules/git_push_force.py", "line_start": 18, "line_end": 18, "quoted": "enabled_by_default = False"}
+      ],
+      "confidence": "thoroughly_reviewed",
+      "pattern_ref": "MP-PY-CONFIRM-01"
+    }
+  ],
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "external-sec-v1",
+      "model": "claude-opus-4-6",
+      "prompt_version": "signatory-v1",
+      "invoked_at": "2026-04-14T12:50:00Z",
+      "round": 1
+    },
+    "notes": "Python CLI with shell-integration surface. Prioritized patterns that pay off for 'developer runs this on their workstation' rather than 'exposed service'. Field `hit_on_atuin` retained per the documented schema quirk.",
+    "patterns": [
+      {
+        "id": "MP-PY-NET-01",
+        "signal_group": "network_endpoints",
+        "description": "Hardcoded http(s) URLs, telemetry clients, update checks, or phone-home endpoints.",
+        "pattern": "rg --type py -n 'https?://|requests\\.|urllib|urlopen|sentry_sdk|segment|posthog|rollbar' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop", "miss_mode": "false_positive_heavy"},
+        "false_positive_notes": "Hits comments and help text. Filter to module-scope import lines or string literals.",
+        "hit_on_atuin": false
+      },
+      {
+        "id": "MP-PY-SUBPROC-01",
+        "signal_group": "subprocess_safety",
+        "description": "`subprocess.run/Popen/call` with `shell=True` and interpolated input; `os.system` with any argument; `executable=` with attacker-influenced path.",
+        "pattern": "rg --type py -n 'shell\\s*=\\s*True|os\\.system\\(|executable\\s*=' thefuck/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "composes_with": ["MP-PY-ENV-01"],
+        "false_positive_notes": "Most `shell=True` hits need a one-hop reasoning check on the string passed — is it attacker-influenced?",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PICKLE-01",
+        "signal_group": "deserialization",
+        "description": "pickle/shelve/dill/cloudpickle/joblib/yaml.load where the input file is writable by anyone other than the process UID.",
+        "pattern": "rg --type py -n 'pickle\\.load|shelve\\.open|dill\\.load|cloudpickle\\.load|yaml\\.load\\(' thefuck/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "`pickle.dumps` without a matching `loads` is safe. `yaml.safe_load` / `Loader=SafeLoader` passes.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-TEMPFILE-01",
+        "signal_group": "filesystem_permissions",
+        "description": "Files created in a shared temp dir (`gettempdir`, `/tmp`, `/var/tmp`) without explicit `mode=0o600` or without use of `mkstemp`.",
+        "pattern": "rg --type py -n 'gettempdir\\(\\)|tempfile\\.|/tmp/|os\\.open\\(' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "composes_with": ["MP-PY-FILEPERM-01"],
+        "false_positive_notes": "Many hits are reads, not writes — need to read the call site.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PLUGIN-01",
+        "signal_group": "plugin_discovery",
+        "description": "Plugin discovery that iterates `sys.path` or site-packages and imports anything matching a name pattern — enables typosquat/hijack.",
+        "pattern": "rg --type py -n 'sys\\.path|glob\\(.*_\\*|iter_entry_points|load_source\\(|importlib\\.util\\.spec_from_file_location' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "multi_hop"},
+        "composes_with": ["MP-PY-SUBPROC-01"],
+        "false_positive_notes": "entry_points-based discovery is safer because package names are explicit; name-pattern globs are the risky variant.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-FILEPERM-01",
+        "signal_group": "filesystem_permissions",
+        "description": "`os.open` / `open` / `Path.write_text` on sensitive paths without explicit mode (inherits umask).",
+        "pattern": "rg --type py -n 'os\\.open\\([^)]*\\)|\\.write_text\\(|\\.write_bytes\\(' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Only matters when the path is shared or the content is sensitive.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-ENV-01",
+        "signal_group": "env_policy",
+        "description": "Env-var reads that expand attack surface (PATH hijack, SHELL hijack, EDITOR shell-injection, forced trace vars).",
+        "pattern": "rg --type py -n 'os\\.environ\\[|os\\.environ\\.get\\(' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "composes_with": ["MP-PY-SUBPROC-01"],
+        "false_positive_notes": "Most env reads are benign (XDG, HISTFILE, PS1); focus on vars that feed subprocess calls or shell-string formatting.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-INSTALL-01",
+        "signal_group": "install_time_execution",
+        "description": "setup.py with `cmdclass`, custom `install` commands, `setup_requires` side effects, or `.pth` files that run code at interpreter startup.",
+        "pattern": "rg -n 'cmdclass|setup_requires|post_install|\\.pth$' setup.py MANIFEST.in",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "false_positive_notes": "Declarative `setup(...)` is safe; look for custom classes inheriting `setuptools.Command`.",
+        "hit_on_atuin": false
+      },
+      {
+        "id": "MP-PY-DEBUG-01",
+        "signal_group": "secret_leakage",
+        "description": "Debug/verbose log paths that serialize `os.environ`, full request/response bodies, or command output into stderr or persistent logs.",
+        "pattern": "rg --type py -n 'debug\\(.*env|pformat\\(settings|format\\(.*os\\.environ|Received output' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Structured loggers that apply redaction pass. Plain `format()` of env dict is the risky pattern.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-SIDEEFFECT-01",
+        "signal_group": "action_amplification",
+        "description": "Rule-like hooks that mutate the filesystem (write, remove, rename) as part of 'helpful corrections' without per-action confirmation.",
+        "pattern": "rg --type py -n 'def side_effect|os\\.remove|shutil\\.rmtree|\\.unlink\\(' thefuck/rules/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Narrow — thefuck only has 3 side-effect rules, all worth reading.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-PATHCHECK-01",
+        "signal_group": "path_traversal",
+        "description": "Containment checks implemented as `startswith(cwd)` / `startswith(base)` without trailing-separator normalization — prefix-match traversal bug.",
+        "pattern": "rg --type py -n 'startswith\\(.*getcwd|startswith\\(.*base|commonpath' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "`commonpath`-based checks pass; naked `startswith` is the bug.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-CONFIRM-01",
+        "signal_group": "security_ux",
+        "description": "Default-on risky corrections — rules that run (or suggest running) destructive actions without `enabled_by_default = False` gate.",
+        "pattern": "rg --type py -nL 'enabled_by_default\\s*=\\s*False' thefuck/rules/ | xargs rg -l 'rm |--no-verify|--force|--no-preserve-root|sudo '",
+        "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "High false-positive rate — most matches are the rule *detecting* a dangerous command, not *suggesting* one. Manual review required.",
+        "hit_on_atuin": true
+      },
+      {
+        "id": "MP-PY-SECRET-01",
+        "signal_group": "secret_storage",
+        "description": "In-process handling of credentials — keyring backends, netrc reads, environment-variable secret fallback, token caches written to predictable paths.",
+        "pattern": "rg --type py -in 'keyring|netrc|credential|password|token|api_key|api_token|\\bsecret\\b' thefuck/",
+        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "false_positive_notes": "Lots of false positives in docstrings and help text; confirm on import lines.",
+        "hit_on_atuin": false
+      },
+      {
+        "id": "MP-PY-RERUN-01",
+        "signal_group": "action_amplification",
+        "description": "Auto-re-execution of user commands to capture output — specific to 'helper' tools that shadow shell behavior. Turns transient network/filesystem side effects into reliable double-invocations.",
+        "pattern": "rg --type py -n 'Popen\\(.*shell\\s*=\\s*True|os\\.system\\(.*\\$' thefuck/output_readers/",
+        "collector_hint": {"grep_precision": "high", "reasoning_depth": "multi_hop"},
+        "false_positive_notes": "Narrow; easily distinguishable from pipeline-reading use of shell=True.",
+        "hit_on_atuin": true
+      }
+    ]
+  },
+  "round_notes": "## TL;DR\n\nIn response to the intake question 'likelihood of leaking credentials or code?': **moderate, mostly bounded by opt-in modes.** The codebase has no telemetry, no phone-home, and no credential storage — but three mechanisms can exfil sensitive data to disk or stderr:\n\n1. **Instant mode's /tmp log** (F003) — if enabled, records everything the TTY renders with inherit-umask perms. Strongest credential-leak vector.\n2. **Forced `GIT_TRACE=1` on re-run** (F007) — captures URL-embedded git credentials into `Command.output`, which is then reachable via debug logs and the instant-mode log.\n3. **`--debug` prints full env** (F006) — opt-in, but trivially shareable by users who paste debug output into bug reports.\n\nThe highest-leverage supply-chain finding is **F001** (any `thefuck_contrib_*` on sys.path auto-executes), which is a deliberate plugin model but broadly scoped. The most interesting secondary finding is **F002** (shelve/pickle cache) — low on single-user systems, medium in containers and CI runners.\n\nThe two notable UX-flavored findings — **F004** (ssh_known_hosts MITM-bypass-on-confirm) and **F008** (git_hook_bypass as default correction) — are where thefuck's 'just press Enter' rhythm erodes trust boundaries that other tools depend on.\n\nCounterbalancing: **F010** (no network endpoints) and the five positive absences are genuinely tighter than expected. `rm_root` and `git_push_force` being `enabled_by_default = False` is deliberate hardening. Default `require_confirmation = True` with `-y/-r` mutually exclusive is thoughtful.\n\n## Out of scope for this analyst\n\n- Commit-signing distribution, contributor trajectory, PyPI publishing origin, wheel build provenance — all deferred to the provenance analyst per engagement split.\n- The ~170 rule files were sampled, not exhaustively reviewed. Additional per-rule findings are plausible but would mostly be variations on F004/F008/F009.\n- Dependency vetting of `psutil`, `colorama`, `six`, `pyte`, `decorator`, `pathlib2` — deferred.\n"
+}
