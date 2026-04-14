@@ -24,9 +24,9 @@ func ingestAll(t *testing.T) *SQLite {
 	}{
 		{path: "../exchange/testdata/atuin-schema-trial.json",
 			out: loadFixture(t, "atuin-schema-trial.json")},
-		{path: "../../design/analysis/thefuck-security-v1.json",
+		{path: "../../filestore/analysis/thefuck-security-v1.json",
 			out: loadAnalysisFixture(t, "thefuck-security-v1.json")},
-		{path: "../../design/analysis/thefuck-provenance-v1.json",
+		{path: "../../filestore/analysis/thefuck-provenance-v1.json",
 			out: loadAnalysisFixture(t, "thefuck-provenance-v1.json")},
 	} {
 		_, err := s.IngestAnalystOutput(ctx, fix.out, fix.path)

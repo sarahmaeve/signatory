@@ -28,7 +28,7 @@ prior-conversation context.
 |------|------|--------|
 | [security-review-v1.md](security-review-v1.md) | Security analyst (code-grounded threat modeling) — Python flavor | First validated end-to-end on the thefuck engagement (2026-04-14) — see `design/analysis/thefuck.md`. The pattern catalog is Python-specific; non-Python targets should fork. |
 | [security-review-go-v1.md](security-review-go-v1.md) | Security analyst (code-grounded threat modeling) — Go flavor | Forked from the Python variant for the signatory dogfood engagement. Replaces the Python pattern catalog with Go-shaped patterns: unsafe/cgo, exec.Command shell-injection shape, file-permission hygiene, TLS config, SQL injection, deserialization, init() side effects, build-tag divergence, env-var escape hatches. Language-agnostic scaffolding (schema, calibration, output format) is identical to the Python variant. |
-| [provenance-review-v1.md](provenance-review-v1.md) | Provenance analyst (metadata, git history, signing posture, identity graph) | Extracted from the in-session provenance run on thefuck (2026-04-14, output at `design/analysis/thefuck-provenance-v1.json`). Not yet validated via fresh-agent run; the next provenance engagement should use this template and confirm whether the structure is self-contained. The ecosystem-specific section covers PyPI, crates.io, npm, and Go modules — all four ecosystems' API patterns documented in one file rather than forked per ecosystem. |
+| [provenance-review-v1.md](provenance-review-v1.md) | Provenance analyst (metadata, git history, signing posture, identity graph) | Validated end-to-end on the signatory dogfood engagement (2026-04-14, output at `filestore/analysis/signatory-provenance-v1.json`). Initially extracted from the in-session provenance run on thefuck. The ecosystem-specific section covers PyPI, crates.io, npm, and Go modules in one file. |
 
 ## How a template gets used
 
@@ -42,7 +42,8 @@ prior-conversation context.
 5. Run `signatory format-check <output>` to confirm the emission
    parses and validates.
 6. (When both analysts have run) synthesize, persist verbatim
-   outputs to `design/analysis/`, write the synthesis document.
+   outputs to `filestore/analysis/`, write the synthesis narrative
+   document to `design/analysis/`.
 
 ## Versioning
 

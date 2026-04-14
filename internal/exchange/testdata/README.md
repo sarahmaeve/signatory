@@ -5,11 +5,11 @@ Test fixtures for the exchange package.
 ## `atuin-schema-trial.json`
 
 A migration of the primary-source analyst emission at
-`design/analysis/atuin-schema-trial-response.json` into the v1 schema
+`filestore/analysis/atuin-schema-trial-response.json` into the v1 schema
 shape. The original was the first real test of the schema; it used
 the pre-revision shapes for three fields that the analyst's
 meta-feedback (preserved at
-`design/analysis/atuin-schema-trial-feedback.md`) specifically
+`design/analysis/atuin-schema-trial-feedback.md` (the feedback narrative document stays in design/analysis/)) specifically
 flagged for revision.
 
 This file is what the original emission would look like if the
@@ -64,7 +64,7 @@ resolution to be precise.
 ### Why migrate rather than round-trip the original?
 
 The exchange package implements the post-revision v1 schema. The
-original fixture at `design/analysis/atuin-schema-trial-response.json`
+original fixture at `filestore/analysis/atuin-schema-trial-response.json`
 is preserved verbatim as the historical record of what the analyst
 emitted — the "what shape did we actually produce on day 1" document.
 This testdata file is the "what shape would we produce now, given

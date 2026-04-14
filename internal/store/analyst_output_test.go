@@ -28,7 +28,7 @@ func loadFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
 
 func loadAnalysisFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "design", "analysis", relPath))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "filestore", "analysis", relPath))
 	require.NoError(t, err)
 	var out exchange.AnalystOutput
 	require.NoError(t, json.Unmarshal(raw, &out))

@@ -15,7 +15,7 @@ We have:
 - A SQLite store with an entity model (`internal/store/`,
   `design/entity-model-v2.md`)
 - Two production engagements' worth of analyst output sitting on
-  disk in `design/analysis/` as JSON
+  disk in `filestore/analysis/` as JSON
 
 What we don't have: a way to *use* that data through the DB. The
 files are queryable only by reading them; cross-target queries
@@ -270,7 +270,7 @@ analyst-output structure) and don't conflict.
 - Tests: round-trip the four existing JSON fixtures into a fresh DB; verify counts match
 
 ### Phase B — Read path (1 day)
-- Backfill: `signatory ingest design/analysis/*-v1.json` to populate from existing files
+- Backfill: `signatory ingest filestore/analysis/*-v1.json` to populate from existing files
 - Read API in `internal/store/`:
   - `ListAnalystOutputs(filter)`, `GetAnalystOutput(id)`, `GetFindings(filter)`, etc.
 - Query CLI:
@@ -288,7 +288,7 @@ analyst-output structure) and don't conflict.
 ### Phase D — Write-back sync (later)
 - When agents write findings via MCP rather than via JSON-file
   ingestion, we need a "DB → file" synchronizer to maintain the
-  source-of-truth property of `design/analysis/`.
+  source-of-truth property of `filestore/analysis/`.
 
 I'd recommend doing A and B together since they're a single
 logical unit and B is the validation that A's schema isn't wrong.
@@ -297,7 +297,7 @@ patterns shaken out by B first. Phase D is post-MCP.
 
 ## Files vs. DB framing
 
-Currently our analyst outputs live in `design/analysis/` as JSON.
+Currently our analyst outputs live in `filestore/analysis/` as JSON.
 With ingestion, we have to decide: is the DB the new source of
 truth, or does it live alongside the files?
 
@@ -307,7 +307,7 @@ queryable index. Justifications:
 - Files are auditable in git history (verbatim emissions are
   recoverable forever)
 - DB is rebuildable from files (`signatory reingest --all
-  design/analysis/`)
+  filestore/analysis/`)
 - Files are the export format for sharing across signatory
   instances (federated burn-list use case from
   `entity-model-v2.md`)

@@ -14,8 +14,8 @@ without modification. The synthesis below integrates them.
 
 | Analyst | Role | Output |
 |---------|------|--------|
-| Provenance | Metadata, git history, `.mailmap`, lockfile composition, signing posture, package-registry signals | [`thefuck-provenance-v1.json`](thefuck-provenance-v1.json) |
-| Security | Source-code threat modeling, file:line citations, behavioral analysis | [`thefuck-security-v1.json`](thefuck-security-v1.json) |
+| Provenance | Metadata, git history, `.mailmap`, lockfile composition, signing posture, package-registry signals | [`thefuck-provenance-v1.json`](../../filestore/analysis/thefuck-provenance-v1.json) |
+| Security | Source-code threat modeling, file:line citations, behavioral analysis | [`thefuck-security-v1.json`](../../filestore/analysis/thefuck-security-v1.json) |
 
 The two analysts ran independently on the same git SHA. Provenance was
 me (`signatory-provenance` analyst, model claude-opus-4-6, round 1)
@@ -330,14 +330,14 @@ This engagement validated several architectural claims:
 
 The security handoff template at `/tmp/security-review-handoff.md`
 should be promoted into the repo (probably at
-`design/handoffs/security-review-v1.md`) so future engagements can
+`templates/handoffs/security-review-v1.md`) so future engagements can
 reuse it. Provenance handoff (Option A from the prior session) is
 the natural follow-up.
 
 ## Related artifacts
 
-- Raw analyst outputs: [`thefuck-security-v1.json`](thefuck-security-v1.json),
-  [`thefuck-provenance-v1.json`](thefuck-provenance-v1.json)
+- Raw analyst outputs: [`thefuck-security-v1.json`](../../filestore/analysis/thefuck-security-v1.json),
+  [`thefuck-provenance-v1.json`](../../filestore/analysis/thefuck-provenance-v1.json)
 - v1 schema: `internal/exchange/types.go`
 - Trial validation that drove the v1 schema:
   [`atuin-schema-trial-feedback.md`](atuin-schema-trial-feedback.md)

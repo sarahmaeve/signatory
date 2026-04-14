@@ -126,7 +126,7 @@ names are snake_case in JSON.
 ### `Finding`, `Severity`, `Citation`, `PositiveAbsence`, `Observation`, `MethodologyCatalog`, `MethodologyPattern`, `CollectorHint`, `Supersession`
 
 These types are the same as in the security-review handoff
-(`design/handoffs/security-review-v1.md`). Refer to that file
+(`templates/handoffs/security-review-v1.md`). Refer to that file
 for the full struct definitions; they are not duplicated here
 to avoid drift. The provenance role uses *all* the same types,
 just emits different categories and signal types.

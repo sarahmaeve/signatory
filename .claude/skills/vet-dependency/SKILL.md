@@ -326,7 +326,7 @@ Pick the right location for the file:
 - **`design/dogfood/{package-name}.md`** — if the target is an actual
   dependency of signatory (Go libraries signatory compiles against).
   A posture decision is expected and the user confirms it.
-- **`design/analysis/{package-name}.md`** — if the target is not a
+- **`design/analysis/{package-name}.md`** (synthesis narrative — stays in design/) and **`filestore/analysis/{package-name}-{role}-v1.json`** (raw analyst output, persisted via `signatory ingest`) — if the target is not a
   signatory dependency. This includes non-Go projects, CLIs, and
   arbitrary projects the trust model is being applied to.
   Posture may be "Analysis only — no posture recorded."

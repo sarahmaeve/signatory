@@ -69,7 +69,7 @@ assert_contains "Run with --refresh" \
     "empty-store analyze suggests --refresh path"
 
 # Step B: ingest one analyst output for the target.
-run ingest --quiet design/analysis/thefuck-security-v1.json
+run ingest --quiet filestore/analysis/thefuck-security-v1.json
 
 # Step C: re-analyze; freshness check should surface the analyst output.
 run analyze https://github.com/nvbn/thefuck
@@ -85,7 +85,7 @@ assert_not_contains "No cached" \
     "post-ingest analyze does NOT regress to 'no cached' message"
 
 # Step D: ingest the second analyst output for the same target.
-run ingest --quiet design/analysis/thefuck-provenance-v1.json
+run ingest --quiet filestore/analysis/thefuck-provenance-v1.json
 
 # Step E: re-analyze; both outputs should appear.
 run analyze https://github.com/nvbn/thefuck
@@ -100,7 +100,7 @@ else
 fi
 
 # Step F: re-ingest the same JSON file → idempotent (no second row).
-run ingest design/analysis/thefuck-security-v1.json
+run ingest filestore/analysis/thefuck-security-v1.json
 assert_contains "idempotent" \
     "re-ingest of same content is reported as idempotent"
 
