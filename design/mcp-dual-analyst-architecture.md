@@ -666,3 +666,231 @@ field should be explainable via a specific concrete finding
 from the atuin analysis.** If we can't point to "this field
 exists because this round-2 finding had this property," the
 field is speculative and should wait.
+
+---
+
+## Schema revisions post-trial (2026-04-14)
+
+We ran a targeted schema-validation trial with the security analyst:
+emit §5, §7, §8 as `Finding`s, the round-2 §B catalog as a
+`MethodologyCatalog`, and two §C items as `PositiveAbsence`s, in
+structured JSON. The emission is preserved at
+[`analysis/atuin-schema-trial-response.json`](analysis/atuin-schema-trial-response.json)
+and the analyst's meta-feedback at
+[`analysis/atuin-schema-trial-feedback.md`](analysis/atuin-schema-trial-feedback.md).
+
+The schema held — every structure was used, no findings had to be
+dropped or wholesale reshaped. But the meta-feedback identified
+five concrete gaps and four field-shape refinements.
+
+### Gaps to close (must-have for v1)
+
+1. **`Finding.Prerequisites []string`** (or `ThreatModel`). Structural
+   qualifiers like "requires sync-server compromise" (F002) or
+   "requires `ATUIN_AI__ADDITIONAL_CAPS` env var set" (F001)
+   belong alongside severity, not buried in rationale. Unqueryable
+   otherwise.
+2. **`Finding.RemediationHint`** (or `FixShape`). Machine-consumable
+   fix suggestions — "chmod 0600 after bind", "add cargo-deny CI
+   step". Downstream tooling (issue-tracker backfills, automated
+   PR suggestions) needs these structured.
+3. **`AnalystOutput.Observations []Observation`**. Top-level slot
+   for analysis that isn't a finding. The Michelle-trajectory trust
+   analysis from round 2 is the motivating case: trust-model
+   observation about contributor shape, not a vuln, not an absence,
+   not a methodology pattern. `RoundNotes` was too TL;DR-shaped.
+4. **`MethodologyPattern.ComposesWith []string`**. The analyst
+   flagged MP-ENV-01 × MP-CAP-01 as the pattern pair that surfaces
+   the §7 story; neither alone does. Pattern composition is real.
+5. **Scope-flexible citations.** `PositiveAbsence` citations for
+   "I ripgrep'd the whole crate" don't have line numbers.
+   `Citation.LineStart` must be nullable with an alternative
+   `ScopeRef` for non-line-grounded references.
+
+### Field-shape refinements
+
+6. **`ConditionalSeverity` vocabulary needs structure.** The analyst
+   used `single_user`, `shared_host`, `multi_user_windows` as
+   ad-hoc keys. The last mixes platform and deployment-shape. Adopt
+   their proposal: context as a tuple of named dimensions rather
+   than a flat map.
+
+   ```go
+   type ContextSpec struct {
+       HostIsolation string  // "single_user" | "shared_host" | "container" | "ci_runner"
+       Platform      string  // "unix" | "windows" | "any"
+   }
+   type Severity struct {
+       Default   SeverityValue
+       ByContext []struct{ Context ContextSpec; Value SeverityValue }
+   }
+   ```
+
+   Dimensions and values are a controlled vocabulary; add dimensions
+   as we encounter them. Flat-map form is a trap — readers have no
+   way to know what keys to expect.
+
+7. **`CollectorHint` becomes multi-axis.** The three-way
+   automatable/requires_reasoning/context_dependent collapsed most
+   patterns into `context_dependent`. Replace with:
+
+   ```go
+   type CollectorHint struct {
+       GrepPrecision      string // "high" | "narrows" | "useless"
+       ReasoningDepth     string // "none" | "one_hop" | "multi_hop"
+       MissMode           string // "false_positive_heavy" | "false_negative_heavy" | "balanced"
+   }
+   ```
+
+   The miss-mode axis matters for collector prioritization:
+   FP-heavy wastes triage time but doesn't miss vulns; FN-heavy
+   misses vulns silently (much worse, harder to catch).
+
+8. **Supersession gets explicit structure.** Synthetic IDs like
+   `"r1-ai-subsystem-threat"` were hacky. Replace:
+
+   ```go
+   type Supersession struct {
+       PriorID    string
+       PriorRound int
+       Kind       string // "corrects" | "refines" | "deprecates"
+   }
+
+   type Finding struct {
+       ...
+       Supersedes []Supersession   // was []string
+   }
+   ```
+
+   The `Kind` distinction is useful: *corrects* = prior finding was
+   wrong, *refines* = same finding with better detail, *deprecates*
+   = the prior concern no longer applies (e.g., upstream fixed it).
+   Same structure at AnalystOutput level for round-to-round
+   supersession.
+
+9. **Verdict style guide, not schema change.** The analyst found
+   verdict-for-F001 thin because it didn't convey "this is a
+   correction." No schema field fix — instead, the skill/prompt
+   style guide should say: *for corrections (severity: positive,
+   non-empty supersedes), the verdict should state the finding
+   **and** frame it as correcting prior work.* Schema handles the
+   structure; style handles the prose affordances.
+
+### Fields to relocate or de-emphasize
+
+- **`Attribution.TokenCost`, `DurationMS`, `PromptVersion`** — these
+  are ops-telemetry, wrong at analyst-output layer. Relocate to a
+  `RunMetadata` sibling attached at the MCP response envelope level,
+  or drop from analyst output entirely. Don't block v1 on this.
+- **`Citation.Quoted`** — keep as optional, expect often-empty.
+  Style guide: fill only when the quote adds information beyond the
+  path + line range.
+- **`PositiveAbsence.PatternRef`** — keep; genuinely useful at
+  corpus scale when absences cross-reference methodology patterns,
+  but will often be empty for small runs.
+
+### One meta-finding worth preserving
+
+The analyst's answer to trial question 8:
+
+> *For my thinking: mild positive — drafting verdict first is a
+> useful forcing function.*
+
+The schema isn't just transport. **Structured emission shapes
+analyst cognition.** Forcing a one-sentence verdict before rationale
+commits the analyst to a position before prose hedging can soften
+it. That's a quality improvement orthogonal to mechanization.
+
+Conversely, their "round-2 prose had a color the structured version
+lacks" tells us: the fix isn't to abandon structure; it's to
+preserve prose-color via the `Observations` slot and `round_notes`
+field. Which is what gap #3 above addresses.
+
+### Updated v1 `AnalystOutput` shape
+
+Integrating all revisions:
+
+```go
+type AnalystOutput struct {
+    Attribution      AgentAttribution          `json:"attribution"`
+    Target           string                    `json:"target"`
+    TargetCommit     string                    `json:"target_commit,omitempty"`
+    Findings         []Finding                 `json:"findings"`
+    PositiveAbsences []PositiveAbsence         `json:"positive_absences,omitempty"`
+    Observations     []Observation             `json:"observations,omitempty"` // NEW
+    MethodologyTrace *MethodologyCatalog       `json:"methodology_trace,omitempty"`
+    Supersedes       []Supersession            `json:"supersedes,omitempty"`   // CHANGED from []string
+    ReframesFrom     []string                  `json:"reframes_from,omitempty"`
+    RoundNotes       string                    `json:"round_notes,omitempty"`
+}
+
+type Observation struct {
+    ID          string   `json:"id"`
+    Title       string   `json:"title"`       // one line
+    Body        string   `json:"body"`        // markdown, multi-paragraph
+    Category    string   `json:"category"`    // "trust_model" | "project_personality" | "trajectory" | ...
+    SignalType  *string  `json:"signal_type,omitempty"` // fk if applicable
+    Citations   []Citation `json:"citations,omitempty"`
+}
+
+type Finding struct {
+    ID              string          `json:"id"`
+    Verdict         string          `json:"verdict"`
+    Rationale       string          `json:"rationale"`
+    Severity        Severity        `json:"severity"`
+    DesignIntent    bool            `json:"design_intent,omitempty"`
+    Category        string          `json:"category"`
+    SignalType      *string         `json:"signal_type,omitempty"`
+    Citations       []Citation      `json:"citations,omitempty"`
+    Prerequisites  []string         `json:"prerequisites,omitempty"` // NEW
+    RemediationHints []string       `json:"remediation_hints,omitempty"` // NEW
+    Supersedes      []Supersession  `json:"supersedes,omitempty"`    // CHANGED
+    AnswersQuestion *string         `json:"answers_question,omitempty"`
+    RelatedFindings []string        `json:"related_findings,omitempty"`
+}
+
+type Citation struct {
+    Path      string     `json:"path"`
+    LineStart *int       `json:"line_start,omitempty"` // CHANGED: now nullable
+    LineEnd   *int       `json:"line_end,omitempty"`
+    Scope     *ScopeRef  `json:"scope,omitempty"`      // NEW: alternative to line-ref
+    CommitSHA *string    `json:"commit_sha,omitempty"`
+    Quoted    *string    `json:"quoted,omitempty"`
+}
+
+type ScopeRef struct {
+    Kind string `json:"kind"` // "crate" | "dir" | "tree" | "workspace"
+    Path string `json:"path"`
+}
+
+type MethodologyPattern struct {
+    ID                 string         `json:"id"`
+    SignalGroup        string         `json:"signal_group"`
+    Description        string         `json:"description"`
+    Pattern            *string        `json:"pattern,omitempty"`
+    CollectorHint      CollectorHint  `json:"collector_hint"`    // CHANGED: struct, not enum
+    ComposesWith       []string       `json:"composes_with,omitempty"` // NEW
+    FalsePositiveNotes string         `json:"false_positive_notes,omitempty"`
+    HitOnAtuin         *bool          `json:"hit_on_atuin,omitempty"`
+}
+```
+
+### Readiness gate
+
+The v1 schema is ready for implementation in `internal/exchange/`.
+All revisions are backed by specific signal from the trial; none
+are speculative. The atuin trial-response JSON is the first test
+fixture; `internal/exchange/` round-trip tests should parse it,
+re-serialize it, and match byte-for-byte after a normalization pass
+(or at least produce semantically identical Go structs).
+
+Not blocking v1 but worth tracking:
+
+- Controlled vocabulary for `ContextSpec.HostIsolation` and
+  `.Platform` — start with the handful of values the atuin case
+  needed; add as surfaced by future analyses.
+- `RunMetadata` envelope placement (MCP response vs. analyst
+  output) — design decision, can land in a follow-up.
+- Style guide for verdict phrasing (corrections, conditional
+  severity, design-intent findings) — lives in the
+  `vet-dependency` skill, not in the schema.
