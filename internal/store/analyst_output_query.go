@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 )
@@ -48,6 +49,13 @@ type AnalystOutputFilter struct {
 	// "external-sec-v1", "signatory-provenance").
 	AnalystID string
 
+	// Since limits results to outputs ingested at or after this
+	// timestamp. Zero value disables the filter (returns all
+	// regardless of age). The freshness check on `signatory
+	// analyze` uses this to surface "what's been seen recently"
+	// without paging through years of history.
+	Since time.Time
+
 	// Limit caps the result set. 0 = no limit.
 	Limit int
 }
@@ -83,6 +91,10 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	if filter.AnalystID != "" {
 		clauses = append(clauses, "ao.analyst_id = ?")
 		args = append(args, filter.AnalystID)
+	}
+	if !filter.Since.IsZero() {
+		clauses = append(clauses, "ao.ingested_at >= ?")
+		args = append(args, filter.Since.UTC().Format(time.RFC3339))
 	}
 	whereSQL := ""
 	if len(clauses) > 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,34 @@ func TestListAnalystOutputs_FilterByEntityURI(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Empty(t, none)
+}
+
+func TestListAnalystOutputs_FilterBySince(t *testing.T) {
+	// The Since filter is the SQL-level mechanism backing the
+	// CLI's --max-age flag. With the just-ingested row's
+	// ingested_at == approximately now, a Since set in the past
+	// should include it; a Since set in the future should not.
+	s := ingestAll(t)
+	ctx := context.Background()
+
+	pastList, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
+		Since: time.Now().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	assert.Len(t, pastList, 3, "Since=1h ago includes all three just-ingested rows")
+
+	futureList, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
+		Since: time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+	assert.Len(t, futureList, 0,
+		"Since=1h from now excludes everything (no row's ingested_at is in the future)")
+
+	zeroList, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
+		Since: time.Time{},
+	})
+	require.NoError(t, err)
+	assert.Len(t, zeroList, 3, "zero-time Since is the no-filter sentinel")
 }
 
 func TestListAnalystOutputs_FilterByAnalystID(t *testing.T) {

@@ -22,9 +22,24 @@ import (
 // all collapse to the same canonical URI and therefore the same
 // entity. This prevents duplicate-entity fragmentation (#53).
 type AnalyzeCmd struct {
-	Target  string `arg:"" help:"Package name, repo URL, or identity to analyze."`
-	Refresh bool   `help:"Collect fresh signals from network sources." default:"false"`
-	JSON    bool   `help:"Output as JSON." default:"false"`
+	Target  string        `arg:"" help:"Package name, repo URL, or identity to analyze."`
+	Refresh bool          `help:"Collect fresh signals from network sources." default:"false"`
+	JSON    bool          `help:"Output as JSON." default:"false"`
+	MaxAge  time.Duration `help:"Surface only analyst outputs ingested within this duration (Go duration syntax: 24h, 168h, 720h). 0 = no age filter." default:"0"`
+}
+
+// AnalysisDisplay wraps the runtime profile with any ingested
+// analyst outputs (Layer 2 data) so a single render or JSON dump
+// presents the full picture: signals (Layer 1) AND
+// analyses (Layer 2).
+//
+// Defined in the cmd package rather than internal/profile to avoid
+// coupling profile to the store's summary types — analyst outputs
+// are presentation-layer enrichment, not part of the entity-profile
+// data model.
+type AnalysisDisplay struct {
+	*profile.Profile
+	AnalystOutputs []store.AnalystOutputSummary `json:"analyst_outputs,omitempty"`
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
@@ -67,16 +82,25 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			fmt.Println("Run with --refresh to collect signals from GitHub.")
 			return nil
 		}
-		existing, err := s.GetLatestSignals(ctx, entity.ID)
+		existingSignals, err := s.GetLatestSignals(ctx, entity.ID)
 		if err != nil {
 			return fmt.Errorf("read cached signals: %w", err)
 		}
-		if len(existing) > 0 {
-			return cmd.displayProfile(ctx, s, entity)
+		analystOutputs, err := cmd.fetchAnalystOutputs(ctx, s, entity.ID)
+		if err != nil {
+			return fmt.Errorf("read analyst outputs: %w", err)
 		}
-		fmt.Printf("No cached signals for: %s\n", cmd.Target)
-		fmt.Println("Run with --refresh to collect signals from GitHub.")
-		return nil
+		// Cached state is non-empty if we have signals OR analyst
+		// outputs. Either qualifies as "we know things about this
+		// target." Emptiness in both is the only "go run --refresh"
+		// case.
+		if len(existingSignals) == 0 && len(analystOutputs) == 0 {
+			fmt.Printf("No cached signals or analyst outputs for: %s\n", cmd.Target)
+			fmt.Println("Run with --refresh to collect signals from GitHub,")
+			fmt.Println("or run `signatory ingest <file>` to load an analyst output.")
+			return nil
+		}
+		return cmd.displayProfile(ctx, s, entity, analystOutputs)
 	}
 
 	// --- Refresh path: collect fresh signals. ---
@@ -134,15 +158,50 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
 	}
 
+	// Even on a refresh path, surface any cached analyst outputs —
+	// they're the Layer 2 picture; the Layer 1 collectors don't
+	// touch them. An agent calling `analyze --refresh` after a
+	// previous ingest still benefits from seeing that an analyst
+	// output exists (and a recent one at that).
+	analystOutputs, err := cmd.fetchAnalystOutputs(ctx, s, entity.ID)
+	if err != nil {
+		return fmt.Errorf("read analyst outputs (post-refresh): %w", err)
+	}
+
 	fmt.Println()
-	return cmd.displayProfile(ctx, s, entity)
+	return cmd.displayProfile(ctx, s, entity, analystOutputs)
+}
+
+// fetchAnalystOutputs returns the AnalystOutput summaries for an
+// entity, respecting the --max-age filter when set. Newest-ingested
+// first.
+//
+// This is the core of the freshness check: an agent invoking
+// `signatory analyze` should be able to see, at a glance, what's
+// been ingested for the target and how recently — without having
+// to fall back to `signatory show-analyses` or grep design/analysis/.
+func (cmd *AnalyzeCmd) fetchAnalystOutputs(
+	ctx context.Context, s store.Store, entityID string,
+) ([]store.AnalystOutputSummary, error) {
+	filter := store.AnalystOutputFilter{EntityID: entityID}
+	if cmd.MaxAge > 0 {
+		filter.Since = time.Now().Add(-cmd.MaxAge)
+	}
+	return s.ListAnalystOutputs(ctx, filter)
 }
 
 // displayProfile reads the current-state view for an entity and
 // renders it to stdout. Uses GetLatestSignals so superseded signals
 // are filtered out; uses GetPostures to show the latest posture plus
 // a hint when multiple versions have recorded decisions.
-func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s store.Store, entity *profile.Entity) error {
+//
+// analystOutputs (typically from fetchAnalystOutputs) is woven into
+// both the JSON and human-readable presentations. Pass nil if no
+// outputs should be surfaced (e.g., for a profile-only display).
+func (cmd *AnalyzeCmd) displayProfile(
+	ctx context.Context, s store.Store, entity *profile.Entity,
+	analystOutputs []store.AnalystOutputSummary,
+) error {
 	signals, err := s.GetLatestSignals(ctx, entity.ID)
 	if err != nil {
 		return fmt.Errorf("read signals: %w", err)
@@ -171,8 +230,13 @@ func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s store.Store, entity
 		p.Posture = &latest
 	}
 
+	display := &AnalysisDisplay{
+		Profile:        p,
+		AnalystOutputs: analystOutputs,
+	}
+
 	if cmd.JSON {
-		data, err := json.MarshalIndent(p, "", "  ")
+		data, err := json.MarshalIndent(display, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -180,11 +244,15 @@ func (cmd *AnalyzeCmd) displayProfile(ctx context.Context, s store.Store, entity
 		return nil
 	}
 
-	return displayHuman(p)
+	return displayHuman(display, cmd.MaxAge)
 }
 
-// displayHuman prints a human-readable entity profile.
-func displayHuman(p *profile.Profile) error {
+// displayHuman prints a human-readable entity profile, including
+// any analyst outputs surfaced by the freshness check. maxAge is
+// passed in only for display ("Cached analyses (last %s):") — the
+// filtering itself happened at fetch time.
+func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
+	p := d.Profile
 	fmt.Printf("Entity:    %s\n", p.Entity.ShortName)
 	fmt.Printf("URI:       %s\n", p.Entity.CanonicalURI)
 	fmt.Printf("Type:      %s\n", p.Entity.Type)
@@ -195,6 +263,34 @@ func displayHuman(p *profile.Profile) error {
 		fmt.Printf("Ecosystem: %s\n", p.Entity.Ecosystem)
 	}
 	fmt.Println()
+
+	// Surface ingested analyst outputs before signals — they're
+	// usually the higher-information-density artifact a human or
+	// agent wants to see first ("we ran security review 3 days
+	// ago, here's the headline").
+	if len(d.AnalystOutputs) > 0 {
+		header := "=== Cached analyses ==="
+		if maxAge > 0 {
+			header = fmt.Sprintf("=== Cached analyses (last %s) ===", maxAge)
+		}
+		fmt.Println(header)
+		for _, ao := range d.AnalystOutputs {
+			ageStr := analystOutputAge(ao.IngestedAt)
+			fmt.Printf("  %s  %s round=%d  %s\n",
+				ao.OutputID[:8], ao.AnalystID, ao.Round, ageStr)
+			fmt.Printf("    model=%s  ingested=%s\n",
+				ao.Model, ao.IngestedAt)
+			fmt.Printf("    %d finding(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+				ao.FindingsCount, ao.PositiveAbsenceCount,
+				ao.ObservationCount, ao.PatternCount)
+			if ao.SourcePath != "" {
+				fmt.Printf("    source: %s\n", ao.SourcePath)
+			}
+		}
+		fmt.Printf("Use `signatory show-findings --target %s` for cross-output finding queries.\n",
+			p.Entity.CanonicalURI)
+		fmt.Println()
+	}
 
 	// Posture: show latest + hint about other versions.
 	if len(p.Postures) > 0 {
@@ -271,6 +367,32 @@ func displayHuman(p *profile.Profile) error {
 
 	fmt.Printf("Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
 	return nil
+}
+
+// analystOutputAge produces a human-friendly relative-age string
+// for an AnalystOutput's ingested_at timestamp, e.g. "3 days ago",
+// "2 weeks ago". Falls back to the raw timestamp on parse error so
+// the display never breaks on a malformed value.
+func analystOutputAge(ingestedAt string) string {
+	t, err := time.Parse(time.RFC3339, ingestedAt)
+	if err != nil {
+		return "(" + ingestedAt + ")"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 14*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	case d < 60*24*time.Hour:
+		return fmt.Sprintf("%dw ago", int(d.Hours()/(24*7)))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
+	default:
+		return fmt.Sprintf("%dy ago", int(d.Hours()/(24*365)))
+	}
 }
 
 func printCompactValue(val map[string]interface{}) {
