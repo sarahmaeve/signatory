@@ -27,11 +27,7 @@ prior-conversation context.
 | File | Role | Status |
 |------|------|--------|
 | [security-review-v1.md](security-review-v1.md) | Security analyst (code-grounded threat modeling) | First validated end-to-end on the thefuck engagement (2026-04-14) — see `design/analysis/thefuck.md`. Currently Python-flavored in its pattern catalog; new language flavors should fork this file rather than templatize across languages. |
-
-The provenance handoff is the natural symmetric next artifact —
-not yet written. The provenance role has been validated only via
-in-session runs (signatory's own `vet-dependency` skill methodology
-emitting v1 JSON), not via fresh-agent handoff.
+| [provenance-review-v1.md](provenance-review-v1.md) | Provenance analyst (metadata, git history, signing posture, identity graph) | Extracted from the in-session provenance run on thefuck (2026-04-14, output at `design/analysis/thefuck-provenance-v1.json`). Not yet validated via fresh-agent run; the next provenance engagement should use this template and confirm whether the structure is self-contained. The ecosystem-specific section covers PyPI, crates.io, npm, and Go modules — all four ecosystems' API patterns documented in one file rather than forked per ecosystem. |
 
 ## How a template gets used
 
