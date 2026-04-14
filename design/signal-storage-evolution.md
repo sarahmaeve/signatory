@@ -236,6 +236,24 @@ provenance model alone doesn't surface them.
 | `temp_file_predictability` | hygiene | medium | 4 | negative when predictable, positive when randomized. Temp-file paths that are guessable by a local attacker + a shared `/tmp` enable TOCTOU / pre-creation attacks. Low severity in most cases but a pattern worth catching. |
 | `shell_allowlist_sandbox_claim` | hygiene | high | 7 | negative when claimed, neutral when not. Projects that gate shell-tool execution with an allowlist like `Shell(git *)` are implicitly claiming sandbox properties the allowlist doesn't deliver — the target tool's own plugin/extension/alias mechanism composes with the allowlist into broader execution. Flag explicitly so users aren't over-trusting. |
 
+### From security-review round 2 (dual-analyst handoff)
+
+These signals came from the security analyst's second pass (see
+`design/analysis/atuin-security-review-external-round2.md`) answering
+code-verification questions from signatory's follow-up. Two of them
+reframe a single existing signal into multiple; two are genuinely new
+surfaces. The first one is the highest-leverage — it materially
+downgraded a prior threat assessment.
+
+| Type | Group | Forgery resistance | Weight (1-10) | Polarity |
+|------|-------|-------------------|---------------|----------|
+| `ai_capability_gating_model` | hygiene | high | 9 | categorical + positive when hardened. Values: `hardcoded_enum` / `config_driven` / `server_advertised` / `none`. For AI-agent-integrated projects this determines whether a compromised server can reach arbitrary client-side tools. atuin ships `hardcoded_enum` (positive, defense-in-depth) — the reviewer's round-2 trace through `tools/mod.rs`, `stream.rs`, and `settings.rs` is the reference implementation of how to verify this. |
+| `sync_integrity_protection_split` | publication | high | 8 | positive when complete. **Replaces/refines the existing "E2E encrypted sync" signal, which conflated three distinct properties.** Sub-values: `confidentiality_protection` (per-record encryption), `per_record_integrity_protection` (can server tamper with record content?), `sequence_integrity_protection` (can server silently censor or reorder records?). atuin is **yes / yes / no** — censorship is possible because the client counts received records, not idx values, and persists local-max-idx as the sync high-water-mark. |
+| `silent_privilege_escalation_via_env_var` | hygiene | high | 7 | negative. Environment variables that silently widen trust surface when set (disable TLS, bypass auth, add capabilities, enable debug-only tools in production builds). Structured list rather than boolean. atuin has `ATUIN_AI__ADDITIONAL_CAPS`. Worth enumerating across a project because these are classic "hardcoded-dev-knob leaked into production" vectors. |
+| `env_inheritance_policy_on_spawn` | hygiene | medium | 5 | negative when absent, contextual when deliberate. For projects that spawn subprocesses (AI tools, shell execution, build steps, test runners), whether `env_clear` / equivalent is called before spawn. atuin's AI shell tool deliberately does not clear (needs SSH agent). Signal polarity depends on whether the spawn is user-initiated-but-arbitrary (atuin's case, acceptable) or runs-server-controlled-code (sandbox failure). |
+| `analyst_self_correction` | governance | very-high | 9 | positive. **Meta-signal about the analyst, not the target.** When an analysis round explicitly supersedes a prior round's finding based on deeper grounding, that's a signal about analyst quality — analysts that revise their own assessments when the evidence warrants produce higher-fidelity output than ones that defend prior positions. Record as metadata on the analysis, not as a signal on the target. Feeds `design/mcp-dual-analyst-architecture.md`'s schema design. |
+| `positive_absence_signal` | hygiene | medium | 5 | positive. Distinct from *unexamined absence*. When an analyst explicitly checks for a known-bad pattern (SQL injection shape, `unwrap` on network boundaries, git-pinned deps) and records "checked, not present," that's a different epistemic state than "not examined." Signatory's signal bookkeeping should distinguish these. Implementation: a `positive_absences` field on analyst output, cross-referenced against the checking-analyst's methodology catalog. |
+
 ### A meta-observation about signal design
 
 The `per_developer_commit_signing_ratio` vs. `web_flow_signing_ratio`

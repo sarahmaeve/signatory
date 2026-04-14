@@ -910,7 +910,7 @@ Ten new signal types, now proposed for the registry in
 - `temp_file_predictability` — predictable-by-attacker vs.
   randomized temp file paths
 
-### Note on analysis methodology
+### Note on analysis methodology (as of extended pass 2)
 
 Three passes on the same target in one session surfaced distinctly
 different signal classes:
@@ -926,6 +926,312 @@ Each pass produced signals the others missed. The
 *when upstream sources collapse multiple signals, de-collapse them* —
 generalizes: each analysis perspective surfaces signals the others
 systematically miss. This has direct implications for the MCP
-architecture; see signatory's chat synthesis for the design proposal
-(two analyst roles, cheap deterministic collectors, optional
-synthesist).
+architecture; see
+[`design/mcp-dual-analyst-architecture.md`](../mcp-dual-analyst-architecture.md)
+for the formal proposal (two analyst roles, cheap deterministic
+collectors, optional synthesist, caller-chosen depth).
+
+A fourth pass followed (below). It tested whether the dual-analyst
+handoff format — the prose `/tmp/atuin-provenance-followup.md` —
+could carry structured questions between agents, and whether the
+security analyst could materially correct itself when given specific
+code-verification prompts. It could, it did, and the result
+substantially changed one of our prior assessments.
+
+---
+
+## 2026-04-14 Extended (3): Security Agent Round 2
+
+Source: external security agent's response to signatory's
+follow-up prompt, preserved verbatim in
+[`atuin-security-review-external-round2.md`](atuin-security-review-external-round2.md).
+Round 1 by the same agent is in
+[`atuin-security-review-external.md`](atuin-security-review-external.md).
+
+This round produced a material self-correction on the atuin-ai threat
+assessment, resolved the minor mysteries left from extended pass 2,
+and added one new medium-severity finding. It also produced two
+methodology outputs (a 60-pattern grep catalog and a "checked and
+chose not to flag" list) that directly inform signatory's Layer 1
+collector design per
+`design/mcp-dual-analyst-architecture.md`.
+
+### §7 Material self-correction: AI capability gating downgrades threat
+
+**Round 1 claimed:** atuin-ai is a remote LLM that can "instruct
+your CLI to run shell commands, read files, write files, or search
+your history, defended primarily by a permission prompt."
+
+**Round 2 correction:** that characterization was only accurate for
+`atuin_history`. For `execute_shell_command`, `read_file`, and
+`create_file`, there is a **second line of defense ahead of the
+permission prompt**: a client-hardcoded capability allowlist that,
+in any normal configuration, does not advertise those capabilities.
+
+Layer-by-layer trace from round 2 (file:line citations from the
+review):
+
+1. **Tool-call parsing** (`tools/mod.rs:320-333`): `ClientToolCall::try_from`
+   accepts a hard-coded 4-name enum by `match`. Anything else returns
+   `Err("Unknown tool call")`. This is a compile-time bound on the
+   tool namespace.
+2. **Capability gating** (`stream.rs:289-311`): tool calls whose
+   required capability wasn't advertised never reach permission
+   check, never reach execution; server gets a canned "capability not
+   advertised" error.
+3. **Capability source** (`stream.rs:62-87`, `settings.rs:680-684`):
+   `AiCapabilities` struct has exactly one field —
+   `enable_history_search`. No config surface exists for
+   shell/read/write. The only path to widen capability is the
+   undocumented env var `ATUIN_AI__ADDITIONAL_CAPS`.
+
+**Effect on our assessment:**
+
+- AI-subsystem severity revised from medium to **low-medium in a
+  default configuration**.
+- The realistic default-install threat is "hostile Hub requests
+  `atuin_history` under permission prompts" — meaningfully narrower
+  than "hostile Hub can request arbitrary shell execution under
+  permission prompts."
+- The architecture will age well *provided* the default-true pattern
+  on `enable_history_search` isn't copied for shell/write caps in
+  future.
+- Practical recommendation changes: setting
+  `ai.capabilities.enable_history_search = false` is a cleaner
+  hardening than writing deny rules, because it closes the entire
+  reachable tool surface rather than rule-by-rule.
+
+**New trust-model observation:** self-correction across analysis
+rounds is itself a trust signal about the analyst. An analyst that
+revises its own prior assessment in response to deeper source
+reading is producing higher-quality output than one that defends
+its prior position. Worth encoding as analyst metadata — see
+`design/mcp-dual-analyst-architecture.md` for the schema
+implications.
+
+### §8 New finding: sync protocol lacks monotonicity check
+
+**Medium severity.** Not surfaced in any prior pass.
+
+The data model (`atuin-common/src/record.rs:45-74`) uses
+`(host, tag, idx)` with `idx: u64` monotonic per `(host, tag)`.
+PASETO V4 implicit assertions bind `id`, `idx`, `tag`, `host`,
+`version` into each record's AEAD
+(`atuin-client/src/record/encryption.rs:170-196`), so per-record
+content cannot be tampered by the server.
+
+But the sync loop
+(`atuin-client/src/record/sync.rs:218-273`) increments
+`progress += page.len()` — counting *records received*, not *idx
+values*. A compromised server returning idx `[0,1,2]` then
+`[7,8,9]` (gap at 3–6) brings `progress` to 6 and makes the client
+consider the range complete. On the next sync, `status()` returns
+local-max-idx (9), so the client never re-fetches the gap even if
+the server later starts serving records 3–6.
+
+Net: **a compromised sync server can silently censor history
+entries** without detection. PASETO prevents fabrication and
+tampering; it doesn't prevent censorship. A Merkle chain or hash
+pointer per record would close this; it doesn't exist today.
+
+The README claim "your secrets are safe" is accurate about
+confidentiality but doesn't cover integrity/availability. Worth
+surfacing as a distinct signal:
+
+- `sync_confidentiality_protection` — atuin: **yes** (PASETO v4)
+- `sync_integrity_protection` — atuin: **partial** (per-record
+  integrity via implicit assertions, no sequence integrity)
+- `sync_availability_protection` — atuin: **no** (server can censor)
+
+This splits what the existing model conflates into a single "E2E
+encrypted sync" signal.
+
+### Michelle Tilley trajectory: confirmed clean, inverted trust signal
+
+Full `git log --author="Michelle Tilley" --stat` scan. Her commits
+are strictly in-lane: atuin-ai + one cross-cutting `atuin config
+set/get` feature + mechanical release-prep + docs + two small fixes.
+**Zero touches** to `atuin-client/src/encryption.rs`,
+`record/encryption.rs`, `auth.rs`, `api_client.rs`, `sync.rs`,
+`record/sync.rs`, `atuin-server/**`, or any database migration.
+
+The security reviewer's observation worth preserving verbatim:
+
+> The capability gating that materially downgrades my threat
+> assessment in §7 is her work. From a trust-model standpoint,
+> that's the opposite of what you'd expect an adversarial actor
+> to contribute.
+
+This is a **positive trajectory** signal for the new-co-lead trust
+concern. Our extended pass 1 flagged her as "scope worth watching";
+round 2 confirmed scope is appropriate and her owned code is
+actively hardening the atuin-ai surface rather than weakening it.
+
+Revised recommendation: no particular action needed on Michelle as
+a trust concern. The ramp-up shape was textbook "new contributor
+earns ownership of a subsystem, ships defense-in-depth there."
+
+### Minor resolutions
+
+| Item | Resolved to |
+|------|-------------|
+| `pi` | `@mariozechner/pi-coding-agent`, open-source coding agent. Hook writes a TypeScript extension at `~/.pi/agent/extensions/atuin.ts`. Bundled extension, fully local, doesn't phone home. Most invasive of the three hook integrations (file vs. JSON config) but benign. |
+| `atuin-hex` | Pty-based terminal emulator for the search popup, *not* an AI-tool sandbox. Feature-gated off by default (`hex = ["atuin-hex"]` in `crates/atuin/Cargo.toml:41`). **Not on the AI execution path** — `execute_shell_command_streaming` spawns its own child. My hypothesis that atuin-hex was an AI-tool sandbox was wrong. |
+| `include_str!` scan | 11 usages, all shell init scripts, help text, and TOML examples. No credentials, no compiled-in endpoints. Endpoint defaults (`api.atuin.sh`, `hub.atuin.sh`) are string constants in `settings.rs`, not embedded files. Clean. |
+| `create_file` NYI behavior | Hard error with explicit message (`tools/mod.rs:374-381`). Not a panic, not a silent skip, no fallthrough to accidental write. Informational severity only. |
+| Daemon peer-credential check | **Absent** on Unix. No `SO_PEERCRED` / `getpeereid` in any tonic interceptor. Socket inherits umask; defense-in-depth reduces to filesystem perms. Cheap upstream fix: chmod 0600 + peer-UID check. |
+| Hub auth request payload | Nearly nothing. `User-Agent: atuin/$VERSION`, version header, empty body (except `link_account` which sends a local CLI token for account linking). No device fingerprint, no OS/hostname, no session correlator beyond IP + TLS fingerprint + User-Agent. Unavoidable for CLI auth. |
+| `Command::env_clear` for AI shell tool | Deliberately not called (`tools/mod.rs:672-681`). Shell tool inherits full environment including API tokens, SSH agent, etc. Flagged by reviewer as "design choice, not bug" — the user obviously wants `git status` to work against their private SSH agent. Worth tracking as a design invariant. |
+| Credential-path denylist in permissions | **Absent.** No hardcoded deny-below-user-rules for `~/.ssh/**`, `~/.aws/credentials`, `~/.local/share/atuin/key`, `~/.gnupg/**`. Currently moot given §7 (read_file is capability-gated off). Would become a cheap high-value fix if the capability gate is lifted in future. |
+
+### Revised severity inventory (final for atuin as of 2026-04-14)
+
+Merging all three passes plus round 2:
+
+| Finding | Severity |
+|---------|----------|
+| AI capability gating limits default-install attack surface | **positive** (reduces prior risk) |
+| Sync server can censor records (no monotonicity check) | **medium** |
+| Daemon Unix socket no peer-cred check | **medium** on shared hosts, **low** single-user |
+| Windows daemon unauthenticated TCP `127.0.0.1:8889` | **medium** on multi-user Windows |
+| crates.io publish from maintainer laptop | **medium** (supply chain) |
+| Update-check hardcoded to `api.atuin.sh` | **low** (documented phone-home) |
+| `ensure_hub_session` called for self-hosters | **low** (documented per PR #3301) |
+| No hardcoded credential-path denylist | **low** (informational given capability gate) |
+| Commits unsigned by omission (web-flow only) | **low** |
+| Tags unsigned (lightweight, not annotated) | **low** |
+| `deny.toml` unenforced in CI | **low** |
+| Key file umask-inherited perms | **low** |
+| Auto-install of AI agent hooks during `install.sh` | **low** (invasive UX, not exploit) |
+| `create_file` NYI returns hard error | **informational** |
+| Hub auth request minimal fingerprint | **informational** |
+| AI shell tool inherits full env on spawn | **informational** (by design) |
+| `ATUIN_AI__ADDITIONAL_CAPS` env-var escape hatch | **informational** (silent cap widening if set) |
+
+### New signal types from this round
+
+Added to `design/signal-storage-evolution.md`:
+
+- `ai_capability_gating_model` — structured: `hardcoded_enum` /
+  `config_driven` / `server_advertised` / `none`. atuin is
+  `hardcoded_enum` (positive). The **positive** value of this
+  signal was not obvious from metadata alone; it took a three-layer
+  source trace.
+- `sync_integrity_protection` — per-record integrity (atuin: yes)
+  vs. sequence integrity (atuin: no). Splits the existing
+  "E2E encrypted" signal into confidentiality /
+  per-record-integrity / sequence-integrity components.
+- `sync_availability_protection` — can the server drop records
+  without client detection? atuin: yes, silently.
+- `silent_privilege_escalation_via_env_var` — structured list of
+  env vars that silently widen trust surface.
+  atuin has one: `ATUIN_AI__ADDITIONAL_CAPS`.
+- `env_inheritance_policy_on_spawn` — for projects that spawn
+  subprocesses (AI tools, shell execution, build steps),
+  whether `env_clear` is called before the spawn. atuin: no,
+  by design.
+
+### Revised action items (final)
+
+**Before installing:**
+- Don't run `curl … | sh`. Install binary manually.
+- Skip `atuin setup` or answer `n` to AI and daemon prompts.
+- Pin to `v18.14.1` explicitly.
+
+**Configuration hardening (in priority order, updated per round 2):**
+- Set `update_check = false` (stop `api.atuin.sh` phone-home).
+- If not using Atuin AI, set `ai.enabled = false`.
+- **If using Atuin AI, set
+  `ai.capabilities.enable_history_search = false`** unless you
+  actively want the remote LLM to query your history. This is
+  **the highest-leverage single hardening** — with it disabled,
+  no client-side tool is reachable from the server under default
+  configuration. (Previously I recommended deny-rules as the
+  primary hardening; round 2 showed capability disable is both
+  simpler and more complete.)
+- Confirm `ATUIN_AI__ADDITIONAL_CAPS` is not set in your shell env
+  (`env | grep ATUIN_AI`).
+- `chmod 0600 ~/.local/share/atuin/key` after install.
+- Self-host the sync server, or disable sync entirely. Even with
+  self-hosted sync, login triggers outbound to `hub.atuin.sh`.
+- Consider disabling self-updater; pin releases via your package
+  manager.
+- On multi-user Windows, avoid the daemon (unauthenticated
+  `127.0.0.1:8889`).
+- If using hosted sync, be aware the server can silently drop
+  history records (§8). Self-host eliminates this trust.
+- Assume `secrets_filter` misses some secrets.
+
+**Ongoing:**
+- Run `cargo-deny check` against the pinned version.
+- Re-audit the atuin-ai permissions subsystem on each minor
+  release, *especially* if new capabilities appear in
+  `AiCapabilities`.
+- Monitor ellie's and michelle's GitHub account activity as
+  primary compromise signals.
+
+**Upstream asks (file issues):**
+- Signed annotated tags.
+- `cargo-deny check` CI job.
+- OIDC trusted publishing for crates.io via GitHub Actions.
+- `SECURITY.md` with disclosure contact.
+- Make `update_check` honor `sync_address`.
+- Explicit `chmod 0600` on key-file creation.
+- Windows daemon: auth mechanism (named-pipe ACL or token).
+- Merkle chain / hash pointer in sync protocol (closes §8).
+- Document `ATUIN_AI__ADDITIONAL_CAPS` or remove it.
+- Hardcoded credential-path denylist beneath user rules (for
+  future-proofing against capability-gate lifting).
+
+### Analyst methodology artifacts
+
+Round 2 produced two methodology outputs that are broadly useful
+beyond atuin and feed directly into Layer 1 collector design:
+
+1. **Grep-catalog of security-relevant source patterns** — ~60
+   patterns organized by category (network endpoints, local
+   listeners, file/credential handling, default-on capabilities,
+   unsafe-context patterns, env-var fallbacks, telemetry,
+   auth/crypto smells, dependency hygiene, build provenance). Each
+   is a candidate deterministic collector. See the round-2 file §B
+   for the full list. This is the direct input to
+   `internal/signal/source/` collector design.
+2. **"Checked and chose not to flag" positive-absence signals** —
+   unsafe blocks absent in client crates, panic paths absent in
+   network deserialization, SQL injection shape absent in sqlx
+   usage, etc. Distinct from "not examined." Gives signatory a way
+   to distinguish known-good from never-examined in signal
+   bookkeeping.
+
+Both outputs are preserved in the round-2 file. Extracting them
+into a collector catalog and a positive-absence signal taxonomy is
+the next concrete implementation step — it moves the highest-value
+portion of an Opus-grade security pass into cheap deterministic
+code.
+
+### Methodology: dual-analyst handoff worked
+
+The round-2 response validates that a prose handoff format between
+analysts can:
+- Carry structured questions with priority ordering
+- Elicit file:line-grounded answers
+- Prompt analyst self-correction (§7 above)
+- Produce methodology catalogs usable as collector specs
+- Sustain cross-analyst engagement (the round-2 "Net assessment"
+  picks up the provenance analyst's "social-engineering surface
+  realer than false-flag" framing and confirms it from code
+  trajectory)
+
+What it does *not* yet do well (schema implications for
+`design/mcp-dual-analyst-architecture.md`):
+- Severity conditional on deployment context (single-user vs.
+  shared host) needs structured representation
+- "Positive" severity (findings that reduce prior risk) needs to
+  be a first-class enum value
+- Supersession between analysis rounds needs to be tracked
+- Verdict-vs-rationale split is real (every round-2 section
+  opened with a bolded one-sentence verdict)
+- Methodology catalog should be a distinct output type, not a
+  prose sidebar
+
+These schema learnings are folded into the architecture doc.

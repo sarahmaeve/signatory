@@ -447,3 +447,222 @@ Three reasons not to:
 The dual-analyst architecture is the explicit "two roles, two
 outputs, explicit reconciliation" version of what a single agent
 would do implicitly. The explicit version is reviewable.
+
+---
+
+## Empirical validation: the round-2 handoff experiment
+
+After drafting this architecture, we ran a concrete test of the
+dual-analyst handoff pattern on the same atuin target. Signatory's
+provenance analyst wrote a prose follow-up document asking the
+security analyst specific code-verification questions (preserved
+at `/tmp/atuin-provenance-followup.md`; not checked into repo).
+The security analyst responded with
+[`atuin-security-review-external-round2.md`](analysis/atuin-security-review-external-round2.md).
+
+Results bearing on this architecture:
+
+### What worked
+
+1. **Prose handoff was sufficient as a transport.** No structured
+   schema existed; prose sections with priority ordering carried
+   the questions well. This suggests the schema (next section) is
+   worth building for *ergonomics and queryability*, not because
+   the underlying communication is blocked without it.
+2. **Bidirectional flow emerged.** The security analyst's "Net
+   assessment" picked up the provenance analyst's framing
+   ("social-engineering surface is realer than false-flag") and
+   confirmed it from code trajectory. Cross-analyst engagement
+   worked without being explicitly scaffolded.
+3. **Self-correction occurred and was trust-positive.** The
+   security analyst's round-2 §7 materially revised its round-1
+   characterization of atuin-ai based on deeper source tracing.
+   That revision is a *better* analysis, not a worse one — but
+   the schema needs to represent it.
+4. **Methodology catalog produced on request.** Asking for "the
+   patterns you grep for on every project" yielded ~60 concrete
+   patterns organized by category, directly usable as Layer 1
+   collector specs. The collector backlog is now concrete.
+
+### What broke the proposed schema
+
+The first-pass schema in
+`design/signal-storage-evolution.md` handled most findings but
+had specific gaps the round-2 output exposed:
+
+1. **Severity isn't always a scalar.** A finding like "daemon
+   unauthenticated" was rated "medium on shared hosts, low on
+   single-user." Single-enum severity is too rigid; the schema
+   needs:
+
+   ```go
+   type Severity struct {
+       Default ConditionalSeverity
+       ByContext map[string]ConditionalSeverity  // "shared_host" → medium
+   }
+   ```
+
+2. **"Positive" severity is needed.** The round-2 §7 finding
+   reduced prior risk rather than surfacing new risk. It doesn't
+   fit critical/high/medium/low/informational. Add `positive` as
+   a first-class enum value with semantics "this finding reduces
+   a prior-assessed risk."
+3. **"Informational by design" distinct from "informational."**
+   `Command::env_clear` not called for AI shell tool is a
+   deliberate design choice (user needs SSH agent), not a latent
+   issue. The schema needs an `informational_by_design` variant
+   or a flag — `severity: informational, design_intent: true` —
+   so consumers can distinguish "safely known" from "we should
+   watch this."
+4. **Supersession between rounds.** The round-2 §7 explicitly
+   supersedes the round-1 atuin-ai assessment. Without a
+   `supersedes: []FindingID` field, the trail of "this was wrong,
+   here's why" disappears — which is itself the trust signal
+   about analyst quality.
+5. **Verdict-vs-rationale split is load-bearing.** Every round-2
+   section opened with a bolded one-sentence verdict
+   ("**Verdict: absent. Medium severity.**") followed by the
+   code-path trace. The schema should have both:
+
+   ```go
+   type Finding struct {
+       Verdict   string  // one sentence, dense
+       Rationale string  // markdown, multi-paragraph
+       ...
+   }
+   ```
+
+   This enables programmatic scanning (filter by verdict) without
+   losing the reasoning (serve rationale to humans).
+6. **Methodology catalog wants its own type.** The round-2 §B was
+   a structured catalog of grep patterns organized by signal
+   group. Not a Finding, not a free-text sidebar. Needs:
+
+   ```go
+   type MethodologyCatalog struct {
+       Source   AgentAttribution
+       Patterns []MethodologyPattern
+   }
+   type MethodologyPattern struct {
+       SignalGroup   string  // "network_endpoints", "local_listeners", ...
+       Pattern       string  // ripgrep-ready, or prose description
+       CollectorHint string  // "can this be mechanized?"
+       FalsePositiveNotes string
+   }
+   ```
+
+   This lets us mechanically extract "candidates for Layer 1
+   collector implementation" from analyst output.
+7. **Positive-absence signals want a distinct type.** Round-2 §C
+   listed "checked and chose not to flag" items: unsafe-code
+   absent, panic paths absent from SSE parsing, SQL injection
+   shape absent from sqlx usage. These are *not* findings —
+   they're the inverse. Without representation they're
+   indistinguishable from unexamined absences. Proposal:
+
+   ```go
+   type PositiveAbsence struct {
+       PatternChecked  string      // references a MethodologyPattern
+       Citations       []Citation  // what the analyst looked at
+       Confidence      enum        // spot_checked / thoroughly_reviewed / exhaustive
+   }
+   ```
+
+### What the schema should actually be
+
+Integrating the above, the per-pass analyst-output shape should
+now be:
+
+```go
+type AnalystOutput struct {
+    Attribution        AgentAttribution
+    Target             CanonicalURI
+    Findings           []Finding
+    PositiveAbsences   []PositiveAbsence
+    MethodologyTrace   *MethodologyCatalog   // optional, requested
+    Supersedes         []AnalystOutputID     // rounds before this one
+    ReframesFrom       []string              // free-text notes on cross-analyst engagement
+}
+
+type Finding struct {
+    ID              FindingID
+    Verdict         string  // one sentence
+    Rationale       string  // markdown body
+    Severity        Severity
+    DesignIntent    bool    // "this is deliberate, not a bug"
+    Category        string
+    SignalType      *string  // fk into registry
+    Citations       []Citation
+    Supersedes      []FindingID
+    AnswersQuestion *QuestionID  // if this finding responds to a VerificationAsk
+    RelatedFindings []FindingID
+}
+
+type Severity struct {
+    Default   SeverityValue
+    ByContext map[string]SeverityValue
+}
+
+type SeverityValue enum {
+    Critical
+    High
+    Medium
+    Low
+    Informational
+    Positive  // finding reduces prior risk
+}
+```
+
+Plus the request/question side from the original proposal
+(`AnalysisRequest`, `VerificationAsk`, `OpenQuestion`, renamed for
+consistency — a "question" is a question regardless of whether
+it's verifying a prior claim or opening a new investigation).
+
+### Self-correction as a first-class MCP invocation
+
+The round-2 §7 revision is valuable enough to warrant its own
+invocation pattern beyond `analyze`:
+
+```
+signatory://verify/{finding_id}?depth=security
+```
+
+Re-invoke a specific prior finding with updated grounding (newer
+commit, different depth, different model). The output is a new
+AnalystOutput that `Supersedes` the prior one. This makes
+"re-analyze a specific uncertain finding" cheap relative to
+"re-run the whole analysis."
+
+### Methodology trace as a side output
+
+The grep-catalog from round-2 §B is the direct input to Layer 1
+collector implementation. The MCP response envelope should
+expose it separately:
+
+```json
+{
+  "analysis": { ... },
+  "signals": [ ... ],
+  "methodology_trace": {
+    "patterns_checked": [ ... ],
+    "collector_candidates": [ ... ]
+  },
+  "metadata": { ... }
+}
+```
+
+Tooling can ingest `methodology_trace.collector_candidates`
+directly into a collector-backlog issue tracker.
+
+### Implications for the v0.1 schema implementation
+
+When we build `internal/exchange/`, the shape above is the
+target. The atuin round-2 output is the first real test case;
+round 1 covers the pre-correction state; both rounds together
+exercise the supersession relationship.
+
+A reasonable v0.1 implementation discipline: **every struct
+field should be explainable via a specific concrete finding
+from the atuin analysis.** If we can't point to "this field
+exists because this round-2 finding had this property," the
+field is speculative and should wait.

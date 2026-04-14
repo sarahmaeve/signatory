@@ -33,10 +33,11 @@ Analyses here:
 
 | Target | Ecosystem | Role | Posture | File |
 |--------|-----------|------|---------|------|
-| atuin | Rust / CLI app | Development + Shell-augment + AI-agent runtime + Hosted-service coupled | Analysis only (API + local clone + external security review, 2026-04-14) | [atuin.md](atuin.md) |
+| atuin | Rust / CLI app | Development + Shell-augment + AI-agent runtime + Hosted-service coupled | Analysis only (API + local clone + 2 rounds of external security review, 2026-04-14) | [atuin.md](atuin.md) |
 
 ### Supporting primary-source documents
 
 | File | Kind | Notes |
 |------|------|-------|
-| [atuin-security-review-external.md](atuin-security-review-external.md) | External security review, verbatim | Produced by a separate Claude Opus 4.6 agent with a security-focused system prompt; integrated into atuin.md §"2026-04-14 Extended (2)" |
+| [atuin-security-review-external.md](atuin-security-review-external.md) | External security review, round 1, verbatim | Produced by a separate Claude Opus 4.6 agent with a security-focused system prompt; integrated into atuin.md §"2026-04-14 Extended (2)" |
+| [atuin-security-review-external-round2.md](atuin-security-review-external-round2.md) | External security review, round 2, verbatim | Response to signatory's follow-up handoff document; includes a material self-correction of round 1, a new medium-severity sync-censorship finding, and methodology artifacts (grep catalog + positive-absence list). Integrated into atuin.md §"2026-04-14 Extended (3)" |
