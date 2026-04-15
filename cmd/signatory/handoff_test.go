@@ -450,13 +450,14 @@ func TestFormatPrecheckReport_Unknown(t *testing.T) {
 	assert.NotContains(t, got, "# precheck applied:")
 }
 
-// --- --network-precheck path: end-to-end integration via injectable Source ---
+// --- --network-precheck path: end-to-end integration via injected Source ---
 //
-// These tests exercise applyNetworkPrecheck by swapping newPrecheckSource
-// for a factory that returns a fakePrecheckSource. That lets us drive
+// These tests exercise applyNetworkPrecheck by constructing HandoffCmd
+// with PrecheckSource set to a fakePrecheckSource. That lets us drive
 // the full pipeline (classify target → build detector → call Source →
 // populate cmd.Ecosystem / cmd.Language) without an httptest.Server and
-// without touching the real ghclient.Client.
+// without touching the real ghclient.Client. No shared-state / mutation —
+// each test gets its own fake, no cleanup needed.
 
 // fakePrecheckSource satisfies ecosystem.Source with in-memory canned
 // responses. Tests configure files/language per (owner, name) or
@@ -481,24 +482,27 @@ func (f *fakePrecheckSource) GetRepoLanguage(_ context.Context, _, _ string) (st
 	return f.Language, nil
 }
 
-// swapPrecheckSource replaces newPrecheckSource with a factory that
-// returns src for the duration of the test. Uses t.Cleanup so the
-// production factory is restored even when the test fails.
-func swapPrecheckSource(t *testing.T, src ecosystem.Source) {
-	t.Helper()
-	orig := newPrecheckSource
-	newPrecheckSource = func(string) ecosystem.Source { return src }
-	t.Cleanup(func() { newPrecheckSource = orig })
+// inspectSource is a minimal ecosystem.Source that records how many
+// times its methods were called. Useful for "this path should NEVER
+// reach the Source" assertions, where the test wants to prove absence
+// of invocation rather than assert on results.
+type inspectSource struct {
+	calls int
+}
+
+func (s *inspectSource) ListRootFilenames(_ context.Context, _, _ string) ([]string, error) {
+	s.calls++
+	return nil, nil
+}
+
+func (s *inspectSource) GetRepoLanguage(_ context.Context, _, _ string) (string, error) {
+	s.calls++
+	return "", nil
 }
 
 func TestHandoff_NetworkPrecheck_AppliesEcosystem(t *testing.T) {
 	// Repo with go.mod → detector returns EcosystemGo → precheck
 	// fills --ecosystem=go for the provenance role.
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"go.mod", "README.md"},
-		Language: "Go",
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "provenance",
@@ -507,6 +511,10 @@ func TestHandoff_NetworkPrecheck_AppliesEcosystem(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod", "README.md"},
+			Language: "Go",
+		},
 		// --ecosystem intentionally empty; precheck must fill it.
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
@@ -522,11 +530,6 @@ func TestHandoff_NetworkPrecheck_AppliesEcosystem(t *testing.T) {
 func TestHandoff_NetworkPrecheck_AppliesLanguage(t *testing.T) {
 	// Repo whose primary language is Go → precheck sets --language=go,
 	// which makes the security template pick the Go flavor.
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"go.mod"},
-		Language: "Go",
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "security",
@@ -536,6 +539,10 @@ func TestHandoff_NetworkPrecheck_AppliesLanguage(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
 		// --language intentionally empty.
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
@@ -550,23 +557,10 @@ func TestHandoff_NetworkPrecheck_AppliesLanguage(t *testing.T) {
 
 func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 	// Even with precheck enabled, non-GitHub hosts aren't supported
-	// yet — we should error before attempting any network call (the
-	// fake shouldn't be consulted).
-	called := false
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files: []string{"go.mod"},
-		Err:   nil,
-	})
-	// Replace the swap with a version that records whether the
-	// factory was invoked. If we wired the precheck correctly, a
-	// non-GitHub host shouldn't even reach the factory.
-	orig := newPrecheckSource
-	newPrecheckSource = func(string) ecosystem.Source {
-		called = true
-		return &fakePrecheckSource{}
-	}
-	t.Cleanup(func() { newPrecheckSource = orig })
-
+	// yet — we should error before attempting any network call. The
+	// inspectSource below records whether its methods were reached;
+	// they must not be.
+	src := &inspectSource{}
 	cmd := &HandoffCmd{
 		Role:            "security",
 		Target:          "https://gitlab.com/foo/bar",
@@ -574,11 +568,12 @@ func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
+		PrecheckSource:  src,
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "github.com URL")
-	assert.False(t, called, "factory must not be invoked for non-GitHub targets")
+	assert.Zero(t, src.calls, "Source methods must not be invoked for non-GitHub targets")
 }
 
 // TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage verifies that
@@ -588,10 +583,6 @@ func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 // run on `got` (TypeScript) — silently rendering a Python-headed
 // template against a TypeScript repo is a quality footgun.
 func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"package.json"},
-		Language: "TypeScript",
-	})
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "security",
@@ -600,6 +591,10 @@ func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		// Quiet false: we WANT the warning to appear on stderr.
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"package.json"},
+			Language: "TypeScript",
+		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
@@ -616,10 +611,6 @@ func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
 // the rest of the precheck/clone reporting. (Same contract as the
 // reuse-note suppression in TestClone_SkipsIfDestExists_Quiet.)
 func TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning(t *testing.T) {
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"Cargo.toml"},
-		Language: "Rust",
-	})
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "security",
@@ -628,6 +619,10 @@ func TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning(t *testing.T) 
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"Cargo.toml"},
+			Language: "Rust",
+		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
@@ -639,11 +634,6 @@ func TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning(t *testing.T) 
 func TestHandoff_NetworkPrecheck_DoesNotOverrideExplicit(t *testing.T) {
 	// Detector says "ecosystem is go" but the user already passed
 	// --ecosystem=pypi. Precheck must NOT clobber explicit flags.
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"go.mod"},
-		Language: "Go",
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "provenance",
@@ -654,6 +644,10 @@ func TestHandoff_NetworkPrecheck_DoesNotOverrideExplicit(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
 	assert.Equal(t, "pypi", cmd.Ecosystem, "explicit --ecosystem must not be clobbered")
@@ -664,11 +658,6 @@ func TestHandoff_NetworkPrecheck_ReportsToStderr(t *testing.T) {
 	// With --quiet off, the precheck report lands on stderr so the
 	// user can see what was detected. This is the transparency
 	// contract — nothing about the network call should happen invisibly.
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Files:    []string{"Cargo.toml"},
-		Language: "Rust",
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:            "provenance",
@@ -676,6 +665,10 @@ func TestHandoff_NetworkPrecheck_ReportsToStderr(t *testing.T) {
 		Path:            "/tmp/atuin",
 		NetworkPrecheck: true,
 		Output:          outPath,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"Cargo.toml"},
+			Language: "Rust",
+		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
@@ -688,33 +681,18 @@ func TestHandoff_NetworkPrecheck_ReportsToStderr(t *testing.T) {
 }
 
 // --- --clone-dir tests -------------------------------------------------------
-
-// swapRunGitClone replaces the runGitClone function variable for the duration
-// of the test, restoring the original via t.Cleanup. This mirrors the
-// swapPrecheckSource pattern — the seam exists so tests can exercise the
-// clone pipeline without spawning a real git subprocess.
-func swapRunGitClone(t *testing.T, fn func(ctx context.Context, url, dest string) error) {
-	t.Helper()
-	orig := runGitClone
-	runGitClone = fn
-	t.Cleanup(func() { runGitClone = orig })
-}
+//
+// Tests inject a fake git-clone implementation via HandoffCmd.RunGitClone.
+// Production fall-through (nil field) invokes defaultGitClone (exec.CommandContext).
+// No shared mutation — each test owns its own HandoffCmd value.
 
 // TestClone_CallsGitWithShallowFlags verifies that applyClone invokes
-// runGitClone with --depth=1 and the correct destination path derived from
-// --clone-dir and the repo name in the URL.
+// the injected RunGitClone with --depth=1 and the correct destination path
+// derived from --clone-dir and the repo name in the URL.
 func TestClone_CallsGitWithShallowFlags(t *testing.T) {
 	parent := t.TempDir()
 
 	var gotURL, gotDest string
-	swapRunGitClone(t, func(_ context.Context, url, dest string) error {
-		gotURL = url
-		gotDest = dest
-		// Simulate a successful clone by creating the dest dir so
-		// subsequent stat-based logic stays coherent.
-		return os.MkdirAll(dest, 0o755)
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:     "security",
@@ -723,6 +701,13 @@ func TestClone_CallsGitWithShallowFlags(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, url, dest string) error {
+			gotURL = url
+			gotDest = dest
+			// Simulate a successful clone by creating the dest dir so
+			// subsequent stat-based logic stays coherent.
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
 
@@ -745,11 +730,6 @@ func TestClone_SkipsIfDestExists_NotQuiet(t *testing.T) {
 	require.NoError(t, os.MkdirAll(existingDest, 0o755))
 
 	called := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		called = true
-		return nil
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:     "security",
@@ -758,13 +738,17 @@ func TestClone_SkipsIfDestExists_NotQuiet(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		// Quiet false: the reuse note SHOULD appear on stderr.
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			called = true
+			return nil
+		},
 	}
 
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
 	})
 
-	assert.False(t, called, "runGitClone must not be invoked when dest already exists")
+	assert.False(t, called, "RunGitClone must not be invoked when dest already exists")
 	// EvalSymlinks resolves /var → /private/var on macOS; the reuse
 	// note prints the resolved path. Match by suffix to stay portable.
 	resolvedParent, err := filepath.EvalSymlinks(parent)
@@ -784,11 +768,6 @@ func TestClone_SkipsIfDestExists_Quiet(t *testing.T) {
 	existingDest := filepath.Join(parent, "thefuck")
 	require.NoError(t, os.MkdirAll(existingDest, 0o755))
 
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		t.Fatal("git must not be invoked")
-		return nil
-	})
-
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
 		Role:     "security",
@@ -797,6 +776,10 @@ func TestClone_SkipsIfDestExists_Quiet(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			t.Fatal("git must not be invoked")
+			return nil
+		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
@@ -811,11 +794,6 @@ func TestClone_FailsOnNonURLTarget(t *testing.T) {
 	parent := t.TempDir()
 
 	called := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		called = true
-		return nil
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "/Users/me/code/thefuck",
@@ -823,6 +801,10 @@ func TestClone_FailsOnNonURLTarget(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			called = true
+			return nil
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
@@ -842,11 +824,6 @@ func TestClone_FailsOnNonWritableParent(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(parent, 0o755) })
 
 	called := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		called = true
-		return nil
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/nvbn/thefuck",
@@ -854,6 +831,10 @@ func TestClone_FailsOnNonWritableParent(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			called = true
+			return nil
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
@@ -870,10 +851,6 @@ func TestClone_SetsTargetPath(t *testing.T) {
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	require.NoError(t, err)
 	expectedDest := filepath.Join(resolvedParent, "thefuck")
-
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		return os.MkdirAll(dest, 0o755)
-	})
 
 	// Use a custom template that makes TARGET_PATH easy to assert on.
 	tmplDir := t.TempDir()
@@ -894,6 +871,9 @@ func TestClone_SetsTargetPath(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		Quiet:       true,
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
 
@@ -908,10 +888,6 @@ func TestClone_SetsTargetPath(t *testing.T) {
 func TestClone_ExplicitPathWins(t *testing.T) {
 	parent := t.TempDir()
 	cloneDest := filepath.Join(parent, "thefuck")
-
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		return os.MkdirAll(dest, 0o755)
-	})
 
 	tmplDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmplDir, "handoffs"), 0o755))
@@ -932,6 +908,9 @@ func TestClone_ExplicitPathWins(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		// Quiet intentionally false so we capture the override warning.
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 
 	stderr := captureStderr(t, func() {
@@ -955,10 +934,6 @@ func TestClone_ExplicitPathWins(t *testing.T) {
 func TestClone_QuietSuppressesOverrideWarning(t *testing.T) {
 	parent := t.TempDir()
 
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		return os.MkdirAll(dest, 0o755)
-	})
-
 	tmplDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmplDir, "handoffs"), 0o755))
 	require.NoError(t, os.WriteFile(
@@ -978,6 +953,9 @@ func TestClone_QuietSuppressesOverrideWarning(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		Quiet:       true, // the whole point of this test
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 
 	stderr := captureStderr(t, func() {
@@ -1041,10 +1019,6 @@ func TestClone_GuardFiresWhenNameValidationLoosens(t *testing.T) {
 	parent := t.TempDir()
 
 	var gotDest string
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		gotDest = dest
-		return os.MkdirAll(dest, 0o755)
-	})
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/owner/repo",
@@ -1052,6 +1026,10 @@ func TestClone_GuardFiresWhenNameValidationLoosens(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			gotDest = dest
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
 
@@ -1233,11 +1211,6 @@ func TestSafeCloneRepoName_RejectsPathSeparator(t *testing.T) {
 func TestClone_RejectsQueryStringInURL(t *testing.T) {
 	parent := t.TempDir()
 	gotCalled := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		gotCalled = true
-		return nil
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/foo/bar?upload-pack=evil",
@@ -1245,12 +1218,16 @@ func TestClone_RejectsQueryStringInURL(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			gotCalled = true
+			return nil
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err, "URL with query string must be rejected")
 	assert.Contains(t, err.Error(), "query string",
 		"error must name the rejected component so the user can correct the URL")
-	assert.False(t, gotCalled, "runGitClone must not be invoked for unsafe URLs")
+	assert.False(t, gotCalled, "RunGitClone must not be invoked for unsafe URLs")
 }
 
 // TestClone_RejectsNullByteInRepoName is an end-to-end test that a URL
@@ -1262,11 +1239,6 @@ func TestClone_RejectsQueryStringInURL(t *testing.T) {
 func TestClone_RejectsNullByteInRepoName(t *testing.T) {
 	parent := t.TempDir()
 	gotCalled := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		gotCalled = true
-		return nil
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/foo/bar%00evil", // %00 → null byte
@@ -1274,10 +1246,14 @@ func TestClone_RejectsNullByteInRepoName(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			gotCalled = true
+			return nil
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err, "URL with null byte in repo name must be rejected")
-	assert.False(t, gotCalled, "runGitClone must not be invoked for unsafe repo names")
+	assert.False(t, gotCalled, "RunGitClone must not be invoked for unsafe repo names")
 }
 
 // TestClone_SymlinkParentIsResolved verifies that when --clone-dir itself is
@@ -1295,11 +1271,6 @@ func TestClone_SymlinkParentIsResolved(t *testing.T) {
 	require.NoError(t, os.Symlink(realDir, linkDir))
 
 	var gotDest string
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		gotDest = dest
-		return os.MkdirAll(dest, 0o755)
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/nvbn/thefuck",
@@ -1307,6 +1278,10 @@ func TestClone_SymlinkParentIsResolved(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			gotDest = dest
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
 
@@ -1325,11 +1300,6 @@ func TestClone_SymlinkParentIsResolved(t *testing.T) {
 func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
 	parent := t.TempDir()
 	gotCalled := false
-	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
-		gotCalled = true
-		return nil
-	})
-
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://user:token@github.com/foo/bar",
@@ -1337,11 +1307,15 @@ func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _ string) error {
+			gotCalled = true
+			return nil
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err, "URL with embedded credentials must be rejected")
 	assert.Contains(t, err.Error(), "credentials")
-	assert.False(t, gotCalled, "runGitClone must not be invoked for credential-bearing URLs")
+	assert.False(t, gotCalled, "RunGitClone must not be invoked for credential-bearing URLs")
 }
 
 // TestPrecheck_ErrorDoesNotLeakToken is a regression test for token leakage
@@ -1359,10 +1333,6 @@ func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
 // already does this for response bodies, but not for transport-layer errors).
 // See the "Recommendations not acted on" section in the adversarial review.
 func TestPrecheck_ErrorPropagatesWithContext(t *testing.T) {
-	swapPrecheckSource(t, &fakePrecheckSource{
-		Err: fmt.Errorf("simulated network error"),
-	})
-
 	cmd := &HandoffCmd{
 		Role:            "security",
 		Target:          "https://github.com/foo/bar",
@@ -1370,6 +1340,9 @@ func TestPrecheck_ErrorPropagatesWithContext(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Err: fmt.Errorf("simulated network error"),
+		},
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
@@ -1511,30 +1484,21 @@ func TestSafeGitEnv_PreservesPathAndHome(t *testing.T) {
 }
 
 // TestSafeGitEnv_CloneInheritsCleanEnv is an end-to-end regression test that
-// confirms the production runGitClone closure passes safeGitEnv() to the git
-// subprocess. We do this by swapping runGitClone with a probe that captures
-// cmd.Env, then verifying dangerous vars are absent.
+// confirms safeGitEnv() strips the dangerous vars and that applyClone's
+// happy path still works after the env filtering. Exercises the invariant
+// in two halves: (1) safeGitEnv() output is sanitized, (2) applyClone
+// runs cleanly with --clone-dir while a dangerous env var is present.
 //
-// This exercises the wiring (runGitClone calls safeGitEnv()) rather than just
-// safeGitEnv() in isolation. A refactor that moves the safeGitEnv() call
-// outside runGitClone would be caught here.
-//
-// NOTE: This test calls applyClone directly so it must NOT use t.Parallel()
-// because swapRunGitClone mutates a package-level var.
+// NOTE: Uses t.Setenv, which panics if a test also calls t.Parallel().
+// Keep this test sequential.
 func TestSafeGitEnv_CloneInheritsCleanEnv(t *testing.T) {
 	// Inject a dangerous var so we can verify it is stripped.
 	t.Setenv("GIT_SSH_COMMAND", "evil-binary --steal-credentials")
 
 	parent := t.TempDir()
 
-	// Capture what env the production runGitClone would pass to git.
-	// We do this by temporarily replacing runGitClone with a probe that
-	// records the env, then restoring. But we need the *production*
-	// safeGitEnv() to be called, not a fake — so we invoke the real
-	// function body inline here and verify its output rather than using
-	// the var seam.
+	// Half 1: verify safeGitEnv() directly strips the dangerous var.
 	env := safeGitEnv()
-
 	for _, kv := range env {
 		idx := strings.IndexByte(kv, '=')
 		key := kv
@@ -1545,11 +1509,10 @@ func TestSafeGitEnv_CloneInheritsCleanEnv(t *testing.T) {
 			"GIT_SSH_COMMAND must not be passed to git subprocess")
 	}
 
-	// Also verify that applyClone would reach runGitClone without error
-	// for a clean URL (the env stripping must not break the happy path).
-	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
-		return os.MkdirAll(dest, 0o755)
-	})
+	// Half 2: verify that applyClone's happy path still runs when a
+	// dangerous env var is present. The injected RunGitClone doesn't
+	// use safeGitEnv itself — the test here is that the stripping
+	// function doesn't cause applyClone to err out on a clean URL.
 	cmd := &HandoffCmd{
 		Role:     "security",
 		Target:   "https://github.com/nvbn/thefuck",
@@ -1557,6 +1520,9 @@ func TestSafeGitEnv_CloneInheritsCleanEnv(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, dest string) error {
+			return os.MkdirAll(dest, 0o755)
+		},
 	}
 	require.NoError(t, cmd.Run(&Globals{}),
 		"safeGitEnv() must not break the happy clone path")

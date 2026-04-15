@@ -90,47 +90,6 @@ Each item has:
 
 ## Architecture / refactor
 
-### Promote `newPrecheckSource` and `runGitClone` from package vars to `HandoffCmd` fields
-
-- **Source:** skill-equipped Opus reviewer 2026-04-14 (F5; this is the
-  single most valuable finding from that pass)
-- **Severity:** should-fix
-- **Where:** `cmd/signatory/handoff.go` — the two `var newPrecheckSource`
-  and `var runGitClone` declarations
-- **Sketch:** The package-level var seams are race-prone the moment
-  any test in the file opts into `t.Parallel()` (the golang-testing
-  skill actively encourages this). Today's mitigation is comments
-  saying "do not parallelize" — fragile. Promote both to optional
-  fields on `HandoffCmd`:
-  ```go
-  type HandoffCmd struct {
-      ...
-      // PrecheckSource overrides the default github-backed
-      // ecosystem.Source. nil → uses ghclient.NewClient(GITHUB_TOKEN).
-      PrecheckSource ecosystem.Source `kong:"-"`
-      RunGitClone    func(context.Context, string, string) error `kong:"-"`
-  }
-  ```
-  Tests construct `HandoffCmd{PrecheckSource: fake}` directly.
-  Production wires nil and falls through to the existing constructors.
-  Removes the only barrier to `t.Parallel()` adoption in handoff_test.go
-  and aligns with the broader pattern signatory will need as it adds
-  more injected dependencies (e.g., for the MCP server).
-
-### Read `GITHUB_TOKEN` outside the factory seam
-
-- **Source:** skill-equipped Opus reviewer 2026-04-14 (F10)
-- **Severity:** should-fix
-- **Where:** `cmd/signatory/handoff.go:applyNetworkPrecheck` →
-  `newPrecheckSource(os.Getenv("GITHUB_TOKEN"))`
-- **Sketch:** The env read happens INSIDE the factory tests swap, so
-  the real env-read path is never test-exercised. A future refactor
-  that moves env-read into `NewClient` itself would break tests
-  silently. Read the token once into a local before calling the
-  factory; tests can still swap the factory without affecting the
-  env read. Pairs naturally with the `HandoffCmd` field promotion
-  above (the field can be `Token string \`env:"GITHUB_TOKEN"\``).
-
 ### Empty-string-in-enum trick on `--language`/`--ecosystem`/`--target-role`
 
 - **Source:** unaided cmd reviewer 2026-04-14 (F3, F11, deferred)

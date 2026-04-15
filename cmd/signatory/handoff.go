@@ -75,6 +75,23 @@ type HandoffCmd struct {
 	Output string `short:"o" help:"Write rendered handoff to this file instead of stdout."`
 	Force  bool   `help:"Overwrite --output if it exists."`
 	Quiet  bool   `help:"Suppress the stderr report (template source, unfilled placeholders)." short:"q"`
+
+	// PrecheckSource overrides the GitHub-backed ecosystem.Source used
+	// by --network-precheck. nil → fall through to
+	// ghclient.NewClient(GITHUB_TOKEN) at call time. Exists as a
+	// struct-field seam (not a package-level var) so parallel tests
+	// can't race each other's injection, and so the dependency graph
+	// is visible from HandoffCmd's type definition.
+	//
+	// kong:"-" excludes the field from the CLI surface — it's a
+	// programmatic seam, not a user-tunable flag.
+	PrecheckSource ecosystem.Source `kong:"-"`
+
+	// RunGitClone overrides the git subprocess invocation for
+	// --clone-dir. nil → fall through to defaultGitClone (exec.CommandContext
+	// with safeGitEnv). Same rationale as PrecheckSource: parallel-safe
+	// injection, visible dependency.
+	RunGitClone func(ctx context.Context, url, dest string) error `kong:"-"`
 }
 
 // Run executes the handoff render. Errors from template resolution,
@@ -207,7 +224,16 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 		return "", fmt.Errorf("parse target: %w", err)
 	}
 
-	detector := ecosystem.NewDetector(newPrecheckSource(os.Getenv("GITHUB_TOKEN")))
+	source := cmd.PrecheckSource
+	if source == nil {
+		// Production path: construct a real github client. Reading the
+		// env here (rather than inside the swap-able factory) means
+		// tests that don't inject PrecheckSource exercise this exact
+		// code, and env-var behavior is discoverable from go-to-definition
+		// on applyNetworkPrecheck.
+		source = ghclient.NewClient(os.Getenv("GITHUB_TOKEN"))
+	}
+	detector := ecosystem.NewDetector(source)
 
 	result, err := detector.Detect(ctx, owner, name)
 	if err != nil {
@@ -246,14 +272,14 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	return formatPrecheckReport(owner, name, result, ecoApplied, langApplied) + langWarning, nil
 }
 
-// runGitClone is the function applyClone uses to execute `git clone
-// --depth=1 <url> <dest>`. It is a package-level var — rather than
-// inlined in applyClone — so tests can swap it for a fake that
-// records the arguments without actually spawning git. This mirrors
-// the newPrecheckSource seam pattern used for the network precheck.
+// defaultGitClone is the production git-clone implementation that
+// applyClone falls back to when HandoffCmd.RunGitClone is nil. It is
+// a regular package-level function (not a var) to remove any
+// accidental-mutation surface — tests inject via HandoffCmd.RunGitClone
+// field assignment, not via swap-the-global.
 //
-// The production implementation creates an exec.CommandContext so a
-// cancelled context propagates to the git subprocess.
+// Creates an exec.CommandContext so a cancelled context propagates to
+// the git subprocess.
 //
 // Security: the subprocess runs with a minimal, hardened environment
 // derived from os.Environ() with dangerous git-specific vars stripped.
@@ -263,7 +289,7 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 // or smuggle config that overrides the URL we validated. We strip rather
 // than whitelist so the process still inherits PATH, HOME, and
 // TLS-related vars that legitimate git operations need.
-var runGitClone = func(ctx context.Context, url, dest string) error {
+func defaultGitClone(ctx context.Context, url, dest string) error {
 	// G204 rationale: CommandContext doesn't invoke a shell, so
 	// shell-metacharacter injection in url/dest is not a threat.
 	// url is validated by safeGitCloneURL (rejects ?, #, userinfo,
@@ -474,27 +500,16 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	if err := runGitClone(cloneCtx, cmd.Target, destClean); err != nil {
+	clone := cmd.RunGitClone
+	if clone == nil {
+		clone = defaultGitClone
+	}
+	if err := clone(cloneCtx, cmd.Target, destClean); err != nil {
 		return "", "", err
 	}
 
 	report = fmt.Sprintf("# clone: %s → %s\n", cmd.Target, destClean)
 	return destClean, report, nil
-}
-
-// newPrecheckSource is the factory applyNetworkPrecheck uses to
-// construct an ecosystem.Source backed by GitHub. Exposed as a
-// package-level var specifically so tests can swap it out for a
-// fake — the real ghclient.Client has an unexported baseURL and
-// cannot otherwise be pointed at an httptest.Server from this
-// package.
-//
-// The production implementation wraps ghclient.NewClient(token).
-// Tests assign their own function here (and restore it via
-// t.Cleanup) to exercise the end-to-end precheck pipeline without
-// hitting the live GitHub API.
-var newPrecheckSource = func(token string) ecosystem.Source {
-	return ghclient.NewClient(token)
 }
 
 // looksLikeGitHubURL returns true when the target string starts with
