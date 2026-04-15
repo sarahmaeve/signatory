@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sarahmaeve/signatory"
 	"github.com/sarahmaeve/signatory/internal/config"
@@ -65,7 +68,8 @@ type HandoffCmd struct {
 	ConfigFile   string   `name:"config" help:"Path to signatory.config.toml. If unset, discovered from --project-dir." type:"existingfile"`
 	ProjectDir   string   `name:"project-dir" help:"Project root used to locate ./templates/, ./filestore/, and signatory.config.toml." default:"." type:"path"`
 
-	NetworkPrecheck bool `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the GitHub API (requires a github.com target). Offline by default; this is the opt-in that authorizes network calls."`
+	NetworkPrecheck bool   `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the GitHub API (requires a github.com target). Offline by default; this is the opt-in that authorizes network calls."`
+	CloneDir        string `name:"clone-dir" help:"Shallow-clone the target URL into CLONE_DIR/<repo-name>/ and use that path for TARGET_PATH. Uses 'git clone --depth=1'. Skipped if the destination already exists. Requires target to be a URL." type:"path"`
 
 	Output string `short:"o" help:"Write rendered handoff to this file instead of stdout."`
 	Force  bool   `help:"Overwrite --output if it exists."`
@@ -87,6 +91,30 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 			return fmt.Errorf("network-precheck: %w", err)
 		}
 		precheckReport = report
+	}
+
+	// Clone step: shallow-clone the target URL if --clone-dir was passed.
+	// Runs AFTER precheck (precheck may confirm the target is a GitHub URL)
+	// but BEFORE template resolution (so TARGET_PATH is available).
+	var cloneReport string
+	if cmd.CloneDir != "" {
+		clonedPath, report, err := cmd.applyClone(context.Background())
+		if err != nil {
+			return fmt.Errorf("clone-dir: %w", err)
+		}
+		cloneReport = report
+		// --path wins if the user set it explicitly; --clone-dir is
+		// the "auto-fill" path. We check cmd.Path here — kong leaves
+		// it empty when the user didn't pass the flag.
+		if cmd.Path == "" {
+			cmd.Path = clonedPath
+		} else if !cmd.Quiet {
+			// User passed both flags; note the override. Gated by
+			// --quiet because that flag's contract is "no stderr
+			// output" for automation callers who've made an
+			// intentional choice.
+			fmt.Fprintf(os.Stderr, "# clone-dir: cloned to %s but --path=%s wins\n", clonedPath, cmd.Path)
+		}
 	}
 
 	// Language default: "python" unless auto-detected otherwise.
@@ -144,6 +172,9 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		if precheckReport != "" {
 			fmt.Fprint(os.Stderr, precheckReport)
 		}
+		if cloneReport != "" {
+			fmt.Fprint(os.Stderr, cloneReport)
+		}
 	}
 	return nil
 }
@@ -199,6 +230,115 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	}
 
 	return formatPrecheckReport(owner, name, result, ecoApplied, langApplied), nil
+}
+
+// runGitClone is the function applyClone uses to execute `git clone
+// --depth=1 <url> <dest>`. It is a package-level var — rather than
+// inlined in applyClone — so tests can swap it for a fake that
+// records the arguments without actually spawning git. This mirrors
+// the newPrecheckSource seam pattern used for the network precheck.
+//
+// The production implementation creates an exec.CommandContext so a
+// cancelled context propagates to the git subprocess.
+var runGitClone = func(ctx context.Context, url, dest string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", url, dest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// applyClone shallow-clones the target URL into CloneDir/<repo-name>/
+// and returns (clonedPath, stderrReport, error). It is analogous to
+// applyNetworkPrecheck: it encapsulates one pre-render side-effect and
+// returns a human-readable report string the caller emits to stderr.
+//
+// Invariants enforced here:
+//   - Target must classify as TargetURL (ClassifyTarget).
+//   - CloneDir parent must exist and be writable.
+//   - Derived dest must be strictly inside CloneDir (no symlink/.. escapes).
+//   - If dest already exists as a directory, reuse it without cloning.
+//   - Clone uses a 2-minute context timeout; a cancelled ctx propagates.
+func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report string, err error) {
+	// --clone-dir only makes sense when the target is a URL. If it's a
+	// local path the classification already filled TARGET_PATH, and the
+	// flag is documented as a no-op for local paths — but we still guard
+	// explicitly so a confused invocation fails loudly rather than silently
+	// doing nothing.
+	if config.ClassifyTarget(cmd.Target) != config.TargetURL {
+		return "", "", fmt.Errorf("--clone-dir requires a URL target; %q is not a URL", cmd.Target)
+	}
+
+	repoName := config.InferNameFromURL(cmd.Target)
+	if repoName == "" {
+		return "", "", fmt.Errorf("cannot derive clone directory name from target %q", cmd.Target)
+	}
+
+	// Resolve the parent dir to an absolute path before the containment
+	// check so that symlinks or relative paths in --clone-dir don't
+	// fool the prefix comparison.
+	parent, err := filepath.Abs(cmd.CloneDir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve clone-dir %q: %w", cmd.CloneDir, err)
+	}
+
+	// Writability check: stat the parent and verify it is an existing,
+	// writable directory. We probe with a temp file rather than relying
+	// on the mode bits because ACLs and mount options can override them.
+	info, err := os.Stat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", fmt.Errorf("clone-dir parent %q does not exist", parent)
+		}
+		return "", "", fmt.Errorf("stat clone-dir parent %q: %w", parent, err)
+	}
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("clone-dir %q is not a directory", parent)
+	}
+	// Probe writability with a temp file rather than inspecting mode
+	// bits — ACLs and mount options can make a 0755 dir unwritable.
+	probe, err := os.CreateTemp(parent, ".signatory-clone-probe-*")
+	if err != nil {
+		return "", "", fmt.Errorf("clone-dir %q is not writable: %w", parent, err)
+	}
+	probe.Close()
+	os.Remove(probe.Name())
+
+	// Build dest and verify it is strictly under parent (belt-and-suspenders
+	// against any edge case where InferNameFromURL returns a path-like string).
+	dest := filepath.Join(parent, repoName)
+	destClean := filepath.Clean(dest)
+	parentClean := filepath.Clean(parent)
+	// filepath.Rel returns an error or a path starting with ".." when dest
+	// is outside parent.
+	rel, err := filepath.Rel(parentClean, destClean)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+		return "", "", fmt.Errorf("derived clone path %q escapes clone-dir %q; refusing to clone", destClean, parentClean)
+	}
+
+	// Skip-if-exists: reuse the directory without pulling or fetching.
+	// Intentional design: the analyst may have frozen state, applied
+	// patches, or be on a slow network. Silently updating would be
+	// surprising and potentially unsafe (new commits since last analysis
+	// would silently change the reviewed surface).
+	if fi, err := os.Stat(destClean); err == nil && fi.IsDir() {
+		msg := fmt.Sprintf("# clone: %s already exists, reusing\n", destClean)
+		fmt.Fprint(os.Stderr, msg)
+		return destClean, "", nil
+	}
+
+	// Shallow clone with a 2-minute timeout. Use a child context so the
+	// timeout doesn't bleed into the rest of the Run() pipeline.
+	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	if err := runGitClone(cloneCtx, cmd.Target, destClean); err != nil {
+		return "", "", err
+	}
+
+	report = fmt.Sprintf("# clone: %s → %s\n", cmd.Target, destClean)
+	return destClean, report, nil
 }
 
 // newPrecheckSource is the factory applyNetworkPrecheck uses to
