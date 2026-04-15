@@ -341,7 +341,41 @@ Each item has:
   -fuzztime=1m` runs the engine. Catches inputs the hand-crafted
   cases miss.
 
-## How to add to this file
+## v0.2 milestone gates
+
+Items that are deferred by explicit architectural decision until a
+later version. Not "should fix soon" — "audit and decide at the v0.2
+boundary before acting on."
+
+### Audit `github.com/modelcontextprotocol/go-sdk` for v0.2 MCP work
+
+- **Source:** MCP design session 2026-04-15 (architectural decision
+  locked in `design/mcp-server-architecture.md` — v0.1 hand-rolls the
+  protocol; v0.2 is when the SDK's abstractions start paying off)
+- **Severity:** gate — don't adopt without audit
+- **Where:** dependency decision for `cmd/signatory/mcp.go` +
+  `internal/mcp/`
+- **Sketch:** The official Go SDK at
+  <https://github.com/modelcontextprotocol/go-sdk> would save us the
+  hand-rolled protocol plumbing and give us free upgrade paths for
+  HTTP/SSE transport, progress notifications, and resource
+  subscriptions — all v0.2+ features. Before adopting, audit:
+  - Transitive dependency footprint (we care: it's in the critical
+    path for every MCP call, and signatory's whole product is about
+    supply-chain trust)
+  - Maintenance cadence and author identity (MCP authors themselves,
+    per the project URL, which is reassuring; still verify)
+  - API stability commitments given MCP is a young spec
+  - Size of the library vs. what we actually consume from it (a 10K-line
+    library for 1K lines of our needs is a different trade than a
+    2K-line library)
+  - Whether the library's abstractions compose with signatory's
+    uniform-response-envelope and metadata-flag confirmation patterns,
+    or whether adopting it forces us to restructure those
+  Audit output goes into a `design/mcp-sdk-audit.md` note. Decision at
+  v0.2 planning: adopt and migrate Phase 1 code, or stay hand-rolled.
+
+
 
 When a review surfaces something we can't fix in the same change,
 append an entry with:

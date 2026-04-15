@@ -41,6 +41,8 @@ foundation into an MCP server.
 |---|---|---|
 | Server topology | One process, multiple tools | Single SQLite writer; "role split" is at the prompt/schema level, not process level |
 | Transport (v0.1) | JSON-RPC 2.0 over stdio | MCP standard; fits the "Claude Code spawns signatory-mcp per session" model |
+| Protocol version | MCP spec 2025-11-25 | Current spec at implementation time (<https://modelcontextprotocol.io/specification/2025-11-25>) |
+| Implementation | Hand-rolled, no SDK dependency | v0.1 subset is narrow; matches the project's dep-minimalism ethos. SDK adoption is a v0.2 decision — see pendingfix.md |
 | Model invocation (v0.1) | Client dispatches subagents; server returns prompt material | Leverages the caller's Max subscription; no API key management in signatory |
 | Model invocation (v0.2+) | Direct Anthropic API mode, explicit opt-in | Anticipated by v0.1 interfaces; unimplemented until activated |
 | Synthesize (v0.1) | Go templating over ingested analyst outputs | Deterministic, fast, no dispatch |
@@ -74,7 +76,15 @@ MCP surface.
 
 ## Transport
 
-MCP over JSON-RPC 2.0 over stdio. Standard per the MCP spec.
+MCP over JSON-RPC 2.0 over stdio. Standard per the MCP spec
+(<https://modelcontextprotocol.io/specification/2025-11-25>).
+signatory-mcp implements the subset required for v0.1 — initialize
+handshake, tools/list, tools/call, resources/list, resources/read,
+standard error envelope. The companion document
+`mcp-protocol-envelopes.md` gives concrete JSON shapes; implementers
+should cross-check against the live spec before shipping to catch any
+envelope drift between this doc's authorship (2026-04-15) and the
+implementation date.
 
 Entry point: `signatory mcp` subcommand. Claude Code / Claude Desktop
 configures signatory as:

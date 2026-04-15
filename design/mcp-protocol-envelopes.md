@@ -13,11 +13,22 @@ client-side integration tests.
 
 ## Framing
 
-All communication is JSON-RPC 2.0 over stdio per MCP spec. Requests
-have `id`, `method`, `params`; responses have `id` plus either `result`
-or `error`. Notifications (server-to-client, no response expected) use
-no `id`. signatory-mcp does not emit notifications in v0.1 (deferred:
-progress notifications for long-running refresh operations).
+All communication is JSON-RPC 2.0 over stdio per the MCP specification
+at <https://modelcontextprotocol.io/specification/2025-11-25>.
+Requests have `id`, `method`, `params`; responses have `id` plus either
+`result` or `error`. Notifications (server-to-client, no response
+expected) use no `id`. signatory-mcp does not emit notifications in
+v0.1 (deferred: progress notifications for long-running refresh
+operations).
+
+**Spec-version alignment caveat:** the example envelopes below were
+drafted against the 2025-11-25 spec but are illustrations of our
+intended semantics. The Phase 1 implementer should cross-check each
+shape against the current published spec before committing to it —
+specifically the handshake `protocolVersion` negotiation, the
+`content` array shape in tool responses, and any changes to the
+resource URI/query-parameter handling. Differences should be
+reconciled in code, not in this doc.
 
 ## Handshake
 
@@ -28,7 +39,7 @@ Client initiates:
   "jsonrpc": "2.0", "id": 1,
   "method": "initialize",
   "params": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-11-25",
     "capabilities": {"tools": {}, "resources": {}},
     "clientInfo": {"name": "claude-code", "version": "1.x"}
   }
@@ -41,7 +52,7 @@ Server responds:
 {
   "jsonrpc": "2.0", "id": 1,
   "result": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-11-25",
     "capabilities": {"tools": {}, "resources": {}},
     "serverInfo": {"name": "signatory", "version": "0.1.0"}
   }
