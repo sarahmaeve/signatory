@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,17 +80,22 @@ func TestClassifyTarget(t *testing.T) {
 }
 
 func TestInferNameFromURL(t *testing.T) {
-	cases := map[string]string{
-		"https://github.com/nvbn/thefuck":     "thefuck",
-		"https://github.com/nvbn/thefuck.git": "thefuck",
-		"https://github.com/nvbn/thefuck/":    "thefuck",
-		"https://gitlab.com/cznic/sqlite":     "sqlite",
-		"https://github.com/":                 "",
-		"":                                    "",
+	// Ordered slice (not map) so subtest output is deterministic.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"github repo", "https://github.com/nvbn/thefuck", "thefuck"},
+		{"dot-git suffix stripped", "https://github.com/nvbn/thefuck.git", "thefuck"},
+		{"trailing slash", "https://github.com/nvbn/thefuck/", "thefuck"},
+		{"gitlab repo", "https://gitlab.com/cznic/sqlite", "sqlite"},
+		{"no path", "https://github.com/", ""},
+		{"empty string", "", ""},
 	}
-	for in, want := range cases {
-		t.Run(in, func(t *testing.T) {
-			assert.Equal(t, want, InferNameFromURL(in))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, InferNameFromURL(tc.in))
 		})
 	}
 }
@@ -106,20 +112,23 @@ func TestInferNameFromPath(t *testing.T) {
 // can use the return value directly as a path component without an
 // additional containment check (cmd reviewer F2).
 func TestInferNameFromURL_RejectsUnsafeOutputs(t *testing.T) {
-	cases := map[string]string{
-		// "..", ".", and trailing/embedded NUL get rejected.
-		"https://github.com/foo/..":         "",
-		"https://github.com/foo/.":          "",
-		"https://github.com/foo/bar%00evil": "",
-		// Embedded slash (URL-decoded) — already handled because
-		// strings.Split already broke at the slash, so this returns
-		// "evil" not "bar/evil". Document that path segment is the
-		// last segment, not the literal decoded byte.
-		"https://github.com/foo/bar%2fevil/baz": "baz",
+	// Ordered slice (not map) so subtest output is deterministic.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"dotdot last segment", "https://github.com/foo/..", ""},
+		{"dot last segment", "https://github.com/foo/.", ""},
+		{"NUL in segment", "https://github.com/foo/bar%00evil", ""},
+		// Embedded slash (URL-decoded by url.Parse) — strings.Split
+		// already broke at the slash, so the last segment is "baz".
+		// Document that the path segment is split AFTER decode.
+		{"percent-encoded slash", "https://github.com/foo/bar%2fevil/baz", "baz"},
 	}
-	for in, want := range cases {
-		t.Run(in, func(t *testing.T) {
-			assert.Equal(t, want, InferNameFromURL(in))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, InferNameFromURL(tc.in))
 		})
 	}
 }
@@ -128,15 +137,20 @@ func TestInferNameFromURL_RejectsUnsafeOutputs(t *testing.T) {
 // for the path helper. Targets like "~/.." would decode to a basename
 // of ".." and must be rejected.
 func TestInferNameFromPath_RejectsUnsafeOutputs(t *testing.T) {
-	cases := map[string]string{
-		"/Users/sarah/..": "",
-		"/Users/sarah/.":  "",
-		"/foo/bar\x00":    "",
-		"/":               "",
+	// Ordered slice (not map) so subtest output is deterministic.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"dotdot basename", "/Users/sarah/..", ""},
+		{"dot basename", "/Users/sarah/.", ""},
+		{"NUL in path", "/foo/bar\x00", ""},
+		{"root path", "/", ""},
 	}
-	for in, want := range cases {
-		t.Run(in, func(t *testing.T) {
-			assert.Equal(t, want, InferNameFromPath(in))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, InferNameFromPath(tc.in))
 		})
 	}
 }
@@ -152,7 +166,10 @@ func TestIsSafePathComponent(t *testing.T) {
 		})
 	}
 	for _, u := range unsafe {
-		t.Run("unsafe", func(t *testing.T) {
+		// Include the value in the subtest name so failures identify which
+		// input broke. Using the same name "unsafe" for every case makes
+		// -run filtering useless and hides which input failed.
+		t.Run("unsafe-"+fmt.Sprintf("%q", u), func(t *testing.T) {
 			assert.False(t, isSafePathComponent(u), "%q must be rejected", u)
 		})
 	}

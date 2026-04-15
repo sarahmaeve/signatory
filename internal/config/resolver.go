@@ -108,7 +108,13 @@ func (r *Resolver) OpenTemplate(name string) (rc io.ReadCloser, source string, e
 		}
 		f, openErr := r.EmbeddedFS.Open(embeddedPath)
 		if openErr == nil {
-			return f.(io.ReadCloser), "<embedded>/" + embeddedPath, true, nil
+			// fs.File already satisfies io.ReadCloser (it has both Read
+			// and Close), so no type assertion is needed. An unchecked
+			// assertion would panic against any custom fs.FS whose Open
+			// returns a value that is an fs.File but not registered as
+			// an io.ReadCloser — idiomatic Go avoids this risk entirely
+			// by relying on structural satisfaction.
+			return f, "<embedded>/" + embeddedPath, true, nil
 		}
 	}
 

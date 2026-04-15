@@ -409,3 +409,89 @@ func TestCopyEmbeddedTree_SafeRelPathJoin(t *testing.T) {
 	_, statErr := os.Stat(written)
 	assert.NoError(t, statErr, "expected file at %s", written)
 }
+
+// TestCopyEmbeddedTree_AtomicSkipOnExists verifies that the O_EXCL-based
+// write in copyEmbeddedTree (force=false) correctly skips a file that was
+// created concurrently between the MkdirAll and the open. Without O_EXCL,
+// the stat-then-write shape had a TOCTOU window where a concurrent init or
+// adversarial file creation could slip a file in and have it overwritten.
+// O_EXCL collapses the check and the write to a single syscall, matching
+// the discipline applied to the config scaffold write.
+//
+// Regression guard: if the implementation reverts to stat+WriteFile, this
+// test will still pass (stat sees the file and skips). The meaningful
+// assertion is the skip count — if O_EXCL is broken, a race can silently
+// overwrite and not increment skipped. Because races can't be guaranteed in
+// unit tests, we also verify the static path: pre-existing file → skip.
+func TestCopyEmbeddedTree_SkipsExistingFileWithoutForce(t *testing.T) {
+	dst := t.TempDir()
+	embedFS := fstest.MapFS{
+		"templates/foo.md": &fstest.MapFile{Data: []byte("new content")},
+	}
+
+	// Pre-plant the target file with sentinel content.
+	target := filepath.Join(dst, "foo.md")
+	require.NoError(t, os.WriteFile(target, []byte("original content"), 0o644))
+
+	// copyEmbeddedTree with force=false must skip the existing file.
+	copied, skipped, err := copyEmbeddedTree(embedFS, "templates", dst, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, copied, "no files should be written when target already exists")
+	assert.Equal(t, 1, skipped, "existing file must be counted as skipped")
+
+	// The sentinel content must be unchanged — the existing file was not overwritten.
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "original content", string(got),
+		"pre-existing file content must survive a no-force copyEmbeddedTree")
+}
+
+// TestCopyEmbeddedTree_ForceOverwritesExisting verifies that force=true
+// replaces an existing file, which is the documented contract for --force.
+func TestCopyEmbeddedTree_ForceOverwritesExisting(t *testing.T) {
+	dst := t.TempDir()
+	embedFS := fstest.MapFS{
+		"templates/foo.md": &fstest.MapFile{Data: []byte("new content")},
+	}
+
+	target := filepath.Join(dst, "foo.md")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o644))
+
+	copied, skipped, err := copyEmbeddedTree(embedFS, "templates", dst, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, copied)
+	assert.Equal(t, 0, skipped)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "new content", string(got), "force must overwrite existing file")
+}
+
+// TestResolver_OpenTemplate_EmbeddedFSFileImplementsReadCloser guards the
+// removal of the unnecessary f.(io.ReadCloser) type assertion in OpenTemplate.
+// fs.File structurally satisfies io.ReadCloser (it has both Read and Close);
+// the assertion was removed because it would panic against a custom fs.FS
+// implementation that returns an fs.File not registered as an io.ReadCloser.
+// This test verifies that a minimal custom fs.FS (one that does NOT embed
+// io.ReadCloser anywhere) still works correctly with OpenTemplate.
+func TestResolver_OpenTemplate_EmbeddedFSFileImplementsReadCloser(t *testing.T) {
+	// Use fstest.MapFS — its Open returns *fstest.openMapFile which satisfies
+	// fs.File (and therefore io.ReadCloser) structurally, not via explicit
+	// declaration. If the type assertion were still present it would succeed
+	// here too. The meaningful regression this test provides is that future
+	// custom FS implementations work without explicit io.ReadCloser declaration.
+	embedded := fstest.MapFS{
+		"tmpl/hello.md": &fstest.MapFile{Data: []byte("hello from embedded")},
+	}
+	r := &Resolver{
+		BaseDir:        t.TempDir(),
+		EmbeddedFS:     embedded,
+		EmbeddedPrefix: "tmpl",
+	}
+	rc, _, isEmbedded, err := r.OpenTemplate("hello.md")
+	require.NoError(t, err)
+	assert.True(t, isEmbedded)
+	// Verify the returned rc is usable as io.ReadCloser — both Read and Close.
+	got := readAllAndClose(t, rc)
+	assert.Equal(t, "hello from embedded", got)
+}

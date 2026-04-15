@@ -254,13 +254,93 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 //
 // The production implementation creates an exec.CommandContext so a
 // cancelled context propagates to the git subprocess.
+//
+// Security: the subprocess runs with a minimal, hardened environment
+// derived from os.Environ() with dangerous git-specific vars stripped.
+// Without this, a hostile parent environment (GIT_TERMINAL_PROMPT,
+// GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_CONFIG_COUNT, etc.) could
+// redirect git's network transport, invoke attacker-controlled helpers,
+// or smuggle config that overrides the URL we validated. We strip rather
+// than whitelist so the process still inherits PATH, HOME, and
+// TLS-related vars that legitimate git operations need.
 var runGitClone = func(ctx context.Context, url, dest string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", url, dest)
+	cmd.Env = safeGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// safeGitEnv returns a copy of os.Environ() with dangerous git-specific
+// environment variables removed. These vars can redirect git's transport,
+// invoke arbitrary helper programs, or override config options in ways
+// that bypass the URL validation we performed before calling git clone.
+//
+// Stripped variables and their threat vectors:
+//
+//   - GIT_TERMINAL_PROMPT: if "1", git prompts for credentials on stdin —
+//     useful interactively but a hang risk in a non-terminal context and a
+//     signal that the environment may be adversarially configured.
+//   - GIT_SSH_COMMAND / GIT_SSH: override the SSH binary/wrapper used for
+//     ssh:// transports; an attacker-controlled value achieves RCE.
+//   - GIT_PROXY_COMMAND: overrides the proxy command for non-standard
+//     transports; same RCE risk as GIT_SSH_COMMAND.
+//   - GIT_EXEC_PATH: overrides the directory git searches for sub-commands
+//     (git-clone, git-fetch, etc.); an attacker can inject malicious binaries.
+//   - GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_*: the bulk
+//     config-injection interface added in git 2.31; can override any config
+//     option including core.sshCommand, http.proxy, etc.
+//   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM: redirect the config file paths
+//     that git reads, allowing wholesale config replacement.
+//   - GIT_DIR / GIT_WORK_TREE: redefine what git considers its repository and
+//     work tree; with GIT_DIR set to an existing .git elsewhere on the system,
+//     a clone can be made to operate on the wrong repository.
+//   - GIT_ASKPASS: program to invoke for credential prompts; overrides the
+//     OS credential helper and can capture credentials mid-operation.
+//
+// We do NOT strip PATH, HOME, USER, SSH_AUTH_SOCK, SSL_CERT_FILE,
+// REQUESTS_CA_BUNDLE, or XDG_* because legitimate git operations depend on them.
+func safeGitEnv() []string {
+	// Variables whose mere presence (regardless of value) is dangerous.
+	deny := map[string]bool{
+		"GIT_TERMINAL_PROMPT": true,
+		"GIT_SSH_COMMAND":     true,
+		"GIT_SSH":             true,
+		"GIT_PROXY_COMMAND":   true,
+		"GIT_EXEC_PATH":       true,
+		"GIT_CONFIG_GLOBAL":   true,
+		"GIT_CONFIG_SYSTEM":   true,
+		"GIT_DIR":             true,
+		"GIT_WORK_TREE":       true,
+		"GIT_ASKPASS":         true,
+		"SSH_ASKPASS":         true,
+		"SSH_ASKPASS_REQUIRE": true,
+	}
+	raw := os.Environ()
+	safe := make([]string, 0, len(raw))
+	for _, kv := range raw {
+		key := kv
+		if idx := strings.IndexByte(kv, '='); idx >= 0 {
+			key = kv[:idx]
+		}
+		// Strip GIT_CONFIG_COUNT and GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_*
+		// (bulk injection interface). The prefix check covers all numbered
+		// variants without enumerating them.
+		if deny[key] ||
+			strings.HasPrefix(key, "GIT_CONFIG_COUNT") ||
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		safe = append(safe, kv)
+	}
+	// Force-disable terminal prompts regardless of whether the var was
+	// already present. This guarantees non-interactive behavior even if
+	// the original env had a value we didn't strip.
+	safe = append(safe, "GIT_TERMINAL_PROMPT=0")
+	return safe
 }
 
 // applyClone shallow-clones the target URL into CloneDir/<repo-name>/

@@ -203,24 +203,47 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		}
 		target := filepath.Join(dst, rel)
 
-		if !force {
-			if _, statErr := os.Stat(target); statErr == nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		// Use O_EXCL when not in force mode so the existence check and
+		// the write happen as one atomic operation — the same discipline
+		// applied to the config scaffold (init.go TOCTOU fix). A
+		// stat-then-write window can be raced by a concurrent init or
+		// adversarial file creation; O_EXCL eliminates the window.
+		// With force mode we use O_TRUNC to overwrite any existing file.
+		// We open the destination before reading the embedded FS data so
+		// we can skip early (without the read) when O_EXCL fires.
+		flag := os.O_WRONLY | os.O_CREATE
+		if force {
+			flag |= os.O_TRUNC
+		} else {
+			flag |= os.O_EXCL
+		}
+		f, openErr := os.OpenFile(target, flag, 0o644)
+		if openErr != nil {
+			if os.IsExist(openErr) {
+				// O_EXCL fired — file already present without --force.
 				skipped++
 				if out != nil {
 					fmt.Fprintf(out, "skip %s (exists)\n", target)
 				}
 				return nil
 			}
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+			return openErr
 		}
 		data, readErr := fs.ReadFile(embedFS, path)
 		if readErr != nil {
+			f.Close()
 			return readErr
 		}
-		if err := os.WriteFile(target, data, 0o644); err != nil {
-			return err
+		_, writeErr := f.Write(data)
+		closeErr := f.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 		copied++
 		if out != nil {
