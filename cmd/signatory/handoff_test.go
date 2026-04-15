@@ -560,6 +560,61 @@ func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 	assert.False(t, called, "factory must not be invoked for non-GitHub targets")
 }
 
+// TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage verifies that
+// when the precheck detects a language we don't have a template flavor
+// for (e.g., TypeScript, Rust), the user gets a stderr warning instead
+// of a silent fallback to the python default. Surfaced by the dogfood
+// run on `got` (TypeScript) — silently rendering a Python-headed
+// template against a TypeScript repo is a quality footgun.
+func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
+	swapPrecheckSource(t, &fakePrecheckSource{
+		Files:    []string{"package.json"},
+		Language: "TypeScript",
+	})
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://github.com/foo/bar",
+		Path:            "/tmp/bar",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		// Quiet false: we WANT the warning to appear on stderr.
+	}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+	assert.Contains(t, stderr, "TypeScript")
+	assert.Contains(t, stderr, "no template flavor")
+	assert.Contains(t, stderr, "falling back to python")
+	// Language should still default to python so the render proceeds.
+	assert.Equal(t, "python", cmd.Language)
+}
+
+// TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning verifies
+// that --quiet suppresses the language-flavor warning, consistent with
+// the rest of the precheck/clone reporting. (Same contract as the
+// reuse-note suppression in TestClone_SkipsIfDestExists_Quiet.)
+func TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning(t *testing.T) {
+	swapPrecheckSource(t, &fakePrecheckSource{
+		Files:    []string{"Cargo.toml"},
+		Language: "Rust",
+	})
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://github.com/foo/bar",
+		Path:            "/tmp/bar",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+	}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+	assert.NotContains(t, stderr, "no template flavor",
+		"--quiet must suppress the language-flavor warning")
+}
+
 func TestHandoff_NetworkPrecheck_DoesNotOverrideExplicit(t *testing.T) {
 	// Detector says "ecosystem is go" but the user already passed
 	// --ecosystem=pypi. Precheck must NOT clobber explicit flags.

@@ -222,15 +222,28 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	}
 
 	// Language flavor: fill only if user didn't pass --language.
-	// We currently only ship two flavors (python, go); anything
-	// else leaves --language empty to fall through to "python."
+	// We currently ship two flavors (python, go); for anything else
+	// detected — TypeScript, Rust, JavaScript, etc. — we have no
+	// dedicated template and fall back to the python default. The
+	// fallback CAN produce a usable handoff (the analyst is smart
+	// enough to apply the schema to a different language) but the
+	// hardcoded language strings in the python template will be
+	// wrong. Surface this loudly so the user knows: a silent
+	// fallback would hide a quality regression.
 	langApplied := ""
-	if cmd.Language == "" && languageToFlavor(result.Language) == "go" {
-		cmd.Language = "go"
-		langApplied = "go"
+	langWarning := ""
+	if cmd.Language == "" {
+		switch flavor := languageToFlavor(result.Language); {
+		case flavor != "":
+			cmd.Language = flavor
+			langApplied = flavor
+		case result.Language != "":
+			// Detected a language, but no flavor for it.
+			langWarning = fmt.Sprintf("# precheck warning: detected language %q has no template flavor; falling back to python (the rendered handoff's hardcoded 'Language' header will be inaccurate — consider passing --template explicitly)\n", result.Language)
+		}
 	}
 
-	return formatPrecheckReport(owner, name, result, ecoApplied, langApplied), nil
+	return formatPrecheckReport(owner, name, result, ecoApplied, langApplied) + langWarning, nil
 }
 
 // runGitClone is the function applyClone uses to execute `git clone
