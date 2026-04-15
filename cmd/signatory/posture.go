@@ -84,7 +84,8 @@ func (cmd *PostureGetCmd) Run(globals *Globals) error {
 				fmt.Println("---")
 				fmt.Println()
 			}
-			p := p
+			// Go 1.22+ gives each iteration its own `p`, so taking
+			// &p is safe without the old `p := p` shadow.
 			printPosture(entity, &p)
 		}
 		return nil

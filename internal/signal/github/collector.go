@@ -128,7 +128,7 @@ func (c *Collector) collectContributors(ctx context.Context, result *signal.Coll
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "contributors", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "contributors", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "contributors", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -154,7 +154,7 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 			signal.MakeAbsence(entityID, "last_commit", "github", sanitizeErrorForStorage(err), isRetryable(err), now),
 			signal.MakeAbsence(entityID, "commit_signing", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -198,7 +198,7 @@ func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.Coll
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "total_commits", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "total_commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "total_commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -216,7 +216,7 @@ func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionRe
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "tags", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "tags", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "tags", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -238,7 +238,7 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "owner_profile", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "owner_profile", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "owner_profile", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -265,7 +265,7 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "adoption", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "adoption", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 
@@ -306,7 +306,7 @@ func (c *Collector) collectCI(ctx context.Context, result *signal.CollectionResu
 			signal.MakeAbsence(entityID, "ci_cd", "github",
 				"could not check CI/CD configuration", true, now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "ci_cd", Source: "github",
+			signal.CollectionError{SignalType: "ci_cd", Source: "github",
 				Reason: "could not check CI/CD configuration", Retryable: true})
 	} else {
 		// We checked everything and found nothing — definitive negative.
@@ -324,7 +324,7 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 		result.Collected = append(result.Collected,
 			signal.MakeAbsence(entityID, "go_dependencies", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{SignalType: "go_dependencies", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+			signal.CollectionError{SignalType: "go_dependencies", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
 		return
 	}
 	if goModContent == nil {
@@ -345,7 +345,7 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 			signal.MakeAbsence(entityID, "go_dependencies", "github",
 				"go.mod too large to parse safely", false, now))
 		result.Failures = append(result.Failures,
-			signal.CollectionFailure{
+			signal.CollectionError{
 				SignalType: "go_dependencies",
 				Source:     "github",
 				Reason:     "go.mod too large to parse safely",

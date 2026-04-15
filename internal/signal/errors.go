@@ -17,7 +17,7 @@ type CollectionResult struct {
 
 	// Failures encountered during collection. Each entry describes
 	// what signal was being collected and why it failed.
-	Failures []CollectionFailure
+	Failures []CollectionError
 }
 
 // Signals extracts all collected signals (including absence records
@@ -66,8 +66,8 @@ func (r *CollectionResult) RetryableCount() int {
 	return count
 }
 
-// CollectionFailure records a failed signal collection attempt.
-type CollectionFailure struct {
+// CollectionError records a failed signal collection attempt.
+type CollectionError struct {
 	// SignalType is the signal that failed to collect (e.g., "stars", "contributors").
 	SignalType string
 
@@ -84,7 +84,7 @@ type CollectionFailure struct {
 	Retryable bool
 }
 
-func (f CollectionFailure) Error() string {
+func (f CollectionError) Error() string {
 	retry := ""
 	if f.Retryable {
 		retry = " (retryable)"

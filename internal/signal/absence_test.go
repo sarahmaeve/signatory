@@ -93,7 +93,7 @@ func TestCollectionResult_Summary(t *testing.T) {
 			MakeSignal(profile.Signal{Type: "forks"}),
 			MakeAbsence("e", "contributors", "gh", "rate limited", true, time.Now()),
 		},
-		Failures: []CollectionFailure{
+		Failures: []CollectionError{
 			{SignalType: "contributors", Source: "gh", Retryable: true},
 		},
 	}

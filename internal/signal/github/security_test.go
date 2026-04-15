@@ -252,7 +252,7 @@ func TestSecurity_FindTokenInResult_DetectsKnownLeakPositions(t *testing.T) {
 		{
 			name: "token in failure Reason",
 			result: makeResult(func(r *signal.CollectionResult) {
-				r.Failures = append(r.Failures, signal.CollectionFailure{
+				r.Failures = append(r.Failures, signal.CollectionError{
 					SignalType: "stars",
 					Source:     "github",
 					Reason:     "error with token " + token,
@@ -264,7 +264,7 @@ func TestSecurity_FindTokenInResult_DetectsKnownLeakPositions(t *testing.T) {
 		{
 			name: "token in failure SignalType",
 			result: makeResult(func(r *signal.CollectionResult) {
-				r.Failures = append(r.Failures, signal.CollectionFailure{
+				r.Failures = append(r.Failures, signal.CollectionError{
 					SignalType: token,
 					Source:     "github",
 					Reason:     "ok",
@@ -276,7 +276,7 @@ func TestSecurity_FindTokenInResult_DetectsKnownLeakPositions(t *testing.T) {
 		{
 			name: "token in failure Source",
 			result: makeResult(func(r *signal.CollectionResult) {
-				r.Failures = append(r.Failures, signal.CollectionFailure{
+				r.Failures = append(r.Failures, signal.CollectionError{
 					SignalType: "stars",
 					Source:     token,
 					Reason:     "ok",
@@ -594,9 +594,9 @@ func TestSecurity_ParseRepoURL_AcceptsValid(t *testing.T) {
 
 // --- Token Leak Prevention (Issue #29) ---
 
-// TestSecurity_TokenNotInCollectionFailureError verifies that
-// CollectionFailure.Error() doesn't leak the token either.
-func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {
+// TestSecurity_TokenNotInCollectionErrorError verifies that
+// CollectionError.Error() doesn't leak the token either.
+func TestSecurity_TokenNotInCollectionErrorError(t *testing.T) {
 	secretToken := "ghp_FailureErrorLeakTest1234567890"
 
 	mux := http.NewServeMux()
@@ -634,13 +634,13 @@ func TestSecurity_TokenNotInCollectionFailureError(t *testing.T) {
 	// why this is the right shape.
 	assertNoTokenInResult(t, result, secretToken)
 
-	// Also verify CollectionFailure.Error() rendering, which is the
+	// Also verify CollectionError.Error() rendering, which is the
 	// specific scenario this test name covers (the helper above
 	// covers the field-level check; this asserts the formatted
 	// Error() string also doesn't leak).
 	for _, failure := range result.Failures {
 		assert.NotContains(t, failure.Error(), secretToken,
-			"CollectionFailure.Error() contains the secret token — TOKEN LEAK")
+			"CollectionError.Error() contains the secret token — TOKEN LEAK")
 	}
 }
 
