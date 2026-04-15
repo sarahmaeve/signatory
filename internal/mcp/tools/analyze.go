@@ -35,7 +35,7 @@ type AnalyzeTool struct {
 func (t *AnalyzeTool) Name() string { return "signatory_analyze" }
 
 func (t *AnalyzeTool) Description() string {
-	return "USE THIS when the user asks about the trust posture, safety, or security of a specific package or repo (e.g. 'is X safe?', 'can I trust Y?', 'what's the assessment of Z?'). Returns the cached trust profile (signals + posture) for one target. Prefer signatory_signals when the user wants raw evidence instead of a summary. Returns NotFound if the target hasn't been analyzed — that itself is informative: it means no analyst has assessed this target yet."
+	return "USE THIS when the user asks about the trust posture, safety, or security of a specific package or repo (e.g. 'is X safe?', 'can I trust Y?', 'what's the assessment of Z?'). Returns the cached trust profile (Layer 1 signals + this entity's Layer 2 trust decision) for one target. For a store-wide posture overview ('how many deps have I assessed?', 'show me everything vetted-frozen'), read signatory://posture instead — this tool is entity-scoped. Prefer signatory_signals when the user wants raw evidence instead of a summary. Returns NotFound if the target hasn't been analyzed — that itself is informative: it means no analyst has assessed this target yet."
 }
 
 func (t *AnalyzeTool) InputSchema() json.RawMessage {

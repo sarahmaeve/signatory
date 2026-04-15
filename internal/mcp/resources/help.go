@@ -108,6 +108,18 @@ signatory has assessed"; the filesystem and the web are not.
   vetted-frozen > trusted-for-now > unexamined > unknown-provenance >
   rejected. An entity can have signals and findings without a posture.
 
+- **"Posture" has two meanings — do not confuse them.**
+  (1) A Layer-2 trust decision stored in the ` + "`postures`" + ` table: query
+  via the signatory://posture resource (aggregate) or via
+  signatory_analyze's entity.posture field (per-target). Contains
+  tier, rationale, set_by, set_at.
+  (2) A Layer-1 signal group named "posture" that collectors can emit
+  (e.g., "has a vetted-frozen marker in README"): query via
+  signatory_detail with signal_group="posture". Contains raw evidence.
+  If the user asks "what's the posture of X?" they almost always mean
+  (1). If you pick (2) and find no records, double-check by reading
+  signatory://posture before telling the user "no posture recorded."
+
 - **Burns** are hard-reject markers independent of posture. A burn
   means "do not use, regardless of other signals."
 
