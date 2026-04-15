@@ -68,11 +68,14 @@ func TestListAnalystOutputs_FilterByEntityURI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, atuinList, 1)
 
-	// Unknown entity should return empty (not error).
+	// Unknown entity now surfaces as ErrNotFound so callers can
+	// distinguish "target has never been ingested" from "target is
+	// known but has no outputs yet". Callers that want the old
+	// "absence = empty" behavior wrap with errors.Is explicitly.
 	none, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
 		EntityURI: "pkg:nonexistent/wat",
 	})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrNotFound)
 	assert.Empty(t, none)
 }
 

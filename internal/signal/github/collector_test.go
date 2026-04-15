@@ -458,8 +458,9 @@ func TestCollector_NotFoundError(t *testing.T) {
 	}
 
 	_, err := c.Collect(ctx, entity)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound,
+		"Collect must wrap the github ErrNotFound sentinel so callers can discriminate")
 }
 
 func TestCollector_UsesEntityURLOverName(t *testing.T) {

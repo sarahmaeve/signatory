@@ -46,12 +46,12 @@ func (cmd *PostureGetCmd) Run(globals *Globals) error {
 	ctx := context.Background()
 
 	entity, err := resolveEntity(ctx, s, cmd.Target)
-	if err != nil {
-		return err
-	}
-	if entity == nil {
+	if errors.Is(err, store.ErrNotFound) {
 		fmt.Printf("No posture recorded for: %s\n", cmd.Target)
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	// --version=X: exact lookup.
@@ -187,8 +187,19 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 
 // resolveEntity looks up an entity by user-supplied target (a
 // canonical URI string, or a GitHub repo in any parseable form).
-// Returns (nil, nil) if the entity doesn't exist — the caller
-// decides whether that's an error or a "create it" situation.
+// Returns (nil, store.ErrNotFound) when no entity matches — the
+// caller uses errors.Is to decide whether absence is an error or
+// a "create it" situation.
+//
+// Two absence conditions map to ErrNotFound:
+//
+//  1. The target parses as a canonical URI (or is one already) but
+//     no stored entity has it.
+//  2. The target doesn't parse as a canonical URI AND doesn't
+//     parse as a GitHub-repo shape. We treat this as absence
+//     rather than a distinct parse error because the caller's
+//     interest is "does this entity exist?" — the parse failure is
+//     an implementation detail of how we try to resolve it.
 func resolveEntity(ctx context.Context, s store.Store, target string) (*profile.Entity, error) {
 	// First try the target as-is — it might already be a canonical URI.
 	if entity, err := s.FindEntityByURI(ctx, target); err == nil {
@@ -197,18 +208,18 @@ func resolveEntity(ctx context.Context, s store.Store, target string) (*profile.
 		return nil, fmt.Errorf("lookup entity: %w", err)
 	}
 
-	// Fall back to GitHub-style input normalization. If the input
-	// doesn't parse as a GitHub repo, we return "not found" rather
-	// than propagating the parse error, because it might be a
-	// valid canonical URI for a non-github entity type we just
-	// don't have stored yet.
+	// Fall back to GitHub-style input normalization. A parse
+	// failure here is semantically the same as "the entity doesn't
+	// exist": the input was neither a canonical URI we have nor a
+	// GitHub shape we can normalize. Report it as ErrNotFound so
+	// callers handle both absence conditions uniformly.
 	normalized, _, _, perr := profile.NormalizeGitHubRepoInput(target)
 	if perr != nil {
-		return nil, nil
+		return nil, store.ErrNotFound
 	}
 	entity, err := s.FindEntityByURI(ctx, normalized)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
+		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup entity: %w", err)
@@ -219,13 +230,17 @@ func resolveEntity(ctx context.Context, s store.Store, target string) (*profile.
 // ensureEntity resolves or creates an entity for the given target.
 // Used by posture set and burn add, which should work even on
 // entities that have never been analyzed.
+//
+// If resolveEntity returns ErrNotFound we proceed to the create
+// path; any other error propagates. This is the canonical pattern
+// for consuming ErrNotFound as "absence is a valid operating state."
 func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.Entity, error) {
 	existing, err := resolveEntity(ctx, s, target)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
+	if err == nil {
 		return existing, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
 	}
 
 	// Create a stub entity. Try to parse as a GitHub repo first so we

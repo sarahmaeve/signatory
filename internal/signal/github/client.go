@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,17 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNotFound is the sentinel the client returns (wrapped via %w)
+// when the GitHub API responds 404. Callers that treat absence as a
+// signal (e.g., "does this file exist in the repo?") compare with
+// errors.Is(err, github.ErrNotFound) rather than matching on the
+// error string — string-matching would silently break on any future
+// rewording of the error message. The three callers that care about
+// the 404 semantic (GetDirectoryContents, GetFileRaw, GetGoModRefCount)
+// translate this sentinel into the lightweight (nil, nil) "not
+// present" signal their existing consumers check.
+var ErrNotFound = errors.New("github: not found")
 
 // validGitHubName matches valid GitHub owner and repo names.
 // GitHub allows alphanumeric, hyphens, dots, and underscores.
@@ -238,7 +250,7 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("not found: %s", path)
+		return fmt.Errorf("%w: %s", ErrNotFound, path)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -401,7 +413,7 @@ func (c *Client) GetDirectoryContents(ctx context.Context, owner, repoName, path
 	}
 	var contents []repoContent
 	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &contents)
-	if err != nil && strings.Contains(err.Error(), "not found") {
+	if errors.Is(err, ErrNotFound) {
 		return nil, nil
 	}
 	return contents, err
@@ -421,7 +433,7 @@ func (c *Client) GetFileRaw(ctx context.Context, owner, repoName, path string) (
 	var fc fileContent
 	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repoName, path), &fc)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -470,7 +482,7 @@ func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) 
 	var entries []repoContent
 	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents", owner, repoName), &entries)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err

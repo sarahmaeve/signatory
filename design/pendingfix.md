@@ -17,21 +17,20 @@ Each item has:
 
 ## Security
 
-### `internal/signal/github/client.go` uses string-matched error comparison
+### `internal/store/sqlite.go` compares `sql.ErrNoRows` with `==`
 
-- **Source:** skill-equipped Opus reviewer 2026-04-14 (F3)
+- **Source:** skill-equipped Opus reviewer 2026-04-14 (adjacent to F3);
+  golangci-lint errorlint pass 2026-04-15
 - **Severity:** should-fix
-- **Where:** `client.go:404, 424, 473` — three sites do
-  `strings.Contains(err.Error(), "not found")` to decide whether to
-  swallow a 404 and return `(nil, nil)` instead of an error.
-- **Sketch:** Define `var errNotFound = errors.New("not found")` (or a
-  typed `*NotFoundError`), have `get`/`getWithLinkHeader` wrap with that
-  sentinel, and check at the call sites with `errors.Is(err, errNotFound)`.
-  This was identified as the highest-leverage day-1 fix the
-  golang-security skill would have prevented: any future error-message
-  rewording (localization, wrapping, transport layer changes) silently
-  switches the 404 branch to "return error" and breaks the absence-as-
-  signal contract.
+- **Where:** `sqlite.go:418, 530, 623` — three sites do
+  `if err == sql.ErrNoRows { ... }` instead of `errors.Is`. In
+  practice `database/sql` returns the sentinel unwrapped so today's
+  code works, but any middleware (e.g., a future query-tracing wrapper)
+  that calls `fmt.Errorf("%w: ...", err)` would silently break the
+  absence-detection.
+- **Sketch:** Replace the three `err == sql.ErrNoRows` checks with
+  `errors.Is(err, sql.ErrNoRows)`. Purely mechanical. Test the
+  behavior via the existing tests — no new tests needed.
 
 ### `safeGitEnv` is a denylist; consider promoting to a whitelist
 

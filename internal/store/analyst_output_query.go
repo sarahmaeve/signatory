@@ -65,6 +65,13 @@ type AnalystOutputFilter struct {
 // child tables; this costs one COUNT-aggregating subquery per row
 // shape, which is fine at our scale (small) and remains accurate
 // against the append-only data model.
+//
+// When the EntityURI filter is specified but does not resolve to a
+// known entity, returns (nil, ErrNotFound). Callers that treat
+// "unknown target" as "no analyses yet" should check for this
+// sentinel explicitly — see `errors.Is(err, store.ErrNotFound)`.
+// The `signatory show-*` commands use this distinction to print a
+// better message (entity doesn't exist vs. entity has no rows yet).
 func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFilter) ([]AnalystOutputSummary, error) {
 	// Resolve EntityURI → EntityID if specified. Done before SQL
 	// construction so the WHERE clause stays simple.
@@ -73,9 +80,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 		ent, err := s.FindEntityByURI(ctx, filter.EntityURI)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				// No entity = no outputs. Return empty rather than an error
-				// so callers can treat "unknown target" as "no analyses yet."
-				return nil, nil
+				return nil, ErrNotFound
 			}
 			return nil, fmt.Errorf("resolve entity URI %q: %w", filter.EntityURI, err)
 		}
@@ -190,13 +195,17 @@ type FindingFilter struct {
 // newest first by the parent output's ingested_at. Each row joins
 // to entities for the canonical_uri convenience field and to
 // analyst_outputs for analyst_id + ingested_at attribution.
+//
+// When the EntityURI filter is specified but does not resolve,
+// returns (nil, ErrNotFound); see ListAnalystOutputs for the
+// rationale.
 func (s *SQLite) ListFindings(ctx context.Context, filter FindingFilter) ([]FindingSummary, error) {
 	entityID := filter.EntityID
 	if entityID == "" && filter.EntityURI != "" {
 		ent, err := s.FindEntityByURI(ctx, filter.EntityURI)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				return nil, nil
+				return nil, ErrNotFound
 			}
 			return nil, fmt.Errorf("resolve entity URI %q: %w", filter.EntityURI, err)
 		}
@@ -314,13 +323,17 @@ type MethodologyPatternFilter struct {
 // The aggregation use case ("which network_endpoints patterns
 // actually fired across our analyses?") is the main consumer; the
 // hit_on_target filter and signal_group filter map directly.
+//
+// When the EntityURI filter is specified but does not resolve,
+// returns (nil, ErrNotFound); see ListAnalystOutputs for the
+// rationale.
 func (s *SQLite) ListMethodologyPatterns(ctx context.Context, filter MethodologyPatternFilter) ([]MethodologyPatternSummary, error) {
 	entityID := filter.EntityID
 	if entityID == "" && filter.EntityURI != "" {
 		ent, err := s.FindEntityByURI(ctx, filter.EntityURI)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				return nil, nil
+				return nil, ErrNotFound
 			}
 			return nil, fmt.Errorf("resolve entity URI %q: %w", filter.EntityURI, err)
 		}

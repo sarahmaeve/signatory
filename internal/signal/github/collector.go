@@ -405,17 +405,24 @@ func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName strin
 // Raw error messages may contain tokens, URLs with credentials, or other
 // sensitive data from HTTP responses. This function classifies the error
 // and returns only the category, never the raw content.
+//
+// For signatory-owned sentinels (ErrNotFound, RateLimitError) we use
+// errors.Is / errors.As so wrapping doesn't break the classification.
+// For stdlib transport errors (context deadline, "no such host") we
+// still string-match — those errors have no exported sentinel and
+// their text is stable across Go versions by policy.
 func sanitizeErrorForStorage(err error) string {
 	if err == nil {
 		return ""
 	}
-	if _, ok := err.(*RateLimitError); ok {
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
 		return "rate limited"
 	}
-	errMsg := err.Error()
-	if strings.Contains(errMsg, "not found") {
+	if errors.Is(err, ErrNotFound) {
 		return "not found"
 	}
+	errMsg := err.Error()
 	if strings.Contains(errMsg, "context deadline exceeded") ||
 		strings.Contains(errMsg, "Client.Timeout") {
 		return "request timeout"

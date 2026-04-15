@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,6 +36,13 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		Limit:     cmd.Limit,
 	}
 	rows, err := s.ListAnalystOutputs(context.Background(), filter)
+	if errors.Is(err, store.ErrNotFound) {
+		// Target didn't resolve to any known entity — distinct from
+		// "entity exists but has no outputs." Callers benefit from
+		// seeing the distinction; the store now signals it explicitly.
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -92,6 +100,10 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 		Limit:            cmd.Limit,
 	}
 	rows, err := s.ListFindings(context.Background(), filter)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -155,6 +167,10 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 	}
 
 	rows, err := s.ListMethodologyPatterns(context.Background(), filter)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
