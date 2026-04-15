@@ -156,6 +156,23 @@ Each item has:
   function comment why TARGET_NAME alone is special. (b) is the
   smaller change.
 
+### MCP `maxLineBytes` frame budget — planned expansion steps
+
+- **Source:** H2 remediation discussion 2026-04-15 (post-Opus review)
+- **Severity:** nice-to-have — tracking only
+- **Where:** `internal/mcp/jsonrpc.go:maxLineBytes`
+- **Sketch:** The current frame cap is 64 KiB, chosen to sit well above
+  any legitimate inbound frame our closed schemas accept. If a future
+  tool's arguments or a client's legitimate request pattern butts
+  against this ceiling, the agreed expansion steps are 128 KiB first,
+  then 256 KiB as a hard cap. Beyond 256 KiB the right answer is "use
+  a resource URI for big content," not "raise the frame budget" — a
+  4 MiB JSON-RPC frame is an anti-pattern regardless of our server's
+  ability to receive one. When expanding: bump both the value and the
+  doc comment's rationale; re-run `cmd/smoke-mcp` to confirm no
+  regression. No action until we observe a legitimate frame near the
+  limit.
+
 ## Test quality
 
 ### `captureStream` could use `goleak.VerifyTestMain`

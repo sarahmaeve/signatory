@@ -20,12 +20,6 @@ import (
 	"encoding/json"
 )
 
-// ServerVersion is the value emitted as Response.Metadata.ServerVersion
-// and in the initialize handshake's serverInfo.version. Kept as a
-// package var (not a const) so tests can override and so a future
-// build-info wiring in main can stamp the real semver.
-var ServerVersion = "0.1.0-dev"
-
 // Tool handles a tools/call method per MCP. Implementations live in
 // internal/mcp/tools/*.
 type Tool interface {
@@ -105,22 +99,27 @@ type ResponseMetadata struct {
 }
 
 // OK returns a successful Response with the given data.
-// ElapsedMs is left zero — the protocol layer stamps it before emission.
+//
+// Metadata.ServerVersion and Metadata.ElapsedMs are left zero — the
+// protocol layer stamps them at emission time, immediately before
+// serializing to the MCP wire format. Handler code never has to know
+// the server's version, which eliminates the need for a
+// package-level default and keeps handlers decoupled from the
+// Server's identity.
 func OK(data any) *Response {
 	return &Response{
-		Status:   "ok",
-		Data:     data,
-		Metadata: ResponseMetadata{ServerVersion: ServerVersion},
+		Status: "ok",
+		Data:   data,
 	}
 }
 
 // Err returns an error Response with the given code and message. details
-// may be nil; if non-nil, it must be JSON-serializable.
+// may be nil; if non-nil, it must be JSON-serializable. As with OK, the
+// Metadata fields are stamped by the protocol layer at emission time.
 func Err(code, message string, details any) *Response {
 	return &Response{
-		Status:   "error",
-		Error:    &ResponseError{Code: code, Message: message, Details: details},
-		Metadata: ResponseMetadata{ServerVersion: ServerVersion},
+		Status: "error",
+		Error:  &ResponseError{Code: code, Message: message, Details: details},
 	}
 }
 
@@ -141,13 +140,13 @@ func (r *Response) WithRequiresConfirm(v bool) *Response {
 // Named Code* rather than Err* to avoid collision with Go's error-value
 // naming convention (compare mcp.CodeNotFound vs. store.ErrNotFound).
 const (
-	CodeSchemaViolation            = "schema_violation"
-	CodeNotFound                   = "not_found"
-	CodeCacheMissRequiresRefresh   = "cache_miss_requires_refresh"
+	CodeSchemaViolation             = "schema_violation"
+	CodeNotFound                    = "not_found"
+	CodeCacheMissRequiresRefresh    = "cache_miss_requires_refresh"
 	CodeUnsafeOperationNeedsConfirm = "unsafe_operation_needs_confirm"
-	CodeInvalidConfirmToken        = "invalid_confirm_token"
-	CodeDispatchRequested          = "dispatch_requested"
-	CodeValidationFailed           = "validation_failed"
-	CodeDirectAPINotActivated      = "direct_api_not_activated"
-	CodeInternalError              = "internal_error"
+	CodeInvalidConfirmToken         = "invalid_confirm_token"
+	CodeDispatchRequested           = "dispatch_requested"
+	CodeValidationFailed            = "validation_failed"
+	CodeDirectAPINotActivated       = "direct_api_not_activated"
+	CodeInternalError               = "internal_error"
 )

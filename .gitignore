@@ -40,9 +40,10 @@ design/NEXT.md
 # .idea/
 # .vscode/
 
-# Built signatory binary at the repo root.
-# Anchored with leading slash so the pattern matches ONLY the root-level
-# binary, not the cmd/signatory/ source directory (which previously got
+# Built binaries at the repo root.
+# Anchored with leading slash so each pattern matches ONLY the root-level
+# binary, not the cmd/<name>/ source directory (which previously got
 # silently swallowed by the bare `signatory` pattern, hiding new files
 # in that directory from `git status` and `git add`).
 /signatory
+/smoke-mcp

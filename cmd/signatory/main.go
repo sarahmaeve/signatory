@@ -28,6 +28,7 @@ type CLI struct {
 	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
 	ShowFindings    ShowFindingsCmd    `cmd:"show-findings" help:"Query findings across ingested analyst outputs."`
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
+	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
 	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 
