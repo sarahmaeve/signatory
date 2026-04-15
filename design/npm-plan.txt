@@ -1,0 +1,369 @@
+  The question splits into two distinct interpretations, and the answer is different for each.
+
+  Interpretation A — Gateway verification (does the URL even resolve?)
+
+  When the npm registry says repository.url: "git+https://github.com/expressjs/express.git", do we proactively check that the
+  GitHub repo exists before using it?
+
+  My recommendation: don't verify proactively. Use the registry's claim as-is and let downstream collection fail gracefully if
+  it's bad.
+
+  Reasons:
+  - An extra API call per package, just to check existence, doubles the network cost for what is almost always a successful
+  check
+  - The github collector already has a fail-graceful path: if the resolved repo URL doesn't exist, client.GetRepo returns "not
+  found" and the collector records absence signals for the github-side tier. The user/LLM sees "we couldn't get any github
+  signals for this entity" — which is the right surface for "the npm package's repo claim was wrong or stale"
+  - The threat model isn't "an attacker tricked us into making one bogus API call"; it's "an attacker convinced us a package is
+  trustworthy when it isn't"
+
+  So for the lookup path: trust the registry, structural validate the URL with the existing validateContentsPath-style allowlist
+   (so it at least looks like a real GitHub URL and not javascript: or file://), then hand it off downstream. Bad URLs fail
+  naturally during signal collection.
+
+  Interpretation B — Provenance verification (did this published version actually come from that repo?)
+
+  This is the substantive question — the one the axios case study explicitly identifies as a high-value signal class. Three real
+   verification mechanisms exist:
+
+  1. OIDC trusted publishing attestation. The npm registry exposes an attestations field (when present) for packages published
+  via OIDC trusted publishing. The attestation is cryptographically signed by the npm registry and binds the published version
+  to a source repo + commit SHA. This is the gold standard — no extra API calls, cryptographically verifiable, and per axios
+  lesson #13 "Whether a package uses OIDC-based trusted publishing is a binary, queryable signal." When present and valid, it's
+  a strong positive signal. When absent on a package that previously used it, that's a strong negative signal (the documented
+  axios attack pattern).
+  2. Git tag correspondence. For each published npm version, look for a matching git tag in the resolved repo (try v1.2.3,
+  1.2.3, release-1.2.3 patterns). Per axios lesson #10: "the malicious axios versions were published without trusted publisher
+  binding and without corresponding repo tags or commit trails." This is a HIGH-VALUE signal that directly addresses the
+  documented attack pattern. But it requires API calls to BOTH npm AND github for the same entity, plus comparison logic.
+  3. Tarball-vs-source content diff. Download the published tarball, compare against the source tree at the corresponding tag.
+  Catches "axios source code untouched but package.json modified" attacks. Highest fidelity, highest cost (tarball download per
+  version).
+
+  My recommendation for the v0.1 npm collector:
+  - Ship #1 (OIDC trusted publishing presence) as a flat metadata signal. It's a single field in the registry response for the
+  latest version. No cross-collector orchestration needed. Directly addresses the documented attack pattern. Fits "flat metadata
+   only" from Q5.
+  - Defer #2 (git tag correspondence) to a follow-up signal. It requires cross-collector orchestration (npm collector reading
+  data the github collector also reads), which is a real architectural decision worth its own design pass — does the
+  orchestration live in the npm collector, the github collector, or some new comparison-pass? Not the right call to make under
+  time pressure on the v0.1 first ship.
+  - Defer #3 (tarball diff) to v0.2+. Significant scope (tarball download, content comparison, signed-vs-unsigned semantics).
+
+  So the v0.1 verification story is: trust the URL for lookup, collect OIDC attestation presence as a provenance signal,
+  document the deferred verification mechanisms in the commit message. When tag correspondence ships later, it becomes a second
+  provenance signal that strengthens the picture.
+
+  This keeps Q3's answer scope-consistent with Q5's "flat metadata only" — OIDC presence is one field in one response. Tag
+  correspondence and tarball diffing are separate design exercises that can land iteratively without needing to be perfect on
+  day one.
+
+  Confirming the full answer set
+
+  Let me restate the bundle so we're aligned before I draft the implementation plan:
+
+  ┌───────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │       Q       │                                                 Answer                                                  │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Q1 manifests  │ package.json + package-lock.json only. yarn / pnpm deferred.                                            │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │               │ Broaden ValidateCanonicalURI to allow @ in the body for scoped packages. New regex: [A-Za-z0-9._/@-].   │
+  │ Q2 validator  │ Touches internal/profile/uri.go + tests + internal/identity/team.go's validator (separate, doesn't need │
+  │               │  @).                                                                                                    │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Q3            │ Lookup: trust the registry, don't pre-check URL existence, let downstream collection fail-graceful.     │
+  │ verification  │ Provenance: collect OIDC trusted publishing presence as a flat metadata signal. Defer git tag           │
+  │               │ correspondence and tarball diff.                                                                        │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Q4 bundling   │ Single commit, both Layer A (Provider) and Layer B (Collector). Coherent end-to-end tests.              │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Q5 signals    │ Flat metadata only: last publish date, maintainer count + list, postinstall script presence, OIDC       │
+  │               │ trusted publishing presence, weekly downloads, dependent count.                                         │
+  └───────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  If you confirm, I'll draft the concrete implementation plan — the file layout, the order of steps, the test fixtures we'd need
+   (real package.json files for axios/lodash/@types/node covering scoped + unscoped + with/without lockfile), and the dogfood
+  validation step. Then we can decide whether to start implementing or sleep on it.
+
+  Sound right?
+
+✻ Cogitated for 1m 27s
+
+❯ Yes!
+
+⏺ Implementation plan: v0.1 npm provider + collector
+
+  Single commit, organized in 7 phases. Each phase has its own test discipline; phases land in order so the suite stays green at
+   every checkpoint.
+
+  Phase 0 — Validator broadening (prerequisite, ~10 lines)
+
+  The smallest, most isolated change. Lands first so subsequent phases can use scoped package URIs.
+
+  Files:
+  - internal/profile/uri.go — broaden validURIBody regex from [A-Za-z0-9._/-] to [A-Za-z0-9._/@-]. The @ goes at the end of the
+  char class so it's a literal.
+  - internal/profile/uri_test.go — add positive cases (pkg:npm/@types/node, pkg:npm/@nestjs/core) and negative cases that
+  confirm @ doesn't break the other rules (no double @, can't start with @, etc. — actually need to think about whether scoped
+  names like @types/node should be allowed to start with @... yes, that's literally the format).
+
+  Wait — re-checking. pkg:npm/@types/node: the body after pkg:npm/ is @types/node, which starts with @. The current regex
+  requires the FIRST character to be alphanumeric (per the canonical URI body shape). I need to verify whether the existing
+  regex has a "first char must be alphanum" constraint or whether it just allows the char class anywhere.
+
+  Looking at the validator from #78: the body regex is ^[A-Za-z0-9._/-]{1,128}$ — no first-char restriction, just length-bounded
+   char class. Good. Adding @ to the class is sufficient. Tests need to confirm @types/node body parses.
+
+  Note: this DOES NOT touch ValidateIdentity in internal/identity/team.go. Team identities don't need @ (they use + separator);
+  the validator regexes are deliberately per-domain.
+
+  TDD shape: extend the existing TestValidateCanonicalURI_Accepts and TestValidateCanonicalURI_Rejects test tables.
+
+  Phase 1 — npm Provider (Layer A, the manifest parser)
+
+  New package: internal/ecosystem/npm/
+
+  Files:
+  - internal/ecosystem/npm/provider.go — npm.Provider struct implementing ecosystem.Provider. Methods:
+    - Name() string → "npm"
+    - DetectManifest(dir string) (string, bool) → looks for package.json in dir; returns path + true
+    - ParseManifest(path string) ([]ecosystem.Dependency, error) → reads package.json, then looks for package-lock.json next to
+  it; if present, parses transitives from the lockfile and tags them; otherwise returns just direct deps from package.json
+    - ResolveRepo(ctx context.Context, packageName string) (string, error) → uses the npm.Client (Phase 2) to GET /{packageName}
+   and extract repository.url
+  - internal/ecosystem/npm/parse.go — pure parsing logic (no HTTP). Two functions:
+    - parsePackageJSON(data []byte) (directDeps []packageDep, devDeps []packageDep, err error) — handles dependencies,
+  devDependencies, peerDependencies, optionalDependencies (all four; tag with class)
+    - parsePackageLock(data []byte) (resolved map[string]string, err error) — handles package-lock.json v3 format (packages map
+  keyed by node_modules-relative path); extracts resolved versions for the lockfile-known transitive set
+  - internal/ecosystem/npm/parse_test.go — table-driven unit tests with hand-crafted minimal fixtures + a few realistic ones
+  (axios, express, a scoped package). Real-world parsing edge cases to cover:
+    - Empty dependencies map
+    - Scoped package names (@types/node)
+    - package-lock.json v3 format (the modern one — npm 7+)
+    - Workspace-style entries in lockfile (graceful: ignore for v0.1)
+    - Missing repository.url field
+    - repository as object vs string (npm allows both shapes)
+  - internal/ecosystem/npm/provider_test.go — provider-level tests using a t.TempDir() with fixture files written into it. Tests
+   DetectManifest and ParseManifest. Defers ResolveRepo testing to Phase 2 (needs the HTTP client).
+  - internal/ecosystem/npm/testdata/ — small set of real package.json + package-lock.json fixtures. Probably 3 fixtures:
+    - Simple: 2 direct deps + lockfile with ~5 transitive
+    - Scoped: includes a @scope/name direct dep
+    - Mixed: dependencies + devDependencies + peerDependencies + optionalDependencies
+
+  TDD discipline: each parser function gets a failing test before its implementation. The fixture files are checked in alongside
+   the tests.
+
+  Phase 2 — npm registry HTTP Client (Layer B prerequisite)
+
+  File: internal/ecosystem/npm/client.go
+
+  A small HTTP client modeled on internal/signal/github/client.go but stripped down — npm registry doesn't need auth, redirect
+  policy is identical (HTTPS-only refusal of downgrade per #89), error sanitization is identical (drop response body per #93),
+  max response size guard is identical (per the OOM concerns the github client addresses).
+
+  type Client struct {
+      httpClient *http.Client
+      baseURL    string  // "https://registry.npmjs.org"
+  }
+
+  func NewClient() *Client { ... }
+
+  // Get fetches package metadata. Returns the parsed registry response
+  // or an error. Per #93, errors do NOT include the response body.
+  func (c *Client) GetPackage(ctx context.Context, name string) (*registryPackage, error)
+
+  The registryPackage struct only models the fields the collector actually reads — flat metadata only per Q5: time (latest
+  publish), maintainers, versions[latest].scripts.postinstall, dist-tags.latest (to identify "the latest version"). Plus a
+  separate call (different host) for downloads:
+
+  // GetWeeklyDownloads fetches the weekly download count for a package.
+  // Hits api.npmjs.org/downloads (different host than registry.npmjs.org).
+  func (c *Client) GetWeeklyDownloads(ctx context.Context, name string) (int, error)
+
+  The trusted publishing attestation field — this is where I need to do real research during implementation about the exact npm
+  API shape (it's in the registry response under dist.attestations for newer packages; the field name and shape may have
+  changed). I'll handle "field absent" gracefully (no error, no signal emitted) and document the expected structure based on
+  what the live registry actually returns.
+
+  Tests in internal/ecosystem/npm/client_test.go: httptest server returning hand-crafted minimal JSON, exercises each method.
+  Includes the same security test pattern from #93 (error response body must not leak into the returned error string) and #89
+  (HTTPS-only redirect policy).
+
+  Defense-in-depth list the client must enforce:
+  - HTTPS-only redirect (use the same checkRedirect pattern from #89)
+  - Max response size cap (npm metadata blobs can be megabytes; cap at 10MB like github client)
+  - Error sanitization (no body in error string per #93)
+  - Package name validation (the URL path component is user-influenced via the resolved canonical URI; needs the same allowlist
+  treatment as #90's validateContentsPath, with @ allowed for scoped names)
+  - Context propagation (tested per #87's TestSQLite_ContextCancellation shape)
+
+  Phase 3 — npm signal Collector (Layer B, the registry signals)
+
+  New package: internal/signal/npm/
+
+  File: internal/signal/npm/collector.go — npm.Collector struct implementing signal.Collector. Methods:
+  - Name() string → "npm"
+  - Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) → only acts on entities with
+  canonical URIs starting with pkg:npm/. For non-npm entities, returns an empty result (graceful — the collector is filterable
+  by entity type at the analyze.go dispatch level too, but defense in depth here).
+
+  The 6 flat metadata signals from Q5:
+
+  ┌─────────────────────┬────────────────────────────────────────────────┬─────────────┬───────────────────────────────────┐
+  │     Signal type     │                  Source data                   │   Signal    │        Forgery resistance         │
+  │                     │                                                │    group    │                                   │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ last_publish        │ time[latest_version] from registry             │ vitality    │ medium                            │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ maintainer_count    │ len(maintainers) from registry                 │ governance  │ medium                            │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ postinstall_present │ versions[latest].scripts.postinstall exists?   │ publication │ high (reads actual published      │
+  │                     │                                                │             │ tarball metadata)                 │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ trusted_publishing  │ dist.attestations field present?               │ publication │ very_high (cryptographic)         │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ weekly_downloads    │ /downloads/point/last-week/{pkg} from          │ criticality │ low (gameable but expensive)      │
+  │                     │ api.npmjs.org                                  │             │                                   │
+  ├─────────────────────┼────────────────────────────────────────────────┼─────────────┼───────────────────────────────────┤
+  │ dependent_count     │ /v1/search?text=... count, OR registry's       │ criticality │ low                               │
+  │                     │ bundled count                                  │             │                                   │
+  └─────────────────────┴────────────────────────────────────────────────┴─────────────┴───────────────────────────────────┘
+
+  Each signal uses the same MakeSignal / absence pattern as the github collector. Failures (network errors, missing fields)
+  become absence signals, not fatal collection errors — same shape as the existing github collector.
+
+  File: internal/signal/npm/collector_test.go — uses httptest server returning minimal hand-crafted registry JSON. Tests:
+  - Each signal type extracted correctly from a normal response
+  - Missing field → absence signal (e.g., no postinstall → absence:postinstall_present with reason "no postinstall hook")
+  - Network error → absence signal with sanitized reason
+  - Non-npm entity → empty result
+
+  File: internal/signal/npm/security_test.go — applies the lessons from this session's security tier:
+  - Token leak helper (none expected, npm is unauth, but the helper is the right shape if API tokens are added later)
+  - Error body NOT in returned error (the #93 pattern, applied to npm)
+  - Oversized registry response rejected (the #108 pattern)
+  - Malformed package names rejected before HTTP call (the #90 pattern, with @ allowed)
+  - Context cancellation propagation (the #87 pattern)
+
+  Phase 4 — analyze.go refactor for multi-collector dispatch
+
+  File: cmd/signatory/analyze.go
+
+  Current behavior (post-#101): takes a target string, runs NormalizeGitHubRepoInput to convert to a github canonical URI, calls
+   collectors. Only the github collector exists today, so the dispatch is implicit.
+
+  New behavior:
+  - Detect input shape:
+    - If NormalizeGitHubRepoInput succeeds → github canonical URI (existing path)
+    - Else if ValidateCanonicalURI succeeds → use as-is (npm canonical URIs come in this way: pkg:npm/express)
+    - Else → error with helpful message listing accepted forms
+  - For each registered collector that "applies" to the entity, call it
+  - Merge signal results
+
+  The "applies" question: does the github collector run on a pkg:npm/express entity? Probably yes, IF the npm provider has
+  resolved a github repo URL for it (via ResolveRepo). The flow becomes:
+  1. Parse target → canonical URI + entity type
+  2. If type is package and URI is pkg:npm/...: ask npm provider to resolve to a repo URL
+  3. Look up or create the entity, including the resolved repo URL
+  4. Run all applicable collectors on the entity
+
+  This is a real refactor — maybe 50-100 lines changed in analyze.go plus a few helper additions. The test coverage is via Phase
+   5's end-to-end test, plus existing analyze tests staying green.
+
+  Subtle decision: where does the repo resolution happen? Two options:
+  - (a) Inside analyze.go's flow — call the provider explicitly before running collectors
+  - (b) Inside the npm Collector itself — when npm collects, it ALSO resolves the repo and updates the entity
+
+  (a) is cleaner architecturally — providers and collectors have different jobs and shouldn't bleed into each other. (b) is more
+   cohesive but couples npm collector to entity mutation.
+
+  Recommendation: option (a). Add a step "resolve dependencies' source repos via the appropriate provider" between entity
+  creation and signal collection. The provider produces the repo URL; analyze.go updates the entity with it; collectors pick up
+  the URL when they need it (the github collector reads entity.URL).
+
+  Phase 5 — End-to-end coherence test
+
+  This is the test the user explicitly wanted — the proof that bundling Provider + Collector pays off.
+
+  File: cmd/signatory/functional_test.go — extend with TestFunctional_AnalyzeNpmPackage_FullFlow:
+
+  1. Set up two httptest servers:
+    - npm registry mock (responds with hand-crafted axios-like JSON)
+    - github API mock (responds with hand-crafted express-like JSON)
+  2. Construct Globals with both collectors registered + a temp DB
+  3. Run AnalyzeCmd{Target: "pkg:npm/express", Refresh: true}.Run(globals)
+  4. Verify:
+    - Entity exists with canonical_uri pkg:npm/express
+    - Entity URL matches what the npm registry said (e.g., https://github.com/expressjs/express)
+    - Signal table contains npm-source signals (postinstall_present, last_publish, etc.)
+    - Signal table contains github-source signals (commit_signing, last_commit, etc.)
+    - Audit log contains the analyze action
+
+  This test exercises everything — provider, collector, multi-collector dispatch, store, audit, signal merge — in one call. If
+  any layer is broken, the test fails. If it passes, the bundle is coherent.
+
+  Phase 6 — Dogfood validation (manual, before commit)
+
+  After all tests pass, before committing, run the actual binary against a real npm package with the live npm registry:
+
+  go run ./cmd/signatory analyze pkg:npm/express --refresh
+
+  This is the moment of truth. The mocked tests prove the wiring is right; the live run proves the registry response shape
+  assumptions are right. If the signal extraction is wrong (e.g., I assumed dist.attestations lives somewhere it doesn't), this
+  is where I find out.
+
+  If the dogfood reveals a shape mismatch, I fix the parser and re-run. Repeat until the live output looks reasonable (not
+  necessarily complete — some signals might land as absences, that's fine — but no panics, no parse errors, no obviously-wrong
+  values).
+
+  This is also where I'd test a scoped package: go run ./cmd/signatory analyze pkg:npm/@types/node --refresh. Validates the
+  validator broadening end-to-end.
+
+  Phase 7 — Commit, push, close roadmap items
+
+  Single commit with the title Implement npm ecosystem provider and signal collector (v0.1 must-do #3). References ROADMAP
+  must-do #3 explicitly. Doesn't auto-close anything via the GitHub keyword trap — the must-do item lives in design/ROADMAP.md,
+  not as an issue, so I update ROADMAP.md in the same commit to mark #3 as done.
+
+  Push, watch CI run, verify green.
+
+  Open questions that surfaced during planning
+
+  Three things I noticed while drafting the plan that I should call out:
+
+  1. The "applies" decision in Phase 4 — option (a) vs (b) for repo resolution. I recommended (a) above but it's a real
+  architectural choice. (a) puts the orchestration in analyze.go; (b) puts it inside the npm collector. (a) is cleaner
+  separation of concerns; (b) is more cohesive. My default: (a). Confirm or override?
+
+  2. Default registration of the npm provider/collector. Once Phase 3-4 land, defaultCollectors() in main.go should include the
+  npm collector by default (so signatory analyze pkg:npm/foo works without flags). Same for the provider — there should be a
+  default ecosystem registry. Confirming: yes, default-on for v0.1?
+
+  3. Scope clarity for "flat metadata only". The 6 signals I listed in the table all fit "flat metadata," BUT three of them
+  require separate API calls:
+  - weekly_downloads → api.npmjs.org/downloads/... (different host)
+  - dependent_count → registry.npmjs.org/-/v1/search?text=... (search endpoint)
+  - The main registry call covers the other 4
+
+  So a full collect on one npm package = 3 API calls. That's still "flat" in the sense of "no history comparison, no
+  cross-package logic," but it's not "one call." Just want you to know the operational cost ahead of time. Confirming: 3 calls
+  per package is fine for v0.1?
+
+  Estimated scope
+
+  Best guess (with high uncertainty until I'm in the code):
+  - ~600 lines new production code (provider + parse + client + collector + analyze refactor)
+  - ~800 lines new test code (parse_test, provider_test, client_test, collector_test, security_test, functional end-to-end)
+  - ~10 lines validator broadening
+  - ~3 small test fixture files in testdata/
+  - 1 commit, ~1500 lines total diff
+
+  This is a substantial single commit but it's the right unit per Q4. Reviewing it as one chunk lets reviewers see the full
+  Layer A + Layer B + analyze refactor + end-to-end test as a coherent whole.
+
+  Stop point recommendation
+
+  This is a lot of work for one sitting, and the session has been long. My recommendation: do Phase 0 (validator broadening) as
+  a quick win in the current session if you have energy, then sleep on Phases 1-7 and start fresh. Phase 0 is small enough to be
+   a clean standalone commit, removes a known blocker, and gives a sense of momentum.

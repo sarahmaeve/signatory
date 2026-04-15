@@ -54,7 +54,6 @@ These items are required before v0.1 ships. No exceptions.
 - Federated burn list subscription/sync protocol
 - GitLab signal collector (non-GitHub platform support)
 - CI pipeline integration (gate merges on posture policy)
-- Signed attestation for vetted-frozen tier
 - Dependency graph visualization
 - Cross-ecosystem correlation (detect coordinated campaigns)
 
@@ -106,6 +105,12 @@ user ID and other signals. The realm model would support this pattern.
 
 ## V0.3+ — Future
 
+- **Signed attestation for vetted-frozen tier** (deferred 2026-04-14
+  from V0.2 — heavyweight: key management, envelope schema, signing
+  tool integration, embedded analysis records. Until v0.3 ships,
+  vetted & frozen is internally-produced only — see
+  [open-questions.md](open-questions.md) §"Vetted & frozen scope in
+  early versions" and §"LLM-as-named-tool in attestation envelopes")
 - Additional ecosystem providers (Go modules, crates.io, Maven)
 - Schema evolution (leverage migration system)
 - Multiple signal source plugins
