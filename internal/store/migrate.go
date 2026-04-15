@@ -881,7 +881,9 @@ func backupDatabase(db *sql.DB, dbPath string, fromVersion int) error {
 		}
 	}
 
-	src, err := os.Open(dbPath)
+	// G304: dbPath is the caller-supplied DB path (same one that
+	// OpenSQLite opened); backing it up IS the function's job.
+	src, err := os.Open(dbPath) //nolint:gosec // G304: caller-supplied DB path; backing it up is this function's purpose
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // Nothing to back up for a new database.

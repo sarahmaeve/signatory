@@ -43,7 +43,12 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve config path %s: %w", path, err)
 	}
-	f, err := os.Open(absPath)
+	// path is the user's explicit --config argument (kong's type:"path"
+	// validates it is a real filesystem path); LoadConfig's purpose is
+	// exactly to open that path. The G304 threat model — traversal into
+	// an unintended file — doesn't apply when the caller IS asking us
+	// to open exactly this file.
+	f, err := os.Open(absPath) //nolint:gosec // G304: path is the user's explicit --config argument (kong's type:"path"); LoadConfig's purpose IS to open that file
 	if err != nil {
 		return nil, err
 	}

@@ -264,7 +264,17 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 // than whitelist so the process still inherits PATH, HOME, and
 // TLS-related vars that legitimate git operations need.
 var runGitClone = func(ctx context.Context, url, dest string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", url, dest)
+	// G204 rationale: CommandContext doesn't invoke a shell, so
+	// shell-metacharacter injection in url/dest is not a threat.
+	// url is validated by safeGitCloneURL (rejects ?, #, userinfo,
+	// NUL) and constrained upstream by looksLikeGitHubURL /
+	// ClassifyTarget. dest is validated by the containment check in
+	// applyClone (filepath.Rel against an EvalSymlinks-resolved
+	// parent) and by safeCloneRepoName on the derived repo name.
+	// Env inheritance is stripped to a vetted set by safeGitEnv so
+	// GIT_SSH_COMMAND / GIT_PROXY_COMMAND / GIT_CONFIG_* can't
+	// redirect the clone.
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", url, dest) //nolint:gosec // G204: url validated by safeGitCloneURL, dest validated by applyClone containment check, env sanitized by safeGitEnv
 	cmd.Env = safeGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -400,7 +410,9 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	// missing one is created with 0755, an existing FILE at the path
 	// errors (which we want — the IsDir check below also catches that
 	// case for race conditions).
-	if err := os.MkdirAll(absParent, 0o755); err != nil {
+	// 0o750: owner rwx, group rx, others none. Matches the init-time
+	// scaffold dir perms in internal/config/init.go.
+	if err := os.MkdirAll(absParent, 0o750); err != nil {
 		return "", "", fmt.Errorf("create clone-dir parent %q: %w", absParent, err)
 	}
 	info, err := os.Stat(absParent)
@@ -679,7 +691,12 @@ func writeHandoff(output string, force bool, rendered []byte) error {
 	if !force {
 		flag |= os.O_EXCL
 	}
-	f, err := os.OpenFile(output, flag, 0o644)
+	// G304 rationale: output is the user's explicit --output argument
+	// (kong's type:"path"); writing to that file is writeHandoff's
+	// purpose. G302 rationale: handoff templates are not secrets and
+	// users pipe them into agents / inspect them in editors running
+	// as different uids; 0o644 is the right default.
+	f, err := os.OpenFile(output, flag, 0o644) //nolint:gosec // G304,G302: caller-supplied path, user-facing content, not secrets
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("%s already exists; pass --force to overwrite", output)

@@ -127,8 +127,11 @@ func readTeamFile() (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// path is a fixed subpath of the caller's own HOME directory —
+	// no user input is mixed in. The G304 threat model (traversal
+	// via attacker-controlled path) doesn't apply.
 	path := filepath.Join(home, ".signatory", "team")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a fixed subpath of the current user's HOME; no user input is mixed in
 	if err != nil {
 		return "", false
 	}

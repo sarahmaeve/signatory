@@ -109,7 +109,10 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve dir %s: %w", dir, err)
 	}
-	if err := os.MkdirAll(absDir, 0o755); err != nil {
+	// 0o750: owner rwx, group rx, others none. Tighter than the
+	// conventional 0o755 because signatory project dirs are
+	// single-user by design; other-readable adds no user value.
+	if err := os.MkdirAll(absDir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", absDir, err)
 	}
 
@@ -127,7 +130,7 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 	// 2. Filestore output tree.
 	for _, sub := range []string{DefaultFilestoreDir, filepath.Join(DefaultFilestoreDir, "analysis")} {
 		path := filepath.Join(absDir, sub)
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(path, 0o750); err != nil {
 			return nil, fmt.Errorf("mkdir %s: %w", path, err)
 		}
 		result.DirectoriesCreated = append(result.DirectoriesCreated, path)
@@ -152,7 +155,12 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 	} else {
 		flag |= os.O_EXCL
 	}
-	f, err := os.OpenFile(cfgPath, flag, 0o644)
+	// 0o644: owner rw, group/other r. Intentional — the config is
+	// meant to be read by the user's editor, potentially by scripted
+	// tools running as a different uid in the same project, and has
+	// no sensitive content (it's a path-list scaffold). 0o600 would
+	// be inappropriately restrictive for user-facing scaffold output.
+	f, err := os.OpenFile(cfgPath, flag, 0o644) //nolint:gosec // G302: user-facing scaffold, no secrets; 0o600 would block scripted tools running as non-owner in the same project
 	switch {
 	case err == nil:
 		_, writeErr := f.Write([]byte(ConfigScaffold))
@@ -203,7 +211,8 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		}
 		target := filepath.Join(dst, rel)
 
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		// 0o750 mirrors the dir perms in InitProject above.
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
 		// Use O_EXCL when not in force mode so the existence check and
@@ -220,7 +229,9 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		} else {
 			flag |= os.O_EXCL
 		}
-		f, openErr := os.OpenFile(target, flag, 0o644)
+		// 0o644 rationale matches the config-scaffold write above: these
+		// are user-editable template files, not secrets.
+		f, openErr := os.OpenFile(target, flag, 0o644) //nolint:gosec // G302: user-facing template file, no secrets (same rationale as the config scaffold write above)
 		if openErr != nil {
 			if os.IsExist(openErr) {
 				// O_EXCL fired — file already present without --force.

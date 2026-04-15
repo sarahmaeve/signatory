@@ -603,11 +603,30 @@ func (s *SQLite) loadFindingSupersedes(ctx context.Context, findingID string) ([
 	return out, rows.Err()
 }
 
+// orderedTextTables is the allowlist of (table, parent_column) pairs
+// loadOrderedTexts is permitted to query. New callers extend this map;
+// anything not on the list is a loud panic rather than a silent SQL
+// injection. The value (parentID) is always bound via ?; only the
+// table and column identifiers are interpolated, and those must come
+// from this allowlist.
+var orderedTextTables = map[string]string{
+	"finding_prerequisites":     "finding_id",
+	"finding_remediation_hints": "finding_id",
+}
+
 // loadOrderedTexts handles finding_prerequisites and finding_remediation_hints,
 // which share schema (finding_id, seq, text). Generalizes to keep the
 // per-loader code small.
+//
+// Safety: identifiers are interpolated (SQL does not support binding
+// schema names) but the allowlist above guarantees only known-safe
+// values reach the query. The only user-influenced value — parentID —
+// is parameterized via ?.
 func (s *SQLite) loadOrderedTexts(ctx context.Context, table, parentCol, parentID string) ([]string, error) {
-	q := fmt.Sprintf(`SELECT text FROM %s WHERE %s = ? ORDER BY seq`, table, parentCol)
+	if want, ok := orderedTextTables[table]; !ok || want != parentCol {
+		return nil, fmt.Errorf("loadOrderedTexts: (table=%q, parentCol=%q) is not on the allowlist", table, parentCol)
+	}
+	q := fmt.Sprintf(`SELECT text FROM %s WHERE %s = ? ORDER BY seq`, table, parentCol) //nolint:gosec // G201: table and parentCol are allowlist-checked above; parentID is bound via ?
 	rows, err := s.db.QueryContext(ctx, q, parentID)
 	if err != nil {
 		return nil, fmt.Errorf("query %s: %w", table, err)

@@ -79,7 +79,12 @@ func OpenSQLite(path string) (*SQLite, error) {
 	// in which case the chmodFunc call below narrows any pre-existing
 	// looser permissions. The mode 0600 is preserved through default
 	// umask 0022 because the bits don't intersect.
-	if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600); err != nil {
+	//
+	// G304: path is OpenSQLite's explicit argument — the caller names
+	// the DB file to open. The function's purpose IS to open that
+	// file; traversal defense belongs at the caller boundary, where
+	// kong's type:"path" validation and store.ResolvePath normalize it.
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600); err != nil { //nolint:gosec // G304: caller-supplied DB path; function's purpose is to open it
 		return nil, fmt.Errorf("create database file: %w", err)
 	} else if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("close pre-created database file: %w", err)

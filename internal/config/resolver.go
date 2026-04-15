@@ -151,7 +151,10 @@ func (r *Resolver) ResolveFilestoreOutput(name string) (outputPath, chosenDir st
 			continue
 		}
 		outPath := filepath.Join(abs, name)
-		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil {
+		// 0o750 matches the init-time scaffold dir perms in
+		// internal/config/init.go; tighter than the conventional 0o755
+		// because signatory project dirs are single-user by design.
+		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o750); mkErr != nil {
 			lastErr = mkErr
 			continue
 		}
@@ -254,8 +257,15 @@ func validateRelName(name string) error {
 // file plus its absolute path (for diagnostic reporting). On any
 // error — ENOENT, EACCES, EISDIR, etc. — returns ok=false so the
 // caller tries the next candidate.
+//
+// The path argument is always filepath.Join(<search-dir>, <name>)
+// where <name> came through validateRelName (rejects "..",
+// absolute paths, URL-encoded dots, NUL, non-ASCII byte sequences).
+// Stat-on-fd after Open guards the open-then-replace-with-directory
+// TOCTOU. A path-traversal escape past these guards is not reachable
+// through any documented code path.
 func tryOpenFile(path string) (*os.File, string, bool) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path is filepath.Join(search-dir, validateRelName-checked name); traversal closed upstream (see validateRelName)
 	if err != nil {
 		return nil, "", false
 	}
@@ -281,7 +291,8 @@ func ensureWritableDir(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("abs %s: %w", dir, err)
 	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
+	// 0o750 matches the init-time scaffold dir perms.
+	if err := os.MkdirAll(abs, 0o750); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", abs, err)
 	}
 	probe, err := os.CreateTemp(abs, ".signatory-write-probe-*")
