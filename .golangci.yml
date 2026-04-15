@@ -1,0 +1,74 @@
+# golangci-lint config for signatory.
+#
+# We enable the standard default set (errcheck, govet, ineffassign,
+# staticcheck, unused) plus a focused selection of correctness +
+# security linters. We deliberately do NOT enable everything — the
+# noise floor of "all linters" overwhelms the signal we care about.
+# Each addition below has a specific reason listed inline.
+#
+# Exclusions are narrow and explicit. Disabling a linter for a path
+# requires a comment explaining why.
+
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: standard
+  enable:
+    # Security-focused: hardcoded credentials, weak crypto, command
+    # injection, file-permission hygiene. Overlaps with the
+    # cc-skills-golang:golang-security skill but runs in CI.
+    - gosec
+
+    # HTTP body close: a project that talks to GitHub's API needs
+    # discipline here. Catches resource leaks that the race detector
+    # doesn't surface.
+    - bodyclose
+
+    # Encourage errors.Is / errors.As over == comparison and string
+    # matching. The skill-equipped reviewer flagged three sites in
+    # internal/signal/github/client.go that this would catch.
+    - errorlint
+
+    # Context propagation: any function that takes a context.Context
+    # should pass it down. Surfaces accidental context.Background()
+    # at the wrong layer.
+    - contextcheck
+
+    # Error variables should be named ErrFoo (or err- prefix for
+    # unexported). Helps if/when we adopt the sentinel-error pattern
+    # from pendingfix.md.
+    - errname
+
+    # Loop variable capture (closures over loop vars). Go 1.22
+    # changed semantics, but our go.mod floor is older AND we still
+    # support both meanings being explicit.
+    - copyloopvar
+
+    # nil error returned alongside non-nil result, or vice versa —
+    # classic Go bug shape.
+    - nilerr
+
+    # HTTP requests without a context — almost always wrong for
+    # production code. We use context everywhere already; this
+    # locks it in.
+    - noctx
+
+  exclusions:
+    rules:
+      # Test files routinely defer x.Close() without checking the
+      # error — that pattern is idiomatic when the test will fail
+      # anyway via the read/write that comes next. errcheck on test
+      # files produces almost entirely noise.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+      # Test files intentionally do "insecure" things — set up
+      # cleartext fixtures, write predictable temp files, etc.
+      # gosec on tests is mostly false positives.
+      - path: _test\.go
+        linters:
+          - gosec
