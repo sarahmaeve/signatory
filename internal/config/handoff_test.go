@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,4 +158,112 @@ func TestHandoffSubstitutions_BareNameWithOverrideOK(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "thefuck", subs["TARGET_NAME"])
 	assert.Equal(t, "https://x", subs["TARGET_URL"])
+}
+
+// ── adversarial tests ──────────────────────────────────────────────────────
+
+// TestClassifyTarget_CaseInsensitiveScheme verifies that HTTPS:// and HTTP://
+// (uppercase) are recognised as URLs. RFC 3986 §3.1 says scheme is
+// case-insensitive; browsers and CLIs normalise case freely.
+func TestClassifyTarget_CaseInsensitiveScheme(t *testing.T) {
+	cases := []struct {
+		in   string
+		want TargetKind
+	}{
+		{"HTTPS://github.com/foo/bar", TargetURL},
+		{"HTTP://example.com/proj", TargetURL},
+		{"Https://example.com/proj", TargetURL},
+		{"hTTPs://example.com/proj", TargetURL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := ClassifyTarget(tc.in)
+			assert.Equal(t, tc.want, got, "mixed-case scheme %q must be classified as URL", tc.in)
+		})
+	}
+}
+
+// TestExpandTilde_UserTildeUnchanged verifies that ~user paths are NOT
+// expanded (Go's os.UserHomeDir doesn't support ~user syntax), and the
+// input is returned unchanged so the caller can detect the unexpanded form
+// rather than silently routing to the wrong path.
+func TestExpandTilde_UserTildeUnchanged(t *testing.T) {
+	got := expandTilde("~root/.ssh/id_rsa")
+	assert.Equal(t, "~root/.ssh/id_rsa", got,
+		"~user syntax must be returned unchanged (not expanded to current user's home)")
+	// Critically, it must NOT expand to the current user's home directory.
+	home, err := os.UserHomeDir()
+	if err == nil {
+		assert.False(t, strings.HasPrefix(got, home),
+			"~root must not expand to current user's home %q", home)
+	}
+}
+
+// TestRenderTemplate_ValueContainsPlaceholder verifies that substitution
+// values containing {KEY} syntax are NOT recursively expanded. The renderer
+// must be single-pass: a value of "{TARGET_URL}" does not trigger a second
+// substitution round.
+func TestRenderTemplate_ValueContainsPlaceholder(t *testing.T) {
+	raw := []byte("name={TARGET_NAME} url={TARGET_URL}")
+	subs := map[string]string{
+		"TARGET_NAME": "{TARGET_URL}", // value looks like another placeholder
+		"TARGET_URL":  "https://example.com",
+	}
+	rendered, unsub := RenderTemplate(raw, subs)
+	// TARGET_NAME should expand to the literal string "{TARGET_URL}", not
+	// to "https://example.com" (no recursive expansion).
+	assert.Equal(t, "name={TARGET_URL} url=https://example.com", string(rendered))
+	assert.Empty(t, unsub)
+}
+
+// TestRenderTemplate_ValueWithLiteralBraces verifies that a substitution
+// value containing literal curly braces is written through intact and does
+// not confuse the regex into a partial match.
+func TestRenderTemplate_ValueWithLiteralBraces(t *testing.T) {
+	raw := []byte("config={TARGET_NAME}")
+	subs := map[string]string{"TARGET_NAME": `{"key":"value"}`}
+	rendered, unsub := RenderTemplate(raw, subs)
+	assert.Equal(t, `config={"key":"value"}`, string(rendered))
+	assert.Empty(t, unsub)
+}
+
+// TestRenderTemplate_EmptyPlaceholder verifies that an empty brace pair {}
+// is not matched by the placeholder regex (which requires at least one
+// uppercase letter as the first character).
+func TestRenderTemplate_EmptyPlaceholder(t *testing.T) {
+	raw := []byte("empty={} normal={TARGET_NAME}")
+	subs := map[string]string{"TARGET_NAME": "foo"}
+	rendered, unsub := RenderTemplate(raw, subs)
+	assert.Equal(t, "empty={} normal=foo", string(rendered))
+	assert.Empty(t, unsub)
+}
+
+// TestRenderTemplate_VeryLongPlaceholderName verifies that a placeholder
+// with a 10 000-character name does not cause a denial-of-service (hang,
+// panic, or excessive allocation). The regex has no length bound, so we
+// test that it terminates promptly.
+func TestRenderTemplate_VeryLongPlaceholderName(t *testing.T) {
+	longKey := strings.Repeat("A", 10_000)
+	raw := []byte("{" + longKey + "}")
+	// Must complete without panic or timeout.
+	rendered, unsub := RenderTemplate(raw, nil)
+	assert.Equal(t, raw, rendered, "unrecognised long placeholder must be left untouched")
+	assert.Equal(t, []string{longKey}, unsub)
+}
+
+// TestHandoffSubstitutions_EmbeddedCredentialsInURL verifies that a URL
+// containing embedded credentials (user:pass@) is passed through to
+// TARGET_URL unchanged, but that the credentials do NOT leak into the
+// inferred TARGET_NAME.
+func TestHandoffSubstitutions_EmbeddedCredentialsInURL(t *testing.T) {
+	target := "https://user:s3cr3t@github.com/org/repo"
+	subs, err := HandoffSubstitutions(target, HandoffOverrides{})
+	require.NoError(t, err)
+	// TARGET_URL carries the full URL (credentials included — caller's
+	// responsibility to audit templates).
+	assert.Equal(t, target, subs["TARGET_URL"])
+	// TARGET_NAME must be derived from the path, NOT from the userinfo.
+	assert.Equal(t, "repo", subs["TARGET_NAME"])
+	assert.NotContains(t, subs["TARGET_NAME"], "user")
+	assert.NotContains(t, subs["TARGET_NAME"], "s3cr3t")
 }

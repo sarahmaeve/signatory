@@ -31,6 +31,13 @@ import (
 	"io"
 )
 
+// maxConfigBytes is the hard limit on how many bytes decodeTOML will
+// read from its source. A legitimate signatory config has two keys
+// each holding short path lists; even a deliberately padded config
+// would not approach 1 MB. The cap prevents a symlinked /dev/zero or
+// crafted multi-gigabyte file from OOM-ing the process.
+const maxConfigBytes = 1 << 20 // 1 MB
+
 // rawValue is the parser's output for a single `key = value`
 // assignment. Exactly one of String / Array is set; IsArray
 // distinguishes `x = "foo"` from `x = ["foo"]`. Line is the 1-based
@@ -51,14 +58,24 @@ type rawValue struct {
 // is rejected. Callers validate key names against their schema
 // separately (see Config.parseInto).
 func decodeTOML(r io.Reader) (map[string]rawValue, error) {
-	src, err := io.ReadAll(r)
+	// Enforce the size cap before reading anything: if the source has
+	// more than maxConfigBytes the LimitReader truncates and the
+	// (maxConfigBytes+1) sentinel read lets us detect the overflow.
+	limited := io.LimitReader(r, maxConfigBytes+1)
+	src, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, err
 	}
-	// Normalize CRLF to LF so the single-byte newline handling in the
-	// parser is correct on files authored on Windows. The input is
-	// expected to be small (kilobytes), so the extra copy is cheap.
+	if len(src) > maxConfigBytes {
+		return nil, fmt.Errorf("config input too large (limit %d bytes)", maxConfigBytes)
+	}
+	// Normalize line endings so the single-byte newline handling below
+	// is consistent regardless of the platform that authored the file.
+	// Order matters: replace CRLF first, then any surviving bare CR,
+	// so Windows (\r\n), Unix (\n), and old-Mac (\r) files all parse
+	// identically.
 	src = bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+	src = bytes.ReplaceAll(src, []byte("\r"), []byte("\n"))
 
 	p := &tomlParser{src: src, line: 1}
 	result := make(map[string]rawValue)
@@ -270,7 +287,12 @@ func (p *tomlParser) parseString() (string, error) {
 			default:
 				return "", fmt.Errorf("line %d: unknown escape '\\%c'", p.line, esc)
 			}
-		case c < 0x20 && c != '\t':
+		case (c < 0x20 && c != '\t') || c == 0x7F:
+			// Reject C0 control characters (except tab, which is
+			// legitimate in paths) and DEL (0x7F).  DEL is not a
+			// printable character and has no place in a filesystem path;
+			// silently accepting it would allow adversarial configs to
+			// smuggle non-printable bytes past casual inspection.
 			return "", fmt.Errorf("line %d: control character %#x inside string", p.line, c)
 		default:
 			buf.WriteByte(p.advance())

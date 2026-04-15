@@ -190,6 +190,18 @@ func (r *Resolver) base() string {
 // directory, contain absolute paths, or include NUL bytes. We accept
 // slash-separated subpaths ("handoffs/foo.md") so callers can address
 // the templates/ subtree naturally.
+//
+// Defence layers, in order:
+//  1. Empty / absolute paths → error.
+//  2. NUL bytes → error (some OS APIs truncate at NUL, enabling bypass).
+//  3. Percent signs → error (URL-encoded traversal: %2e%2e/foo).
+//  4. Backslashes → error (Windows-separator traversal on non-Windows hosts;
+//     also catches the ..\\foo form that filepath.ToSlash alone wouldn't
+//     convert on Linux where '\\' is not the separator).
+//  5. Non-ASCII characters → error (fullwidth dots U+FF0E and other
+//     normalisation-equivalent forms that look like '.' to a human but
+//     reach the OS as different bytes).
+//  6. Segment-by-segment ".." check on the forward-slash-split name.
 func validateRelName(name string) error {
 	if name == "" {
 		return fmt.Errorf("name must not be empty")
@@ -197,16 +209,37 @@ func validateRelName(name string) error {
 	if filepath.IsAbs(name) {
 		return fmt.Errorf("name %q must be relative, not absolute", name)
 	}
-	// Normalize to forward slashes so both "a/b" and "a\\b" (Windows
-	// callers) fail the same way when parts are ".."
+	if strings.ContainsRune(name, 0x00) {
+		return fmt.Errorf("name must not contain NUL")
+	}
+	// Reject percent signs: they are never valid in template/filestore
+	// names and are the canonical encoding used by URL-traversal payloads
+	// (%2e%2e/, %252e%252e/, etc.).
+	if strings.ContainsRune(name, '%') {
+		return fmt.Errorf("name %q must not contain percent-encoded sequences", name)
+	}
+	// Reject backslashes: on non-Windows systems, '\\' is a valid filename
+	// character and filepath.ToSlash does NOT convert it, so ..\\foo would
+	// pass the segment check below. On Windows, filepath.ToSlash converts
+	// backslashes before the segment check, so this guard is redundant but
+	// harmless.
+	if strings.ContainsRune(name, '\\') {
+		return fmt.Errorf("name %q must not contain backslashes", name)
+	}
+	// Reject non-ASCII characters (fullwidth full stop U+FF0E, overlong
+	// UTF-8 sequences, and similar normalisation tricks). Template and
+	// filestore names are always plain ASCII identifiers.
+	for i := 0; i < len(name); i++ {
+		if name[i] > 0x7E {
+			return fmt.Errorf("name %q must contain only printable ASCII characters", name)
+		}
+	}
+	// Normalize to forward slashes and check each segment for "..".
 	normalized := filepath.ToSlash(name)
 	for _, part := range strings.Split(normalized, "/") {
 		if part == ".." {
 			return fmt.Errorf("name %q must not contain %q", name, "..")
 		}
-	}
-	if strings.ContainsRune(name, 0x00) {
-		return fmt.Errorf("name must not contain NUL")
 	}
 	return nil
 }

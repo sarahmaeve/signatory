@@ -73,12 +73,13 @@ const (
 	TargetUnknown
 )
 
-// urlSchemePattern matches the leading protocol of a URL-form target.
+// urlSchemePattern matches the leading protocol of a URL-form target,
+// case-insensitively (RFC 3986 §3.1: scheme is case-insensitive).
 // Limited to http/https because that's what the handoff templates
 // expect; git:// or ssh:// targets are unusual for signatory's
 // fresh-agent handoffs and are rejected until a real use case shows
 // up.
-var urlSchemePattern = regexp.MustCompile(`^https?://`)
+var urlSchemePattern = regexp.MustCompile(`(?i)^https?://`)
 
 // ClassifyTarget buckets a raw target argument so the handoff
 // renderer can decide which placeholder slot to populate.

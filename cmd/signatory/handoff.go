@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -270,15 +271,27 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 		return "", "", fmt.Errorf("--clone-dir requires a URL target; %q is not a URL", cmd.Target)
 	}
 
-	repoName := config.InferNameFromURL(cmd.Target)
-	if repoName == "" {
-		return "", "", fmt.Errorf("cannot derive clone directory name from target %q", cmd.Target)
+	// Validate the clone URL before doing anything else. This rejects
+	// query strings (?upload-pack=evil), fragments, embedded credentials,
+	// and null bytes — all forms that can be misinterpreted by git.
+	if err := safeGitCloneURL(cmd.Target); err != nil {
+		return "", "", fmt.Errorf("unsafe clone URL: %w", err)
 	}
 
-	// Resolve the parent dir to an absolute path before the containment
-	// check so that symlinks or relative paths in --clone-dir don't
-	// fool the prefix comparison.
-	parent, err := filepath.Abs(cmd.CloneDir)
+	repoName := config.InferNameFromURL(cmd.Target)
+	// Validate the inferred name before using it as a directory component.
+	// InferNameFromURL uses url.Parse which percent-decodes the path, so a
+	// URL with %00 in the repo segment would produce a null byte in the name.
+	if err := safeCloneRepoName(repoName); err != nil {
+		return "", "", fmt.Errorf("cannot derive safe clone directory name from target %q: %w", cmd.Target, err)
+	}
+
+	// Resolve the parent dir to an absolute, symlink-free path before the
+	// containment check. filepath.Abs handles relative paths but does NOT
+	// resolve symlinks; filepath.EvalSymlinks does. Using the resolved path
+	// prevents an attacker-controlled symlink at clone-dir from redirecting
+	// the parent to an arbitrary location.
+	absParent, err := filepath.Abs(cmd.CloneDir)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve clone-dir %q: %w", cmd.CloneDir, err)
 	}
@@ -286,27 +299,40 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	// Writability check: stat the parent and verify it is an existing,
 	// writable directory. We probe with a temp file rather than relying
 	// on the mode bits because ACLs and mount options can override them.
-	info, err := os.Stat(parent)
+	info, err := os.Stat(absParent)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", "", fmt.Errorf("clone-dir parent %q does not exist", parent)
+			return "", "", fmt.Errorf("clone-dir parent %q does not exist", absParent)
 		}
-		return "", "", fmt.Errorf("stat clone-dir parent %q: %w", parent, err)
+		return "", "", fmt.Errorf("stat clone-dir parent %q: %w", absParent, err)
 	}
 	if !info.IsDir() {
-		return "", "", fmt.Errorf("clone-dir %q is not a directory", parent)
+		return "", "", fmt.Errorf("clone-dir %q is not a directory", absParent)
 	}
 	// Probe writability with a temp file rather than inspecting mode
 	// bits — ACLs and mount options can make a 0755 dir unwritable.
-	probe, err := os.CreateTemp(parent, ".signatory-clone-probe-*")
+	probe, err := os.CreateTemp(absParent, ".signatory-clone-probe-*")
 	if err != nil {
-		return "", "", fmt.Errorf("clone-dir %q is not writable: %w", parent, err)
+		return "", "", fmt.Errorf("clone-dir %q is not writable: %w", absParent, err)
 	}
 	probe.Close()
 	os.Remove(probe.Name())
 
+	// Resolve all symlinks in the parent so the containment check below
+	// compares real filesystem paths. Without this, a symlink at
+	// --clone-dir itself could redirect the parent to an arbitrary path
+	// and cause the containment check to compare unrelated absolute paths.
+	parent, err := filepath.EvalSymlinks(absParent)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve symlinks in clone-dir %q: %w", absParent, err)
+	}
+
 	// Build dest and verify it is strictly under parent (belt-and-suspenders
-	// against any edge case where InferNameFromURL returns a path-like string).
+	// against any edge case where the inferred repo name contains unexpected
+	// path components). We do NOT call EvalSymlinks on dest here — it likely
+	// doesn't exist yet. The name-validation above (safeCloneRepoName) already
+	// rejected names containing path separators, "..", or null bytes; the Rel
+	// check below catches any remaining escapes.
 	dest := filepath.Join(parent, repoName)
 	destClean := filepath.Clean(dest)
 	parentClean := filepath.Clean(parent)
@@ -365,6 +391,73 @@ func looksLikeGitHubURL(target string) bool {
 	lower := strings.ToLower(target)
 	return strings.HasPrefix(lower, "https://github.com/") ||
 		strings.HasPrefix(lower, "http://github.com/")
+}
+
+// safeGitCloneURL validates that raw is safe to pass as a `git clone` URL
+// argument. It parses the URL and rejects any form that could be
+// misinterpreted by git or that carries unexpected data:
+//
+//   - Query strings (?upload-pack=evil) — git's URL parser may interpret
+//     query-encoded protocol options differently from the scheme, leading
+//     to unexpected behavior or remote code execution via git helpers.
+//   - URL fragments (#...) — meaningless to git and a sign of injection.
+//   - Userinfo (@user:pass) — credentials should never be embedded in
+//     URLs passed to git; they belong in netrc or the credential store.
+//   - Null bytes in any component — always a path-injection signal.
+//
+// safeGitCloneURL is a belt-and-suspenders check: it does NOT replace
+// looksLikeGitHubURL or the ClassifyTarget guard; it fires on the same
+// URL that will reach `git clone` as its argv[1].
+func safeGitCloneURL(raw string) error {
+	if strings.ContainsRune(raw, 0) {
+		return fmt.Errorf("clone URL contains a null byte")
+	}
+	// Check for query string and fragment on the raw string before parsing.
+	// url.Parse sets RawQuery="" for a bare "?" suffix and Fragment="" for a
+	// bare "#" suffix, so checking parsed fields misses those forms.
+	// Checking the raw string catches both.
+	if strings.ContainsRune(raw, '?') {
+		return fmt.Errorf("clone URL must not contain a query string; pass a bare repo URL")
+	}
+	if strings.ContainsRune(raw, '#') {
+		return fmt.Errorf("clone URL must not contain a fragment (#...); pass a bare repo URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("clone URL is not parseable: %w", err)
+	}
+	if u.User != nil {
+		return fmt.Errorf("clone URL must not embed credentials; use git's credential store instead")
+	}
+	return nil
+}
+
+// safeCloneRepoName validates that name — derived from the URL by
+// InferNameFromURL — is safe to use as a single directory component
+// under the clone parent. It rejects:
+//
+//   - Empty strings (InferNameFromURL couldn't derive a name).
+//   - Names containing path separators (would escape the parent dir).
+//   - Names that are "." or ".." (classic traversal).
+//   - Names containing null bytes (path-injection on most OSes).
+//
+// This is a second line of defense behind InferNameFromURL, which uses
+// url.Parse and takes the last path segment. InferNameFromURL can still
+// produce unsafe names from percent-encoded bytes in crafted URLs.
+func safeCloneRepoName(name string) error {
+	if name == "" {
+		return fmt.Errorf("inferred repo name is empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("inferred repo name %q is a reserved path component", name)
+	}
+	if strings.ContainsRune(name, 0) {
+		return fmt.Errorf("inferred repo name %q contains a null byte", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("inferred repo name %q contains a path separator", name)
+	}
+	return nil
 }
 
 // languageToFlavor maps GitHub's primary-language string to the

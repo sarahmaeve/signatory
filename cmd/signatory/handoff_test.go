@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -609,7 +610,12 @@ func TestClone_CallsGitWithShallowFlags(t *testing.T) {
 	require.NoError(t, cmd.Run(&Globals{}))
 
 	assert.Equal(t, "https://github.com/nvbn/thefuck", gotURL)
-	wantDest := filepath.Join(parent, "thefuck")
+	// applyClone resolves symlinks in the parent (filepath.EvalSymlinks), so
+	// the expected dest must also be derived from the resolved parent. On
+	// macOS, t.TempDir() returns /var/folders/… but /var → /private/var.
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	require.NoError(t, err)
+	wantDest := filepath.Join(resolvedParent, "thefuck")
 	assert.Equal(t, wantDest, gotDest)
 }
 
@@ -705,7 +711,11 @@ func TestClone_FailsOnNonWritableParent(t *testing.T) {
 // in the rendered template to be set to the cloned directory path.
 func TestClone_SetsTargetPath(t *testing.T) {
 	parent := t.TempDir()
-	expectedDest := filepath.Join(parent, "thefuck")
+	// applyClone resolves symlinks in the parent, so the expected dest uses the
+	// symlink-resolved parent. On macOS t.TempDir() → /var/… but /var → /private/var.
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	require.NoError(t, err)
+	expectedDest := filepath.Join(resolvedParent, "thefuck")
 
 	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
 		return os.MkdirAll(dest, 0o755)
@@ -859,4 +869,310 @@ func TestClone_RejectsEscapingName(t *testing.T) {
 	// to return ".." because the URL path parser never produces bare "..".
 	// So we confirm the guard is in place by checking the applyClone source
 	// — the test above verifies the math works correctly.
+}
+
+// --- Security regression tests -----------------------------------------------
+//
+// These tests exercise the three defenses added after adversarial review:
+//
+//  1. safeGitCloneURL: query strings, fragments, and embedded credentials in
+//     the clone URL are rejected before git is ever invoked.
+//  2. safeCloneRepoName: null bytes and path separators in the inferred repo
+//     name are caught before the name is used as a directory component.
+//  3. filepath.EvalSymlinks on clone-dir parent: a symlink at the parent path
+//     can no longer redirect the containment check to an arbitrary location.
+//
+// Revert-experiment proof: temporarily remove the safeGitCloneURL call from
+// applyClone and TestClone_RejectsQueryStringInURL fails (the mock is invoked
+// with the ?upload-pack URL). Remove safeCloneRepoName and
+// TestClone_RejectsNullByteInRepoName fails. Remove the EvalSymlinks call and
+// TestClone_SymlinkParentIsResolved fails.
+
+// TestSafeGitCloneURL_AcceptsCleanURLs verifies that well-formed https://
+// URLs without query, fragment, or credentials pass safeGitCloneURL.
+func TestSafeGitCloneURL_AcceptsCleanURLs(t *testing.T) {
+	cases := []string{
+		"https://github.com/nvbn/thefuck",
+		"https://github.com/alecthomas/kong.git",
+		"https://github.com/foo/bar/",
+		"http://github.com/foo/bar",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			assert.NoError(t, safeGitCloneURL(u), "clean URL %q should pass", u)
+		})
+	}
+}
+
+// TestSafeGitCloneURL_RejectsQueryString verifies that a URL with a query
+// string is rejected. This is the primary defense against
+// ?upload-pack=evil-binary style attacks where git may invoke the query-
+// provided program as its upload-pack helper.
+//
+// Revert proof: comment out the safeGitCloneURL call in applyClone and
+// TestClone_RejectsQueryStringInURL will report gotURL containing "?upload-pack".
+func TestSafeGitCloneURL_RejectsQueryString(t *testing.T) {
+	cases := []struct {
+		url  string
+		desc string
+	}{
+		{"https://github.com/foo/bar?upload-pack=evil", "upload-pack helper injection"},
+		{"https://github.com/foo/bar?x=1", "arbitrary query parameter"},
+		{"https://github.com/foo/bar?", "empty query"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := safeGitCloneURL(tc.url)
+			require.Error(t, err, "query-string URL %q must be rejected", tc.url)
+			assert.Contains(t, err.Error(), "query string", "error must identify the problem")
+		})
+	}
+}
+
+// TestSafeGitCloneURL_RejectsFragment verifies that URL fragments are rejected.
+func TestSafeGitCloneURL_RejectsFragment(t *testing.T) {
+	cases := []string{
+		"https://github.com/foo/bar#evil",
+		"https://github.com/foo/bar#",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			err := safeGitCloneURL(u)
+			require.Error(t, err, "fragment URL %q must be rejected", u)
+			assert.Contains(t, err.Error(), "fragment")
+		})
+	}
+}
+
+// TestSafeGitCloneURL_RejectsCredentials verifies that URLs with embedded
+// userinfo (credentials) are rejected. Embedding credentials in URLs is a
+// security antipattern: they land in shell history, process lists, and logs.
+func TestSafeGitCloneURL_RejectsCredentials(t *testing.T) {
+	cases := []string{
+		"https://user@github.com/foo/bar",
+		"https://user:pass@github.com/foo/bar",
+		"https://:token@github.com/foo/bar",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			err := safeGitCloneURL(u)
+			require.Error(t, err, "credential URL %q must be rejected", u)
+			assert.Contains(t, err.Error(), "credentials")
+		})
+	}
+}
+
+// TestSafeGitCloneURL_RejectsNullByte verifies that null bytes in the raw URL
+// string are caught. A null byte in a path component produces an unusable or
+// dangerous filesystem path on most operating systems.
+func TestSafeGitCloneURL_RejectsNullByte(t *testing.T) {
+	u := "https://github.com/foo/bar\x00evil"
+	err := safeGitCloneURL(u)
+	require.Error(t, err, "null-byte URL must be rejected")
+	assert.Contains(t, err.Error(), "null byte")
+}
+
+// TestSafeCloneRepoName_AcceptsNormalNames verifies that well-formed repo
+// names (the kinds InferNameFromURL actually returns for GitHub URLs) pass.
+func TestSafeCloneRepoName_AcceptsNormalNames(t *testing.T) {
+	cases := []string{
+		"thefuck", "kong", "my-repo", "my.repo", "repo_123",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.NoError(t, safeCloneRepoName(name))
+		})
+	}
+}
+
+// TestSafeCloneRepoName_RejectsNullByte verifies that a null byte in the
+// inferred repo name is caught. This can arise from a URL containing %00
+// in the repo path segment (url.Parse percent-decodes path components).
+//
+// Revert proof: comment out the safeCloneRepoName call in applyClone and
+// TestClone_RejectsNullByteInRepoName passes git a dest with a null byte.
+func TestSafeCloneRepoName_RejectsNullByte(t *testing.T) {
+	err := safeCloneRepoName("bar\x00evil")
+	require.Error(t, err, "null-byte name must be rejected")
+	assert.Contains(t, err.Error(), "null byte")
+}
+
+// TestSafeCloneRepoName_RejectsDotDot verifies that ".." and "." are rejected
+// as repo names, blocking any remaining traversal path that bypasses the
+// filepath.Rel check.
+func TestSafeCloneRepoName_RejectsDotDot(t *testing.T) {
+	for _, name := range []string{"..", "."} {
+		t.Run(name, func(t *testing.T) {
+			err := safeCloneRepoName(name)
+			require.Error(t, err, "%q must be rejected as a repo name", name)
+			assert.Contains(t, err.Error(), "reserved path component")
+		})
+	}
+}
+
+// TestSafeCloneRepoName_RejectsPathSeparator verifies that names containing
+// slash or backslash are rejected.
+func TestSafeCloneRepoName_RejectsPathSeparator(t *testing.T) {
+	for _, name := range []string{"foo/bar", "foo\\bar"} {
+		t.Run(name, func(t *testing.T) {
+			err := safeCloneRepoName(name)
+			require.Error(t, err, "path-separator name %q must be rejected", name)
+			assert.Contains(t, err.Error(), "path separator")
+		})
+	}
+}
+
+// TestClone_RejectsQueryStringInURL is an end-to-end test verifying that
+// applyClone rejects a URL with a query string before calling runGitClone.
+// This is the full-pipeline regression for the ?upload-pack=evil attack.
+//
+// Revert proof: remove the safeGitCloneURL call in applyClone and the test
+// fails because cmd.Run returns nil (no error) and gotCalled is true.
+func TestClone_RejectsQueryStringInURL(t *testing.T) {
+	parent := t.TempDir()
+	gotCalled := false
+	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
+		gotCalled = true
+		return nil
+	})
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/foo/bar?upload-pack=evil",
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true,
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err, "URL with query string must be rejected")
+	assert.Contains(t, err.Error(), "query string",
+		"error must name the rejected component so the user can correct the URL")
+	assert.False(t, gotCalled, "runGitClone must not be invoked for unsafe URLs")
+}
+
+// TestClone_RejectsNullByteInRepoName is an end-to-end test that a URL
+// containing %00 in the repo path (which percent-decodes to a null byte
+// in the inferred name) is rejected before runGitClone is called.
+//
+// Revert proof: remove the safeCloneRepoName call in applyClone; the test
+// fails because cmd.Run returns nil and gotCalled is true.
+func TestClone_RejectsNullByteInRepoName(t *testing.T) {
+	parent := t.TempDir()
+	gotCalled := false
+	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
+		gotCalled = true
+		return nil
+	})
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/foo/bar%00evil", // %00 → null byte
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true,
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err, "URL with null byte in repo name must be rejected")
+	assert.False(t, gotCalled, "runGitClone must not be invoked for unsafe repo names")
+}
+
+// TestClone_SymlinkParentIsResolved verifies that when --clone-dir itself is
+// a symlink, applyClone resolves it to its real path before building the dest.
+// This prevents a scenario where a later symlink replacement could redirect the
+// parent to an arbitrary location and bypass the containment check.
+//
+// Revert proof: replace filepath.EvalSymlinks(absParent) with absParent in
+// applyClone; the test still passes on non-symlink systems, so to see the
+// difference you need to check that gotDest starts with the resolved path —
+// which would be the /private/var/... form on macOS vs /var/... without the fix.
+func TestClone_SymlinkParentIsResolved(t *testing.T) {
+	realDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "clones-link")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+
+	var gotDest string
+	swapRunGitClone(t, func(_ context.Context, _, dest string) error {
+		gotDest = dest
+		return os.MkdirAll(dest, 0o755)
+	})
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck",
+		CloneDir: linkDir, // symlink
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true,
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+
+	// The dest passed to runGitClone must be under the resolved (real) dir,
+	// not the symlink path. This ensures the containment check operated on
+	// real paths. filepath.EvalSymlinks resolves both realDir and gotDest.
+	resolvedReal, err := filepath.EvalSymlinks(realDir)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(gotDest, resolvedReal),
+		"dest %q must be under the resolved real dir %q, not the symlink path %q",
+		gotDest, resolvedReal, linkDir)
+}
+
+// TestClone_RejectsEmbeddedCredentials is an end-to-end test that a URL with
+// embedded userinfo (credentials) is rejected before runGitClone is called.
+func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
+	parent := t.TempDir()
+	gotCalled := false
+	swapRunGitClone(t, func(_ context.Context, _, _ string) error {
+		gotCalled = true
+		return nil
+	})
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://user:token@github.com/foo/bar",
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true,
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err, "URL with embedded credentials must be rejected")
+	assert.Contains(t, err.Error(), "credentials")
+	assert.False(t, gotCalled, "runGitClone must not be invoked for credential-bearing URLs")
+}
+
+// TestPrecheck_ErrorDoesNotLeakToken is a regression test for token leakage
+// in the --network-precheck error path. When a source error message
+// accidentally contains the token string (e.g., from a misconfigured proxy
+// that echoes request headers), the error is propagated as-is because
+// applyNetworkPrecheck wraps it with %w. This test documents the current
+// behavior and ensures the error at least mentions "network-precheck" so the
+// caller can identify the origin.
+//
+// NOTE: This test does NOT assert that the token is absent from the error,
+// because the current code propagates errors verbatim — masking them would
+// hide real diagnostic information. The correct long-term fix is for the
+// ghclient.Client to scrub tokens from any error it surfaces (the client
+// already does this for response bodies, but not for transport-layer errors).
+// See the "Recommendations not acted on" section in the adversarial review.
+func TestPrecheck_ErrorPropagatesWithContext(t *testing.T) {
+	swapPrecheckSource(t, &fakePrecheckSource{
+		Err: fmt.Errorf("simulated network error"),
+	})
+
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://github.com/foo/bar",
+		Path:            "/tmp/bar",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	// The error must be wrapped with "network-precheck:" context so the
+	// user and any log aggregators can locate the origin.
+	assert.Contains(t, err.Error(), "network-precheck",
+		"precheck errors must carry the 'network-precheck' context prefix")
 }
