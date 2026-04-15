@@ -26,7 +26,7 @@ type ShowFindingsTool struct {
 func (t *ShowFindingsTool) Name() string { return "signatory_show_findings" }
 
 func (t *ShowFindingsTool) Description() string {
-	return "Query findings across ingested analyst outputs with optional filtering."
+	return "USE THIS when the user asks about specific concerns or findings across analyses — 'what findings mention supply-chain risk?', 'show medium-severity findings for X', 'are there design-intent positives recorded?'. Searches individual Finding records across every ingested analysis, with filters for target, severity, category, signal_type, and design-intent. Returns per-finding records; use signatory_show_analyses when the user wants analysis-level summaries, not individual findings."
 }
 
 func (t *ShowFindingsTool) InputSchema() json.RawMessage {

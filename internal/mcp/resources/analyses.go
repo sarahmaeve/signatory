@@ -33,7 +33,7 @@ func (r *AnalysesResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *AnalysesResource) Description() string {
-	return "Ingested analyst output index. Optional ?target=<uri> filters by entity."
+	return "READ THIS when the user wants an index of analyses for a specific target, via ?target=<uri>. Same underlying data as the signatory_show_analyses tool, but as a resource — prefer the tool for rich filtering; prefer this resource when the caller just wants structured JSON for one target or the whole index."
 }
 
 // analysesData is the response shape when no target filter is applied.

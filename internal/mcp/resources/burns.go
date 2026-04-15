@@ -23,7 +23,7 @@ func (r *BurnsResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *BurnsResource) Description() string {
-	return "Active burn records with source (local vs. inherited). Array of burn objects."
+	return "READ THIS when the user asks 'what has signatory burned?', 'is anything marked compromised?', or before recommending a dependency to check it isn't on the burn list. Returns every active burn record with reason, source (local vs. inherited), and timestamp. A burn is a hard-reject marker independent of posture."
 }
 
 // Read calls store.ListBurns and returns the full array. An empty

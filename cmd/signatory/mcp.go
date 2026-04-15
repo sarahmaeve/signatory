@@ -60,6 +60,11 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 	srv := mcp.NewServer(version)
 
 	// Register read-only resources (Phase 1).
+	// HelpResource carries the orientation guide (question→tool map,
+	// concept glossary, failure-mode notes). It's companion to the
+	// initialize response's Instructions field — the latter is pushed
+	// on every handshake, this is pulled on demand for deeper context.
+	srv.RegisterResource(&resources.HelpResource{})
 	srv.RegisterResource(&resources.ConfigResource{
 		DBPath:  dbPath,
 		Version: version,

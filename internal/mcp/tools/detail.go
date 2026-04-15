@@ -24,7 +24,7 @@ type DetailTool struct {
 func (t *DetailTool) Name() string { return "signatory_detail" }
 
 func (t *DetailTool) Description() string {
-	return "Return all signals for one signal group of an entity."
+	return "USE THIS when the user asks about one specific *dimension* of an entity's trust (e.g. 'what's the vitality of X?', 'show me the hygiene signals for Y', 'how does Z's governance look?'). Scopes to one signal group at a time: vitality, governance, publication, hygiene, posture, or criticality. Use signatory_signals instead when the user wants every group at once."
 }
 
 func (t *DetailTool) InputSchema() json.RawMessage {

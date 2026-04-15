@@ -26,7 +26,7 @@ func (r *UnexaminedResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *UnexaminedResource) Description() string {
-	return "Dependencies without a posture decision, sorted by most-recently observed first."
+	return "READ THIS when the user asks 'what haven't I vetted yet?', 'which deps still need a posture?', or 'what's the unassessed surface?'. Returns dependencies observed in a manifest that have no recorded posture, sorted most-recently-observed first. Empty until a manifest has been ingested — an empty list means no manifest-level surveying has happened, not that everything is assessed."
 }
 
 // unexaminedEntity is the per-row shape in the response array.

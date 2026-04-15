@@ -44,7 +44,7 @@ func (r *ConfigResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *ConfigResource) Description() string {
-	return "Effective MCP server configuration (no secrets). Agents use this to discover transport and capability flags."
+	return "READ THIS on session start (or when the user asks about signatory's setup) to confirm server version, transport, enabled capabilities, and the DB path. Contains no secrets. For orientation on what signatory does, read signatory://help instead."
 }
 
 // configData is the JSON shape returned by signatory://config.

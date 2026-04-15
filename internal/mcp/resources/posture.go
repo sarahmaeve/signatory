@@ -31,7 +31,7 @@ func (r *PostureResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *PostureResource) Description() string {
-	return "Aggregated posture overview: total count, breakdown by tier, oldest and newest entries."
+	return "READ THIS for a high-level posture overview ('how many deps have I assessed?', 'what's my posture distribution?'). Returns total count, breakdown by tier (trusted-for-now, vetted-frozen, rejected, etc.), and oldest/newest entries. Prefer this over signatory_show_analyses when the user wants counts and distribution, not per-analysis detail."
 }
 
 // postureData is the JSON shape returned by signatory://posture.

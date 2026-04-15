@@ -24,7 +24,7 @@ type SignalsTool struct {
 func (t *SignalsTool) Name() string { return "signatory_signals" }
 
 func (t *SignalsTool) Description() string {
-	return "Return the full raw Layer 1 signal records for a target entity."
+	return "USE THIS when the user wants the raw, unfiltered trust-signal evidence for a target — usually to see what's behind an assessment, to spot-check data, or to compare signals across targets. Returns every signal record for one entity. Prefer signatory_analyze for a summarised profile; this tool is the 'show me everything' option."
 }
 
 func (t *SignalsTool) InputSchema() json.RawMessage {

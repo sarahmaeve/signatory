@@ -48,6 +48,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -112,6 +113,7 @@ func run() error {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"serverInfo"`
+		Instructions string `json:"instructions"`
 	}
 	if err := json.Unmarshal(initResult, &initDecoded); err != nil {
 		rep.fail("initialize: decode result: " + err.Error())
@@ -127,6 +129,17 @@ func run() error {
 	// leftover default.
 	rep.assertEqual("initialize: serverInfo.version matches ldflags",
 		targetVersion, initDecoded.ServerInfo.Version)
+	// Instructions is the server-level routing nudge that rides in
+	// every handshake's response. Non-empty is the dogfood-driven
+	// invariant: an empty instructions field was the root cause of
+	// the first-session "why did Claude Code reach for grep?" finding.
+	rep.assertTrue("initialize: instructions is non-empty",
+		initDecoded.Instructions != "")
+	// Sanity anchor — the text should mention the project name and
+	// point at the help resource. If this fails the serverInstructions
+	// constant has drifted into something unrecognisable.
+	rep.assertTrue("initialize: instructions mentions signatory",
+		containsAll(initDecoded.Instructions, "signatory", "signatory://help"))
 
 	// 2. notifications/initialized — no response expected. Sending it
 	//    now advances the server from stateInitialized to
@@ -187,6 +200,7 @@ func run() error {
 		resSet[r.URI] = true
 	}
 	for _, want := range []string{
+		"signatory://help",
 		"signatory://config",
 		"signatory://signal-types",
 		"signatory://burns",
@@ -197,11 +211,34 @@ func run() error {
 		rep.assertTrue("resources/list includes "+want, resSet[want])
 	}
 
-	// 5. resources/read signatory://config — the refactor-critical
+	// 5. resources/read signatory://help — orientation guide must be
+	//    present and contain recognisable anchors. This is the deeper
+	//    companion to the initialize-time Instructions; without it,
+	//    an LLM that wants more context than instructions gave has
+	//    nowhere to go. Empty or missing = dogfood regression.
+	helpEnvelope, err := session.readResource(4, "signatory://help")
+	if err != nil {
+		rep.fail("help read: " + err.Error())
+		return rep.finish(session)
+	}
+	rep.assertEqual("help: envelope status", "ok", helpEnvelope.Status)
+	var helpData struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(helpEnvelope.Data, &helpData); err != nil {
+		rep.fail("help: decode data: " + err.Error())
+		return rep.finish(session)
+	}
+	rep.assertTrue("help: content is non-empty", helpData.Content != "")
+	rep.assertTrue("help: content mentions analyze/show_findings/posture",
+		containsAll(helpData.Content,
+			"signatory_analyze", "signatory_show_findings", "signatory://posture"))
+
+	// 6. resources/read signatory://config — the refactor-critical
 	//    assertion: the dispatch layer stamped metadata.server_version
 	//    AND the ConfigResource's injected Version field surfaces as
 	//    data.mcp_version.
-	cfgEnvelope, err := session.readResource(4, "signatory://config")
+	cfgEnvelope, err := session.readResource(5, "signatory://config")
 	if err != nil {
 		rep.fail("config read: " + err.Error())
 		return rep.finish(session)
@@ -222,11 +259,11 @@ func run() error {
 		targetVersion, cfgData.MCPVersion)
 	rep.assertEqual("config: data.transport", "stdio", cfgData.Transport)
 
-	// 6. resources/read signatory://posture — empty-DB handler path.
+	// 7. resources/read signatory://posture — empty-DB handler path.
 	//    Proves the rows cursor cleanup and empty-store envelope shape
 	//    are still intact, and that dispatch stamps the version on a
 	//    handler that touches the real database.
-	posEnvelope, err := session.readResource(5, "signatory://posture")
+	posEnvelope, err := session.readResource(6, "signatory://posture")
 	if err != nil {
 		rep.fail("posture read: " + err.Error())
 		return rep.finish(session)
@@ -540,4 +577,18 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.buf)
+}
+
+// containsAll reports whether s contains every substring in needles.
+// Used by assertions that check multiple required anchors in a text
+// blob (initialize.instructions, help content) without bloating the
+// assertion list — one failure logs one line, which is enough to
+// prompt the developer to look at the text and see what's missing.
+func containsAll(s string, needles ...string) bool {
+	for _, n := range needles {
+		if !strings.Contains(s, n) {
+			return false
+		}
+	}
+	return true
 }

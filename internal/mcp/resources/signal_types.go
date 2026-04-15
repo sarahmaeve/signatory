@@ -29,7 +29,7 @@ func (r *SignalTypesResource) URIPattern() string {
 
 // Description summarises the resource for resources/list.
 func (r *SignalTypesResource) Description() string {
-	return "Signal-type registry: groups, forgery-resistance scale, and v0.1 placeholder catalog."
+	return "READ THIS to understand what kinds of trust signals signatory tracks before interpreting signatory_analyze or signatory_signals output. Contains the six signal groups (vitality, governance, publication, hygiene, posture, criticality), the forgery-resistance scale, and the current placeholder catalog."
 }
 
 // signalTypeRegistry is the compile-time registry shape returned to agents.

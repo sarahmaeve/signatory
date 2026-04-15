@@ -25,7 +25,7 @@ type SurveyTool struct{}
 func (t *SurveyTool) Name() string { return "signatory_survey" }
 
 func (t *SurveyTool) Description() string {
-	return "Return a dependency-tree posture overview for a project manifest."
+	return "USE THIS when the user asks about a whole project's dependency tree, not one dep in isolation — 'what's the posture of all my deps?', 'which of my transitive deps are unassessed?'. Takes a manifest path (go.mod, package.json, Cargo.toml, pyproject.toml). v0.1 limitation: dependency parsing is not yet implemented — this tool returns CodeNotFound with guidance to call signatory_analyze per-dep until v0.2. Still useful to confirm a manifest is recognised."
 }
 
 func (t *SurveyTool) InputSchema() json.RawMessage {

@@ -27,7 +27,7 @@ type ShowAnalysesTool struct {
 func (t *ShowAnalysesTool) Name() string { return "signatory_show_analyses" }
 
 func (t *ShowAnalysesTool) Description() string {
-	return "List ingested analyst outputs, optionally filtered by target, analyst, or recency."
+	return "USE THIS when the user asks 'what has signatory analyzed?', 'what assessments exist recently?', or 'are there any analyses of X?'. Lists trust analyses recorded in signatory's store, with optional filters for target URI, analyst_id, and since-timestamp. An empty list is a real answer — it means nothing has been ingested yet, not that the tool failed. For specific concerns within analyses, use signatory_show_findings."
 }
 
 func (t *ShowAnalysesTool) InputSchema() json.RawMessage {

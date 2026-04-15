@@ -60,10 +60,17 @@ func (c clientInfo) Source() string {
 }
 
 // initializeResult is the result body of the server's initialize response.
+// Instructions carries server-level orientation that the client may
+// surface to the model — per MCP 2025-11-25 §Lifecycle/Initialize it
+// is the designated channel for "what this server is for and when to
+// reach for it." Empty is legal; non-empty is strongly recommended
+// because it's pushed to the model on every session start, whereas
+// resources are only read when the model chooses to fetch them.
 type initializeResult struct {
 	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    serverCapabilities `json:"capabilities"`
 	ServerInfo      serverInfoBody     `json:"serverInfo"`
+	Instructions    string             `json:"instructions,omitempty"`
 }
 
 // serverCapabilities declares what the server supports. v0.1 declares
@@ -136,8 +143,39 @@ func (h *handshake) handleInitialize(params json.RawMessage) (*initializeResult,
 			Name:    "signatory",
 			Version: h.version,
 		},
+		Instructions: serverInstructions,
 	}, nil
 }
+
+// serverInstructions is the routing nudge the server emits on every
+// initialize. Kept deliberately short — this text rides in every
+// session's context window, so brevity matters.
+//
+// Goals (in priority order):
+//  1. Tell the model what kind of tool signatory is (supply-chain
+//     trust analysis), so the model can decide if a user question
+//     is in-scope.
+//  2. Steer it toward signatory_* tools over generic grep/file
+//     searches for in-scope questions — this addresses the
+//     dogfood finding where a freshly-connected session reached
+//     for file tools despite the MCP surface being available.
+//  3. Point at signatory://help for fuller guidance, so we don't
+//     have to inline the whole question→tool map here.
+//
+// Maintenance: when adding a new tool or resource, update the
+// "typical entry points" section of signatory://help FIRST (that's
+// the deep content) and update this text only if the top-level
+// framing changes.
+const serverInstructions = `signatory is a supply-chain trust analysis tool. Its MCP surface provides read-only access to a local store of trust analyses, findings, postures, and burns.
+
+When a user asks about dependency safety, supply-chain risk, whether a package is trustworthy, assessment findings, or posture decisions, prefer the signatory_* tools (signatory_analyze, signatory_show_analyses, signatory_show_findings, signatory_show_methodology, signatory_signals, signatory_detail, signatory_survey) and signatory:// resources over grep, file search, or web lookups. The tools query a structured store built from prior analyst runs.
+
+Key distinctions:
+- signatory_analyze returns a single target's cached trust summary; signatory_signals returns its raw evidence records.
+- signatory_show_analyses lists what has been assessed; signatory_show_findings searches individual concerns across analyses.
+- Analyses are ingested, not live-scanned: NotFound means "not in the store," not "failed to analyze."
+
+Read signatory://help for the full tool-selection guide and concept map.`
 
 // handleInitializedNotification processes the notifications/initialized
 // notification. Transitions state to operational. Safe to call only
