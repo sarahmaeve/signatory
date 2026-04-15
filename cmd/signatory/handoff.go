@@ -296,14 +296,22 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 		return "", "", fmt.Errorf("resolve clone-dir %q: %w", cmd.CloneDir, err)
 	}
 
-	// Writability check: stat the parent and verify it is an existing,
-	// writable directory. We probe with a temp file rather than relying
-	// on the mode bits because ACLs and mount options can override them.
+	// Create the parent if it doesn't exist. This matches the user
+	// model of `git clone URL DEST` (which creates DEST) and
+	// `signatory init DIR` (which creates DIR). Insisting that the
+	// user pre-create the parent was a UX paper-cut surfaced during
+	// dogfood — the friction had no defensive value because the
+	// writability probe below catches real permission problems.
+	//
+	// MkdirAll is idempotent: an existing directory is fine, a
+	// missing one is created with 0755, an existing FILE at the path
+	// errors (which we want — the IsDir check below also catches that
+	// case for race conditions).
+	if err := os.MkdirAll(absParent, 0o755); err != nil {
+		return "", "", fmt.Errorf("create clone-dir parent %q: %w", absParent, err)
+	}
 	info, err := os.Stat(absParent)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", "", fmt.Errorf("clone-dir parent %q does not exist", absParent)
-		}
 		return "", "", fmt.Errorf("stat clone-dir parent %q: %w", absParent, err)
 	}
 	if !info.IsDir() {
