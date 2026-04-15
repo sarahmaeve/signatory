@@ -139,6 +139,12 @@ type repo struct {
 	OpenIssuesCount int       `json:"open_issues_count"`
 	Archived        bool      `json:"archived"`
 	License         *license  `json:"license"`
+	// Language is GitHub's guess at the primary language, derived from
+	// file-extension frequency across the tree. Useful as a hint for
+	// picking a language-specific analyst-prompt variant (e.g.,
+	// Python-flavored vs. Go-flavored security review). Empty when the
+	// repo is empty or contains only languages GitHub doesn't track.
+	Language string `json:"language"`
 }
 
 type repoOwner struct {
@@ -431,6 +437,51 @@ func (c *Client) GetFileRaw(ctx context.Context, owner, repoName, path string) (
 		return nil, fmt.Errorf("decode base64 content: %w", err)
 	}
 	return data, nil
+}
+
+// GetRepoLanguage returns GitHub's primary-language guess for a
+// repo. It reuses GetRepo's single API call and projects out just
+// the language string, which is useful for callers (e.g., the
+// ecosystem detector) that don't need the rest of the repo metadata.
+// Returns the empty string when GitHub has no language determination.
+func (c *Client) GetRepoLanguage(ctx context.Context, owner, repoName string) (string, error) {
+	r, err := c.GetRepo(ctx, owner, repoName)
+	if err != nil {
+		return "", err
+	}
+	return r.Language, nil
+}
+
+// ListRootFilenames returns the names of regular files at the repo
+// root. It filters out directories so callers looking for manifest
+// files (go.mod, package.json, Cargo.toml, …) don't need to reason
+// about entry types. Returns an empty slice if the repo is empty;
+// nil without error for a repo that doesn't exist.
+//
+// One API call. Useful for cheap ecosystem detection:
+// `go.mod in root filenames → Go project`.
+//
+// Uses a dedicated URL construction (the empty-path root listing)
+// rather than GetDirectoryContents("") because the contents-path
+// validator rejects empty strings (per issue #90's SSRF defenses).
+// The repo path components here come from validated owner/repoName,
+// so the validator's protections still apply to user input upstream.
+func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) ([]string, error) {
+	var entries []repoContent
+	err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/contents", owner, repoName), &entries)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "file" {
+			names = append(names, e.Name)
+		}
+	}
+	return names, nil
 }
 
 // parseRateLimitReset parses the X-RateLimit-Reset header.
