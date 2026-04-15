@@ -173,6 +173,28 @@ Each item has:
   regression. No action until we observe a legitimate frame near the
   limit.
 
+### golangci-lint baseline has ~32 pre-existing issues outside MCP
+
+- **Source:** noticed while wiring up `make check` on 2026-04-15
+- **Severity:** should-fix (batch cleanup, not urgent)
+- **Where:** `internal/store/sqlite.go`, `internal/store/analyst_output.go`,
+  `cmd/signatory/format_check.go`, `cmd/signatory/handoff.go`,
+  `cmd/signatory/ingest.go`, `internal/config/toml.go`
+- **Sketch:** Running `golangci-lint run ./...` today reports about 30
+  errcheck violations (nearly all `defer x.Close()` where the close
+  error is dropped) and two staticcheck quick-fix nits (`QF1002`
+  tagged-switch suggestion in `toml.go:349`, `QF1011` redundant type
+  in `analyst_output.go:564`). The MCP packages are clean; the
+  backlog is entirely older non-MCP code. Plan: one dedicated
+  commit that (a) wraps the `defer x.Close()` sites in a
+  `_ = x.Close()` pattern or equivalent with short `//nolint:errcheck
+  // <reason>` annotations where dropping genuinely is fine, and
+  (b) accepts the two staticcheck suggestions. CI does not currently
+  gate on golangci-lint, so the baseline went stale without a forcing
+  function — this fix should land alongside a CI addition so the
+  baseline can't regrow silently. `make lint` in the Makefile serves
+  as the local-dev forcing function until CI catches up.
+
 ## Test quality
 
 ### `captureStream` could use `goleak.VerifyTestMain`
