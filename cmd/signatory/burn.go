@@ -28,13 +28,13 @@ type BurnAddCmd struct {
 }
 
 func (cmd *BurnAddCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	ctx := context.Background()
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()
 	if err != nil {
@@ -99,13 +99,13 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 type BurnListCmd struct{}
 
 func (cmd *BurnListCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	ctx := context.Background()
 	burns, err := s.ListBurns(ctx)
 	if err != nil {
 		return err

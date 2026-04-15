@@ -43,13 +43,13 @@ type AnalysisDisplay struct {
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	ctx := context.Background()
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()
 	if err != nil {

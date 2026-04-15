@@ -49,13 +49,13 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 		return fmt.Errorf("validate %s:\n%w", cmd.File, err)
 	}
 
-	store, err := globals.OpenStore()
+	ctx := context.Background()
+	store, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	ctx := context.Background()
 	result, err := store.IngestAnalystOutput(ctx, out, cmd.File)
 	if err != nil {
 		return fmt.Errorf("ingest %s: %w", cmd.File, err)

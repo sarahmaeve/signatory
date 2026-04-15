@@ -24,7 +24,8 @@ type ShowAnalysesCmd struct {
 }
 
 func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -35,7 +36,7 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		AnalystID: cmd.Analyst,
 		Limit:     cmd.Limit,
 	}
-	rows, err := s.ListAnalystOutputs(context.Background(), filter)
+	rows, err := s.ListAnalystOutputs(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
 		// Target didn't resolve to any known entity — distinct from
 		// "entity exists but has no outputs." Callers benefit from
@@ -81,7 +82,8 @@ type ShowFindingsCmd struct {
 }
 
 func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -99,7 +101,7 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 		DesignIntentOnly: cmd.DesignIntent,
 		Limit:            cmd.Limit,
 	}
-	rows, err := s.ListFindings(context.Background(), filter)
+	rows, err := s.ListFindings(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil
@@ -145,7 +147,8 @@ type ShowMethodologyCmd struct {
 }
 
 func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
@@ -166,7 +169,7 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 		filter.HitOnTarget = &f
 	}
 
-	rows, err := s.ListMethodologyPatterns(context.Background(), filter)
+	rows, err := s.ListMethodologyPatterns(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil

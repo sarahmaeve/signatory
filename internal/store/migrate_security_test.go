@@ -46,7 +46,7 @@ func TestSecurity_Backup_RefusesToClobberExistingFile(t *testing.T) {
 	}
 
 	// Run the backup (db nil → skip the WAL checkpoint, just copy bytes).
-	err := backupDatabase(nil, dbPath, 0)
+	err := backupDatabase(t.Context(), nil, dbPath, 0)
 	require.NoError(t, err, "backup should succeed by writing to a unique path")
 
 	// THE CRITICAL ASSERTION: every sentinel must be byte-identical.
@@ -96,7 +96,7 @@ func TestSecurity_Backup_RefusesToFollowSymlink(t *testing.T) {
 		require.NoError(t, os.Symlink(sentinel, symlinkPath))
 	}
 
-	err := backupDatabase(nil, dbPath, 0)
+	err := backupDatabase(t.Context(), nil, dbPath, 0)
 	require.NoError(t, err, "backup should succeed by writing to a unique path")
 
 	// THE CRITICAL ASSERTION: the symlink target (sentinel) must not

@@ -57,6 +57,13 @@ var chmodFunc = os.Chmod
 // database file to 0600 permissions, enables WAL mode and foreign keys,
 // and runs schema migrations.
 //
+// ctx is threaded through every SQL operation (Ping, PRAGMA setup,
+// migrations). Cancellation during Open aborts the in-progress SQL
+// call cleanly; the partially-initialized *sql.DB is then closed.
+// For interactive CLI use, context.Background() is fine. For the MCP
+// server, pass the server's lifecycle context so shutdown interrupts
+// a slow migration rather than blocking until it finishes.
+//
 // File-permission safety (#83): the database file is pre-created via
 // os.OpenFile with mode 0600 BEFORE being handed to sql.Open, so there
 // is no window during which the file is world-readable. The previous
@@ -68,7 +75,7 @@ var chmodFunc = os.Chmod
 // (0600 & ~0022 = 0600). The chmodFunc call below remains as defense
 // in depth for the case where the file already existed with looser
 // perms when OpenSQLite was first called.
-func OpenSQLite(path string) (*SQLite, error) {
+func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
@@ -95,7 +102,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
@@ -119,7 +126,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 
 	// Verify WAL mode is enabled.
 	var journalMode string
-	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set journal_mode: %w", err)
 	}
@@ -133,13 +140,13 @@ func OpenSQLite(path string) (*SQLite, error) {
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA foreign_keys=ON",
 	} {
-		if _, err := db.Exec(pragma); err != nil {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("set %s: %w", pragma, err)
 		}
 	}
 
-	if err := migrate(db, path); err != nil {
+	if err := migrate(ctx, db, path); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}

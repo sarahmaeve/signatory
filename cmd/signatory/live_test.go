@@ -42,7 +42,7 @@ func TestLive_AnalyzeKong(t *testing.T) {
 	require.NoError(t, cmd.Run(globals))
 
 	// Verify signals were persisted.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -64,7 +64,7 @@ func TestLive_AnalyzeTestify_OrgOwner(t *testing.T) {
 	cmd := &AnalyzeCmd{Target: "stretchr/testify", Refresh: true}
 	require.NoError(t, cmd.Run(globals))
 
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 

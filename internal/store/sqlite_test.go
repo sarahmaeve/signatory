@@ -18,7 +18,7 @@ func newTestDB(t *testing.T) *SQLite {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
-	s, err := OpenSQLite(path)
+	s, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 	return s
@@ -42,7 +42,7 @@ func testEntity(id, uri, shortName string, now time.Time) *profile.Entity {
 func TestOpenSQLite_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "deep", "test.db")
-	s, err := OpenSQLite(path)
+	s, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -54,12 +54,12 @@ func TestOpenSQLite_IdempotentMigration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
 
-	s1, err := OpenSQLite(path)
+	s1, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	s1.Close()
 
 	// Opening the same database again should not fail.
-	s2, err := OpenSQLite(path)
+	s2, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	s2.Close()
 }

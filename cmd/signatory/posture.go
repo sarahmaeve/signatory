@@ -37,13 +37,12 @@ type PostureGetCmd struct {
 }
 
 func (cmd *PostureGetCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-
-	ctx := context.Background()
 
 	entity, err := resolveEntity(ctx, s, cmd.Target)
 	if errors.Is(err, store.ErrNotFound) {
@@ -131,13 +130,13 @@ type PostureSetCmd struct {
 }
 
 func (cmd *PostureSetCmd) Run(globals *Globals) error {
-	s, err := globals.OpenStore()
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	ctx := context.Background()
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()
 	if err != nil {

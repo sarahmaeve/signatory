@@ -92,7 +92,7 @@ func TestFunctional_PostureSetAndGet(t *testing.T) {
 	require.NoError(t, setCmd.Run(globals))
 
 	// Read back via store directly to verify persistence.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -127,7 +127,7 @@ func TestFunctional_PostureSetCreatesEntity(t *testing.T) {
 
 	// Verify the entity was created — by canonical URI, not by
 	// the UUID (which we don't know).
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -173,7 +173,7 @@ func TestFunctional_DBPathCustom(t *testing.T) {
 	require.NoError(t, setCmd.Run(globals))
 
 	// Verify the file was created at the custom path.
-	s, err := store.OpenSQLite(dbPath)
+	s, err := store.OpenSQLite(t.Context(), dbPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -197,7 +197,7 @@ func TestFunctional_BurnAndReadBack(t *testing.T) {
 	require.NoError(t, burnCmd.Run(globals))
 
 	// Read back via store directly.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -219,7 +219,7 @@ func TestFunctional_BurnCreatesEntity(t *testing.T) {
 	}
 	require.NoError(t, burnCmd.Run(globals))
 
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -239,7 +239,7 @@ func TestFunctional_BurnOverwriteExisting(t *testing.T) {
 	burn2 := &BurnAddCmd{Target: "pkg:npm/bad", Reason: "confirmed malware"}
 	require.NoError(t, burn2.Run(globals))
 
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -301,7 +301,7 @@ func TestFunctional_BurnAuditDetailOverwriteFlagReflectsPriorBurn(t *testing.T) 
 			// reliable even when timestamps collide at second precision
 			// and audit_log.id is a random hex string with no temporal
 			// component.
-			s, err := store.OpenSQLite(globals.DBPath)
+			s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 			require.NoError(t, err)
 			defer s.Close()
 
@@ -360,7 +360,7 @@ func TestFunctional_AnalyzeRefreshWithMock(t *testing.T) {
 
 	// Verify signals were persisted. The entity was created with a
 	// UUID ID, so we have to look it up via the canonical URI.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -400,7 +400,7 @@ func TestFunctional_AnalyzeInputFormsCollapse(t *testing.T) {
 	}
 
 	// Only one entity should exist.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -460,7 +460,7 @@ func TestFunctional_AuditLogWrittenOnPostureSet(t *testing.T) {
 	}).Run(globals))
 
 	// DB side.
-	s, err := store.OpenSQLite(globals.DBPath)
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
 

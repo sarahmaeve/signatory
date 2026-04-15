@@ -65,7 +65,7 @@ func TestSecurity_DBFile_AtomicallyCreatedWith0600(t *testing.T) {
 	defer func() { chmodFunc = origChmodFunc }()
 
 	path := filepath.Join(parent, "test.db")
-	s, err := OpenSQLite(path)
+	s, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	defer s.Close()
 

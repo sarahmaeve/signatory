@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -70,12 +71,16 @@ type Globals struct {
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
-func (g *Globals) OpenStore() (store.Store, error) {
+// ctx is threaded into OpenSQLite's Ping + PRAGMA setup + migrations,
+// so a cancelled caller context aborts store initialization cleanly.
+// Every Run method on a command already creates or receives a context;
+// that same context is the right thing to pass here.
+func (g *Globals) OpenStore(ctx context.Context) (store.Store, error) {
 	path, err := store.ResolvePath(g.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
 	}
-	return store.OpenSQLite(path)
+	return store.OpenSQLite(ctx, path)
 }
 
 // NewAuditLogger constructs an audit logger wired to the given store

@@ -102,13 +102,13 @@ func TestIngest_AllShipped_v1Fixtures(t *testing.T) {
 	// Both fixtures target the same URL → should resolve to the same
 	// entity (after normalization to the canonical repo:github/... form).
 	var entityCount int
-	require.NoError(t, s.db.QueryRow(
+	require.NoError(t, s.db.QueryRowContext(t.Context(),
 		`SELECT COUNT(*) FROM entities WHERE canonical_uri = ?`,
 		"repo:github/nvbn/thefuck").Scan(&entityCount))
 	assert.Equal(t, 1, entityCount, "both thefuck outputs should share one entity")
 
 	var outputCount int
-	require.NoError(t, s.db.QueryRow(
+	require.NoError(t, s.db.QueryRowContext(t.Context(),
 		`SELECT COUNT(*) FROM analyst_outputs`).Scan(&outputCount))
 	assert.Equal(t, 2, outputCount, "two distinct outputs ingested")
 }
@@ -355,7 +355,7 @@ func contentHash(t *testing.T, out *exchange.AnalystOutput) string {
 func assertCount(t *testing.T, s *SQLite, table, where string, arg interface{}, expected int) {
 	t.Helper()
 	var got int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM "+table+" WHERE "+where, arg,
 	).Scan(&got)
 	require.NoError(t, err)

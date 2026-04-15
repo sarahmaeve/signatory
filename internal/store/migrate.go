@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -688,9 +689,15 @@ ALTER TABLE signals DROP COLUMN details;
 // 3. Backs up the database file before each migration
 // 4. Applies each migration in a transaction
 // 5. Refuses to open if the database is newer than the code supports
-func migrate(db *sql.DB, dbPath string) error {
+//
+// ctx cancellation propagates to every SQL operation. Cancelling
+// mid-migration is safe because each version's Up-plus-record-version
+// is a single transaction: a cancelled transaction rolls back and the
+// schema_version table reflects the last COMMITTED version. A restart
+// with the same ctx (or a fresh one) resumes from that version.
+func migrate(ctx context.Context, db *sql.DB, dbPath string) error {
 	// Create the version tracking table.
-	if _, err := db.Exec(`
+	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_version (
 			version    INTEGER NOT NULL,
 			applied_at TEXT NOT NULL
@@ -699,20 +706,20 @@ func migrate(db *sql.DB, dbPath string) error {
 		return fmt.Errorf("create schema_version table: %w", err)
 	}
 
-	currentVersion, err := getCurrentVersion(db)
+	currentVersion, err := getCurrentVersion(ctx, db)
 	if err != nil {
 		return err
 	}
 
 	// Detect legacy database: tables exist but no version recorded.
 	if currentVersion == 0 {
-		hasLegacyTables, err := detectLegacyTables(db)
+		hasLegacyTables, err := detectLegacyTables(ctx, db)
 		if err != nil {
 			return err
 		}
 		if hasLegacyTables {
 			// Mark as v1 — the initial schema is already applied.
-			if err := recordVersion(db, 1); err != nil {
+			if err := recordVersion(ctx, db, 1); err != nil {
 				return fmt.Errorf("record legacy version: %w", err)
 			}
 			currentVersion = 1
@@ -735,26 +742,26 @@ func migrate(db *sql.DB, dbPath string) error {
 
 		// Backup before migration.
 		if dbPath != "" {
-			if err := backupDatabase(db, dbPath, i); err != nil {
+			if err := backupDatabase(ctx, db, dbPath, i); err != nil {
 				return fmt.Errorf("backup before migration %d: %w", m.Version, err)
 			}
 		}
 
 		// Apply migration and record version atomically in one transaction.
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", m.Version, err)
 		}
 
-		if _, err := tx.Exec(m.Up); err != nil {
-			tx.Rollback()
+		if _, err := tx.ExecContext(ctx, m.Up); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("migration %d (%s) failed: %w", m.Version, m.Description, err)
 		}
 
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
 			m.Version, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("record version %d: %w", m.Version, err)
 		}
 
@@ -768,8 +775,8 @@ func migrate(db *sql.DB, dbPath string) error {
 
 // migrateDown rolls back the most recent migration. It backs up the
 // database before rolling back.
-func migrateDown(db *sql.DB, dbPath string) error {
-	currentVersion, err := getCurrentVersion(db)
+func migrateDown(ctx context.Context, db *sql.DB, dbPath string) error {
+	currentVersion, err := getCurrentVersion(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -786,18 +793,18 @@ func migrateDown(db *sql.DB, dbPath string) error {
 
 	// Backup before rollback.
 	if dbPath != "" {
-		if err := backupDatabase(db, dbPath, currentVersion); err != nil {
+		if err := backupDatabase(ctx, db, dbPath, currentVersion); err != nil {
 			return fmt.Errorf("backup before rollback from %d: %w", m.Version, err)
 		}
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin rollback %d: %w", m.Version, err)
 	}
 
-	if _, err := tx.Exec(m.Down); err != nil {
-		tx.Rollback()
+	if _, err := tx.ExecContext(ctx, m.Down); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("rollback %d (%s) failed: %w", m.Version, m.Description, err)
 	}
 
@@ -806,7 +813,7 @@ func migrateDown(db *sql.DB, dbPath string) error {
 	}
 
 	// Update version: delete the rolled-back version entry.
-	if _, err := db.Exec("DELETE FROM schema_version WHERE version = ?", m.Version); err != nil {
+	if _, err := db.ExecContext(ctx, "DELETE FROM schema_version WHERE version = ?", m.Version); err != nil {
 		return fmt.Errorf("delete version %d: %w", m.Version, err)
 	}
 
@@ -815,9 +822,9 @@ func migrateDown(db *sql.DB, dbPath string) error {
 
 // getCurrentVersion returns the highest applied migration version,
 // or 0 if no migrations have been recorded.
-func getCurrentVersion(db *sql.DB) (int, error) {
+func getCurrentVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var version int
-	err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version)
+	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("get current version: %w", err)
 	}
@@ -826,9 +833,9 @@ func getCurrentVersion(db *sql.DB) (int, error) {
 
 // detectLegacyTables checks if the database has the original schema
 // tables but no version tracking.
-func detectLegacyTables(db *sql.DB) (bool, error) {
+func detectLegacyTables(ctx context.Context, db *sql.DB) (bool, error) {
 	var count int
-	err := db.QueryRow(
+	err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entities'",
 	).Scan(&count)
 	if err != nil {
@@ -838,8 +845,8 @@ func detectLegacyTables(db *sql.DB) (bool, error) {
 }
 
 // recordVersion inserts a version record into schema_version.
-func recordVersion(db *sql.DB, version int) error {
-	_, err := db.Exec(
+func recordVersion(ctx context.Context, db *sql.DB, version int) error {
+	_, err := db.ExecContext(ctx,
 		"INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
 		version, time.Now().UTC().Format(time.RFC3339))
 	return err
@@ -871,12 +878,12 @@ func recordVersion(db *sql.DB, version int) error {
 //
 // CreateTemp opens with O_RDWR|O_CREATE|O_EXCL, mode 0600 — same
 // permission as the previous explicit OpenFile call.
-func backupDatabase(db *sql.DB, dbPath string, fromVersion int) error {
+func backupDatabase(ctx context.Context, db *sql.DB, dbPath string, fromVersion int) error {
 	// Checkpoint WAL to ensure all committed data is in the main file.
 	// TRUNCATE mode flushes the WAL and truncates it to zero bytes,
 	// ensuring the backup of the main file is complete.
 	if db != nil {
-		if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 			return fmt.Errorf("checkpoint WAL before backup: %w", err)
 		}
 	}

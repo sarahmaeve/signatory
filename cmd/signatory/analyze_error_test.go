@@ -20,7 +20,7 @@ import (
 // not silently ignored. (Review 3, C1)
 func TestAnalyze_CorruptedEntityErrorNotSwallowed(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	s, err := store.OpenSQLite(dbPath)
+	s, err := store.OpenSQLite(t.Context(), dbPath)
 	require.NoError(t, err)
 
 	// Insert an entity with a corrupted timestamp so the entity read
@@ -63,7 +63,7 @@ func TestAnalyze_CorruptedEntityErrorNotSwallowed(t *testing.T) {
 // (Review 3, H4)
 func TestAnalyze_DisplayProfileErrorNotSwallowed(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	s, err := store.OpenSQLite(dbPath)
+	s, err := store.OpenSQLite(t.Context(), dbPath)
 	require.NoError(t, err)
 
 	ctx := context.Background()

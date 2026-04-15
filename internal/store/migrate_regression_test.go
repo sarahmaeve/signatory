@@ -22,16 +22,16 @@ func TestMigration_BackupIncludesWALData(t *testing.T) {
 	db, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec("PRAGMA journal_mode=WAL")
+	_, err = db.ExecContext(t.Context(), "PRAGMA journal_mode=WAL")
 	require.NoError(t, err)
-	_, err = db.Exec("CREATE TABLE test_data (id TEXT PRIMARY KEY, value TEXT)")
+	_, err = db.ExecContext(t.Context(), "CREATE TABLE test_data (id TEXT PRIMARY KEY, value TEXT)")
 	require.NoError(t, err)
-	_, err = db.Exec("INSERT INTO test_data (id, value) VALUES ('key1', 'important_data')")
+	_, err = db.ExecContext(t.Context(), "INSERT INTO test_data (id, value) VALUES ('key1', 'important_data')")
 	require.NoError(t, err)
 	// Do NOT checkpoint — data may be in WAL only.
 
 	// Backup using our function — should checkpoint WAL first.
-	err = backupDatabase(db, path, 0)
+	err = backupDatabase(t.Context(), db, path, 0)
 	require.NoError(t, err)
 	db.Close()
 
@@ -53,7 +53,7 @@ func TestMigration_BackupIncludesWALData(t *testing.T) {
 	defer backupDB.Close()
 
 	var value string
-	err = backupDB.QueryRow("SELECT value FROM test_data WHERE id = 'key1'").Scan(&value)
+	err = backupDB.QueryRowContext(t.Context(), "SELECT value FROM test_data WHERE id = 'key1'").Scan(&value)
 	require.NoError(t, err, "backup should contain committed data including WAL contents")
 	assert.Equal(t, "important_data", value)
 }
@@ -67,7 +67,7 @@ func TestMigration_BackupVersionTagUsesIterationVersion(t *testing.T) {
 
 	// Create backups for version 0 and version 1.
 	// Use a short sleep to ensure different timestamps.
-	err := backupDatabase(nil, path+"doesnotexist", 0)
+	err := backupDatabase(t.Context(), nil, path+"doesnotexist", 0)
 	assert.NoError(t, err) // no-op for nonexistent file
 
 	// Create the file so backups work.
@@ -76,9 +76,9 @@ func TestMigration_BackupVersionTagUsesIterationVersion(t *testing.T) {
 	f.Write([]byte("test"))
 	f.Close()
 
-	err = backupDatabase(nil, path, 0)
+	err = backupDatabase(t.Context(), nil, path, 0)
 	require.NoError(t, err)
-	err = backupDatabase(nil, path, 1)
+	err = backupDatabase(t.Context(), nil, path, 1)
 	require.NoError(t, err)
 
 	entries, err := os.ReadDir(dir)

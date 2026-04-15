@@ -33,7 +33,7 @@ func TestSecurity_EnsureEntity_FailsClosedOnUnparseableInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "test.db"))
+			s, err := store.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 			require.NoError(t, err)
 			defer s.Close()
 

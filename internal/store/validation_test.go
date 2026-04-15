@@ -109,7 +109,7 @@ func TestValidation_AppendSignals_ForeignKeyViolation(t *testing.T) {
 func TestSecurity_DatabaseFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
-	s, err := OpenSQLite(path)
+	s, err := OpenSQLite(t.Context(), path)
 	require.NoError(t, err)
 	defer s.Close()
 

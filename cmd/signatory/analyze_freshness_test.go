@@ -44,7 +44,7 @@ func TestAnalyze_FreshnessCheck_SurfacesIngestedOutputs(t *testing.T) {
 	globals := testGlobals(t)
 
 	// Ingest two outputs against the same target.
-	s, err := globals.OpenStore()
+	s, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)
 	ctx := context.Background()
 	for _, fixturePath := range []string{
@@ -64,7 +64,7 @@ func TestAnalyze_FreshnessCheck_SurfacesIngestedOutputs(t *testing.T) {
 	require.NoError(t, cmd.Run(globals))
 
 	// Verify the analyst outputs are visible via the helper.
-	s2, err := globals.OpenStore()
+	s2, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)
 	defer s2.Close()
 	entity, err := s2.FindEntityByURI(ctx, "repo:github/nvbn/thefuck")
@@ -96,7 +96,7 @@ func TestAnalyze_NoSignalsNoOutputs_PromptsBoth(t *testing.T) {
 func TestAnalyze_FreshnessCheck_MaxAge_FilterApplied(t *testing.T) {
 	globals := testGlobals(t)
 
-	s, err := globals.OpenStore()
+	s, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)
 	ctx := context.Background()
 	out := loadAnalystFixture(t, "atuin-schema-trial.json")
@@ -104,7 +104,7 @@ func TestAnalyze_FreshnessCheck_MaxAge_FilterApplied(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
-	s2, err := globals.OpenStore()
+	s2, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)
 	defer s2.Close()
 
@@ -131,7 +131,7 @@ func TestAnalyze_FreshnessCheck_AnalysisDisplay_JSONShape(t *testing.T) {
 	// a top-level field alongside the embedded Profile fields.
 	out := loadAnalystAnalysisFixture(t, "thefuck-security-v1.json")
 	globals := testGlobals(t)
-	s, err := globals.OpenStore()
+	s, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)
 	ctx := context.Background()
 	_, err = s.IngestAnalystOutput(ctx, out, "test")

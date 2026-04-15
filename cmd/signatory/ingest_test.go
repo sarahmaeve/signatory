@@ -30,7 +30,7 @@ func TestIngest_ValidJSON_StoresAndCounts(t *testing.T) {
 	require.NoError(t, cmd.Run(g))
 
 	// Verify the row landed by re-opening the store and counting.
-	s, err := g.OpenStore()
+	s, err := g.OpenStore(t.Context())
 	require.NoError(t, err)
 	defer s.Close()
 
@@ -51,7 +51,7 @@ func TestIngest_IdempotentReingest(t *testing.T) {
 	require.NoError(t, cmd.Run(g))
 	require.NoError(t, cmd.Run(g)) // re-ingest
 
-	s, err := g.OpenStore()
+	s, err := g.OpenStore(t.Context())
 	require.NoError(t, err)
 	defer s.Close()
 
