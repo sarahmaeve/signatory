@@ -34,10 +34,15 @@ type InitCmd struct {
 	Quiet bool   `help:"Suppress per-file progress output; errors still print." short:"q"`
 }
 
-// Run executes the init. Progress lines go to stdout; the final
-// summary line goes to stdout too. Errors propagate as usual.
+// Run executes the init. Progress lines and the final summary go to
+// stderr; stdout stays clean. This matches the rest of signatory's
+// CLI: stdout carries pipeable content (e.g., the rendered handoff
+// when `signatory handoff` is used without --output), stderr carries
+// diagnostics. init produces no pipeable content today, so its
+// stdout is silent. Future shapes like `signatory init --print-config`
+// would emit the scaffold to stdout.
 func (cmd *InitCmd) Run(globals *Globals) error {
-	var out io.Writer = os.Stdout
+	var out io.Writer = os.Stderr
 	if cmd.Quiet {
 		out = io.Discard
 	}
@@ -54,12 +59,12 @@ func (cmd *InitCmd) Run(globals *Globals) error {
 	}
 
 	if !cmd.Quiet {
-		fmt.Printf("\ntemplates: %d copied, %d skipped\n", result.TemplatesCopied, result.TemplatesSkipped)
-		fmt.Printf("filestore: %d directories ready\n", len(result.DirectoriesCreated))
+		fmt.Fprintf(os.Stderr, "\ntemplates: %d copied, %d skipped\n", result.TemplatesCopied, result.TemplatesSkipped)
+		fmt.Fprintf(os.Stderr, "filestore: %d directories ready\n", len(result.DirectoriesCreated))
 		if result.ConfigWritten {
-			fmt.Printf("config:    wrote %s\n", result.ConfigPath)
+			fmt.Fprintf(os.Stderr, "config:    wrote %s\n", result.ConfigPath)
 		} else {
-			fmt.Printf("config:    preserved %s\n", result.ConfigPath)
+			fmt.Fprintf(os.Stderr, "config:    preserved %s\n", result.ConfigPath)
 		}
 	}
 	return nil

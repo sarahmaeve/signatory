@@ -110,8 +110,17 @@ func ClassifyTarget(target string) TargetKind {
 
 // InferNameFromURL extracts a short human-readable package name from
 // a GitHub/GitLab-style URL. "https://github.com/foo/bar" becomes
-// "bar"; ".git" suffixes are stripped; a URL with no path segments
-// returns the empty string (caller falls back to explicit --name).
+// "bar"; ".git" suffixes are stripped. Returns the empty string when
+// no usable name can be derived OR when the derived name would be
+// unsafe to use as a path component (".", "..", contains a separator,
+// or contains a NUL byte).
+//
+// This rejection is intentionally inside the helper rather than at
+// each call site: a future consumer that uses the returned name to
+// build a filesystem path could otherwise forget the containment
+// check. Centralizing the rule means callers can trust the output as
+// a safe path-component-shaped string. (Reviewer F2: helpers should
+// own their own contract.)
 func InferNameFromURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -123,13 +132,41 @@ func InferNameFromURL(raw string) string {
 	}
 	last := parts[len(parts)-1]
 	last = strings.TrimSuffix(last, ".git")
+	if !isSafePathComponent(last) {
+		return ""
+	}
 	return last
 }
 
 // InferNameFromPath returns the basename of a path as a best-effort
-// project name. Strips a trailing slash.
+// project name. Returns the empty string when the basename would be
+// unsafe to use as a path component (same contract as InferNameFromURL).
 func InferNameFromPath(path string) string {
-	return filepath.Base(strings.TrimRight(path, string(filepath.Separator)))
+	base := filepath.Base(strings.TrimRight(path, string(filepath.Separator)))
+	if !isSafePathComponent(base) {
+		return ""
+	}
+	return base
+}
+
+// isSafePathComponent returns true when name is suitable for use as
+// a single path component without further validation. Centralizing
+// this check makes the rule explicit and easy to extend (e.g., reject
+// reserved Windows names, or limit length, if needed later).
+func isSafePathComponent(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsRune(name, 0x00) {
+		return false
+	}
+	// Reject any platform's path separator. We use ContainsAny rather
+	// than filepath.Separator because the value may have come from a
+	// URL parsed on a system different from the one consuming it.
+	if strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	return true
 }
 
 // HandoffSubstitutions builds the {PLACEHOLDER: value} map a caller
@@ -149,6 +186,7 @@ func HandoffSubstitutions(target string, overrides HandoffOverrides) (map[string
 	switch ClassifyTarget(target) {
 	case TargetURL:
 		subs["TARGET_URL"] = target
+		// InferNameFromURL guarantees a safe path-component or "".
 		if name := InferNameFromURL(target); name != "" {
 			subs["TARGET_NAME"] = name
 		}
@@ -158,7 +196,8 @@ func HandoffSubstitutions(target string, overrides HandoffOverrides) (map[string
 		// or check existence — that's the user's responsibility.
 		expanded := expandTilde(target)
 		subs["TARGET_PATH"] = expanded
-		if name := InferNameFromPath(expanded); name != "" && name != "." && name != "/" {
+		// InferNameFromPath guarantees a safe path-component or "".
+		if name := InferNameFromPath(expanded); name != "" {
 			subs["TARGET_NAME"] = name
 		}
 	case TargetUnknown:

@@ -136,25 +136,45 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 		}
 	}
 
-	// 3. Config scaffold.
+	// 3. Config scaffold. Use O_EXCL (without --force) or O_TRUNC
+	// (with --force) so the existence check and the write happen as
+	// one atomic operation. The previous stat-then-write shape had a
+	// TOCTOU window where a concurrent init or an adversary could
+	// slip a file in between (config reviewer F11). The handoff
+	// command's writeHandoff already uses this pattern; matching it
+	// here keeps the discipline consistent.
 	cfgPath := filepath.Join(absDir, ConfigFileName)
 	result.ConfigPath = cfgPath
-	_, statErr := os.Stat(cfgPath)
+
+	flag := os.O_WRONLY | os.O_CREATE
+	if opts.Force {
+		flag |= os.O_TRUNC
+	} else {
+		flag |= os.O_EXCL
+	}
+	f, err := os.OpenFile(cfgPath, flag, 0o644)
 	switch {
-	case statErr == nil && !opts.Force:
-		if opts.Out != nil {
-			fmt.Fprintf(opts.Out, "skip %s (exists; --force to overwrite)\n", cfgPath)
+	case err == nil:
+		_, writeErr := f.Write([]byte(ConfigScaffold))
+		closeErr := f.Close()
+		if writeErr != nil {
+			return nil, fmt.Errorf("write %s: %w", cfgPath, writeErr)
 		}
-	case statErr == nil, os.IsNotExist(statErr):
-		if err := os.WriteFile(cfgPath, []byte(ConfigScaffold), 0o644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", cfgPath, err)
+		if closeErr != nil {
+			return nil, fmt.Errorf("close %s: %w", cfgPath, closeErr)
 		}
 		result.ConfigWritten = true
 		if opts.Out != nil {
 			fmt.Fprintf(opts.Out, "wrote %s\n", cfgPath)
 		}
+	case os.IsExist(err):
+		// O_EXCL fired — file already there and --force was not passed.
+		// This is the documented "skip-on-exists" path.
+		if opts.Out != nil {
+			fmt.Fprintf(opts.Out, "skip %s (exists; --force to overwrite)\n", cfgPath)
+		}
 	default:
-		return nil, fmt.Errorf("stat %s: %w", cfgPath, statErr)
+		return nil, fmt.Errorf("open %s: %w", cfgPath, err)
 	}
 
 	return result, nil

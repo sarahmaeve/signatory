@@ -100,6 +100,64 @@ func TestInferNameFromPath(t *testing.T) {
 	assert.Equal(t, "code", InferNameFromPath("/code"))
 }
 
+// TestInferNameFromURL_RejectsUnsafeOutputs verifies that a URL whose
+// derived name would be unsafe to use as a path component returns the
+// empty string. This is the contract the helper now owns: callers
+// can use the return value directly as a path component without an
+// additional containment check (cmd reviewer F2).
+func TestInferNameFromURL_RejectsUnsafeOutputs(t *testing.T) {
+	cases := map[string]string{
+		// "..", ".", and trailing/embedded NUL get rejected.
+		"https://github.com/foo/..":         "",
+		"https://github.com/foo/.":          "",
+		"https://github.com/foo/bar%00evil": "",
+		// Embedded slash (URL-decoded) — already handled because
+		// strings.Split already broke at the slash, so this returns
+		// "evil" not "bar/evil". Document that path segment is the
+		// last segment, not the literal decoded byte.
+		"https://github.com/foo/bar%2fevil/baz": "baz",
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			assert.Equal(t, want, InferNameFromURL(in))
+		})
+	}
+}
+
+// TestInferNameFromPath_RejectsUnsafeOutputs verifies same contract
+// for the path helper. Targets like "~/.." would decode to a basename
+// of ".." and must be rejected.
+func TestInferNameFromPath_RejectsUnsafeOutputs(t *testing.T) {
+	cases := map[string]string{
+		"/Users/sarah/..": "",
+		"/Users/sarah/.":  "",
+		"/foo/bar\x00":    "",
+		"/":               "",
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			assert.Equal(t, want, InferNameFromPath(in))
+		})
+	}
+}
+
+// TestIsSafePathComponent ensures the new shared helper matches the
+// documented contract end-to-end.
+func TestIsSafePathComponent(t *testing.T) {
+	safe := []string{"foo", "foo.bar", "foo-bar", "foo_bar", "abc123", "name.git"}
+	unsafe := []string{"", ".", "..", "foo/bar", "foo\\bar", "foo\x00bar"}
+	for _, s := range safe {
+		t.Run("safe-"+s, func(t *testing.T) {
+			assert.True(t, isSafePathComponent(s), "%q should be considered safe", s)
+		})
+	}
+	for _, u := range unsafe {
+		t.Run("unsafe", func(t *testing.T) {
+			assert.False(t, isSafePathComponent(u), "%q must be rejected", u)
+		})
+	}
+}
+
 func TestHandoffSubstitutions_URLTarget(t *testing.T) {
 	subs, err := HandoffSubstitutions("https://github.com/nvbn/thefuck", HandoffOverrides{})
 	require.NoError(t, err)

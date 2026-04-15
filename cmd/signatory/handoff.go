@@ -348,10 +348,12 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	// patches, or be on a slow network. Silently updating would be
 	// surprising and potentially unsafe (new commits since last analysis
 	// would silently change the reviewed surface).
+	//
+	// The reuse note is returned through the report channel (gated by
+	// --quiet upstream), not written directly to stderr — consistent
+	// with the rest of the precheck/clone reporting.
 	if fi, err := os.Stat(destClean); err == nil && fi.IsDir() {
-		msg := fmt.Sprintf("# clone: %s already exists, reusing\n", destClean)
-		fmt.Fprint(os.Stderr, msg)
-		return destClean, "", nil
+		return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
 	}
 
 	// Shallow clone with a 2-minute timeout. Use a child context so the
