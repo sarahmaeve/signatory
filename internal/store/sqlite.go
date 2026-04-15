@@ -26,6 +26,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -415,7 +416,7 @@ func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, e
 	var b profile.Burn
 	var burnedAt string
 	err := row.Scan(&b.EntityID, &b.Reason, (*string)(&b.Source), &b.SourceOrg, &burnedAt, &b.BurnedBy)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -527,7 +528,7 @@ func (s *SQLite) GetLatestDependencies(ctx context.Context, projectID string) ([
 		 WHERE project_id = ?
 		 ORDER BY observed_at DESC
 		 LIMIT 1`, projectID).Scan(&surveyID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -620,7 +621,7 @@ func (s *SQLite) GetTeamIdentity(ctx context.Context, id string) (*profile.TeamI
 	var createdAt string
 	var haltedAt, revokedAt, revokeReason sql.NullString
 	err := row.Scan(&t.ID, &t.Name, &createdAt, &haltedAt, &revokedAt, &revokeReason)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -695,7 +696,7 @@ func scanEntity(row *sql.Row) (*profile.Entity, error) {
 	var createdAt, updatedAt string
 	err := row.Scan(&e.ID, &e.CanonicalURI, (*string)(&e.Type), &e.ShortName, &e.Description,
 		&e.Ecosystem, &e.URL, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -750,7 +751,7 @@ func scanPosture(row *sql.Row) (*profile.Posture, error) {
 	var p profile.Posture
 	var setAt string
 	err := row.Scan(&p.EntityID, &p.Version, (*string)(&p.Tier), &p.Rationale, &p.SetBy, &setAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {

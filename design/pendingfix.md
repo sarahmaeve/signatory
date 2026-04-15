@@ -17,21 +17,6 @@ Each item has:
 
 ## Security
 
-### `internal/store/sqlite.go` compares `sql.ErrNoRows` with `==`
-
-- **Source:** skill-equipped Opus reviewer 2026-04-14 (adjacent to F3);
-  golangci-lint errorlint pass 2026-04-15
-- **Severity:** should-fix
-- **Where:** `sqlite.go:418, 530, 623` — three sites do
-  `if err == sql.ErrNoRows { ... }` instead of `errors.Is`. In
-  practice `database/sql` returns the sentinel unwrapped so today's
-  code works, but any middleware (e.g., a future query-tracing wrapper)
-  that calls `fmt.Errorf("%w: ...", err)` would silently break the
-  absence-detection.
-- **Sketch:** Replace the three `err == sql.ErrNoRows` checks with
-  `errors.Is(err, sql.ErrNoRows)`. Purely mechanical. Test the
-  behavior via the existing tests — no new tests needed.
-
 ### `safeGitEnv` is a denylist; consider promoting to a whitelist
 
 - **Source:** skill-equipped cmd-adversarial agent 2026-04-14 (Bug 1
