@@ -283,6 +283,15 @@ func (s *Server) dispatchResourcesRead(ctx context.Context, rawParams json.RawMe
 // Exact match takes priority. If no exact match, a pattern containing
 // "{" is tried as a prefix match against the path-before-"?" of uri.
 // Caller must hold s.mu (at least read-locked).
+//
+// Static-pattern matching is deliberately strict: the URI must equal
+// the pattern exactly OR differ only by a "?"-prefixed query string
+// or "#"-prefixed fragment. Plain HasPrefix would let a shorter
+// pattern shadow a longer one — e.g. a hypothetical
+// "signatory://ana" resource would intercept requests for
+// "signatory://analyses?target=x". That collision doesn't exist in
+// today's resource set, but the guard prevents a future registration
+// from accidentally creating it.
 func (s *Server) matchResource(uri string) Resource {
 	// 1. Exact match.
 	if r, ok := s.resources[uri]; ok {
@@ -298,9 +307,13 @@ func (s *Server) matchResource(uri string) Resource {
 			if uriBase(pattern) == reqBase {
 				return r
 			}
-		} else if strings.HasPrefix(uri, pattern) {
-			// Static pattern that is a prefix (e.g., "signatory://analyses"
-			// matching "signatory://analyses?target=x").
+		} else if uri == pattern ||
+			strings.HasPrefix(uri, pattern+"?") ||
+			strings.HasPrefix(uri, pattern+"#") {
+			// Static pattern matched at a legal boundary.
+			// "signatory://analyses" matches
+			// "signatory://analyses?target=x" but NOT
+			// "signatory://analyses-other".
 			return r
 		}
 	}

@@ -344,7 +344,11 @@ func formatBound(f float64) string {
 }
 
 // describeJSON returns a human-readable type label for the leading byte
-// of a raw JSON value, for use in error messages.
+// of a raw JSON value, for use in error messages. The label is a
+// first-byte approximation — "looks like a number" means "starts with
+// '-' or a digit," not "parses as a valid JSON number." Good enough
+// for error messages the LLM client reads; not suitable for
+// validation decisions (those use json.Unmarshal on the full value).
 func describeJSON(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return "null"
@@ -360,7 +364,13 @@ func describeJSON(raw json.RawMessage) string {
 		return "boolean"
 	case 'n':
 		return "null"
-	default:
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		return "number"
+	default:
+		// Unknown leading byte — malformed or truncated input that
+		// the caller presumably detected separately. Returning
+		// "invalid" rather than misclassifying it as a number keeps
+		// the message honest.
+		return "invalid"
 	}
 }

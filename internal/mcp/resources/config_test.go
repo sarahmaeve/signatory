@@ -81,10 +81,22 @@ func TestConfigResource_NoSecretsInResponse(t *testing.T) {
 	raw := mustMarshal(t, resp.Data)
 	payload := string(raw)
 
-	// None of these strings should appear as JSON keys in the config payload.
+	// None of these strings should appear as JSON keys in the config
+	// payload. The list is intentionally broad: each category
+	// (auth, session, key material) has multiple common spellings so
+	// a developer adding a new secret-shaped field is likely to trip
+	// one. If a legitimate field name collides with an entry here,
+	// prefer renaming the field over removing the entry.
 	forbiddenKeys := []string{
-		"api_key", "apikey", "secret", "token", "credential",
-		"password", "passwd", "private_key",
+		// Keys / tokens
+		"api_key", "apikey", "access_key", "private_key", "signing_key",
+		"ssh_key", "gpg_key",
+		// Secrets / credentials
+		"secret", "client_secret", "credential", "password", "passwd",
+		// Auth / tokens / bearers
+		"token", "refresh_token", "access_token", "bearer", "authorization",
+		// Session / cookie material
+		"session", "cookie",
 	}
 	for _, key := range forbiddenKeys {
 		assert.NotContains(t, payload, `"`+key+`"`,

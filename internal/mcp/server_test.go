@@ -866,3 +866,187 @@ func TestServer_MultipleRequests_IDIsolation(t *testing.T) {
 		require.NotNil(t, byID[id]["result"], "id %s should have result", id)
 	}
 }
+
+// ---- M2: Register enforces additionalProperties:false ----------------
+
+// permissiveTool declares no additionalProperties constraint. A Register
+// call with this tool must panic — the strict-reject posture is a
+// contract of the Tool interface (see interfaces.go) and a silently
+// permissive schema would slip unknown fields through validation.
+type permissiveTool struct{}
+
+func (permissiveTool) Name() string        { return "permissive" }
+func (permissiveTool) Description() string { return "omits additionalProperties:false" }
+func (permissiveTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type":"object",
+		"properties":{"x":{"type":"string"}},
+		"required":[]
+	}`)
+}
+func (permissiveTool) Handle(_ context.Context, _ json.RawMessage) *Response {
+	return OK(nil)
+}
+
+// explicitlyPermissiveTool declares additionalProperties:true explicitly.
+// Register must panic on this too — "true" is semantically equivalent
+// to "omitted" for our purposes.
+type explicitlyPermissiveTool struct{}
+
+func (explicitlyPermissiveTool) Name() string        { return "explicit_permissive" }
+func (explicitlyPermissiveTool) Description() string { return "explicit additionalProperties:true" }
+func (explicitlyPermissiveTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type":"object",
+		"properties":{"x":{"type":"string"}},
+		"additionalProperties":true
+	}`)
+}
+func (explicitlyPermissiveTool) Handle(_ context.Context, _ json.RawMessage) *Response {
+	return OK(nil)
+}
+
+// TestServer_Register_PanicsOnPermissiveSchema is the M2 regression:
+// a tool whose schema does not declare additionalProperties:false must
+// trigger a panic at Register time with a message naming the tool.
+// Discovering this at startup (vs. letting a permissive schema slip
+// into production) is the whole point of enforcing it here.
+func TestServer_Register_PanicsOnPermissiveSchema(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "Register must panic when additionalProperties:false is missing")
+		msg, ok := r.(string)
+		require.True(t, ok, "panic value should be a string, got %T", r)
+		assert.Contains(t, msg, "permissive",
+			"panic message must name the offending tool")
+		assert.Contains(t, msg, "additionalProperties:false",
+			"panic message must identify the missing invariant")
+	}()
+
+	srv := NewServer(testServerVersion)
+	srv.Register(permissiveTool{}) // should panic before return
+}
+
+// TestServer_Register_PanicsOnExplicitAdditionalPropertiesTrue covers
+// the explicit "additionalProperties": true case separately from the
+// "omitted" case — both are permissive, both must be rejected.
+func TestServer_Register_PanicsOnExplicitAdditionalPropertiesTrue(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "Register must panic on additionalProperties:true")
+	}()
+
+	srv := NewServer(testServerVersion)
+	srv.Register(explicitlyPermissiveTool{})
+}
+
+// TestServer_Register_SucceedsWithStrictSchema is the positive control
+// for the M2 enforcement: echoTool's schema does include
+// additionalProperties:false and Register must accept it without
+// panicking. If this test ever fails, the M2 check has been
+// over-tightened.
+func TestServer_Register_SucceedsWithStrictSchema(t *testing.T) {
+	t.Parallel()
+
+	// A bare function call is the test: if Register panics, the test
+	// itself panics. No recover() needed.
+	srv := NewServer(testServerVersion)
+	srv.Register(echoTool{})
+}
+
+// ---- M4: static URI matching requires a legal boundary ----------------
+
+// TestServer_ResourcesRead_PrefixBoundary is the M4 regression test.
+// Before the fix, matchResource used plain HasPrefix, so a short
+// pattern could shadow a longer URI — "signatory://ana" would
+// silently handle requests for "signatory://analyses". The fix
+// requires the URI to equal the pattern exactly, or to continue with
+// "?" or "#". This test registers two resources where one pattern is
+// a prefix of the other and verifies each URI reaches its intended
+// handler.
+func TestServer_ResourcesRead_PrefixBoundary(t *testing.T) {
+	t.Parallel()
+	s, stop := newSession(t, func(srv *Server) {
+		// Shorter pattern first — if HasPrefix were still in use, it
+		// would win the iteration coin flip some fraction of the time
+		// and intercept the longer URI.
+		srv.RegisterResource(&staticResource{
+			uriPattern: "signatory://ana",
+			data:       map[string]string{"kind": "ana"},
+		})
+		srv.RegisterResource(&staticResource{
+			uriPattern: "signatory://analyses",
+			data:       map[string]string{"kind": "analyses"},
+		})
+	})
+	defer stop()
+	s.doHandshake(t)
+
+	// 1. Exact URI for the shorter pattern → shorter handler.
+	s.request(101, "resources/read", map[string]any{"uri": "signatory://ana"})
+	resp := s.readResponse(t)
+	require.Nil(t, resp["error"], "shorter pattern must handle its own URI")
+	assertResourcePayloadKind(t, resp, "ana")
+
+	// 2. Exact URI for the longer pattern → longer handler. If
+	//    HasPrefix were still in effect, the shorter pattern could
+	//    intercept this.
+	s.request(102, "resources/read", map[string]any{"uri": "signatory://analyses"})
+	resp = s.readResponse(t)
+	require.Nil(t, resp["error"], "longer pattern must handle its own URI")
+	assertResourcePayloadKind(t, resp, "analyses")
+
+	// 3. Longer URI with query string → longer handler via the
+	//    pattern+"?" branch. Same concern: the shorter pattern must
+	//    not win this match.
+	s.request(103, "resources/read", map[string]any{
+		"uri": "signatory://analyses?target=repo:github/foo/bar",
+	})
+	resp = s.readResponse(t)
+	require.Nil(t, resp["error"], "query-string URI must resolve to longer pattern")
+	assertResourcePayloadKind(t, resp, "analyses")
+
+	// 4. A URI that extends the shorter pattern at a non-boundary
+	//    character ("ana" + "lyses" with no ?/#) must NOT match the
+	//    shorter pattern via its own loop iteration. It still matches
+	//    the longer pattern (exact match, step 1 of matchResource),
+	//    so we'd see the longer handler either way — the proof is that
+	//    step 3 also reaches the longer handler, which it can only
+	//    do if the short pattern did not intercept.
+	//
+	//    To construct a case where only a shorter-prefix-shadow
+	//    failure would be observable, register a URI that extends
+	//    the short pattern but has no registered longer match — it
+	//    should return resource-not-found, not silently match the
+	//    short pattern.
+	s.request(104, "resources/read", map[string]any{
+		"uri": "signatory://ana-other",
+	})
+	resp = s.readResponse(t)
+	require.NotNil(t, resp["error"], "extended URI with no exact match must surface not-found")
+}
+
+// assertResourcePayloadKind extracts data.kind from a resources/read
+// envelope and asserts it equals want. Factored out because three
+// subcases in TestServer_ResourcesRead_PrefixBoundary share the check.
+func assertResourcePayloadKind(t *testing.T, resp map[string]json.RawMessage, want string) {
+	t.Helper()
+	var result struct {
+		Contents []struct {
+			Text string `json:"text"`
+		} `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(resp["result"], &result))
+	require.Len(t, result.Contents, 1)
+
+	var env struct {
+		Data map[string]string `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.Contents[0].Text), &env))
+	assert.Equal(t, want, env.Data["kind"],
+		"resources/read must reach the handler matching the URI boundary, not a shorter prefix")
+}

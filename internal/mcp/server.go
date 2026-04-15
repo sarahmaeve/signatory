@@ -82,13 +82,22 @@ func (s *Server) Version() string {
 }
 
 // Register adds a Tool to the server's registry. The tool's InputSchema
-// is parsed and cached; if parsing fails, Register panics — schema
-// validity is a programmer error, not a runtime error.
+// is parsed and cached; if parsing fails or the schema doesn't declare
+// additionalProperties:false, Register panics — schema validity is a
+// programmer error discovered at startup, not a runtime error. The
+// strict-reject posture is a documented invariant of the Tool contract
+// (see interfaces.go); enforcing it at Register time prevents a new
+// tool author from silently producing a permissive schema that slips
+// unknown fields through validation.
 // Register is not safe to call after Serve has started.
 func (s *Server) Register(t Tool) {
 	schema, err := parseInputSchema(t.InputSchema())
 	if err != nil {
 		panic("mcp: invalid InputSchema for tool " + t.Name() + ": " + err.Error())
+	}
+	if !schema.strictReject {
+		panic("mcp: tool " + t.Name() +
+			" InputSchema must set additionalProperties:false (strict-reject is required by the Tool contract)")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

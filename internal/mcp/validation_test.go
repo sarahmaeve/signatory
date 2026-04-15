@@ -435,3 +435,42 @@ func TestValidation_Number_RejectsOverflow(t *testing.T) {
 	assert.Equal(t, CodeSchemaViolation, result.Error.Code)
 	assert.Contains(t, result.Error.Message, "representable")
 }
+
+// TestDescribeJSON_LabelCoverage locks in the M5 change: the default
+// fallback is "invalid", not "number". A leading byte that isn't a
+// legal JSON start (say '?' from truncated input) must not be
+// misclassified, since the label goes into user-facing error messages.
+//
+// Each row is one leading byte and the label describeJSON should
+// emit. The "number" row covers both sign and digit paths explicitly
+// so the narrowing doesn't accidentally drop one.
+func TestDescribeJSON_LabelCoverage(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", "null"},
+		{"string", `"hello"`, "string"},
+		{"object", `{}`, "object"},
+		{"array", `[]`, "array"},
+		{"boolean true", `true`, "boolean"},
+		{"boolean false", `false`, "boolean"},
+		{"null literal", `null`, "null"},
+		{"positive digit", `42`, "number"},
+		{"leading zero", `0.5`, "number"},
+		{"negative", `-1`, "number"},
+		{"stray question mark", `?garbage`, "invalid"},
+		{"stray comma", `,`, "invalid"},
+		{"whitespace only", ` `, "invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := describeJSON(json.RawMessage(tc.raw))
+			assert.Equal(t, tc.want, got,
+				"describeJSON(%q) must label the leading byte honestly, not fall back to 'number'", tc.raw)
+		})
+	}
+}

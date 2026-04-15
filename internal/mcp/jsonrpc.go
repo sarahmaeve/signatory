@@ -135,7 +135,13 @@ func (c *codec) readRequest() (*rpcRequest, error) {
 	}
 	var req rpcRequest
 	if err := json.Unmarshal(line, &req); err != nil {
-		return nil, &rpcError{Code: codeParseError, Message: "parse error: " + err.Error()}
+		// The stdlib json error message can include snippets of the
+		// offending input ("invalid character 'q' looking for…") and
+		// byte offsets. That's an attacker-controlled-text channel into
+		// our response — low severity, but the only such channel. We
+		// return a generic message; a client that needs to debug has
+		// its own serialized output to look at.
+		return nil, &rpcError{Code: codeParseError, Message: "parse error: message is not valid JSON"}
 	}
 	if req.JSONRPC != rpcVersion {
 		return nil, &rpcError{Code: codeInvalidRequest, Message: `jsonrpc must be "2.0"`}

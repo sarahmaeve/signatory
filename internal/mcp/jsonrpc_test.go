@@ -53,6 +53,33 @@ func TestCodec_ReadRequest_ParseError(t *testing.T) {
 	assert.Equal(t, codeParseError, rpcErr.Code)
 }
 
+// TestCodec_ReadRequest_ParseError_DoesNotEchoUserBytes is the M1
+// regression test: the parse-error response must not contain fragments
+// of the attacker-controlled input. stdlib json errors include
+// excerpts like "invalid character 'q' looking for beginning of
+// value" — a low-severity leak, but the only such channel into our
+// on-wire response, so we sanitize. If this test fails because the
+// message changed, re-check that the new message also omits user
+// bytes before relaxing the assertions.
+func TestCodec_ReadRequest_ParseError_DoesNotEchoUserBytes(t *testing.T) {
+	t.Parallel()
+	// A distinctive byte we'd see in a stdlib message like
+	// "invalid character 'Q' looking for beginning of value".
+	const marker = "Q"
+	line := marker + "\n" // not valid JSON; the whole thing is garbage.
+	c := newCodec(strings.NewReader(line), io.Discard)
+
+	_, err := c.readRequest()
+	require.Error(t, err)
+	var rpcErr *rpcError
+	require.ErrorAs(t, err, &rpcErr)
+	assert.Equal(t, codeParseError, rpcErr.Code)
+	assert.NotContains(t, rpcErr.Message, marker,
+		"parse-error message must not echo user-supplied bytes; this is the M1 sanitization invariant")
+	assert.NotContains(t, rpcErr.Message, "invalid character",
+		"parse-error message must not relay the stdlib json error text")
+}
+
 // TestCodec_ReadRequest_WrongVersion verifies that a message with
 // jsonrpc != "2.0" is rejected with -32600 (Invalid Request).
 func TestCodec_ReadRequest_WrongVersion(t *testing.T) {
