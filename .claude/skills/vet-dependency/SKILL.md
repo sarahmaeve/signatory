@@ -109,6 +109,30 @@ See `design/dogfood/README.md` for the original four roles and
 `design/signal-storage-evolution.md` for the expanded set and its
 motivation.
 
+### Parallelism guidance — read this before steps 3-4
+
+Steps 3 and 4 are **independent data collection** that should run as
+**parallel agents**, not sequential steps. Wall-clock time is the
+constraint (GitHub API is rate-limited; each `gh api` call is ~1-2s).
+Parallelizing the collection phase reduces a 2-minute serial crawl
+to ~30s.
+
+**Spawn these as parallel agents** (one message, multiple Agent tool
+uses):
+
+| Agent | What it collects |
+|-------|-----------------|
+| **Forge signals** | Repo metadata, top contributors, recent commits (signing + activity), owner/org profile, tags/releases |
+| **Adoption + community** | `go.mod` reference count (adoption), dependent repos, downstream usage |
+| **Commit history analysis** | Total commit count, activity distribution over project lifetime, gap analysis, nature of recent commits |
+| **Ecosystem-specific** | go.mod/Cargo.toml/package.json contents, transitive dep count, registry metadata |
+
+Each agent returns its collected data. After ALL return, proceed to
+step 5 (assessment) which synthesizes across all signals.
+
+**Do NOT** collect everything in a single agent making 15 sequential
+API calls — that's the anti-pattern this guidance exists to prevent.
+
 ### 3. Collect signals from the source forge
 
 #### 3a. GitHub-hosted projects
