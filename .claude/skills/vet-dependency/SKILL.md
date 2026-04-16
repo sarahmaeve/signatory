@@ -34,6 +34,24 @@ trust model needs to expand.
 
 ## Process
 
+### 0. Check signatory's store first
+
+Before collecting signals, check whether signatory already has data
+for this target. If the signatory MCP server is available:
+
+1. Call `signatory_analyze(target=<target>)` — returns the cached
+   trust profile if the target has been assessed before.
+2. Call `signatory_show_conclusions(target=<target>)` — returns any
+   conclusions already recorded.
+
+If data exists, present it to the user and ask whether they want a
+fresh analysis (re-collect) or are satisfied with the existing one.
+Re-collecting from GitHub's API is slow and rate-limited; the store
+is the fast path and should always be checked first.
+
+If the signatory MCP server is not configured (tool not available),
+skip this step and proceed to collection.
+
 ### 1. Identify the target
 
 Parse $ARGUMENTS to determine:

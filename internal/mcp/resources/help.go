@@ -143,9 +143,33 @@ signatory has assessed"; the filesystem and the web are not.
 - SchemaViolation: the tool arguments don't match the schema. Fix the
   call, do not retry blindly.
 
-## Out of scope for signatory
+## Workflow: "is X safe?" for a new target
 
-- Live network scans. signatory queries a local store.
+signatory's MCP surface is read-only. Collection and analysis happen
+outside MCP (via the vet-dependency skill or CLI tools), and their
+results are ingested into the store for future queries.
+
+Expected sequence:
+1. Check signatory_analyze(target=X). If data exists → answer from it.
+2. If NotFound → the target hasn't been assessed. Tell the user.
+3. Offer to run the vet-dependency skill (or equivalent collection
+   tooling) to produce a fresh analysis document.
+4. After the skill completes, the output is ingested via
+   ` + "`signatory ingest <file>`" + ` (CLI) → populates the store.
+5. Future signatory_analyze(target=X) calls return the ingested data.
+
+Do NOT skip step 1 and go straight to vet-dependency. The store may
+already have the answer, and re-collecting signals from GitHub's API
+is slow and rate-limited.
+
+Do NOT ask signatory MCP to "collect" or "refresh" — it cannot. The
+refresh=true parameter on signatory_analyze is stubbed in v0.1. When
+you see NotFound, the action is "offer the user collection via the
+vet-dependency skill," not "retry with different parameters."
+
+## Out of scope for signatory MCP (v0.1)
+
+- Live network scans or signal collection. signatory queries a local store.
 - Generating new analyses. v0.1 is read-only; write paths are Phase 2.
 - Cross-ecosystem vulnerability databases (CVE, OSV). signatory tracks
   its own conclusions, not public advisories.

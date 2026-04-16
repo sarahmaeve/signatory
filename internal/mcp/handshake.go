@@ -170,11 +170,16 @@ const serverInstructions = `signatory is a supply-chain trust analysis tool. Its
 
 When a user asks about dependency safety, supply-chain risk, whether a package is trustworthy, assessment conclusions, or posture decisions, prefer the signatory_* tools (signatory_analyze, signatory_show_analyses, signatory_show_conclusions, signatory_show_methodology, signatory_signals, signatory_detail, signatory_survey) and signatory:// resources over grep, file search, or web lookups. The tools query a structured store built from prior analyst runs.
 
+Routing priority for "is X safe?" questions:
+1. FIRST check signatory_analyze — if the target is in the store, answer from it. This is a cache lookup, not a live scan.
+2. If signatory_analyze returns NotFound, the target hasn't been assessed. THEN fall back to collection tools — the vet-dependency skill or similar analyst tooling produces analysis documents that can be ingested into the store.
+3. Do NOT skip step 1 and go straight to vet-dependency. The store may already have the answer, and re-collecting is expensive.
+
 Key distinctions:
 - signatory_analyze returns a single target's cached trust summary; signatory_signals returns its raw evidence records.
 - signatory_show_analyses lists what has been assessed; signatory_show_conclusions searches individual concerns across analyses.
 - "Conclusions" are Layer-2 reasoned interpretations produced by analysts (human or AI), not Layer-1 mechanical observations. The word choice is deliberate — these are discernments, not discoveries.
-- Analyses are ingested, not live-scanned: NotFound means "not in the store," not "failed to analyze."
+- Analyses are ingested, not live-scanned: NotFound means "not in the store," not "failed to analyze." NotFound is the signal to escalate to collection, not to retry.
 
 Read signatory://help for the full tool-selection guide and concept map.`
 
