@@ -172,8 +172,9 @@ When a user asks about dependency safety, supply-chain risk, whether a package i
 
 Routing priority for "is X safe?" questions:
 1. FIRST check signatory_analyze — if the target is in the store, answer from it. This is a cache lookup, not a live scan.
-2. If signatory_analyze returns NotFound, the target hasn't been assessed. THEN fall back to collection tools — the vet-dependency skill or similar analyst tooling produces analysis documents that can be ingested into the store.
-3. Do NOT skip step 1 and go straight to vet-dependency. The store may already have the answer, and re-collecting is expensive.
+2. If signatory_analyze returns NotFound, the target hasn't been assessed. THEN offer to run the /analyze skill — it dispatches specialist analyst agents using signatory handoff prompts, ingests their v1-schema JSON output, and synthesizes a combined assessment. The /analyze skill IS the automated pipeline.
+3. Do NOT skip step 1 and go straight to /analyze or /vet-dependency. The store may already have the answer, and re-collecting is expensive.
+4. /vet-dependency is the manual human-readable fallback — use it only when the user explicitly requests a narrative document, not as the default pipeline.
 
 Key distinctions:
 - signatory_analyze returns a single target's cached trust summary; signatory_signals returns its raw evidence records.

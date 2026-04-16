@@ -7,9 +7,14 @@ allowed-tools: Bash Read Write Edit Glob Grep WebFetch
 # Vet Dependency (or any open-source target)
 
 Perform a supply chain trust analysis on an open-source project. This
-skill is the collection and analysis arm that feeds signatory's MCP
-server — it produces v1-schema JSON that `signatory ingest` loads into
-the store, making the analysis queryable via the MCP surface.
+is the **human-invoked fallback** (v0.0) — it produces a human-readable
+markdown document for direct review. It does NOT feed the signatory
+store or MCP surface.
+
+For the automated pipeline that populates the signatory store (v1 JSON
+→ ingest → MCP queryable), use `/analyze` instead. This skill exists
+for cases where the user explicitly wants a narrative document they
+can read, not a structured pipeline run.
 
 The target is specified as $ARGUMENTS — a package coordinate (Go module
 path, npm name, PyPI name, crates.io name), a GitHub / GitLab repo URL,
@@ -362,90 +367,22 @@ tight-coupling risk.
 hosted SaaS alongside the binary, that's a **second, independent
 trust decision**. Document both surfaces separately.
 
-### 6. Produce v1-schema JSON (PRIMARY output)
+### 6. Produce the output document
 
-The primary output is a v1-schema analyst output JSON file. This is
-what `signatory ingest` consumes, what `signatory format-check`
-validates, and what makes the analysis queryable via the MCP surface.
+This skill produces **markdown only** — human-readable analysis
+documents for direct review. It does NOT produce v1-schema JSON or
+feed the signatory store. For the automated pipeline (JSON → ingest →
+MCP), use the `/analyze` skill instead.
 
-**Before writing JSON**, read one existing v1 analyst output as a
-schema reference — these are the canonical examples:
+Pick the right location for the file:
 
-```
-filestore/analysis/signatory-security-v1.json
-filestore/analysis/thefuck-provenance-v1.json
-```
-
-Read one of them (not both — they follow the same schema). Your JSON
-**MUST** match this structure exactly. The schema is defined in
-`internal/exchange/types.go` (the `AnalystOutput` struct) but the
-examples are easier to pattern-match against.
-
-**File location**: `filestore/analysis/{target-name}-{role}-v1.json`
-Examples: `photon-provenance-v1.json`, `lodash-security-v1.json`
-
-**Required top-level fields** (see the example for the exact JSON shape):
-
-- `attribution`: `{analyst_id, model, prompt_version, invoked_at, round}`
-  - `analyst_id`: a short identifier for this skill run (e.g. `"signatory-provenance"` or `"external-sec-v1"`)
-  - `model`: the model that produced this output (e.g. `"claude-sonnet-4-6"`)
-  - `invoked_at`: RFC3339 timestamp of when you started
-  - `round`: integer, typically 1 for first analysis
-- `target`: canonical URI (e.g. `"repo:github/komoot/photon"` or `"pkg:npm/lodash"`)
-- `target_commit`: the git commit SHA you analyzed (from `gh api repos/{owner}/{repo} --jq .default_branch` then the HEAD SHA)
-- `conclusions`: array of conclusion objects (each with id, verdict, rationale, severity, category, citations, etc.)
-- `positive_absences`: array of things you specifically checked for and confirmed absent
-- `methodology_trace`: `{patterns: [...]}` — the detection patterns you applied
-- `round_notes`: prose summary of what this round covered
-
-**Each conclusion** must have:
-- `id`: short local ID (e.g. `"F001"`, `"F002"`)
-- `verdict`: one-sentence statement of the conclusion
-- `rationale`: detailed explanation with evidence
-- `severity`: `{default: "critical"|"high"|"medium"|"low"|"informational"|"positive"}`
-- `category`: descriptive category string
-- `citations`: array of `{path, line_start, line_end?, quoted?}` source references
-
-**After writing the JSON**, validate it:
-
-```bash
-signatory format-check filestore/analysis/{file}.json
-signatory format-check -s filestore/analysis/{file}.json
-```
-
-If format-check fails, fix the JSON until it passes. Do NOT skip
-this step — an invalid JSON file will fail at ingest.
-
-### 7. Ingest into the signatory store
-
-After format-check passes, ingest the JSON into the store:
-
-```bash
-signatory ingest filestore/analysis/{file}.json
-```
-
-This populates the store so future `signatory_analyze`,
-`signatory_show_conclusions`, and `signatory_show_methodology`
-queries return this analysis. Verify:
-
-```bash
-signatory show-analyses
-```
-
-The ingested output should appear in the list.
-
-### 8. Produce markdown companion (secondary output)
-
-Write a human-readable markdown companion alongside the JSON:
-
-- **`design/dogfood/{package-name}.md`** — if the target is a
-  signatory dependency. A posture decision is expected.
+- **`design/dogfood/{package-name}.md`** — if the target is an actual
+  dependency of signatory (Go libraries signatory compiles against).
+  A posture decision is expected and the user confirms it.
 - **`design/analysis/{package-name}.md`** — if the target is not a
-  signatory dependency (analysis-only).
-
-The markdown is for human consumption (design review, dogfood
-tracking). The JSON is the machine-readable record of truth. Both
-should cover the same content; the markdown can be more narrative.
+  signatory dependency. This includes non-Go projects, CLIs, and
+  arbitrary projects the trust model is being applied to.
+  Posture may be "Analysis only — no posture recorded."
 
 Use this structure:
 
@@ -511,14 +448,14 @@ or the role taxonomy. Feeds into signal-storage-evolution.md and
 the signal-type registry.}
 ```
 
-### 9. Update the index
+### 7. Update the index
 
 - If filing under `design/dogfood/`: add a row to the decisions table
   in `design/dogfood/README.md`.
 - If filing under `design/analysis/`: add a row to the analyses table
   in `design/analysis/README.md`.
 
-### 10. Present recommendation to the user
+### 8. Present recommendation to the user
 
 Summarize conclusions and present a posture recommendation with
 rationale. **The decision is the user's — do not record the posture
@@ -526,9 +463,10 @@ without confirmation.** "Analysis only — no posture recorded" is a
 valid terminal state and should be offered explicitly when the target
 isn't a consumer dependency.
 
-Confirm that the analysis was ingested into the store and is now
-queryable via `signatory_show_analyses` and
-`signatory_show_conclusions`.
+Note: this skill does NOT populate the signatory store. If the user
+wants the analysis in the store (queryable via MCP), suggest running
+`/analyze` for the same target — that skill produces v1-schema JSON
+and ingests it.
 
 ## Important Notes
 

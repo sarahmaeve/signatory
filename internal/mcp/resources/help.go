@@ -164,8 +164,18 @@ is slow and rate-limited.
 
 Do NOT ask signatory MCP to "collect" or "refresh" — it cannot. The
 refresh=true parameter on signatory_analyze is stubbed in v0.1. When
-you see NotFound, the action is "offer the user collection via the
-vet-dependency skill," not "retry with different parameters."
+you see NotFound, the action is "offer to run the /analyze skill,"
+not "retry with different parameters."
+
+The /analyze skill is the v0.1 automated pipeline: it generates
+handoff prompts via signatory CLI, dispatches security + provenance
+analyst agents in parallel, validates and ingests their v1-schema
+JSON output, and synthesizes a combined assessment. It IS the bridge
+between "nothing in the store" and "store has data."
+
+/vet-dependency is the manual human-readable fallback — use it only
+when the user explicitly asks for a narrative document, not as the
+default collection path.
 
 ## Out of scope for signatory MCP (v0.1)
 
