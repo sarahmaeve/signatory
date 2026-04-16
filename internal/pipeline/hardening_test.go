@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -461,15 +460,3 @@ func createTestSession(t *testing.T, client *http.Client, baseURL string) string
 	return sess.ID
 }
 
-// newTestServerWithDB is like newTestServer but also returns the underlying
-// httptest.Server for tests that need the handler directly.
-func newTestServerWithHandler(t *testing.T) (*httptest.Server, http.Handler) {
-	t.Helper()
-	db := openTestDB(t)
-	s, err := pipeline.OpenStore(context.Background(), db)
-	require.NoError(t, err)
-	srv := pipeline.NewServer(s, nil)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return ts, srv.Handler()
-}

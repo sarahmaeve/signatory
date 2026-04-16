@@ -26,13 +26,6 @@ func openTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// openTestDBWithPragmas is an alias for openTestDB, retained for
-// backward compatibility with tests written before the rename.
-func openTestDBWithPragmas(t *testing.T) *sql.DB {
-	t.Helper()
-	return openTestDB(t)
-}
-
 func openTestStore(t *testing.T) *pipeline.Store {
 	t.Helper()
 	db := openTestDB(t)
