@@ -25,6 +25,7 @@ type CLI struct {
 	Handoff         HandoffCmd         `cmd:"" help:"Render a handoff prompt for a fresh analyst agent."`
 	FormatCheck     FormatCheckCmd     `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
 	Ingest          IngestCmd          `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
+	BuildOutput     BuildOutputCmd     `cmd:"build-output" help:"Convert structured agent text to v1-schema JSON."`
 	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
 	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs."`
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
