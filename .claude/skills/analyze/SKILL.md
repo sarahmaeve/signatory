@@ -57,6 +57,28 @@ echo "exit: $?"
   argument, not `--target`), missing `~/.signatory/signatory.db`
   (run `signatory init` first), or a corrupted database file.
 
+## Prerequisite — one-time TLS setup
+
+The pipeline service uses HTTPS because Claude Code's WebFetch
+tool forces HTTPS on all URLs. One-time setup with mkcert:
+
+```bash
+brew install mkcert
+mkcert -install  # installs local CA; needs sudo password
+mkdir -p ~/.signatory/certs
+cd ~/.signatory/certs && mkcert 127.0.0.1 localhost
+```
+
+Then add to your shell profile so Claude Code's HTTP client
+trusts the mkcert CA:
+
+```bash
+export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+```
+
+Restart Claude Code for the env var to take effect. This setup
+is one-time — subsequent pipeline runs just use the service.
+
 ## Step 1 — Start pipeline service + create session + generate handoffs
 
 The pipeline message service eliminates /tmp files and context-window
@@ -71,7 +93,7 @@ SERVE_PID=$!
 sleep 1  # wait for server startup
 
 # Create a session for this pipeline run.
-SESSION_ID=$(curl -s -X POST http://127.0.0.1:21517/api/sessions \
+SESSION_ID=$(curl -s -X POST https://127.0.0.1:21517/api/sessions \
   -H "Content-Type: application/json" \
   -d "{\"target\":\"$TARGET\"}" | jq -r .id)
 echo "Session: $SESSION_ID"
@@ -88,7 +110,7 @@ SECURITY_HANDOFF=$(signatory handoff security "$TARGET" \
   --network-precheck --clone-dir filestore/clones/ 2>/dev/null)
 
 # Deposit in the pipeline service.
-curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
   --data-binary @- <<ENDJSON
 {"role":"security","msg_type":"handoff","content":$(echo "$SECURITY_HANDOFF" | jq -Rs .)}
@@ -99,7 +121,7 @@ TARGET_NAME=$(basename "$TARGET" .git)
 PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" \
   --network-precheck --path "filestore/clones/$TARGET_NAME" 2>/dev/null)
 
-curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
   --data-binary @- <<ENDJSON
 {"role":"provenance","msg_type":"handoff","content":$(echo "$PROVENANCE_HANDOFF" | jq -Rs .)}
@@ -126,7 +148,7 @@ API calls and to retrieve their handoff. Do NOT give them Bash.
 
 The URL pattern for retrieving handoffs is:
 ```
-http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role={ROLE}&type=handoff&format=raw
+https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role={ROLE}&type=handoff&format=raw
 ```
 
 The `format=raw` parameter returns plain text (not JSON), which is
@@ -138,7 +160,7 @@ Agent(security-analyst):
     You are a security analyst for signatory's trust analysis pipeline.
     
     FIRST: Retrieve your full handoff instructions using WebFetch:
-      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
+      https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
     
     Follow those instructions exactly.
     
@@ -155,7 +177,7 @@ Agent(provenance-analyst):
     You are a provenance analyst for signatory's trust analysis pipeline.
     
     FIRST: Retrieve your full handoff instructions using WebFetch:
-      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
+      https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
     
     Follow those instructions exactly.
     
@@ -205,7 +227,7 @@ dispatch a synthesist agent that retrieves it via WebFetch.
 ```bash
 SYNTHESIS_HANDOFF=$(signatory handoff synthesist "$TARGET" 2>/dev/null)
 
-curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
   --data-binary @- <<ENDJSON
 {"role":"synthesist","msg_type":"handoff","content":$(echo "$SYNTHESIS_HANDOFF" | jq -Rs .)}
@@ -218,7 +240,7 @@ Agent(synthesist):
     You are a synthesist for signatory's trust analysis pipeline.
     
     FIRST: Retrieve your full handoff instructions using WebFetch:
-      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=synthesist&type=handoff&format=raw
+      https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=synthesist&type=handoff&format=raw
     
     Follow those instructions exactly.
     

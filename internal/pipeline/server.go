@@ -67,9 +67,16 @@ func (s *Server) registerRoutes() {
 }
 
 // ListenAndServe starts the HTTP server on the given port.
-// It binds to 127.0.0.1 only. The server shuts down gracefully
-// when ctx is cancelled.
-func (s *Server) ListenAndServe(ctx context.Context, port int) error {
+// It binds to 127.0.0.1 only. If certFile and keyFile are both
+// non-empty, TLS is enabled and the server listens on HTTPS.
+// The server shuts down gracefully when ctx is cancelled.
+//
+// TLS is required for agent access via WebFetch (Claude Code's
+// HTTP client forces HTTPS and rejects self-signed certs). Use
+// mkcert or a similar tool to generate a locally-trusted cert
+// for 127.0.0.1, and set NODE_EXTRA_CA_CERTS to the CA root so
+// Claude Code's HTTP client trusts it.
+func (s *Server) ListenAndServe(ctx context.Context, port int, certFile, keyFile string) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	s.server = &http.Server{
 		Addr:              addr,
@@ -90,8 +97,20 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		}
 	}()
 
-	s.logger.Info("pipeline server listening", "addr", addr)
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	tlsEnabled := certFile != "" && keyFile != ""
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	s.logger.Info("pipeline server listening", "addr", addr, "scheme", scheme)
+
+	var err error
+	if tlsEnabled {
+		err = s.server.ListenAndServeTLS(certFile, keyFile)
+	} else {
+		err = s.server.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
