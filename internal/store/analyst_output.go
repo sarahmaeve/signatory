@@ -561,7 +561,7 @@ func insertCitations(
 ) error {
 	for seq := range citations {
 		c := &citations[seq]
-		var lineStart, lineEnd int = -1, -1
+		var lineStart, lineEnd = -1, -1
 		if c.LineStart != nil {
 			lineStart = *c.LineStart
 		}

@@ -345,11 +345,10 @@ func (p *tomlParser) parseArray() ([]string, error) {
 // that are allowed between tokens inside an array literal.
 func (p *tomlParser) skipArrayNoise() {
 	for !p.atEOF() {
-		c := p.peek()
-		switch {
-		case c == ' ' || c == '\t' || c == '\n':
+		switch p.peek() {
+		case ' ', '\t', '\n':
 			p.advance()
-		case c == '#':
+		case '#':
 			p.skipCommentBody()
 		default:
 			return
