@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,11 +20,48 @@ type Store struct {
 // OpenStore wraps an existing *sql.DB connection and ensures the
 // pipeline tables exist. The caller owns the DB lifecycle — Store
 // does not close it.
+//
+// The caller is responsible for configuring the DB connection for
+// SQLite concurrency safety (SetMaxOpenConns(1), WAL mode, busy
+// timeout, foreign keys). When used via `signatory serve`, the
+// main store's OpenSQLite handles this. For standalone use or
+// testing, call ConfigureDB first.
 func OpenStore(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("pipeline migrate: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// ConfigureDB sets the SQLite pragmas required for safe concurrent
+// use: single connection, WAL journal mode, busy timeout, and
+// foreign key enforcement. Call this when the *sql.DB was not
+// opened via the main store's OpenSQLite (which sets these itself).
+func ConfigureDB(ctx context.Context, db *sql.DB) error {
+	db.SetMaxOpenConns(1)
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err := db.ExecContext(ctx, p); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// CountActiveSessions returns the number of sessions with status 'active'.
+func (s *Store) CountActiveSessions(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_sessions WHERE status = 'active'`,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active sessions: %w", err)
+	}
+	return count, nil
 }
 
 // CreateSession starts a new pipeline session for the given target.
@@ -47,7 +85,8 @@ func (s *Store) CreateSession(ctx context.Context, target, metadata string) (*Se
 	return sess, nil
 }
 
-// GetSession retrieves a session by ID.
+// GetSession retrieves a session by ID. Returns sql.ErrNoRows
+// (wrapped) if the session does not exist.
 func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, target, status, created_at, metadata
@@ -122,7 +161,8 @@ func (s *Store) GetMessages(ctx context.Context, f MessageFilter) ([]Message, er
 	return msgs, rows.Err()
 }
 
-// GetLatestMessage retrieves the most recent message matching the filter.
+// GetLatestMessage retrieves the most recent message matching the
+// filter. Returns sql.ErrNoRows (wrapped) if no message matches.
 func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message, error) {
 	query := `SELECT id, session_id, role, msg_type, content, created_at, metadata
 	          FROM pipeline_messages WHERE session_id = ?`
@@ -145,6 +185,9 @@ func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message
 	err := row.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.MsgType,
 		&msg.Content, &createdStr, &metadata)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("get latest message: %w", sql.ErrNoRows)
+		}
 		return nil, fmt.Errorf("get latest message: %w", err)
 	}
 	msg.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
@@ -206,6 +249,9 @@ func scanSession(row *sql.Row) (*Session, error) {
 	var createdStr string
 	var metadata sql.NullString
 	if err := row.Scan(&sess.ID, &sess.Target, &sess.Status, &createdStr, &metadata); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("scan session: %w", sql.ErrNoRows)
+		}
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
 	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)

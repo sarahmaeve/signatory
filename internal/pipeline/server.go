@@ -2,13 +2,34 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"time"
+)
+
+// Request body size limits. The message limit is generous because
+// handoff templates can be 500+ lines; the session limit is small
+// because it's just a target URI and optional metadata.
+const (
+	maxSessionBodyBytes = 4 * 1024       // 4 KB
+	maxMessageBodyBytes = 10 * 1024 * 1024 // 10 MB
+)
+
+// maxActiveSessions is the default cap on concurrent active sessions.
+// Prevents unbounded growth from runaway loops. Configurable via
+// NewServerWithOptions if we ever need it.
+const maxActiveSessions = 100
+
+// Valid role and msg_type values. Requests with values outside these
+// sets are rejected with 400.
+var (
+	validRoles    = map[string]bool{"security": true, "provenance": true, "synthesist": true, "orchestrator": true}
+	validMsgTypes = map[string]bool{"handoff": true, "output": true, "feedback": true, "template": true, "status": true}
 )
 
 // Server is the HTTP API for the pipeline message service.
@@ -54,6 +75,8 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		Addr:              addr,
 		Handler:           s.mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		BaseContext:       func(_ net.Listener) context.Context { return ctx },
 	}
 
@@ -68,7 +91,7 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 	}()
 
 	s.logger.Info("pipeline server listening", "addr", addr)
-	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
@@ -96,9 +119,11 @@ type depositMessageRequest struct {
 // --- handlers ---
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSessionBodyBytes)
+
 	var req createSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: %v", err)
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Target == "" {
@@ -106,9 +131,23 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce session count limit.
+	count, err := s.store.CountActiveSessions(r.Context())
+	if err != nil {
+		s.logger.Error("count sessions", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if count >= maxActiveSessions {
+		writeError(w, http.StatusServiceUnavailable,
+			"active session limit reached (%d); delete old sessions first", maxActiveSessions)
+		return
+	}
+
 	sess, err := s.store.CreateSession(r.Context(), req.Target, req.Metadata)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create session: %v", err)
+		s.logger.Error("create session", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -119,7 +158,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.store.ListSessions(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list sessions: %v", err)
+		s.logger.Error("list sessions", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if sessions == nil {
@@ -132,11 +172,12 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, err := s.store.GetSession(r.Context(), id)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
-			writeError(w, http.StatusNotFound, "session %q not found", id)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "get session: %v", err)
+		s.logger.Error("get session", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, sess)
@@ -145,7 +186,8 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete session: %v", err)
+		s.logger.Error("delete session", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	s.logger.Info("session deleted", "id", id)
@@ -153,15 +195,24 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDepositMessage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMessageBodyBytes)
 	sessionID := r.PathValue("id")
 
 	var req depositMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: %v", err)
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Role == "" || req.MsgType == "" {
 		writeError(w, http.StatusBadRequest, "role and msg_type are required")
+		return
+	}
+	if !validRoles[req.Role] {
+		writeError(w, http.StatusBadRequest, "invalid role %q", req.Role)
+		return
+	}
+	if !validMsgTypes[req.MsgType] {
+		writeError(w, http.StatusBadRequest, "invalid msg_type %q", req.MsgType)
 		return
 	}
 	if req.Content == "" {
@@ -178,7 +229,8 @@ func (s *Server) handleDepositMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := s.store.DepositMessage(r.Context(), msg)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "deposit message: %v", err)
+		s.logger.Error("deposit message", "session", sessionID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -198,7 +250,8 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := s.store.GetMessages(r.Context(), filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get messages: %v", err)
+		s.logger.Error("get messages", "session", sessionID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -227,11 +280,12 @@ func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) 
 
 	msg, err := s.store.GetLatestMessage(r.Context(), filter)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
+		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "no matching message")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "get latest: %v", err)
+		s.logger.Error("get latest message", "session", sessionID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

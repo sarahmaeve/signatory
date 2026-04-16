@@ -19,8 +19,18 @@ func openTestDB(t *testing.T) *sql.DB {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
+	// Match production SQLite configuration: single connection,
+	// WAL mode, busy timeout, foreign key enforcement.
+	require.NoError(t, pipeline.ConfigureDB(context.Background(), db))
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// openTestDBWithPragmas is an alias for openTestDB, retained for
+// backward compatibility with tests written before the rename.
+func openTestDBWithPragmas(t *testing.T) *sql.DB {
+	t.Helper()
+	return openTestDB(t)
 }
 
 func openTestStore(t *testing.T) *pipeline.Store {
