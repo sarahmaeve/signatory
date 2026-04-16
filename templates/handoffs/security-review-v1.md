@@ -35,7 +35,7 @@ documented below.
 - **Name**: `{TARGET_NAME}`
 - **Repo**: `{TARGET_PATH}` (cloned locally, read-only)
 - **Language**: Python
-- **Role**: CLI application for developers
+- **Role**: {TARGET_ROLE}
 - **Notes from the user**: {INTAKE_QUESTION}
 
 ## Calibration notes
