@@ -30,6 +30,7 @@ type CLI struct {
 	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs."`
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
 	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
+	Serve           ServeCmd           `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)."`
 	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 
