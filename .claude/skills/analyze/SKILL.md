@@ -63,26 +63,51 @@ gh api repos/{owner}/{repo} --jq '{default_branch, pushed_at}'
 gh api repos/{owner}/{repo}/commits --jq '.[0].sha' | head -c 12
 ```
 
-## Step 2 — Generate handoff prompts
+## Step 2 — Detect ecosystem + generate handoff prompts
 
-Use `signatory handoff` to generate the specialist prompts. These
-are the instructions each analyst agent will follow.
+### 2a. Detect language and ecosystem
+
+The provenance handoff REQUIRES `--ecosystem`. Detect it:
 
 ```bash
-# Security analyst prompt
-signatory handoff security "$TARGET" -o /tmp/signatory-handoff-security.md
-
-# Provenance analyst prompt
-signatory handoff provenance "$TARGET" -o /tmp/signatory-handoff-provenance.md
+gh api repos/{owner}/{repo} --jq '.language'
 ```
 
-If the target needs flags (e.g. `--ecosystem go`, `--language python`),
-pass them through. If `signatory handoff` errors because the target
-format isn't recognized, resolve the target manually in Step 1 and
-pass `--url` / `--name` explicitly.
+Map the result:
+- Python → `--ecosystem pypi --language python`
+- Go → `--ecosystem go --language go`
+- Rust → `--ecosystem crates`
+- JavaScript/TypeScript → `--ecosystem npm`
+- Java/Kotlin → no ecosystem flag (Maven/Gradle not yet supported);
+  pass `--ecosystem go` as a placeholder and note the gap
 
-Read both generated prompts to verify they rendered correctly (no
-unfilled `TARGET_*` placeholders).
+### 2b. Generate the handoff prompts
+
+Always use `--force` to overwrite stale files from prior runs.
+
+```bash
+signatory handoff security "$TARGET" \
+  --language "$LANGUAGE" --ecosystem "$ECOSYSTEM" \
+  --force -o /tmp/signatory-handoff-security.md
+
+signatory handoff provenance "$TARGET" \
+  --ecosystem "$ECOSYSTEM" \
+  --force -o /tmp/signatory-handoff-provenance.md
+```
+
+### 2c. Check for unfilled placeholders
+
+The handoff command prints unfilled placeholders to stderr.
+**These are acceptable and expected:**
+
+- `INTAKE_QUESTION` — no intake question for automated runs. The
+  analyst will operate without one; this is fine.
+- `TARGET_PATH` — no local clone. The analysts can work from
+  GitHub API + web fetches. If a local clone is needed, the
+  analyst agent can clone it themselves.
+
+**Do NOT stop to manually fill these.** Proceed to Step 3. The
+analysts' handoff instructions handle the absent-placeholder case.
 
 ## Step 3 — Dispatch analyst agents IN PARALLEL
 
