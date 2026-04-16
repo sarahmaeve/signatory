@@ -47,7 +47,7 @@ import (
 // target's primary language and ecosystem markers. Without it, pass
 // --language and --ecosystem explicitly.
 type HandoffCmd struct {
-	Role   string `arg:"" enum:"security,provenance" help:"Analyst role: security or provenance."`
+	Role   string `arg:"" enum:"security,provenance,synthesist" help:"Analyst role: security, provenance, or synthesist."`
 	Target string `arg:"" help:"Target repository URL or local path (e.g., https://github.com/foo/bar or /Users/me/code/foo)."`
 
 	Name       string `help:"Override TARGET_NAME (default: inferred from target)."`
@@ -683,6 +683,10 @@ func inferTemplateName(role, language string) string {
 		// Language doesn't fork provenance — the template covers
 		// PyPI, npm, crates.io, and Go modules in one file.
 		return "handoffs/provenance-review-v1.md"
+	case "synthesist":
+		// The synthesist reads the signatory store, not source —
+		// no language/ecosystem fork needed.
+		return "handoffs/synthesis-v1.md"
 	default:
 		// Enum validation ensures we never reach this; keep the
 		// fallthrough explicit to catch programmer error in tests.

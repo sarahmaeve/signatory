@@ -154,50 +154,42 @@ You should see two entries (security + provenance). If either ingest
 fails, check the format-check output from the agent — the JSON may
 have a structural issue the agent didn't fully resolve.
 
-## Step 5 — Synthesize
+## Step 5 — Dispatch synthesist agent
 
-This is the step that makes the pipeline more than raw data. You
-(the orchestrator) now read the ingested data and produce a combined
-assessment that no single analyst could.
-
-Query the store for everything about this target:
+Generate the synthesis handoff prompt and dispatch a synthesist agent.
+The synthesist reads the store (not source) and produces the combined
+assessment. Its instructions come from the template, not from this
+skill — the template IS the single source of truth for how to
+synthesize.
 
 ```bash
-signatory show-conclusions --target "$CANONICAL_URI"
-signatory show-methodology --target "$CANONICAL_URI"
-signatory show-analyses --target "$CANONICAL_URI"
+signatory handoff synthesist "$TARGET" -o /tmp/signatory-handoff-synthesis.md
 ```
 
-Produce a synthesis that:
+Read the generated prompt to verify it rendered correctly.
 
-1. **Cross-references security + provenance conclusions.** Where do
-   the analysts agree? Where do they see different things? A
-   provenance concern that the security analyst didn't flag (or vice
-   versa) is itself a signal — one analyst's blind spot is another's
-   focus area.
+Then dispatch the synthesist:
 
-2. **Weighs by forgery resistance.** Conclusions backed by
-   cryptographic evidence (signed commits, trusted publishing) carry
-   more weight than conclusions from self-reported metadata (star
-   counts, README claims). Name the resistance level when citing a
-   conclusion.
+```
+Agent(synthesist):
+  prompt: |
+    You are a synthesist. Follow the instructions in
+    /tmp/signatory-handoff-synthesis.md exactly.
+    
+    Your output is a narrative trust assessment (markdown), not
+    v1-schema JSON. Present it directly — it will be shown to the
+    user as the final pipeline output.
+    
+    IMPORTANT: Read ALL conclusions and positive absences from the
+    store before writing anything. The posture tier goes at the TOP
+    of your output, before the reasoning — commit first, justify
+    second.
+  allowed-tools: Bash Read Write Glob Grep
+```
 
-3. **Names the posture recommendation with reasoning.** Tier should
-   be one of: `vetted-frozen`, `trusted-for-now`, `rejected`,
-   `unknown-provenance`, or `analysis-only` (if not a dependency).
-   Explain why THIS tier and not a higher or lower one.
-
-4. **Identifies gaps.** What couldn't either analyst determine? What
-   would a second round need to investigate? These gaps are honest
-   limitations, not failures.
-
-5. **States action items.** What should the user do next? Version
-   pin? Monitor? Set up Renovate? Audit a specific transitive dep?
-
-Present the synthesis to the user as a clear narrative. This is the
-human-readable assessment — the structured data is in the store for
-machine queries; this is the LLM-produced interpretation layer that
-gives the data meaning.
+The synthesist's output is the human-readable assessment that makes
+the pipeline's data meaningful. Present it to the user as the final
+result.
 
 ## Step 6 — Record posture (with user confirmation)
 
