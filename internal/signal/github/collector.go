@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -37,6 +36,11 @@ func (c *Collector) Name() string { return "github" }
 // is collected independently — a failure in one (e.g., rate limiting on
 // the search API) does not prevent other signals from being collected.
 // Failed collections are recorded as absence signals.
+//
+// Signal Group and ForgeryResistance come from the signal type registry
+// (internal/signal/types.go) rather than being hardcoded at each call
+// site. If a type is unregistered, RecordSignal panics — that catches
+// collector additions that forgot to extend the registry.
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	target := entity.URL
 	if target == "" {
@@ -58,39 +62,27 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
 
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entity.ID, "last_push", profile.SignalGroupVitality,
-			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))})),
-		signal.MakeSignal(makeSignal(entity.ID, "repo_age", profile.SignalGroupVitality,
-			profile.ForgeryVeryHigh, now, ttl,
-			map[string]interface{}{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)})),
-		signal.MakeSignal(makeSignal(entity.ID, "stars", profile.SignalGroupCriticality,
-			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.StargazersCount})),
-		signal.MakeSignal(makeSignal(entity.ID, "forks", profile.SignalGroupCriticality,
-			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.ForksCount})),
-		signal.MakeSignal(makeSignal(entity.ID, "open_issues", profile.SignalGroupVitality,
-			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{"count": r.OpenIssuesCount})),
-		signal.MakeSignal(makeSignal(entity.ID, "archived", profile.SignalGroupVitality,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"archived": r.Archived})),
-		signal.MakeSignal(makeSignal(entity.ID, "owner_type", profile.SignalGroupGovernance,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"type": r.Owner.Type, "login": r.Owner.Login})),
-	)
+	result.RecordSignal(entity.ID, "last_push", "github", now, ttl,
+		map[string]interface{}{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))})
+	result.RecordSignal(entity.ID, "repo_age", "github", now, ttl,
+		map[string]interface{}{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)})
+	result.RecordSignal(entity.ID, "stars", "github", now, ttl,
+		map[string]interface{}{"count": r.StargazersCount})
+	result.RecordSignal(entity.ID, "forks", "github", now, ttl,
+		map[string]interface{}{"count": r.ForksCount})
+	result.RecordSignal(entity.ID, "open_issues", "github", now, ttl,
+		map[string]interface{}{"count": r.OpenIssuesCount})
+	result.RecordSignal(entity.ID, "archived", "github", now, ttl,
+		map[string]interface{}{"archived": r.Archived})
+	result.RecordSignal(entity.ID, "owner_type", "github", now, ttl,
+		map[string]interface{}{"type": r.Owner.Type, "login": r.Owner.Login})
 
 	if r.License != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeSignal(makeSignal(entity.ID, "license", profile.SignalGroupHygiene,
-				profile.ForgeryLowDeclining, now, ttl,
-				map[string]interface{}{"spdx_id": r.License.SPDXID})))
+		result.RecordSignal(entity.ID, "license", "github", now, ttl,
+			map[string]interface{}{"spdx_id": r.License.SPDXID})
 	} else {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entity.ID, "license", "github",
-				"no license detected", false, now))
+		result.RecordAbsence(entity.ID, "license", "github",
+			"no license detected", false, now)
 	}
 
 	// Contributors — independent, failures recorded as absence.
@@ -125,10 +117,7 @@ func (c *Collector) collectContributors(ctx context.Context, result *signal.Coll
 
 	contributors, err := c.client.GetContributors(ctx, owner, repoName)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "contributors", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "contributors", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "contributors", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 
@@ -139,10 +128,8 @@ func (c *Collector) collectContributors(ctx context.Context, result *signal.Coll
 			"contributions": contrib.Contributions,
 		})
 	}
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "contributors", profile.SignalGroupGovernance,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"count": len(contributors), "top": topContribs})))
+	result.RecordSignal(entityID, "contributors", "github", now, ttl,
+		map[string]interface{}{"count": len(contributors), "top": topContribs})
 }
 
 func (c *Collector) collectCommits(ctx context.Context, result *signal.CollectionResult,
@@ -150,18 +137,23 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 
 	commits, err := c.client.GetRecentCommits(ctx, owner, repoName)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "last_commit", "github", sanitizeErrorForStorage(err), isRetryable(err), now),
-			signal.MakeAbsence(entityID, "commit_signing", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		// One upstream error produces two absences (both last_commit
+		// and commit_signing come from the same API call). The single
+		// CollectionError is keyed to "commits" to reflect the real
+		// source of the failure, not either individual signal.
+		reason := sanitizeErrorForStorage(err)
+		retryable := isRetryable(err)
+		result.RecordAbsence(entityID, "last_commit", "github", reason, retryable, now)
+		result.RecordAbsence(entityID, "commit_signing", "github", reason, retryable, now)
+		result.Failures = append(result.Failures, signal.CollectionError{
+			SignalType: "commits", Source: "github", Reason: reason, Retryable: retryable,
+		})
 		return
 	}
 
 	if len(commits) == 0 {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "last_commit", "github", "no commits found", false, now),
-			signal.MakeAbsence(entityID, "commit_signing", "github", "no commits found", false, now))
+		result.RecordAbsence(entityID, "last_commit", "github", "no commits found", false, now)
+		result.RecordAbsence(entityID, "commit_signing", "github", "no commits found", false, now)
 		return
 	}
 
@@ -172,22 +164,18 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 		}
 	}
 
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "last_commit", profile.SignalGroupVitality,
-			profile.ForgeryMediumDeclining, now, ttl,
-			map[string]interface{}{
-				"date":     commits[0].Commit.Author.Date.Format(time.RFC3339),
-				"era":      string(profile.ClassifyEra(commits[0].Commit.Author.Date)),
-				"days_ago": int(now.Sub(commits[0].Commit.Author.Date).Hours() / 24),
-			})),
-		signal.MakeSignal(makeSignal(entityID, "commit_signing", profile.SignalGroupGovernance,
-			profile.ForgeryVeryHigh, now, ttl,
-			map[string]interface{}{
-				"signed_count": signedCount,
-				"total_count":  len(commits),
-				"ratio":        float64(signedCount) / float64(len(commits)),
-			})),
-	)
+	result.RecordSignal(entityID, "last_commit", "github", now, ttl,
+		map[string]interface{}{
+			"date":     commits[0].Commit.Author.Date.Format(time.RFC3339),
+			"era":      string(profile.ClassifyEra(commits[0].Commit.Author.Date)),
+			"days_ago": int(now.Sub(commits[0].Commit.Author.Date).Hours() / 24),
+		})
+	result.RecordSignal(entityID, "commit_signing", "github", now, ttl,
+		map[string]interface{}{
+			"signed_count": signedCount,
+			"total_count":  len(commits),
+			"ratio":        float64(signedCount) / float64(len(commits)),
+		})
 }
 
 func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.CollectionResult,
@@ -195,17 +183,12 @@ func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.Coll
 
 	totalCommits, err := c.client.GetTotalCommitCount(ctx, owner, repoName)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "total_commits", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "total_commits", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "total_commits", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "total_commits", profile.SignalGroupVitality,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"count": totalCommits})))
+	result.RecordSignal(entityID, "total_commits", "github", now, ttl,
+		map[string]interface{}{"count": totalCommits})
 }
 
 func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionResult,
@@ -213,10 +196,7 @@ func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionRe
 
 	tags, err := c.client.GetTags(ctx, owner, repoName)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "tags", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "tags", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "tags", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 
@@ -224,10 +204,8 @@ func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionRe
 	for _, t := range tags {
 		tagNames = append(tagNames, t.Name)
 	}
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "tags", profile.SignalGroupPublication,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{"count": len(tags), "recent": tagNames})))
+	result.RecordSignal(entityID, "tags", "github", now, ttl,
+		map[string]interface{}{"count": len(tags), "recent": tagNames})
 }
 
 func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.CollectionResult,
@@ -235,26 +213,21 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 
 	ownerUser, err := c.client.GetUser(ctx, owner)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "owner_profile", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "owner_profile", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "owner_profile", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "owner_profile", profile.SignalGroupGovernance,
-			profile.ForgeryVeryHigh, now, ttl,
-			map[string]interface{}{
-				"login":            ownerUser.Login,
-				"name":             ownerUser.Name,
-				"company":          ownerUser.Company,
-				"created":          ownerUser.CreatedAt.Format(time.RFC3339),
-				"account_age_days": int(now.Sub(ownerUser.CreatedAt).Hours() / 24),
-				"public_repos":     ownerUser.PublicRepos,
-				"followers":        ownerUser.Followers,
-				"type":             ownerUser.Type,
-			})))
+	result.RecordSignal(entityID, "owner_profile", "github", now, ttl,
+		map[string]interface{}{
+			"login":            ownerUser.Login,
+			"name":             ownerUser.Name,
+			"company":          ownerUser.Company,
+			"created":          ownerUser.CreatedAt.Format(time.RFC3339),
+			"account_age_days": int(now.Sub(ownerUser.CreatedAt).Hours() / 24),
+			"public_repos":     ownerUser.PublicRepos,
+			"followers":        ownerUser.Followers,
+			"type":             ownerUser.Type,
+		})
 }
 
 func (c *Collector) collectAdoption(ctx context.Context, result *signal.CollectionResult,
@@ -262,10 +235,7 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 
 	refCount, err := c.client.GetGoModRefCount(ctx, "github.com/"+owner+"/"+repoName)
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "adoption", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 
@@ -279,40 +249,31 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 	} else if ratio > 1 {
 		adoptionType = "mixed"
 	}
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "adoption", profile.SignalGroupCriticality,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{
-				"go_mod_refs":   refCount,
-				"stars":         stars,
-				"refs_to_stars": ratio,
-				"adoption_type": adoptionType,
-			})))
+	result.RecordSignal(entityID, "adoption", "github", now, ttl,
+		map[string]interface{}{
+			"go_mod_refs":   refCount,
+			"stars":         stars,
+			"refs_to_stars": ratio,
+			"adoption_type": adoptionType,
+		})
 }
 
 func (c *Collector) collectCI(ctx context.Context, result *signal.CollectionResult,
 	entityID, owner, repoName string, now time.Time, ttl time.Duration) {
 
 	providers, hadErrors := c.collectCIPresence(ctx, owner, repoName)
-	if len(providers) > 0 {
-		result.Collected = append(result.Collected,
-			signal.MakeSignal(makeSignal(entityID, "ci_cd", profile.SignalGroupHygiene,
-				profile.ForgeryMediumDeclining, now, ttl,
-				map[string]interface{}{"providers": providers})))
-	} else if hadErrors {
-		// We couldn't check — this is a retryable absence, not a
-		// definitive "no CI found."
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "ci_cd", "github",
-				"could not check CI/CD configuration", true, now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "ci_cd", Source: "github",
-				Reason: "could not check CI/CD configuration", Retryable: true})
-	} else {
+	switch {
+	case len(providers) > 0:
+		result.RecordSignal(entityID, "ci_cd", "github", now, ttl,
+			map[string]interface{}{"providers": providers})
+	case hadErrors:
+		// We couldn't check — retryable absence, not a definitive "no CI".
+		result.RecordFailure(entityID, "ci_cd", "github",
+			"could not check CI/CD configuration", true, now)
+	default:
 		// We checked everything and found nothing — definitive negative.
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "ci_cd", "github",
-				"no CI/CD configuration detected", false, now))
+		result.RecordAbsence(entityID, "ci_cd", "github",
+			"no CI/CD configuration detected", false, now)
 	}
 }
 
@@ -321,47 +282,33 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 
 	goModContent, err := c.client.GetFileRaw(ctx, owner, repoName, "go.mod")
 	if err != nil {
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "go_dependencies", "github", sanitizeErrorForStorage(err), isRetryable(err), now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{SignalType: "go_dependencies", Source: "github", Reason: sanitizeErrorForStorage(err), Retryable: isRetryable(err)})
+		result.RecordFailure(entityID, "go_dependencies", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
 	}
 	if goModContent == nil {
 		// Not a Go project — record absence but not as a failure.
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "go_dependencies", "github",
-				"no go.mod found (not a Go project)", false, now))
+		result.RecordAbsence(entityID, "go_dependencies", "github",
+			"no go.mod found (not a Go project)", false, now)
 		return
 	}
 
 	deps, err := parseGoModDeps(string(goModContent))
 	if err != nil {
-		// Oversized go.mod (#108). Record as an absence — not retryable
+		// Oversized go.mod (#108). Record as a failure — not retryable
 		// because the file won't shrink on retry. Sanitize the parser
 		// error so the byte counts don't leak the parsed-but-rejected
 		// content size to attackers (defense in depth).
-		result.Collected = append(result.Collected,
-			signal.MakeAbsence(entityID, "go_dependencies", "github",
-				"go.mod too large to parse safely", false, now))
-		result.Failures = append(result.Failures,
-			signal.CollectionError{
-				SignalType: "go_dependencies",
-				Source:     "github",
-				Reason:     "go.mod too large to parse safely",
-				Retryable:  false,
-			})
+		result.RecordFailure(entityID, "go_dependencies", "github",
+			"go.mod too large to parse safely", false, now)
 		return
 	}
-	result.Collected = append(result.Collected,
-		signal.MakeSignal(makeSignal(entityID, "go_dependencies", profile.SignalGroupGovernance,
-			profile.ForgeryHigh, now, ttl,
-			map[string]interface{}{
-				"direct_count":   deps.directCount,
-				"indirect_count": deps.indirectCount,
-				"total_count":    deps.directCount + deps.indirectCount,
-				"direct":         deps.direct,
-			})))
+	result.RecordSignal(entityID, "go_dependencies", "github", now, ttl,
+		map[string]interface{}{
+			"direct_count":   deps.directCount,
+			"indirect_count": deps.indirectCount,
+			"total_count":    deps.directCount + deps.indirectCount,
+			"direct":         deps.direct,
+		})
 }
 
 // collectCIPresence checks for common CI/CD configuration.
@@ -554,27 +501,3 @@ func parseGoModDeps(content string) (goModDeps, error) {
 	return deps, nil
 }
 
-// makeSignal builds a Signal with a collision-resistant ID.
-//
-// The ID format is {source}:{entity_id}:{signal_type}:{collected_at_nanos}
-// per design/entity-model-v2.md §Signal ID Scheme. Including the
-// collected_at nanos makes re-runs of the same collection append
-// cleanly instead of colliding — which matters now that the store is
-// append-only (AppendSignals rejects duplicate IDs).
-func makeSignal(entityID, signalType string, group profile.SignalGroup,
-	forgery profile.ForgeryResistance, collectedAt time.Time, ttl time.Duration,
-	value map[string]interface{}) profile.Signal {
-
-	valueBytes, _ := json.Marshal(value)
-	return profile.Signal{
-		ID:                fmt.Sprintf("github:%s:%s:%d", entityID, signalType, collectedAt.UnixNano()),
-		EntityID:          entityID,
-		Type:              signalType,
-		Group:             group,
-		Source:            "github",
-		ForgeryResistance: forgery,
-		Value:             json.RawMessage(valueBytes),
-		CollectedAt:       collectedAt,
-		ExpiresAt:         collectedAt.Add(ttl),
-	}
-}

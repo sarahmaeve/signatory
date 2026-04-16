@@ -1,0 +1,496 @@
+// Package signal — signal type registry.
+//
+// The registry is the canonical source of truth for (signal type →
+// metadata). Before this existed, type-level facts were hardcoded at
+// every collector call site AND duplicated in absence.go's
+// signalGroupForType switch. The two copies disagreed in practice,
+// and new signal types surfaced by analyses (atuin, thefuck, external
+// security reviews) had nowhere to live.
+//
+// The registry resolves both by making Group and ForgeryResistance
+// data-driven. Collectors pass a type string; the registry supplies
+// the rest. See design/signal-type-registry.md for the design note.
+//
+// Per the v0.1 decision log, this pass intentionally excludes:
+//   - Realm (deferred to enterprise work)
+//   - Weight (deferred to user-configurable tuning)
+//   - Polarity (deferred; drops amplifier-role signals from this batch)
+//   - Per-entity-type overrides (deferred)
+//
+// The three documented "amplifier" signals (hosted_service_coupling,
+// self_updater_present, ai_agent_runtime_capability) and the one
+// synthesis-time amplifier (fallow_status_amplifier) are intentionally
+// absent — they need the Polarity axis to be represented honestly.
+// When Polarity lands, add them in the same change.
+
+package signal
+
+import (
+	"sort"
+
+	"github.com/sarahmaeve/signatory/internal/profile"
+)
+
+// SignalTypeInfo is the compile-time catalog entry for one signal type.
+//
+// Group and ForgeryResistance are the type-level defaults that every
+// emitted observation of this type inherits. Collectors that need to
+// override per-observation (rare) can still construct a profile.Signal
+// directly rather than going through signal.Make.
+//
+// Description and Caveats are for human consumption — surfaced in
+// --verbose output, in MCP resources when the MCP subsystem is wired,
+// and in JSON output so LLM consumers can reason about the limits of
+// a signal before citing it.
+type SignalTypeInfo struct {
+	// Type is the canonical signal name (e.g., "stars", "commit_signing").
+	// Must be unique across the registry.
+	Type string
+
+	// Group is the question the signal answers. Inherited by every
+	// observation of this type.
+	Group profile.SignalGroup
+
+	// ForgeryResistance is how hard the signal is to fake. Inherited by
+	// every observation of this type.
+	ForgeryResistance profile.ForgeryResistance
+
+	// Description is a short human-readable explanation of what this
+	// signal measures. One sentence; assume a reader who understands
+	// the trust model but not the specific signal.
+	Description string
+
+	// Caveats lists known limitations of this signal — the reasons the
+	// ForgeryResistance rating isn't higher, the ways it can mislead,
+	// the conditions under which it doesn't apply. Empty when no
+	// material caveats exist.
+	Caveats []string
+}
+
+// GetSignalTypeInfo returns the registry entry for a signal type.
+// Returns ok=false if the type is not registered — callers MUST
+// treat unregistered types as a programming error (every signal a
+// collector emits or an analyst produces should be registered here).
+func GetSignalTypeInfo(signalType string) (SignalTypeInfo, bool) {
+	info, ok := signalTypeRegistry[signalType]
+	return info, ok
+}
+
+// SignalTypes returns all registered types, sorted by Type name for
+// stable iteration. Intended for diagnostics, JSON output, and the
+// eventual MCP resource — not for hot paths.
+func SignalTypes() []SignalTypeInfo {
+	out := make([]SignalTypeInfo, 0, len(signalTypeRegistry))
+	for _, info := range signalTypeRegistry {
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Type < out[j].Type
+	})
+	return out
+}
+
+// signalTypeRegistry is the canonical catalog. Grouped by SignalGroup
+// for reading; order within a group is not semantically meaningful.
+//
+// When adding a new entry:
+//   - Every emitted signal type MUST be registered before collection
+//     can produce it (signal.Make panics on unregistered types).
+//   - Descriptions are one sentence, audience "trust-model-literate".
+//   - Caveats call out *why* the ForgeryResistance rating isn't higher
+//     or the conditions under which the signal misleads. These are
+//     surfaced to users and LLMs; they're not internal notes.
+//   - If the signal's forgery resistance doesn't fit the existing
+//     four tiers, DO NOT invent a new enum value — revisit the
+//     classification with the trust model in hand.
+var signalTypeRegistry = map[string]SignalTypeInfo{
+
+	// ================================================================
+	// Vitality — "Is anyone home?"
+	// ================================================================
+
+	"last_push": {
+		Type:              "last_push",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Timestamp of the most recent push to the default branch.",
+		Caveats: []string{
+			"push dates can lag behind meaningful work in a tag-only release flow",
+			"force-push can rewrite history and alter this value",
+		},
+	},
+	"repo_age": {
+		Type:              "repo_age",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Age of the repository since creation.",
+		Caveats: []string{
+			"age alone is not positive — a one-commit-per-year fallow repo has high age and low vitality",
+		},
+	},
+	"open_issues": {
+		Type:              "open_issues",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Count of open issues (GitHub reports PRs in this count too).",
+		Caveats: []string{
+			"triage hygiene varies wildly; counts are comparable within a project, not across projects",
+		},
+	},
+	"archived": {
+		Type:              "archived",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the repository has been marked archived by its owner.",
+		Caveats: []string{
+			"archived implies read-only but not necessarily end-of-life — some projects archive after migrating to a successor",
+		},
+	},
+	"last_commit": {
+		Type:              "last_commit",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Timestamp of the most recent commit on the default branch.",
+		Caveats: []string{
+			"commit dates can be set arbitrarily in git; author date and committer date can disagree",
+			"not identical to last_push — an unpushed branch doesn't update this",
+		},
+	},
+	"total_commits": {
+		Type:              "total_commits",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Total commit count on the default branch.",
+		Caveats: []string{
+			"low count on an old repo indicates write-once code, not maintenance activity",
+		},
+	},
+	"commit_activity_shape": {
+		Type:              "commit_activity_shape",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Shape of commit activity over time — accelerating, flat, bursty, or decelerating.",
+		Caveats: []string{
+			"noisy on projects with release-based flow where most activity happens in short windows",
+			"derivation method (rolling window, slope calculation) affects the shape classification",
+		},
+	},
+
+	// ================================================================
+	// Governance — "Who's responsible?"
+	// ================================================================
+
+	"owner_type": {
+		Type:              "owner_type",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the repo is owned by a user account or an organization.",
+		Caveats: []string{
+			"org-owned does not mean multi-maintainer — a one-person org is common",
+		},
+	},
+	"owner_profile": {
+		Type:              "owner_profile",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Repo owner's account metadata — tenure, public repos, followers, affiliation.",
+		Caveats: []string{
+			"account age is forgery-resistant once observed but can be faked forward by seeding a quiet account years before use",
+			"follower counts are manipulable via fake-account rings",
+		},
+	},
+	"contributors": {
+		Type:              "contributors",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Contributor list with contribution counts.",
+		Caveats: []string{
+			"GitHub's contributor graph is commit-count based; drive-by commits appear as contributors",
+			"merge-commit-based stats can hide the actual authorship distribution",
+		},
+	},
+	"commit_signing": {
+		Type:              "commit_signing",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Ratio of recent commits with verified GPG/SSH signatures.",
+		Caveats: []string{
+			"GitHub's verified:true flag conflates personal signing with web-flow signing — see per_developer_commit_signing_ratio for the split",
+			"verification status depends on key validity at observation time; key revocation invalidates previously-verified commits",
+		},
+	},
+	"go_dependencies": {
+		Type:              "go_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "go.mod direct and indirect dependency counts and direct-dependency list.",
+		Caveats: []string{
+			"indirect counts include transitive entries forced by minimum-version-selection and may misrepresent the project's intentional surface",
+		},
+	},
+	"identity_domain_consistency": {
+		Type:              "identity_domain_consistency",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Consistency between maintainer email domain, project domain, and other owned domains.",
+		Caveats: []string{
+			"requires domain ownership verification to be trustworthy; bare email-match is a weak form",
+			"not applicable to projects whose maintainers have no published personal or corporate domain",
+		},
+	},
+	"effective_maintainer_concentration": {
+		Type:              "effective_maintainer_concentration",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Proportion of recent contribution concentrated in a small number of committers, regardless of org backing.",
+		Caveats: []string{
+			"bus-factor signal — high concentration is negative even when the project is organizationally backed",
+		},
+	},
+	"per_developer_commit_signing_ratio": {
+		Type:              "per_developer_commit_signing_ratio",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Fraction of recent commits signed by the committing author's own key, not by GitHub's web-flow key.",
+		Caveats: []string{
+			"requires parsing the verification.signature and verification.reason fields, not just the verified boolean",
+			"depends on the project's signing policy being enforceable on all contributors",
+		},
+	},
+	"web_flow_signing_ratio": {
+		Type:              "web_flow_signing_ratio",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Fraction of recent commits signed by GitHub's web-flow key (merges and suggestion commits).",
+		Caveats: []string{
+			"a high ratio with low per-developer signing means trust is delegated to GitHub's platform, not to contributor identity",
+		},
+	},
+	"identity_graph_depth": {
+		Type:              "identity_graph_depth",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       ".mailmap-derived count of confirmed identity mappings across contributors.",
+		Caveats: []string{
+			"corporate-to-personal email migrations across multi-year windows are expensive to fabricate across multiple contributors",
+			"projects without .mailmap produce no signal in either direction",
+		},
+	},
+	"analyst_self_correction": {
+		Type:              "analyst_self_correction",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Meta-signal: an analysis round explicitly supersedes a prior round's conclusion based on deeper grounding.",
+		Caveats: []string{
+			"emitted as metadata on the analysis record, not on the target entity",
+			"absent an explicit supersedes-reference in analyst output, this cannot be inferred after the fact",
+		},
+	},
+	"dual_analyst_self_confirmation": {
+		Type:              "dual_analyst_self_confirmation",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Meta-signal: two analysts using independent methods converged on the same absence or positive conclusion.",
+		Caveats: []string{
+			"synthesis-only — emitted by the synthesist role, not by individual analysts",
+			"information-theoretic: two independent-method false negatives compound, but common-mode analyst failures (same training blind spot) can still produce a shared false negative",
+		},
+	},
+
+	// ================================================================
+	// Publication — "How was this published?"
+	// ================================================================
+
+	"tags": {
+		Type:              "tags",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Count and list of recent tags.",
+		Caveats: []string{
+			"tag names alone don't convey signing status — see tag_signing_status for the distinction",
+			"a tag's existence doesn't imply a corresponding package publication",
+		},
+	},
+	"release_tooling": {
+		Type:              "release_tooling",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Kind, version, and workflow location of the project's release tooling (e.g., cargo-dist, goreleaser).",
+		Caveats: []string{
+			"standardized tooling reduces ad-hoc release-compromise risk but doesn't eliminate it",
+		},
+	},
+	"tag_signing_status": {
+		Type:              "tag_signing_status",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Classification of tag style — signed_annotated, annotated_unsigned, or lightweight.",
+		Caveats: []string{
+			"lightweight tags carry no signing information and are indistinguishable from branch-like refs",
+		},
+	},
+	"build_provenance_attestation": {
+		Type:              "build_provenance_attestation",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Presence of Sigstore/SLSA build provenance attestations on published artifacts.",
+		Caveats: []string{
+			"attestation alone is not trust — a verifier must check it against a known-good build configuration",
+		},
+	},
+	"registry_publish_origin": {
+		Type:              "registry_publish_origin",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Origin of registry publishing — oidc_ci, long_lived_token_ci, local_maintainer_machine, or unknown.",
+		Caveats: []string{
+			"oidc_ci is the hardened posture; local_maintainer_machine is the lowest trust tier",
+			"CI-based publishing is only as trustworthy as the CI workflow's action-pin tightness",
+		},
+	},
+	"crates_io_trusted_publishing": {
+		Type:              "crates_io_trusted_publishing",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Whether crates.io trusted-publishing (OIDC) is configured for the crate.",
+		Caveats: []string{
+			"status is visible only after a first publish that used it — absence on a new crate is not automatically negative",
+		},
+	},
+
+	// ================================================================
+	// Hygiene — "Does it look like they care?"
+	// ================================================================
+
+	"license": {
+		Type:              "license",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryLowDeclining,
+		Description:       "SPDX license identifier from the repository's declared license.",
+		Caveats: []string{
+			"a license file can be added without contributor consent on transfer of ownership",
+			"some projects declare a license in README without a LICENSE file or vice versa",
+		},
+	},
+	"ci_cd": {
+		Type:              "ci_cd",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Detected CI/CD providers (github-actions, travis-ci, circleci, etc.).",
+		Caveats: []string{
+			"presence doesn't imply the CI actually gates anything — see ci_supply_chain_gate for the is-it-enforced form",
+		},
+	},
+	"community_health_score": {
+		Type:              "community_health_score",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "GitHub community-health percentage and list of missing community files.",
+		Caveats: []string{
+			"GitHub's community profile checks a fixed list of files calibrated to open-source norms, not all projects",
+		},
+	},
+	"supply_chain_policy_config": {
+		Type:              "supply_chain_policy_config",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Presence of supply-chain policy configuration (deny.toml, .cargo-audit-ignore, govulncheck config, etc.).",
+		Caveats: []string{
+			"presence doesn't imply enforcement — see ci_supply_chain_gate for the gated-in-CI form",
+		},
+	},
+	"ci_supply_chain_gate": {
+		Type:              "ci_supply_chain_gate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Whether a declared supply-chain policy is invoked by at least one CI workflow.",
+		Caveats: []string{
+			"invocation-present is weaker than gate-required-to-pass; separating the two is a future refinement",
+		},
+	},
+	"ci_action_pin_tightness": {
+		Type:              "ci_action_pin_tightness",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Distribution of CI action pinning — sha_pinned, major_version_pinned, master_pinned, or unpinned.",
+		Caveats: []string{
+			"major-version pinning is the common baseline; sha-pinning is the hardened posture",
+			"unpinned or master-pinned references are a recognized supply-chain risk",
+		},
+	},
+	"unsafe_code_posture": {
+		Type:              "unsafe_code_posture",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Rust unsafe-code posture per crate — forbid, deny, allow, or unattributed.",
+		Caveats: []string{
+			"forbid at crate root is the strong form; deny can be overridden in submodules",
+			"non-Rust projects produce no signal of this type",
+		},
+	},
+	"third_party_install_inputs": {
+		Type:              "third_party_install_inputs",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "External scripts or binaries fetched during install beyond the package manager.",
+		Caveats: []string{
+			"curl-to-bash install patterns are harder to audit than package-manager installs",
+			"existence of third-party inputs is not automatically negative — legitimate uses exist (e.g., pulling shell integration hooks)",
+		},
+	},
+	"advisory_suppressions": {
+		Type:              "advisory_suppressions",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "List of supply-chain advisory suppressions (e.g., cargo-deny ignores) with their stated rationales.",
+		Caveats: []string{
+			"count alone is noise; presence of written rationales is the real quality signal",
+			"stale suppressions accumulate — age and rationale-freshness should be tracked separately when surfaced",
+		},
+	},
+	"positive_absence_signal": {
+		Type:              "positive_absence_signal",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Analyst explicitly checked for a known-bad pattern and confirmed its absence. Distinct from 'not examined'.",
+		Caveats: []string{
+			"only trustworthy when the checking methodology is recorded — 'I looked and it wasn't there' is weaker than 'I ran X against the full tree'",
+			"absence of a pattern is only as strong as the coverage of the check",
+		},
+	},
+
+	// ================================================================
+	// Criticality — "How critical is this?"
+	// ================================================================
+
+	"stars": {
+		Type:              "stars",
+		Group:             profile.SignalGroupCriticality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "GitHub star count.",
+		Caveats: []string{
+			"silently mutable — no historical star count is exposed via GitHub API",
+			"vulnerable to mass star/unstar manipulation campaigns",
+			"no way to distinguish organic growth from manipulation in a single observation",
+		},
+	},
+	"forks": {
+		Type:              "forks",
+		Group:             profile.SignalGroupCriticality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "GitHub fork count.",
+		Caveats: []string{
+			"like stars, vulnerable to manipulation campaigns",
+			"a high fork count on an abandoned project indicates continuing dependence on a dead upstream",
+		},
+	},
+	"adoption": {
+		Type:              "adoption",
+		Group:             profile.SignalGroupCriticality,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Ratio of go.mod references to stars, indicating direct-vs-transitive adoption shape.",
+		Caveats: []string{
+			"the GitHub search API count is an approximation — it excludes private repos and is subject to indexing lag",
+		},
+	},
+}

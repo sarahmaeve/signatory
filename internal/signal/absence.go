@@ -58,6 +58,18 @@ type AbsenceRecord struct {
 }
 
 // ToSignal converts an absence record to a storable signal.
+//
+// The Group is inherited from the parent type's registry entry so the
+// absence signal is categorized alongside real observations of that
+// type. If the parent type is not registered, the absence falls back
+// to vitality — matching the legacy default — but a registered parent
+// is the strongly-preferred path; unregistered types shouldn't be
+// producing absences any more than they should be producing signals.
+//
+// ForgeryResistance is always high for absences, regardless of the
+// parent type's rating: the "we tried to collect this and couldn't"
+// property is hard to fake independently of whether the underlying
+// signal is stars (easy to forge) or commit_signing (hard to forge).
 func (a *AbsenceRecord) ToSignal() profile.Signal {
 	value, _ := json.Marshal(map[string]interface{}{
 		"absent":    true,
@@ -65,40 +77,23 @@ func (a *AbsenceRecord) ToSignal() profile.Signal {
 		"retryable": a.Retryable,
 	})
 
+	group := profile.SignalGroupVitality
+	if info, ok := GetSignalTypeInfo(a.SignalType); ok {
+		group = info.Group
+	}
+
 	// Signal ID includes collected_at nanos per the v2 spec so that
 	// re-runs append instead of colliding with earlier absence records.
 	return profile.Signal{
 		ID:                fmt.Sprintf("%s:%s:absence:%s:%d", a.Source, a.EntityID, a.SignalType, a.CollectedAt.UnixNano()),
 		EntityID:          a.EntityID,
 		Type:              "absence:" + a.SignalType,
-		Group:             signalGroupForType(a.SignalType),
+		Group:             group,
 		Source:            a.Source,
 		ForgeryResistance: profile.ForgeryHigh, // Absence itself is hard to fake.
 		Value:             json.RawMessage(value),
 		CollectedAt:       a.CollectedAt,
 		ExpiresAt:         a.CollectedAt.Add(1 * time.Hour), // Short TTL — retry sooner.
-	}
-}
-
-// signalGroupForType maps known signal types to their group.
-// Unknown types default to vitality.
-func signalGroupForType(signalType string) profile.SignalGroup {
-	switch signalType {
-	case "stars", "forks", "adoption":
-		return profile.SignalGroupCriticality
-	case "owner_type", "contributors", "commit_signing", "owner_profile", "go_dependencies":
-		return profile.SignalGroupGovernance
-	case "tags":
-		return profile.SignalGroupPublication
-	case "license", "ci_cd":
-		return profile.SignalGroupHygiene
-	case "last_push", "repo_age", "open_issues", "last_commit", "total_commits", "archived":
-		return profile.SignalGroupVitality
-	default:
-		// Unknown signal types default to vitality. If you add a new
-		// signal type to a collector, add it to this switch to ensure
-		// absence signals get the correct group.
-		return profile.SignalGroupVitality
 	}
 }
 
