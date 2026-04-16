@@ -90,71 +90,103 @@ A bus-factor concern is `low` for a single-user adoption,
 `medium` for a CI runner that would re-fetch on every build.
 Use the `severity.by_context` map.
 
-## Schema
+## Output format — structured markdown
 
-Emit a single JSON document conforming to this schema. Field
-names are snake_case in JSON.
+Write your output as **structured markdown**, not JSON. The pipeline
+orchestrator will convert your text to v1-schema JSON using
+`signatory build-output`. Your job is analysis; the binary handles
+serialization.
 
-### `AnalystOutput` (top-level envelope)
+### Header fields
 
-```
-{
-  "attribution": AgentAttribution,    // required
-  "target": string,                    // required, e.g. "{TARGET_URL}"
-  "target_commit": string,             // optional, git SHA
-  "findings": [Finding],               // may be empty array
-  "positive_absences": [PositiveAbsence],  // optional
-  "observations": [Observation],       // optional — provenance often emits these
-  "methodology_trace": MethodologyCatalog,  // optional but requested below
-  "supersedes": [Supersession],        // optional
-  "round_notes": string                // optional, markdown-allowed
-}
-```
-
-### `AgentAttribution`
+At the top of your file, include these key: value lines:
 
 ```
-{
-  "analyst_id": string,    // required, e.g. "external-prov-v1" or "signatory-provenance"
-  "model": string,         // required, e.g. "claude-opus-4-6"
-  "prompt_version": string, // optional
-  "invoked_at": string,    // required, RFC3339 timestamp
-  "round": int             // optional, 1 for first pass
-}
+Analyst: external-prov-v1
+Model: (your model name)
+Round: 1
+Target-commit: (the HEAD SHA you analyzed)
 ```
 
-### `Finding`, `Severity`, `Citation`, `PositiveAbsence`, `Observation`, `MethodologyCatalog`, `MethodologyPattern`, `CollectorHint`, `Supersession`
+### Conclusions
 
-These types are the same as in the security-review handoff
-(`templates/handoffs/security-review-v1.md`). Refer to that file
-for the full struct definitions; they are not duplicated here
-to avoid drift. The provenance role uses *all* the same types,
-just emits different categories and signal types.
+One H2 section per conclusion. Required fields: Severity, Category,
+Verdict. Body text is the rationale. Citations use compact syntax.
 
-The one distinction worth noting: provenance findings often
-warrant `Observation` entries more than security findings do —
-contributor-trajectory analysis, project-personality texture,
-and "this is the causal explanation for why the project went
-fallow" don't fit `Finding` shape. Use `Observation` liberally
-when the analysis is trust-relevant but not a vulnerability.
+```
+## Conclusion: F001
+Severity: high
+Category: vitality_unmaintained
+Design-intent: false
+Verdict: Project is effectively unmaintained — no release in 4 years, no commits in 21 months
+Citation: . "git log --format='%an' --since=2024-01-01 produces 1 commit total"
+The year-by-year commit distribution shows a project in terminal
+decline: 21 commits in 2018, tapering to 1 in 2024 and 0 in
+2025. Five pull requests filed in March 2026 sit unreviewed...
+```
+
+**Citation syntax** — the orchestrator parses these forms:
+- `path/to/file.py:47-52 "quoted text"` → line-range with quote
+- `path/to/file.py:47` → single line
+- `path/to/file.py` → whole-file scope (no line number)
+- `. "git log output"` → repo-tree scope with quoted evidence
+
+**Severity values**: critical, high, medium, low, informational, positive
+
+**`positive` is a real severity.** Signed tags across the full
+release history, PyPI Trusted Publishing in active use, or a
+deep `.mailmap` — these are positive conclusions. Use them.
+
+### Positive absences
+
+```
+## Absence: git-pinned dependencies
+Confidence: thoroughly_reviewed
+Citation: requirements.txt
+Checked all dependency declarations for git+https:// URLs,
+--index-url, and --extra-index-url overrides — none found.
+All dependencies resolve via the canonical registry.
+```
+
+Confidence: `exhaustive`, `thoroughly_reviewed`, or `spot_checked`.
+
+### Observations
+
+```
+## Observation: O001
+Title: Maintainer identity is strong despite project being fallow
+Category: trust_model_observation
+The maintainer has a 15-year GitHub tenure, public blog, real
+name and location, consistent email across GitHub profile,
+setup.py author field, and git history. This is not a defense
+against account-takeover but it does narrow the impersonation surface...
+```
+
+### Round notes
+
+```
+## Round-notes
+Provenance analysis focused on: vitality, tag signing, publish
+path, identity consistency. Dominant signal is project fallow
+status — this amplifies every other concern...
+```
+
+### What NOT to do
+
+- Do NOT write JSON. The orchestrator converts your markdown.
+- Do NOT run `signatory format-check`. You don't have Bash access.
+- Do NOT worry about JSON field names, nesting, or escaping.
+- Focus entirely on analysis quality — citation discipline,
+  severity calibration, verdict-then-rationale shape.
 
 ### `Citation` for provenance
 
 Most provenance citations will be **scope-based** rather than
 line-based, because the evidence is shape-of-the-repo rather
-than specific code lines:
+than specific code lines. Use `. "quoted evidence"` for
+repo-tree scope, or `path/to/file` for a specific config file.
 
-```json
-{"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%G?' -200 returns 200 'N' entries"}
-```
-
-Or pointing at config-file regions:
-
-```json
-{"path": "release.py", "line_start": 1, "line_end": 38, "quoted": "..."}
-```
-
-Both are valid; pick the one that best supports the finding.
+Both forms are valid; pick the one that best supports the conclusion.
 
 ## Signal types (for `Finding.signal_type`)
 
@@ -348,149 +380,42 @@ gh api 'repos/{owner}/{repo}/issues?state=open&per_page=10&sort=created&directio
 Look for a "is this maintained?" issue — that's a community
 signal, not just metadata inference.
 
-## What to emit
-
-A single JSON document at `/tmp/{TARGET_NAME}-provenance-v1.json`
-conforming to the `AnalystOutput` schema.
+## What to produce
 
 Aim for:
-- **3-8 findings** (provenance typically produces fewer findings
-  than security; the trust signals are cumulative rather than
-  vulnerability-shaped)
-- **3-5 positive absences** (these are particularly valuable
-  for provenance — "no git pins", "no alternative registries",
-  "no telemetry-library imports", etc., are real trust-strengthening
-  signals)
-- **1-3 observations** for trust-relevant analysis that doesn't
-  fit `Finding` shape (contributor trajectory, identity
-  consistency, project-personality)
-- **8-15 methodology patterns** in the catalog, organized by
-  signal group, with `hit_on_target: true/false`
+- Between **3 and 10 conclusions** (more if warranted; fewer
+  if the target is genuinely tight)
+- **At least 2-3 positive absences** of patterns you checked for
+  and didn't find — these are valuable signal too
+- **1-2 observations** for trust-model texture that doesn't fit
+  the Conclusion shape
 
 Spend your effort on:
-- The vitality finding first — it's almost always the top-line
-  signal for any project under analysis. Build the year-by-year
-  commit distribution; check the open-PR responsiveness; cite a
-  community comment if one exists.
-- Identity-graph signals — `.mailmap` presence, owner profile
-  consistency, cross-platform identity (GitHub bio + blog +
-  package metadata + email domain).
-- Publication integrity — tag signing, commit signing
-  distribution, registry publish path, CI gating.
-- Lockfile composition — clean (all from canonical registry, no
-  git pins) is a positive signal worth recording.
+- Citation discipline — every conclusion needs file:line evidence
+- Distinguishing "I confirmed this is safe" from "I didn't look"
+- Severity calibration (per the calibration notes above)
+- Verdict-then-rationale shape: one dense sentence stating the
+  conclusion, then code-grounded explanation
 
 Don't spend effort on:
-- Security work (subprocess calls, deserialization, file
-  permissions, hardcoded URLs in code) — that's the security
-  analyst's job. If you notice something striking while reading
-  metadata, mention it briefly in `round_notes` and let security
-  pursue it.
-- Reformatting your reasoning into prose-only narrative — the
-  schema is the format.
-- Speculation beyond what metadata supports.
-
-## Reference: example output shape
-
-A previous engagement on a Python target produced output like
-this (condensed). Emit the same overall shape; the field values
-are illustrative.
-
-```json
-{
-  "attribution": {
-    "analyst_id": "signatory-provenance",
-    "model": "claude-opus-4-6",
-    "invoked_at": "2026-04-14T20:30:00Z",
-    "round": 1
-  },
-  "target": "{TARGET_URL}",
-  "round_notes": "Provenance analysis of {TARGET_NAME}. The dominant trust signal is project vitality: ...",
-  "findings": [
-    {
-      "id": "F001",
-      "verdict": "The project is effectively unmaintained: no PyPI release in over 4 years, no commits in the past 21 months, and 5+ pull requests filed in March 2026 sit unreviewed despite contributor activity continuing.",
-      "rationale": "Year-by-year commit counts on master:\n\n- 2018: 21 commits ...\n- 2024: 1 commit\n- 2025: 0 commits\n\nLast PyPI release `3.32` was uploaded `2022-01-02T21:46:52` ...",
-      "severity": {"default": "high"},
-      "category": "vitality_unmaintained",
-      "signal_type": "commit_activity_shape",
-      "citations": [
-        {"scope": {"kind": "tree", "path": "."}, "quoted": "git log --format='%an' --since=2024-01-01 produces 1 commit total"}
-      ],
-      "remediation_hints": [
-        "Pin to a specific known-good version and accept that future security patches will require a fork"
-      ]
-    }
-  ],
-  "positive_absences": [
-    {
-      "pattern_checked": "git-pinned dependencies in requirements.txt or setup.py install_requires",
-      "description": "All declared dependencies resolve via PyPI; no git+https:// URLs, no alternative indexes.",
-      "citations": [{"path": "requirements.txt", "scope": {"kind": "file", "path": "requirements.txt"}}],
-      "confidence": "thoroughly_reviewed"
-    }
-  ],
-  "observations": [
-    {
-      "id": "O1",
-      "title": "Maintainer identity is strong despite project being fallow",
-      "body": "Vladimir Iakovlev (`nvbn`) has a high-quality, forgery-resistant identity profile: 15-year GitHub tenure, public blog, real name and location, consistent email across GitHub profile, setup.py author field, and git history.\n\n**However**, this is not a defense against account-takeover. ...",
-      "category": "trust_model_observation",
-      "signal_type": "identity_domain_consistency"
-    }
-  ],
-  "methodology_trace": {
-    "source": { /* same shape as attribution */ },
-    "patterns": [
-      {
-        "id": "MP-PY-VITAL-01",
-        "signal_group": "vitality",
-        "description": "Last commit date relative to claimed-active status.",
-        "pattern": "git log -1 --format='%ai' && grep -i 'maintained\\|actively\\|stable' README.md",
-        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
-        "false_positive_notes": "Mature small libraries can be legitimately 'done' with no recent commits.",
-        "hit_on_target": true
-      }
-    ]
-  }
-}
-```
-
-For more detailed reference, see
-`design/analysis/thefuck-provenance-v1.json` (the engagement
-this template was extracted from).
+- Provenance work — that's the other analyst's job
+- JSON formatting — the orchestrator handles serialization
+- Speculation beyond what the code supports
 
 ## Stop conditions
 
-- Stop after one focused pass. You're producing first-round
-  provenance signal; signatory will integrate with the security
-  analyst's findings.
-- If you find more than ~8 findings, you're probably surfacing
-  hygiene issues that should compress into one finding. Look for
-  the through-line.
-- If a finding requires source-code analysis to confirm, stop
-  and note it in `round_notes` rather than guessing — the
-  security analyst will see it.
-- Don't propose follow-up reviews yourself — the human
-  orchestrator decides when to ask another round.
+- Stop after one focused pass. You're producing a high-signal
+  first-round security review, not an exhaustive audit.
+- If you find more than ~10 conclusions, prioritize ruthlessly —
+  high-severity ones first, then ones that surface novel signal
+  types signatory doesn't yet know about.
+- If there's something you'd want to investigate further but
+  can't resolve, mark severity conservatively and note
+  uncertainty in the rationale.
 
-## Final pre-flight
-
-Before emitting:
-- Validate every Citation has either path+line_start or scope (not both, not neither)
-- Validate every severity.default is one of the six allowed values
-- Validate every Finding ID is unique within the document
-- Validate every collector_hint has both grep_precision and reasoning_depth
-- Run `signatory format-check /tmp/{TARGET_NAME}-provenance-v1.json` to confirm structural conformance before reporting back
-
-Write the file to `/tmp/{TARGET_NAME}-provenance-v1.json` and
-report back the path plus a short prose summary of what you
-found (severity-tagged headlines only, no detail). The structured
-output is the canonical record; the prose is for the human
-orchestrator's quick scan.
+Write your output file and report back the path plus a short
+prose summary (severity-tagged headlines only). The structured
+output is the canonical record; the prose is for the orchestrator.
 
 If `{INTAKE_QUESTION}` is non-empty above, address it directly
-in your `round_notes`. Provenance often answers part of the
-user's question (the half about trust in the publish chain and
-the maintainer); name explicitly which part of the question you
-can answer and which part is the security analyst's territory.
+in your round-notes.

@@ -63,57 +63,34 @@ gh api repos/{owner}/{repo} --jq '{default_branch, pushed_at}'
 gh api repos/{owner}/{repo}/commits --jq '.[0].sha' | head -c 12
 ```
 
-## Step 2 — Detect ecosystem + generate handoff prompts
+## Step 2 — Generate handoff prompts
 
-### 2a. Detect language and ecosystem
-
-The provenance handoff REQUIRES `--ecosystem`. Detect it:
-
-```bash
-gh api repos/{owner}/{repo} --jq '.language'
-```
-
-Map the result:
-- Python → `--ecosystem pypi --language python`
-- Go → `--ecosystem go --language go`
-- Rust → `--ecosystem crates`
-- JavaScript/TypeScript → `--ecosystem npm`
-- Java/Kotlin → no ecosystem flag (Maven/Gradle not yet supported);
-  pass `--ecosystem go` as a placeholder and note the gap
-
-### 2b. Generate the handoff prompts
-
-Always use `--force` to overwrite stale files from prior runs.
+Use `--network-precheck` to auto-detect language and ecosystem from
+the GitHub API. Use `--force` to overwrite stale files from prior runs.
 
 ```bash
 signatory handoff security "$TARGET" \
-  --language "$LANGUAGE" --ecosystem "$ECOSYSTEM" \
-  --force -o /tmp/signatory-handoff-security.md
+  --network-precheck --force \
+  -o /tmp/signatory-handoff-security.md
 
 signatory handoff provenance "$TARGET" \
-  --ecosystem "$ECOSYSTEM" \
-  --force -o /tmp/signatory-handoff-provenance.md
+  --network-precheck --force \
+  -o /tmp/signatory-handoff-provenance.md
 ```
 
-### 2c. Check for unfilled placeholders
+`--network-precheck` calls the GitHub API to detect the language and
+ecosystem (Python→pypi, Go→go, Rust→crates, JS→npm) and fills the
+`--language` and `--ecosystem` flags automatically. The binary does
+the detection — you don't need to call `gh api` yourself.
 
-The handoff command prints unfilled placeholders to stderr.
-**These are acceptable and expected:**
-
-- `INTAKE_QUESTION` — no intake question for automated runs. The
-  analyst will operate without one; this is fine.
-- `TARGET_PATH` — no local clone. The analysts can work from
-  GitHub API + web fetches. If a local clone is needed, the
-  analyst agent can clone it themselves.
-
-**Do NOT stop to manually fill these.** Proceed to Step 3. The
-analysts' handoff instructions handle the absent-placeholder case.
+**Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_PATH`) are
+expected and acceptable. Do NOT stop to fill them. Proceed to Step 3.
 
 ## Step 3 — Dispatch analyst agents IN PARALLEL
 
 Spawn two agents in a single message (parallel dispatch). Each agent
-receives the handoff prompt as its instructions and produces v1-schema
-JSON as its output.
+follows its handoff prompt and produces **structured markdown** — NOT
+JSON. The agent's job is analysis; the binary handles serialization.
 
 **IMPORTANT**: send BOTH Agent calls in ONE message so they run
 concurrently. Do NOT wait for one to finish before starting the other.
@@ -124,60 +101,71 @@ Agent(security-analyst):
     You are a security analyst. Follow the instructions in
     /tmp/signatory-handoff-security.md exactly.
     
-    Your output is a v1-schema JSON file. Before writing it, read
-    filestore/analysis/signatory-security-v1.json as a schema
-    reference — your JSON must match this structure exactly.
+    Write your output as STRUCTURED MARKDOWN (not JSON) to:
+      /tmp/signatory-output-security.md
     
-    Write your output to:
-      filestore/analysis/{target-name}-security-v1.json
+    The output format is defined in your handoff instructions.
+    Use the structured section format (## Conclusion: F001,
+    Severity/Category/Verdict fields, Citation lines, rationale
+    as body text). The orchestrator will convert your markdown to
+    v1-schema JSON using `signatory build-output`.
     
-    After writing, validate:
-      signatory format-check filestore/analysis/{target-name}-security-v1.json
-    
-    If format-check fails, fix the JSON and re-validate.
-    Do NOT proceed until format-check passes.
-  allowed-tools: Bash Read Write Glob Grep WebFetch
+    Do NOT write JSON. Do NOT run format-check. Focus entirely on
+    analysis quality — the pipeline handles serialization.
+  allowed-tools: Read Write Glob Grep WebFetch
 
 Agent(provenance-analyst):
   prompt: |
     You are a provenance analyst. Follow the instructions in
     /tmp/signatory-handoff-provenance.md exactly.
     
-    Your output is a v1-schema JSON file. Before writing it, read
-    filestore/analysis/thefuck-provenance-v1.json as a schema
-    reference — your JSON must match this structure exactly.
+    Write your output as STRUCTURED MARKDOWN (not JSON) to:
+      /tmp/signatory-output-provenance.md
     
-    Write your output to:
-      filestore/analysis/{target-name}-provenance-v1.json
+    The output format is defined in your handoff instructions.
+    Use the structured section format (## Conclusion: F001,
+    Severity/Category/Verdict fields, Citation lines, rationale
+    as body text). The orchestrator will convert your markdown to
+    v1-schema JSON using `signatory build-output`.
     
-    After writing, validate:
-      signatory format-check filestore/analysis/{target-name}-provenance-v1.json
-    
-    If format-check fails, fix the JSON and re-validate.
-    Do NOT proceed until format-check passes.
-  allowed-tools: Bash Read Write Glob Grep WebFetch
+    Do NOT write JSON. Do NOT run format-check. Focus entirely on
+    analysis quality — the pipeline handles serialization.
+  allowed-tools: Read Write Glob Grep WebFetch
 ```
+
+Note: Bash is NOT in the agents' allowed-tools. They don't need it —
+they use Read/Write/Glob/Grep for code inspection and WebFetch for
+registry APIs. The orchestrator handles all CLI commands.
 
 Wait for BOTH agents to complete before proceeding.
 
-## Step 4 — Ingest into the signatory store
+## Step 4 — Convert + validate + ingest
 
-After both agents report success, ingest their output:
+The orchestrator (you) converts structured markdown to v1 JSON,
+validates, and ingests. The agents never touch JSON.
 
 ```bash
+# Convert structured text → v1 JSON
+signatory build-output /tmp/signatory-output-security.md \
+  --target "$CANONICAL_URI" --force \
+  -o filestore/analysis/{target-name}-security-v1.json
+
+signatory build-output /tmp/signatory-output-provenance.md \
+  --target "$CANONICAL_URI" --force \
+  -o filestore/analysis/{target-name}-provenance-v1.json
+
+# Ingest into the store
 signatory ingest filestore/analysis/{target-name}-security-v1.json
 signatory ingest filestore/analysis/{target-name}-provenance-v1.json
+
+# Verify
+signatory show-analyses "$CANONICAL_URI"
 ```
 
-Verify both landed:
-
-```bash
-signatory show-analyses --target "$CANONICAL_URI"
-```
-
-You should see two entries (security + provenance). If either ingest
-fails, check the format-check output from the agent — the JSON may
-have a structural issue the agent didn't fully resolve.
+If `build-output` fails, it names the specific conclusion and the
+missing field. Read the error, check the agent's markdown output,
+and either fix the markdown or re-dispatch the agent with guidance.
+Do NOT try to fix JSON — the JSON doesn't exist yet at this stage.
 
 ## Step 5 — Dispatch synthesist agent
 
@@ -188,7 +176,7 @@ skill — the template IS the single source of truth for how to
 synthesize.
 
 ```bash
-signatory handoff synthesist "$TARGET" -o /tmp/signatory-handoff-synthesis.md
+signatory handoff synthesist "$TARGET" --force -o /tmp/signatory-handoff-synthesis.md
 ```
 
 Read the generated prompt to verify it rendered correctly.
