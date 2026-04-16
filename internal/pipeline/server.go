@@ -16,7 +16,7 @@ import (
 // handoff templates can be 500+ lines; the session limit is small
 // because it's just a target URI and optional metadata.
 const (
-	maxSessionBodyBytes = 4 * 1024       // 4 KB
+	maxSessionBodyBytes = 4 * 1024         // 4 KB
 	maxMessageBodyBytes = 10 * 1024 * 1024 // 10 MB
 )
 

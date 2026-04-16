@@ -500,4 +500,3 @@ func parseGoModDeps(content string) (goModDeps, error) {
 	}
 	return deps, nil
 }
-

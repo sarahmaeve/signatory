@@ -207,8 +207,8 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 	s = strings.TrimPrefix(s, "http://")
 	s = strings.TrimPrefix(s, "git@")
 	s = strings.TrimPrefix(s, "www.")
-	s = strings.TrimPrefix(s, "github.com/")  // HTTPS path form
-	s = strings.TrimPrefix(s, "github.com:")  // SSH form (git@ stripped above, leaving github.com:owner/repo)
+	s = strings.TrimPrefix(s, "github.com/") // HTTPS path form
+	s = strings.TrimPrefix(s, "github.com:") // SSH form (git@ stripped above, leaving github.com:owner/repo)
 
 	// Strip `.git` suffix and any trailing slash.
 	s = strings.TrimSuffix(s, "/")

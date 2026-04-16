@@ -467,7 +467,7 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	if err != nil {
 		return "", "", fmt.Errorf("clone-dir %q is not writable: %w", absParent, err)
 	}
-	_ = probe.Close()            // probe was just created; close errors don't affect the writability check
+	_ = probe.Close()           // probe was just created; close errors don't affect the writability check
 	_ = os.Remove(probe.Name()) // best-effort cleanup of the probe file
 
 	// Resolve all symlinks in the parent so the containment check below

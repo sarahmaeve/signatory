@@ -459,4 +459,3 @@ func createTestSession(t *testing.T, client *http.Client, baseURL string) string
 	resp.Body.Close()
 	return sess.ID
 }
-
