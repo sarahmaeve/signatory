@@ -35,6 +35,7 @@ Analyses here:
 |--------|-----------|------|---------|------|
 | atuin | Rust / CLI app | Development + Shell-augment + AI-agent runtime + Hosted-service coupled | Analysis only (API + local clone + 2 rounds of external security review, 2026-04-14) | [atuin.md](atuin.md) |
 | thefuck | Python / CLI app | Development tool (shell-augment / command interception) | Analysis only (dual-analyst structured emission v1, 2026-04-14) | [thefuck.md](thefuck.md) |
+| photon | Java / self-hosted service | Service (self-hosted geocoder) | Analysis only (single-analyst provenance, 2026-04-15) | [photon.md](photon.md) |
 
 ### Supporting primary-source documents
 
