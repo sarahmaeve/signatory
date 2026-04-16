@@ -33,66 +33,79 @@ Before doing anything expensive, check whether signatory already has
 data for this target.
 
 ```bash
-signatory show-analyses --target "$TARGET" 2>&1
+signatory show-analyses "$TARGET" 2>&1
+echo "exit: $?"
 ```
 
-If analyses exist, query the conclusions:
+**Check the exit code before interpreting the output:**
 
-```bash
-signatory show-conclusions --target "$TARGET" 2>&1
-```
+- **Exit 0 + output shows analyses**: data exists. Query conclusions:
+  ```bash
+  signatory show-conclusions --target "$TARGET" 2>&1
+  ```
+  Present the existing analysis to the user. Ask whether they want a
+  fresh run (re-collect) or are satisfied. If satisfied, skip to
+  Step 4. If re-collecting, proceed to Step 1.
 
-**If data exists**: present the existing analysis to the user. Ask
-whether they want a fresh run (re-collect) or are satisfied with the
-existing assessment. If satisfied, synthesize from existing data
-(skip to Step 5). If re-collecting, proceed to Step 1.
+- **Exit 0 + "No entity matches"**: no data in the store. Tell the
+  user "no existing analysis" and proceed to Step 1.
 
-**If no data**: tell the user "no existing analysis in the store"
-and proceed to Step 1.
+- **Any non-zero exit code**: something is broken — a CLI syntax
+  error, missing database, permissions problem, etc. **STOP.** Report
+  the exact error output to the user. Do NOT proceed to Step 1.
+  Common causes: wrong flag syntax (show-analyses uses a positional
+  argument, not `--target`), missing `~/.signatory/signatory.db`
+  (run `signatory init` first), or a corrupted database file.
 
-## Step 1 — Resolve the target
+## Step 1 — Generate handoff prompts with clone
 
-Parse $ARGUMENTS to determine:
-- The canonical URI (e.g. `repo:github/komoot/photon`)
-- The source forge (GitHub, GitLab, etc.)
-- The ecosystem if applicable (Go, Rust, npm, Python)
-
-For GitHub targets, resolve the default branch and HEAD commit:
-```bash
-gh api repos/{owner}/{repo} --jq '{default_branch, pushed_at}'
-gh api repos/{owner}/{repo}/commits --jq '.[0].sha' | head -c 12
-```
-
-## Step 2 — Generate handoff prompts (capture to variables, NOT files)
+Generate both handoff prompts using `signatory handoff`. The binary
+handles target resolution, language/ecosystem detection, and
+shallow-cloning — you do NOT need to call `gh api` or `git clone`
+yourself.
 
 Capture the handoff content via stdout. Do NOT write to /tmp or any
 file — subagents cannot read /tmp, and fixed filenames cause
 collisions between concurrent sessions.
 
 ```bash
-SECURITY_HANDOFF=$(signatory handoff security "$TARGET" --network-precheck 2>/dev/null)
-PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" --network-precheck 2>/dev/null)
+# The security handoff clones the repo into filestore/clones/.
+# --clone-dir creates the shallow clone and fills TARGET_PATH.
+# --network-precheck auto-detects language and ecosystem from GitHub.
+SECURITY_HANDOFF=$(signatory handoff security "$TARGET" \
+  --network-precheck --clone-dir filestore/clones/ 2>/dev/null)
+
+# The provenance handoff reuses the same clone — pass --path
+# to point at the existing checkout. Replace $TARGET_NAME with
+# the inferred repo name (last path segment of the URL).
+PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" \
+  --network-precheck --path "filestore/clones/$TARGET_NAME" 2>/dev/null)
 ```
 
-`--network-precheck` auto-detects language and ecosystem from the
-GitHub API. The binary accepts both full URLs (`https://github.com/
-owner/repo`) and shorthand (`owner/repo`).
+The binary accepts both full URLs (`https://github.com/owner/repo`)
+and shorthand (`owner/repo`).
 
-If a handoff command fails, check stderr — usually a missing
-`--ecosystem` override for non-GitHub targets. Pass it explicitly.
+If a handoff command fails, remove `2>/dev/null` and check stderr.
+Common causes: missing `--ecosystem` for non-GitHub targets (pass
+it explicitly), or a clone failure (network/permissions).
 
-**Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_PATH`) are
+**Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_ROLE`) are
 expected and acceptable. Do NOT stop to fill them. Proceed.
 
-## Step 3 — Dispatch analyst agents IN PARALLEL
+## Step 2 — Dispatch analyst agents IN PARALLEL
 
 Spawn two agents in a single message. **INLINE the handoff content
 directly in each agent's prompt** — do not point at files. The agent
-produces structured markdown and returns it in its response (or
-writes it to a project-local path). No /tmp files involved.
+produces structured markdown and writes it to a project-local path.
 
 **IMPORTANT**: send BOTH Agent calls in ONE message so they run
 concurrently.
+
+**IMPORTANT**: analyst agents do NOT have Bash. They use Read, Glob,
+Grep to analyze the local clone, and WebFetch for registry/GitHub
+API calls. The handoff template tells them what tools they have and
+what URLs to fetch. Do NOT give them Bash — it leads to chaotic
+shell command attempts.
 
 For each agent prompt, paste the captured handoff content after the
 preamble. The structure is:
@@ -108,8 +121,7 @@ Agent(security-analyst):
     
     IMPORTANT OUTPUT INSTRUCTIONS:
     - Write your output as STRUCTURED MARKDOWN (not JSON).
-    - Write it to: filestore/analysis/click-security-structured.md
-      (substitute the actual target name for "click")
+    - Write it to: filestore/analysis/{target-name}-security-structured.md
     - Use the output format from your handoff instructions:
       ## Conclusion: F001 with Severity/Category/Verdict fields,
       Citation lines, rationale as body text.
@@ -117,6 +129,8 @@ Agent(security-analyst):
       using `signatory build-output`. You handle analysis; the
       binary handles serialization.
     - Do NOT write JSON. Do NOT run signatory commands.
+    - The source is cloned at the TARGET_PATH shown in your handoff.
+      Use Read/Glob/Grep to analyze it. You do NOT have Bash.
   allowed-tools: Read Write Glob Grep WebFetch
 
 Agent(provenance-analyst):
@@ -129,10 +143,12 @@ Agent(provenance-analyst):
     
     IMPORTANT OUTPUT INSTRUCTIONS:
     - Write your output as STRUCTURED MARKDOWN (not JSON).
-    - Write it to: filestore/analysis/click-provenance-structured.md
-      (substitute the actual target name for "click")
+    - Write it to: filestore/analysis/{target-name}-provenance-structured.md
     - Use the output format from your handoff instructions.
     - Do NOT write JSON. Do NOT run signatory commands.
+    - The source is cloned at the TARGET_PATH shown in your handoff.
+      Use Read/Glob/Grep for local files and WebFetch for registry
+      and GitHub API calls. You do NOT have Bash.
   allowed-tools: Read Write Glob Grep WebFetch
 ```
 
@@ -141,7 +157,7 @@ they DO have access to. No /tmp involvement.
 
 Wait for BOTH agents to complete before proceeding.
 
-## Step 4 — Convert + validate + ingest
+## Step 3 — Convert + validate + ingest
 
 The orchestrator (you) converts structured markdown to v1 JSON,
 validates, and ingests. The agents never touch JSON.
@@ -169,7 +185,7 @@ missing field. Read the error, check the agent's markdown output,
 and either fix the markdown or re-dispatch the agent with guidance.
 Do NOT try to fix JSON — the JSON doesn't exist yet at this stage.
 
-## Step 5 — Dispatch synthesist agent
+## Step 4 — Dispatch synthesist agent
 
 Generate the synthesis handoff prompt and dispatch a synthesist agent.
 The synthesist reads the store (not source) and produces the combined
@@ -208,7 +224,7 @@ The synthesist's output is the human-readable assessment that makes
 the pipeline's data meaningful. Present it to the user as the final
 result.
 
-## Step 6 — Record posture (with user confirmation)
+## Step 5 — Record posture (with user confirmation)
 
 **The decision is the user's.** Present the recommendation; do not
 record it without confirmation.

@@ -230,7 +230,28 @@ func (p *structuredParser) flushSection() error {
 	return nil
 }
 
+// sectionIsEmpty returns true when the current section has no
+// accumulated content: no field lines, no body text, no citations.
+// This happens when an agent emits an ID-only heading followed
+// immediately by the real heading, e.g.:
+//
+//	## Absence: A001
+//	## Absence: network-outbound connections or telemetry
+//	Confidence: exhaustive
+//	...
+//
+// The first heading creates a section with sectionID="A001" but no
+// content. Rather than failing validation on the empty record, the
+// flush functions discard it — the real content lands in the next
+// section where it belongs.
+func (p *structuredParser) sectionIsEmpty() bool {
+	return len(p.fields) == 0 && len(p.bodyLines) == 0 && len(p.citations) == 0
+}
+
 func (p *structuredParser) flushConclusion() error {
+	if p.sectionIsEmpty() {
+		return nil // ID-only heading; real content follows.
+	}
 	id := p.sectionID
 	verdict := p.fields["verdict"]
 	if verdict == "" {
@@ -283,6 +304,9 @@ func (p *structuredParser) flushConclusion() error {
 }
 
 func (p *structuredParser) flushAbsence() error {
+	if p.sectionIsEmpty() {
+		return nil // ID-only heading; real content follows.
+	}
 	pattern := p.sectionID
 	conf := p.fields["confidence"]
 	if conf == "" {
@@ -313,6 +337,9 @@ func (p *structuredParser) flushAbsence() error {
 }
 
 func (p *structuredParser) flushObservation() error {
+	if p.sectionIsEmpty() {
+		return nil // ID-only heading; real content follows.
+	}
 	id := p.sectionID
 	title := p.fields["title"]
 	if title == "" {

@@ -195,3 +195,114 @@ func TestParseStructuredOutput_Validates(t *testing.T) {
 	err = out.Validate()
 	assert.NoError(t, err, "parsed output must pass Validate — if this fails, the parser is constructing invalid objects")
 }
+
+// TestParseStructuredOutput_DoubleHeaderAbsence verifies that an
+// agent emitting an ID line followed by a description line for
+// absences is handled gracefully. The ID-only section (no fields,
+// no body, no citations) is discarded; the real content lands in
+// the second section.
+func TestParseStructuredOutput_DoubleHeaderAbsence(t *testing.T) {
+	t.Parallel()
+	input := `Analyst: test-analyst
+Model: test-model
+Round: 1
+
+## Absence: A001
+## Absence: network-outbound connections or telemetry
+Confidence: exhaustive
+Citation: Cargo.toml
+Searched all dependency declarations for HTTP client crates — none found.
+
+## Absence: A002
+## Absence: embedded secrets
+Confidence: thoroughly_reviewed
+Citation: src/
+No keys, tokens, or credentials in embedded files.
+`
+	out, err := exchange.ParseStructuredOutput(strings.NewReader(input), "pkg:test/x")
+	require.NoError(t, err)
+
+	// Two real absences, not four.
+	require.Len(t, out.PositiveAbsences, 2)
+	assert.Equal(t, "network-outbound connections or telemetry", out.PositiveAbsences[0].PatternChecked)
+	assert.Contains(t, out.PositiveAbsences[0].Description, "HTTP client crates")
+	assert.Equal(t, "embedded secrets", out.PositiveAbsences[1].PatternChecked)
+	assert.Contains(t, out.PositiveAbsences[1].Description, "keys, tokens")
+
+	// Must also pass full validation.
+	require.NoError(t, out.Validate())
+}
+
+// TestParseStructuredOutput_DoubleHeaderConclusion verifies the same
+// pattern for conclusions — an agent might emit:
+//
+//	## Conclusion: F001
+//	## Conclusion: IPC socket permissions
+//	Severity: medium
+//	...
+func TestParseStructuredOutput_DoubleHeaderConclusion(t *testing.T) {
+	t.Parallel()
+	input := `Analyst: test-analyst
+Model: test-model
+Round: 1
+
+## Conclusion: F001
+## Conclusion: IPC socket permissions
+Severity: medium
+Category: ipc_auth
+Verdict: Socket created with no explicit permission restriction
+The IPC socket is world-connectable on multi-user systems.
+`
+	out, err := exchange.ParseStructuredOutput(strings.NewReader(input), "pkg:test/x")
+	require.NoError(t, err)
+
+	// One real conclusion, not two.
+	require.Len(t, out.Conclusions, 1)
+	assert.Equal(t, "IPC socket permissions", out.Conclusions[0].ID)
+	assert.Equal(t, "Socket created with no explicit permission restriction", out.Conclusions[0].Verdict)
+	require.NoError(t, out.Validate())
+}
+
+// TestParseStructuredOutput_DoubleHeaderObservation covers the
+// observation variant of the empty-section pattern.
+func TestParseStructuredOutput_DoubleHeaderObservation(t *testing.T) {
+	t.Parallel()
+	input := `Analyst: test-analyst
+Model: test-model
+Round: 1
+
+## Observation: O001
+## Observation: Threat model is single-user desktop
+Title: Threat model is single-user desktop
+Category: trust_boundary
+The application runs as a terminal emulator with local access only.
+`
+	out, err := exchange.ParseStructuredOutput(strings.NewReader(input), "pkg:test/x")
+	require.NoError(t, err)
+
+	require.Len(t, out.Observations, 1)
+	assert.Equal(t, "Threat model is single-user desktop", out.Observations[0].Title)
+	require.NoError(t, out.Validate())
+}
+
+// TestParseStructuredOutput_SingleHeaderStillWorks confirms that the
+// normal single-header format (no ID prefix) is unaffected by the
+// empty-section guard.
+func TestParseStructuredOutput_SingleHeaderStillWorks(t *testing.T) {
+	t.Parallel()
+	input := `Analyst: test-analyst
+Model: test-model
+Round: 1
+
+## Absence: eval/exec usage
+Confidence: exhaustive
+Citation: src/
+Grepped all files, zero hits.
+`
+	out, err := exchange.ParseStructuredOutput(strings.NewReader(input), "pkg:test/x")
+	require.NoError(t, err)
+	require.Len(t, out.PositiveAbsences, 1)
+	assert.Equal(t, "eval/exec usage", out.PositiveAbsences[0].PatternChecked)
+	assert.Contains(t, out.PositiveAbsences[0].Description, "zero hits")
+	require.NoError(t, out.Validate())
+}

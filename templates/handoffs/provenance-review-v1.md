@@ -40,27 +40,41 @@ documented below.
 ## The target
 
 - **Name**: `{TARGET_NAME}`
-- **Repo**: `{TARGET_PATH}` (cloned locally — needed for `git`
-  history, `.mailmap`, lockfile inspection)
+- **Repo**: `{TARGET_PATH}` (cloned locally — read files
+  directly for CI config, lockfiles, `.mailmap`, manifests)
 - **Ecosystem**: `{ECOSYSTEM}` (e.g., PyPI, crates.io, npm,
   Go modules)
 - **GitHub URL**: `{TARGET_URL}`
 - **Notes from the user**: {INTAKE_QUESTION}
 
-## Tools you'll need
+## Tools you have
 
-- `gh api` — for GitHub API metadata (repo, contributors,
-  commits, releases, tags, security advisories, community
-  health)
-- `git` — for local-clone analysis (commit signing distribution
-  via `%G?`, tag object types via `for-each-ref`, author
-  history, `.mailmap`)
-- `curl` for ecosystem-specific registry APIs:
-  - PyPI: `https://pypi.org/pypi/{package}/json`
-  - crates.io: `https://crates.io/api/v1/crates/{crate}`
-  - npm: `https://registry.npmjs.org/{package}`
-  - Go: `https://pkg.go.dev/...` (web scrape) or
-    `https://proxy.golang.org/...`
+You have **Read**, **Glob**, **Grep**, and **WebFetch**. You do
+NOT have Bash, git, gh, or curl. Plan your analysis accordingly:
+
+- **Read** files in the local clone at `{TARGET_PATH}` — CI
+  configs, manifests, lockfiles, `.mailmap`, `CHANGELOG`,
+  `SECURITY.md`, `CODEOWNERS`, etc.
+- **Glob** to discover files: `{TARGET_PATH}/.github/workflows/*.yml`,
+  `{TARGET_PATH}/Cargo.lock`, etc.
+- **Grep** for patterns across the source tree.
+- **WebFetch** for HTTP APIs — GitHub REST API, registry APIs.
+  All URLs below are public and need no authentication.
+
+### What you CANNOT do (deferred to v0.2)
+
+- **Commit signing analysis** (`git log --format='%G?'`) —
+  requires git CLI. Note this gap in your round-notes.
+- **Tag object type inspection** (`git for-each-ref`) —
+  requires git CLI. Note this gap in your round-notes.
+- **Year-by-year commit activity shape** — requires git CLI.
+  You CAN approximate vitality from the GitHub API commits
+  endpoint (recent commits, timestamps) and from the releases
+  endpoint (release cadence).
+
+Mark any conclusion that would benefit from these deferred
+signals with a note in the rationale: "confidence would improve
+with git-level signing data (deferred to v0.2)."
 
 ## Calibration notes
 
@@ -118,18 +132,18 @@ Verdict. Body text is the rationale. Citations use compact syntax.
 Severity: high
 Category: vitality_unmaintained
 Design-intent: false
-Verdict: Project is effectively unmaintained — no release in 4 years, no commits in 21 months
-Citation: . "git log --format='%an' --since=2024-01-01 produces 1 commit total"
-The year-by-year commit distribution shows a project in terminal
-decline: 21 commits in 2018, tapering to 1 in 2024 and 0 in
-2025. Five pull requests filed in March 2026 sit unreviewed...
+Verdict: Project is effectively unmaintained — no release in 4 years, open issues unanswered
+Citation: . "GitHub releases endpoint shows last release 2022-03-15"
+The release cadence shows a project in terminal decline: last
+release was over 4 years ago. Five pull requests filed in 2025
+sit unreviewed...
 ```
 
 **Citation syntax** — the orchestrator parses these forms:
-- `path/to/file.py:47-52 "quoted text"` → line-range with quote
-- `path/to/file.py:47` → single line
-- `path/to/file.py` → whole-file scope (no line number)
-- `. "git log output"` → repo-tree scope with quoted evidence
+- `path/to/file.py:47-52 "quoted text"` — line-range with quote
+- `path/to/file.py:47` — single line
+- `path/to/file.py` — whole-file scope (no line number)
+- `. "quoted evidence"` — repo-tree scope with quoted evidence
 
 **Severity values**: critical, high, medium, low, informational, positive
 
@@ -166,9 +180,13 @@ against account-takeover but it does narrow the impersonation surface...
 
 ```
 ## Round-notes
-Provenance analysis focused on: vitality, tag signing, publish
-path, identity consistency. Dominant signal is project fallow
-status — this amplifies every other concern...
+Provenance analysis focused on: vitality, publish path, identity
+consistency. Dominant signal is project fallow status — this
+amplifies every other concern.
+
+Known gaps: commit signing distribution and tag object types
+require git CLI access (deferred to v0.2). Conclusions about
+signing are based on GitHub API verification flags only.
 ```
 
 ### What NOT to do
@@ -200,16 +218,18 @@ Vitality:
   patterns
 
 Governance:
-- `per_developer_commit_signing_ratio` — local `%G?` distribution
-- `web_flow_signing_ratio` — distinct from above; GitHub web-flow
-  merge signing
+- `per_developer_commit_signing_ratio` — (deferred to v0.2:
+  requires git CLI for `%G?` distribution)
+- `web_flow_signing_ratio` — approximable from GitHub API commit
+  verification flags
 - `effective_maintainer_concentration` — bus-factor analysis
 - `analyst_self_correction` — meta-signal about the analyst (only
   on supersession rounds)
 
 Publication integrity:
-- `tag_signing_status` — `signed_annotated` / `annotated_unsigned`
-  / `lightweight`
+- `tag_signing_status` — (deferred to v0.2: requires git
+  `for-each-ref` for `signed_annotated` / `annotated_unsigned`
+  / `lightweight` distinction)
 - `registry_publish_origin` — `oidc_ci` / `long_lived_token_ci`
   / `local_maintainer_machine` / `unknown`
 - `build_provenance_attestation` — Sigstore / SLSA-style
@@ -245,137 +265,169 @@ note the gap in `round_notes` so the registry can grow.
 Your standard pass should touch these. Not exhaustive — go
 deeper based on what surfaces.
 
-### GitHub API metadata
+### GitHub API metadata (via WebFetch)
 
-```sh
-gh api repos/{owner}/{repo} --jq '{name, owner: .owner.login, owner_type: .owner.type, created_at, updated_at, pushed_at, stargazers_count, forks_count, open_issues_count, archived, description, license: .license.spdx_id, language, default_branch}'
-gh api 'repos/{owner}/{repo}/contributors?per_page=20' --jq '.[] | {login, contributions}'
-gh api repos/{owner}/{repo}/commits --jq '.[0:15] | .[] | {date: .commit.author.date, message: .commit.message[0:80], author: .commit.author.name, verified: .commit.verification.verified}'
-gh api 'repos/{owner}/{repo}/releases?per_page=10' --jq '.[] | {tag_name, name, published_at, prerelease, draft}'
-gh api 'repos/{owner}/{repo}/security-advisories?per_page=10'
-gh api 'repos/{owner}/{repo}/community/profile'
-gh api 'repos/{owner}/{repo}/commits?per_page=1' -i 2>&1 | grep -i 'link:'  # total commit count via Link header
+Fetch these URLs using WebFetch. All are public endpoints.
+Replace `{owner}` and `{repo}` with the target's values
+(derived from `{TARGET_URL}`).
+
+**Repository metadata:**
+```
+https://api.github.com/repos/{owner}/{repo}
+```
+Extract: `name`, `owner.login`, `owner.type` (User vs
+Organization), `created_at`, `updated_at`, `pushed_at`,
+`stargazers_count`, `forks_count`, `open_issues_count`,
+`archived`, `license.spdx_id`, `language`, `default_branch`.
+
+**Top contributors:**
+```
+https://api.github.com/repos/{owner}/{repo}/contributors?per_page=20
+```
+Extract: `login`, `contributions` for each.
+
+**Recent commits (with verification status):**
+```
+https://api.github.com/repos/{owner}/{repo}/commits?per_page=15
+```
+Extract: `commit.author.date`, `commit.message` (first 80 chars),
+`commit.author.name`, `commit.verification.verified`,
+`commit.verification.reason`. The `verified` field gives partial
+signing signal without needing `git log --format='%G?'`.
+
+**Releases:**
+```
+https://api.github.com/repos/{owner}/{repo}/releases?per_page=10
+```
+Extract: `tag_name`, `name`, `published_at`, `prerelease`, `draft`.
+
+**Security advisories:**
+```
+https://api.github.com/repos/{owner}/{repo}/security-advisories?per_page=10
 ```
 
-### Owner / maintainer profile
-
-```sh
-gh api users/{owner} --jq '{login, name, company, location, bio, blog, twitter_username, created_at, public_repos, followers, email}'
+**Community health:**
+```
+https://api.github.com/repos/{owner}/{repo}/community/profile
 ```
 
-For organization-owned repos, also `gh api orgs/{owner}` and
-note whether the owner is `User` vs `Organization` (per the
-repo metadata above).
+### Owner / maintainer profile (via WebFetch)
 
-### Local git analysis
-
-```sh
-git log --format='%G?' -200 | sort | uniq -c    # commit signing distribution
-git for-each-ref refs/tags --format='%(objecttype)' | sort | uniq -c   # tag types
-git log --format='%an' --all | sort | uniq -c | sort -rn | head -10   # author totals
-ls -la .mailmap 2>&1                              # identity-graph file presence
-git log --reverse --oneline | head -1             # first commit
 ```
-
-For the year-by-year activity shape:
-
-```sh
-for year in 2018 2019 2020 2021 2022 2023 2024 2025; do
-  echo "=== $year ==="
-  git log --format='%an' --since="$year-01-01" --until="$year-12-31" \
-    | sort | uniq -c | sort -rn | head -5
-done
+https://api.github.com/users/{owner}
 ```
+Extract: `login`, `name`, `company`, `location`, `bio`, `blog`,
+`twitter_username`, `created_at`, `public_repos`, `followers`,
+`email`.
 
-### Ecosystem-specific registry metadata
+For organization-owned repos, also fetch
+`https://api.github.com/orgs/{owner}` and note whether the
+owner is `User` vs `Organization`.
 
-For `{ECOSYSTEM}` = PyPI:
-```sh
-curl -s https://pypi.org/pypi/{TARGET_NAME}/json | jq '{
-  version: .info.version,
-  author: .info.author,
-  author_email: .info.author_email,
-  maintainer: .info.maintainer,
-  license: .info.license,
-  project_urls: .info.project_urls,
-  total_releases: (.releases | length),
-  latest_upload: .urls[0].upload_time,
-  latest_files: [.urls[] | {packagetype, upload_time, filename}]
-}'
-```
+### Local clone analysis (via Read / Glob / Grep)
 
-For `{ECOSYSTEM}` = crates.io:
-```sh
-curl -s https://crates.io/api/v1/crates/{TARGET_NAME} | jq '{
-  version: .versions[0].num,
-  recent_downloads: .crate.recent_downloads,
-  downloads: .crate.downloads,
-  created_at: .crate.created_at,
-  updated_at: .crate.updated_at
-}'
-curl -s "https://crates.io/api/v1/crates/{TARGET_NAME}/reverse_dependencies?per_page=1" | jq '.meta.total'
-```
+Since you have the clone at `{TARGET_PATH}`, read these directly:
 
-For `{ECOSYSTEM}` = npm:
-```sh
-curl -s "https://registry.npmjs.org/{TARGET_NAME}" | jq '{
-  latest: ."dist-tags".latest,
-  maintainers: .maintainers,
-  time: .time
-}'
-curl -s "https://api.npmjs.org/downloads/point/last-week/{TARGET_NAME}"
-```
+**Identity graph:**
+- Read `{TARGET_PATH}/.mailmap` — presence and depth of identity
+  mappings indicates maintainer care about attribution history.
 
-For `{ECOSYSTEM}` = Go modules:
-```sh
-# Vanity-domain resolution and module metadata via pkg.go.dev or the proxy
-curl -s "https://proxy.golang.org/{module-path}/@latest"
-gh api 'search/code?q={module-path}+filename:go.mod&per_page=1' --jq '.total_count'  # crude refs count
-```
+**First commit / repo age:**
+- Read `{TARGET_PATH}/.git/refs/heads/{default_branch}` for HEAD
+  SHA (approximate; exact history requires git CLI).
 
-### Manifests and lockfiles
+**CI and release configuration:**
+- Glob `{TARGET_PATH}/.github/workflows/*.yml` — read each workflow.
+- Read `{TARGET_PATH}/.github/dependabot.yml` if present.
+- For Rust: read `{TARGET_PATH}/deny.toml`,
+  `{TARGET_PATH}/audit.toml`, `{TARGET_PATH}/.cargo-audit-ignore`.
+- Read `{TARGET_PATH}/Makefile`, `{TARGET_PATH}/justfile`,
+  `{TARGET_PATH}/cliff.toml` (release tooling).
 
-For `{ECOSYSTEM}` = PyPI:
-- `setup.py` / `pyproject.toml` — declared deps
-- `requirements.txt` / `requirements*.txt` — pinned deps
-- `Pipfile.lock` / `poetry.lock` / `pdm.lock` / `uv.lock` —
-  resolved tree
-- Look for `git+https://`, `--index-url`, `--extra-index-url`
-
-For `{ECOSYSTEM}` = crates.io:
-- `Cargo.toml` — declared deps
-- `Cargo.lock` — resolved tree (count crates.io vs git vs path
-  sources)
-- `deny.toml` if present — declared supply-chain policy
-
-For `{ECOSYSTEM}` = npm:
-- `package.json` — declared deps and scripts (especially
-  `postinstall`, `preinstall`)
-- `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` — tree
-- `npm audit` JSON output if you can run it offline
-
-### CI configuration and release path
-
-```sh
-ls .github/workflows/ 2>/dev/null
-ls .github/dependabot.yml 2>/dev/null         # dependency automation
-ls deny.toml audit.toml .cargo-audit-ignore 2>/dev/null  # supply-chain policy files
-ls release.py Makefile justfile cliff.toml 2>/dev/null   # release tooling
-```
-
-For each workflow, check:
+For each CI workflow, check:
 - Is publishing done in CI, or via a local script?
 - Is `id-token: write` set anywhere (OIDC trusted publishing)?
 - Are actions pinned by SHA, by major version, or to `@master`?
-- Is there a `cargo-deny check` / `pip-audit` / `npm audit` /
-  `govulncheck` step?
+- Is there a supply-chain gate (`cargo-deny check`, `pip-audit`,
+  `npm audit`, `govulncheck`)?
 
-### Issues and PR responsiveness
+### Ecosystem-specific registry metadata (via WebFetch)
 
-```sh
-gh api 'repos/{owner}/{repo}/pulls?state=open&per_page=10&sort=created&direction=desc' --jq '.[] | {number, title, created_at, user: .user.login}'
-gh api 'repos/{owner}/{repo}/issues?state=open&per_page=10&sort=created&direction=desc' --jq '.[] | select(.pull_request==null) | {number, title, created_at}'
+For `{ECOSYSTEM}` = PyPI:
 ```
+https://pypi.org/pypi/{TARGET_NAME}/json
+```
+Extract: `info.version`, `info.author`, `info.author_email`,
+`info.maintainer`, `info.license`, `info.project_urls`,
+release count (`len(releases)`), latest upload time
+(`urls[0].upload_time`), file types.
+
+For `{ECOSYSTEM}` = crates:
+```
+https://crates.io/api/v1/crates/{TARGET_NAME}
+```
+Extract: latest version (`versions[0].num`), download counts,
+`created_at`, `updated_at`.
+
+Also fetch reverse dependencies:
+```
+https://crates.io/api/v1/crates/{TARGET_NAME}/reverse_dependencies?per_page=1
+```
+Extract: `meta.total` for reverse-dep count.
+
+For `{ECOSYSTEM}` = npm:
+```
+https://registry.npmjs.org/{TARGET_NAME}
+```
+Extract: `dist-tags.latest`, `maintainers`, `time` (publish
+timestamps).
+
+Also fetch download stats:
+```
+https://api.npmjs.org/downloads/point/last-week/{TARGET_NAME}
+```
+
+For `{ECOSYSTEM}` = go:
+```
+https://proxy.golang.org/{module-path}/@latest
+```
+Module metadata and latest version.
+
+### Manifests and lockfiles (via Read)
+
+For `{ECOSYSTEM}` = PyPI:
+- Read `{TARGET_PATH}/setup.py` / `{TARGET_PATH}/pyproject.toml`
+- Read `{TARGET_PATH}/requirements.txt` and any
+  `requirements*.txt` variants
+- Read `{TARGET_PATH}/Pipfile.lock`, `poetry.lock`, `pdm.lock`,
+  `uv.lock` if present
+- Grep for `git+https://`, `--index-url`, `--extra-index-url`
+
+For `{ECOSYSTEM}` = crates:
+- Read `{TARGET_PATH}/Cargo.toml` — declared deps
+- Read `{TARGET_PATH}/Cargo.lock` — resolved tree (count
+  crates.io vs git vs path sources)
+- Read `{TARGET_PATH}/deny.toml` if present — declared
+  supply-chain policy
+
+For `{ECOSYSTEM}` = npm:
+- Read `{TARGET_PATH}/package.json` — declared deps and
+  scripts (especially `postinstall`, `preinstall`)
+- Read `{TARGET_PATH}/package-lock.json`, `yarn.lock`, or
+  `pnpm-lock.yaml`
+
+### Issues and PR responsiveness (via WebFetch)
+
+**Open PRs:**
+```
+https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=10&sort=created&direction=desc
+```
+
+**Open issues (excluding PRs):**
+```
+https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=10&sort=created&direction=desc
+```
+Filter: items where `pull_request` is null are issues.
 
 Look for a "is this maintained?" issue — that's a community
 signal, not just metadata inference.
@@ -391,21 +443,21 @@ Aim for:
   the Conclusion shape
 
 Spend your effort on:
-- Citation discipline — every conclusion needs file:line evidence
+- Citation discipline — every conclusion needs evidence
 - Distinguishing "I confirmed this is safe" from "I didn't look"
 - Severity calibration (per the calibration notes above)
 - Verdict-then-rationale shape: one dense sentence stating the
-  conclusion, then code-grounded explanation
+  conclusion, then evidence-grounded explanation
 
 Don't spend effort on:
-- Provenance work — that's the other analyst's job
+- Security source-code analysis — that's the other analyst's job
 - JSON formatting — the orchestrator handles serialization
-- Speculation beyond what the code supports
+- Speculation beyond what the evidence supports
 
 ## Stop conditions
 
 - Stop after one focused pass. You're producing a high-signal
-  first-round security review, not an exhaustive audit.
+  first-round provenance review, not an exhaustive audit.
 - If you find more than ~10 conclusions, prioritize ruthlessly —
   high-severity ones first, then ones that surface novel signal
   types signatory doesn't yet know about.

@@ -286,10 +286,25 @@ func TestHandoff_InferTemplateName(t *testing.T) {
 	cases := []struct {
 		role, language, want string
 	}{
+		// Language-specific security templates.
 		{"security", "python", "handoffs/security-review-v1.md"},
 		{"security", "go", "handoffs/security-review-go-v1.md"},
+		{"security", "rust", "handoffs/security-review-rust-v1.md"},
+		// Recognized flavors without dedicated templates → generic.
+		{"security", "javascript", "handoffs/security-review-generic-v1.md"},
+		{"security", "typescript", "handoffs/security-review-generic-v1.md"},
+		{"security", "java", "handoffs/security-review-generic-v1.md"},
+		{"security", "csharp", "handoffs/security-review-generic-v1.md"},
+		{"security", "cpp", "handoffs/security-review-generic-v1.md"},
+		{"security", "c", "handoffs/security-review-generic-v1.md"},
+		{"security", "php", "handoffs/security-review-generic-v1.md"},
+		// Undetected language → generic.
+		{"security", "", "handoffs/security-review-generic-v1.md"},
+		// Provenance is language-agnostic.
 		{"provenance", "python", "handoffs/provenance-review-v1.md"},
 		{"provenance", "go", "handoffs/provenance-review-v1.md"},
+		{"provenance", "rust", "handoffs/provenance-review-v1.md"},
+		{"provenance", "", "handoffs/provenance-review-v1.md"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.role+"-"+tc.language, func(t *testing.T) {
@@ -372,10 +387,26 @@ func TestLanguageToFlavor_KnownLanguages(t *testing.T) {
 	cases := []struct {
 		input, want string
 	}{
+		// Original two.
 		{"Go", "go"},
 		{"go", "go"},
 		{"Python", "python"},
 		{"python", "python"},
+		// Newly mapped languages (GitHub-casing → slug).
+		{"Rust", "rust"},
+		{"JavaScript", "javascript"},
+		{"TypeScript", "typescript"},
+		{"Java", "java"},
+		{"C#", "csharp"},
+		{"C++", "cpp"},
+		{"C", "c"},
+		{"PHP", "php"},
+		// Case-insensitive variants.
+		{"rust", "rust"},
+		{"JAVA", "java"},
+		{"c#", "csharp"},
+		{"c++", "cpp"},
+		{"php", "php"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
@@ -386,7 +417,7 @@ func TestLanguageToFlavor_KnownLanguages(t *testing.T) {
 
 func TestLanguageToFlavor_UnknownReturnsEmpty(t *testing.T) {
 	t.Parallel()
-	cases := []string{"Rust", "JavaScript", "", "Ruby"}
+	cases := []string{"Haskell", "Kotlin", "", "Ruby", "Scala", "Dart"}
 	for _, in := range cases {
 		t.Run("input="+in, func(t *testing.T) {
 			assert.Empty(t, languageToFlavor(in))
@@ -576,12 +607,30 @@ func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 	assert.Zero(t, src.calls, "Source methods must not be invoked for non-GitHub targets")
 }
 
+// TestHandoff_NetworkPrecheck_RejectsNonGitHubSchemeOnly verifies that
+// bare owner/repo shorthand (no scheme) is allowed through — the URL
+// host guard only fires when a :// scheme is present.
+func TestHandoff_NetworkPrecheck_RejectsNonGitHubSchemeOnly(t *testing.T) {
+	src := &inspectSource{}
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "foo/bar", // shorthand, no scheme
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		PrecheckSource:  src,
+	}
+	// Shorthand targets pass the URL guard; the Source will be
+	// called. The test verifies we DON'T reject this form.
+	_ = cmd.Run(&Globals{})
+	assert.NotZero(t, src.calls, "bare owner/repo must pass the URL guard and reach the Source")
+}
+
 // TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage verifies that
-// when the precheck detects a language we don't have a template flavor
-// for (e.g., TypeScript, Rust), the user gets a stderr warning instead
-// of a silent fallback to the python default. Surfaced by the dogfood
-// run on `got` (TypeScript) — silently rendering a Python-headed
-// template against a TypeScript repo is a quality footgun.
+// when the precheck detects a language we don't have a flavor mapping
+// for (e.g., Haskell), the user gets a stderr warning. The generic
+// security template handles these correctly; the warning is
+// informational so the user knows what happened.
 func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "handoff.md")
 	cmd := &HandoffCmd{
@@ -592,18 +641,18 @@ func TestHandoff_NetworkPrecheck_WarnsOnUnflavoredLanguage(t *testing.T) {
 		Output:          outPath,
 		// Quiet false: we WANT the warning to appear on stderr.
 		PrecheckSource: &fakePrecheckSource{
-			Files:    []string{"package.json"},
-			Language: "TypeScript",
+			Files:    []string{"stack.yaml"},
+			Language: "Haskell",
 		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
 	})
-	assert.Contains(t, stderr, "TypeScript")
-	assert.Contains(t, stderr, "no template flavor")
-	assert.Contains(t, stderr, "falling back to python")
-	// Language should still default to python so the render proceeds.
-	assert.Equal(t, "python", cmd.Language)
+	assert.Contains(t, stderr, "Haskell")
+	assert.Contains(t, stderr, "no flavor mapping")
+	assert.Contains(t, stderr, "generic security template")
+	// Language stays empty — no flavor to set.
+	assert.Empty(t, cmd.Language)
 }
 
 // TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning verifies
@@ -620,14 +669,14 @@ func TestHandoff_NetworkPrecheck_QuietSuppressesUnflavoredWarning(t *testing.T) 
 		Output:          outPath,
 		Quiet:           true,
 		PrecheckSource: &fakePrecheckSource{
-			Files:    []string{"Cargo.toml"},
-			Language: "Rust",
+			Files:    []string{"mix.exs"},
+			Language: "Elixir", // unmapped → triggers warning
 		},
 	}
 	stderr := captureStderr(t, func() {
 		require.NoError(t, cmd.Run(&Globals{}))
 	})
-	assert.NotContains(t, stderr, "no template flavor",
+	assert.NotContains(t, stderr, "no flavor mapping",
 		"--quiet must suppress the language-flavor warning")
 }
 

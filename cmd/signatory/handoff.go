@@ -136,11 +136,9 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		}
 	}
 
-	// Language default: "python" unless auto-detected otherwise.
-	// Done AFTER network-precheck so detection can set "go" first.
-	if cmd.Language == "" {
-		cmd.Language = "python"
-	}
+	// Language stays as whatever precheck detected (or "" if
+	// undetected / no precheck). inferTemplateName maps "" to the
+	// generic security template — no hardcoded Python default.
 
 	resolver, err := cmd.buildResolver()
 	if err != nil {
@@ -217,6 +215,17 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 //     takes effect. We'll extend this as we add more language
 //     variants of the security template.
 func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error) {
+	// Reject non-GitHub URLs early. NormalizeGitHubRepoInput is
+	// lenient — it accepts any URL with 2+ path segments and
+	// would happily parse gitlab.com/foo/bar as owner="gitlab.com"
+	// name="foo". The precheck only works with GitHub's API, so
+	// we guard URL-form targets with the stricter host check.
+	// Bare owner/repo shorthand (no scheme) is allowed through —
+	// NormalizeGitHubRepoInput assumes GitHub for those.
+	if strings.Contains(cmd.Target, "://") && !looksLikeGitHubURL(cmd.Target) {
+		return "", fmt.Errorf("--network-precheck requires a github.com URL; got %q", cmd.Target)
+	}
+
 	// Accept both full GitHub URLs and owner/repo shorthand. The
 	// NormalizeGitHubRepoInput function handles all forms:
 	//   https://github.com/owner/repo
@@ -253,14 +262,11 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	}
 
 	// Language flavor: fill only if user didn't pass --language.
-	// We currently ship two flavors (python, go); for anything else
-	// detected — TypeScript, Rust, JavaScript, etc. — we have no
-	// dedicated template and fall back to the python default. The
-	// fallback CAN produce a usable handoff (the analyst is smart
-	// enough to apply the schema to a different language) but the
-	// hardcoded language strings in the python template will be
-	// wrong. Surface this loudly so the user knows: a silent
-	// fallback would hide a quality regression.
+	// languageToFlavor maps the top ten GitHub languages to stable
+	// slugs. For anything else detected (Haskell, Kotlin, etc.) the
+	// slug is "" and inferTemplateName routes to the generic security
+	// template — which is language-agnostic and correct, unlike the
+	// old Python fallback.
 	langApplied := ""
 	langWarning := ""
 	if cmd.Language == "" {
@@ -269,8 +275,10 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 			cmd.Language = flavor
 			langApplied = flavor
 		case result.Language != "":
-			// Detected a language, but no flavor for it.
-			langWarning = fmt.Sprintf("# precheck warning: detected language %q has no template flavor; falling back to python (the rendered handoff's hardcoded 'Language' header will be inaccurate — consider passing --template explicitly)\n", result.Language)
+			// Detected a language, but no flavor for it. The generic
+			// template handles this correctly; the warning is
+			// informational so the user knows what happened.
+			langWarning = fmt.Sprintf("# precheck warning: detected language %q has no flavor mapping; using generic security template (consider passing --template for a language-specific review)\n", result.Language)
 		}
 	}
 
@@ -596,18 +604,36 @@ func safeCloneRepoName(name string) error {
 }
 
 // languageToFlavor maps GitHub's primary-language string to the
-// language flavor slug we use in template filenames. Unknown
-// languages return "" so the caller can fall back to the default.
+// language flavor slug we use in template filenames. Recognized
+// languages return a stable slug; unrecognized languages return ""
+// so the caller falls back to the generic security template.
 //
-// Kept as a small switch rather than a map so the default case is
-// explicit: adding a new template flavor is a one-line change here
-// plus the corresponding handoffs/security-review-<flavor>-v1.md file.
+// The top ten languages by GitHub usage are mapped here so that
+// --network-precheck can route to the right template without
+// manual --language overrides. Not all flavors have dedicated
+// templates today — inferTemplateName handles the fallback.
 func languageToFlavor(primaryLanguage string) string {
 	switch strings.ToLower(primaryLanguage) {
 	case "go":
 		return "go"
 	case "python":
 		return "python"
+	case "rust":
+		return "rust"
+	case "javascript":
+		return "javascript"
+	case "typescript":
+		return "typescript"
+	case "java":
+		return "java"
+	case "c#":
+		return "csharp"
+	case "c++":
+		return "cpp"
+	case "c":
+		return "c"
+	case "php":
+		return "php"
 	default:
 		return ""
 	}
@@ -673,16 +699,14 @@ func (cmd *HandoffCmd) buildResolver() (*config.Resolver, error) {
 }
 
 // inferTemplateName maps the role/language CLI arguments to a
-// specific template file under handoffs/. The mapping is small and
-// explicit to keep behavior predictable; callers with non-standard
-// variants should pass --template.
+// specific template file under handoffs/. Languages with dedicated
+// templates (go, python, rust) get their own file; everything else
+// falls back to the generic security template. Callers with
+// non-standard variants should pass --template.
 func inferTemplateName(role, language string) string {
 	switch role {
 	case "security":
-		if language == "go" {
-			return "handoffs/security-review-go-v1.md"
-		}
-		return "handoffs/security-review-v1.md"
+		return inferSecurityTemplate(language)
 	case "provenance":
 		// Language doesn't fork provenance — the template covers
 		// PyPI, npm, crates.io, and Go modules in one file.
@@ -695,6 +719,30 @@ func inferTemplateName(role, language string) string {
 		// Enum validation ensures we never reach this; keep the
 		// fallthrough explicit to catch programmer error in tests.
 		return ""
+	}
+}
+
+// inferSecurityTemplate returns the security-review template path
+// for the given language flavor. Languages with dedicated templates
+// get their own file; everything else gets the generic template.
+//
+// Adding a new language-specific template:
+//  1. Create handoffs/security-review-<flavor>-v1.md
+//  2. Add the flavor to this switch
+//  3. Add the GitHub language string to languageToFlavor
+func inferSecurityTemplate(language string) string {
+	switch language {
+	case "go":
+		return "handoffs/security-review-go-v1.md"
+	case "python":
+		return "handoffs/security-review-v1.md"
+	case "rust":
+		return "handoffs/security-review-rust-v1.md"
+	default:
+		// Covers "" (undetected), and recognized flavors like
+		// "javascript", "java", etc. that don't have dedicated
+		// templates yet.
+		return "handoffs/security-review-generic-v1.md"
 	}
 }
 

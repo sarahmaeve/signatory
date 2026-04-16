@@ -40,6 +40,12 @@ design/NEXT.md
 # .idea/
 # .vscode/
 
+# Filestore — analysis output, clones, and ingested data.
+# This directory is project-local working state, not source.
+# Its location is configurable via --filestore-dir and
+# signatory.config.toml; .gitignore covers the default.
+filestore/
+
 # Built binaries at the repo root.
 # Anchored with leading slash so each pattern matches ONLY the root-level
 # binary, not the cmd/<name>/ source directory (which previously got
