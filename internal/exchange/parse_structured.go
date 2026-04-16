@@ -39,7 +39,8 @@ import (
 // should pass format-check without further fixup.
 func ParseStructuredOutput(r io.Reader, target string) (*AnalystOutput, error) {
 	p := &structuredParser{
-		target: target,
+		target:      target,
+		sectionType: "header", // Start in header mode so pre-H1 fields are captured.
 		out: &AnalystOutput{
 			Target:      target,
 			Attribution: AgentAttribution{InvokedAt: time.Now().UTC().Format(time.RFC3339)},
@@ -73,7 +74,10 @@ type structuredParser struct {
 	out     *AnalystOutput
 	lineNum int
 
-	// Current section being accumulated.
+	// Current section being accumulated. Starts as "header" so
+	// attribution fields before any H1/H2 heading are captured —
+	// agents naturally start with Analyst:/Model:/Round: lines
+	// without an explicit # Analysis: preamble.
 	sectionType string // "header", "conclusion", "absence", "observation", "round-notes"
 	sectionID   string
 	fields      map[string]string
