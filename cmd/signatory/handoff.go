@@ -154,7 +154,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	if err != nil {
 		return fmt.Errorf("load template: %w", err)
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck // template reader close; errors here are not actionable after the read below
 	raw, err := io.ReadAll(rc)
 	if err != nil {
 		return fmt.Errorf("read template %s: %w", source, err)
@@ -467,8 +467,8 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	if err != nil {
 		return "", "", fmt.Errorf("clone-dir %q is not writable: %w", absParent, err)
 	}
-	probe.Close()
-	os.Remove(probe.Name())
+	_ = probe.Close()            // probe was just created; close errors don't affect the writability check
+	_ = os.Remove(probe.Name()) // best-effort cleanup of the probe file
 
 	// Resolve all symlinks in the parent so the containment check below
 	// compares real filesystem paths. Without this, a symlink at
@@ -775,9 +775,16 @@ func writeHandoff(output string, force bool, rendered []byte) error {
 		}
 		return fmt.Errorf("open %s: %w", output, err)
 	}
-	defer f.Close()
+	// Defer is a safety net against early returns below. The primary
+	// close is explicit after the write so flush errors surface as a
+	// real error to the caller — a silent close error on a write path
+	// can mean data wasn't actually persisted.
+	defer f.Close() //nolint:errcheck // safety net; the primary close is below
 	if _, err := f.Write(rendered); err != nil {
 		return fmt.Errorf("write %s: %w", output, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", output, err)
 	}
 	return nil
 }

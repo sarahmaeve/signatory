@@ -42,7 +42,7 @@ func (cmd *PostureGetCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	entity, err := resolveEntity(ctx, s, cmd.Target)
 	if errors.Is(err, store.ErrNotFound) {
@@ -136,7 +136,7 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()

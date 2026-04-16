@@ -135,7 +135,7 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 		}
 		result.DirectoriesCreated = append(result.DirectoriesCreated, path)
 		if opts.Out != nil {
-			fmt.Fprintf(opts.Out, "ok   %s\n", path)
+			_, _ = fmt.Fprintf(opts.Out, "ok   %s\n", path) //nolint:errcheck // best-effort CLI output
 		}
 	}
 
@@ -173,13 +173,13 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 		}
 		result.ConfigWritten = true
 		if opts.Out != nil {
-			fmt.Fprintf(opts.Out, "wrote %s\n", cfgPath)
+			_, _ = fmt.Fprintf(opts.Out, "wrote %s\n", cfgPath) //nolint:errcheck // best-effort CLI output
 		}
 	case os.IsExist(err):
 		// O_EXCL fired — file already there and --force was not passed.
 		// This is the documented "skip-on-exists" path.
 		if opts.Out != nil {
-			fmt.Fprintf(opts.Out, "skip %s (exists; --force to overwrite)\n", cfgPath)
+			_, _ = fmt.Fprintf(opts.Out, "skip %s (exists; --force to overwrite)\n", cfgPath) //nolint:errcheck // best-effort CLI output
 		}
 	default:
 		return nil, fmt.Errorf("open %s: %w", cfgPath, err)
@@ -237,7 +237,7 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 				// O_EXCL fired — file already present without --force.
 				skipped++
 				if out != nil {
-					fmt.Fprintf(out, "skip %s (exists)\n", target)
+					_, _ = fmt.Fprintf(out, "skip %s (exists)\n", target) //nolint:errcheck // best-effort CLI output
 				}
 				return nil
 			}
@@ -245,7 +245,7 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		}
 		data, readErr := fs.ReadFile(embedFS, path)
 		if readErr != nil {
-			f.Close()
+			_ = f.Close() // already in error path; close failure would mask the read error
 			return readErr
 		}
 		_, writeErr := f.Write(data)
@@ -258,7 +258,7 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		}
 		copied++
 		if out != nil {
-			fmt.Fprintf(out, "wrote %s\n", target)
+			_, _ = fmt.Fprintf(out, "wrote %s\n", target) //nolint:errcheck // best-effort CLI output
 		}
 		return nil
 	})

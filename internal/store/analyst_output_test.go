@@ -230,7 +230,7 @@ func TestIngest_ConditionalSeverity_Stored(t *testing.T) {
 		 ORDER BY csc.host_isolation, csc.platform`,
 		result.OutputID)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	type ctxRow struct{ host, platform, value string }
 	var got []ctxRow
@@ -263,7 +263,7 @@ func TestIngest_Citations_PolymorphicFK(t *testing.T) {
 		 GROUP BY parent_kind`,
 		result.OutputID, result.OutputID)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	kinds := map[string]int{}
 	for rows.Next() {
@@ -301,7 +301,7 @@ func TestIngest_MethodologyComposesWith_Stored(t *testing.T) {
 		 ORDER BY mpc.composes_with`,
 		result.OutputID)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var got []string
 	for rows.Next() {

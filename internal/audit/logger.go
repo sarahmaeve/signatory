@@ -167,10 +167,16 @@ func (l *Logger) appendFile(entry *profile.AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
-	defer f.Close()
-
+	// Defer is the safety net; the primary close is explicit below so
+	// flush errors surface as real errors. An audit log that silently
+	// fails to flush on close would lose entries — the opposite of what
+	// an audit log is for.
+	defer f.Close() //nolint:errcheck // safety net; the primary close is below
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
 	}
 	return nil
 }

@@ -52,7 +52,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only config file close; errors here are not actionable after the decode below
 
 	raw, err := decodeTOML(f)
 	if err != nil {

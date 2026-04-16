@@ -239,7 +239,7 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	if err != nil {
 		return fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // close-after-read; body is consumed above, error here is not actionable
 
 	// Limit response body size to prevent OOM from malicious responses.
 	limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
@@ -299,7 +299,7 @@ func (c *Client) getWithLinkHeader(ctx context.Context, path string, result inte
 	if err != nil {
 		return "", fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // close-after-read; body is consumed above, error here is not actionable
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		resetAt := parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))

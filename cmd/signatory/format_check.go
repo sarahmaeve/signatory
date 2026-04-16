@@ -94,58 +94,70 @@ func (cmd *FormatCheckCmd) Run(globals *Globals) error {
 //   - True prose fields are excluded entirely; if the consumer
 //     wants the rationale they should read the file.
 func printSummary(w io.Writer, path, format string, out *exchange.AnalystOutput) {
-	fmt.Fprintf(w, "%s (%s)\n", path, format)
-	fmt.Fprintf(w, "  attribution: %s / %s", out.Attribution.AnalystID, out.Attribution.Model)
-	if out.Attribution.Round > 0 {
-		fmt.Fprintf(w, " (round %d)", out.Attribution.Round)
+	// Local best-effort writer helpers. Display output to a CLI writer
+	// has no actionable error handling — a broken stdout pipe or a
+	// closed terminal is surfaced by the shell, not by us. Absorbing
+	// the return values here is preferable to sprinkling nolint across
+	// every Fprintf call or cluttering the function with unused errs.
+	p := func(f string, args ...any) {
+		_, _ = fmt.Fprintf(w, f, args...) //nolint:errcheck // best-effort CLI output
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  target: %s\n", out.Target)
-	if out.TargetCommit != "" {
-		fmt.Fprintf(w, "  target_commit: %s\n", out.TargetCommit)
-	}
-	if len(out.Supersedes) > 0 {
-		fmt.Fprintf(w, "  supersedes %d prior\n", len(out.Supersedes))
+	pln := func() {
+		_, _ = fmt.Fprintln(w) //nolint:errcheck // best-effort CLI output
 	}
 
-	fmt.Fprintf(w, "\nconclusions (%d):\n", len(out.Conclusions))
+	p("%s (%s)\n", path, format)
+	p("  attribution: %s / %s", out.Attribution.AnalystID, out.Attribution.Model)
+	if out.Attribution.Round > 0 {
+		p(" (round %d)", out.Attribution.Round)
+	}
+	pln()
+	p("  target: %s\n", out.Target)
+	if out.TargetCommit != "" {
+		p("  target_commit: %s\n", out.TargetCommit)
+	}
+	if len(out.Supersedes) > 0 {
+		p("  supersedes %d prior\n", len(out.Supersedes))
+	}
+
+	p("\nconclusions (%d):\n", len(out.Conclusions))
 	for i := range out.Conclusions {
 		printConclusionSummary(w, &out.Conclusions[i])
 	}
 
 	if len(out.PositiveAbsences) > 0 {
-		fmt.Fprintf(w, "\npositive_absences (%d):\n", len(out.PositiveAbsences))
+		p("\npositive_absences (%d):\n", len(out.PositiveAbsences))
 		for _, pa := range out.PositiveAbsences {
-			fmt.Fprintf(w, "  [%s] %s\n", pa.Confidence, truncateLine(pa.PatternChecked, 90))
+			p("  [%s] %s\n", pa.Confidence, truncateLine(pa.PatternChecked, 90))
 		}
 	}
 
 	if len(out.Observations) > 0 {
-		fmt.Fprintf(w, "\nobservations (%d):\n", len(out.Observations))
+		p("\nobservations (%d):\n", len(out.Observations))
 		for _, o := range out.Observations {
 			sigInfo := ""
 			if o.SignalType != nil {
 				sigInfo = " (" + *o.SignalType + ")"
 			}
-			fmt.Fprintf(w, "  %s [%s]%s: %s\n", o.ID, o.Category, sigInfo, truncateLine(o.Title, 90))
+			p("  %s [%s]%s: %s\n", o.ID, o.Category, sigInfo, truncateLine(o.Title, 90))
 		}
 	}
 
 	if out.MethodologyTrace != nil && len(out.MethodologyTrace.Patterns) > 0 {
-		fmt.Fprintf(w, "\nmethodology_trace (%d patterns):\n", len(out.MethodologyTrace.Patterns))
+		p("\nmethodology_trace (%d patterns):\n", len(out.MethodologyTrace.Patterns))
 		groups := groupPatternsBySignalGroup(out.MethodologyTrace.Patterns)
 		for _, g := range sortedKeys(groups) {
 			ids := groups[g]
-			fmt.Fprintf(w, "  %s (%d): %s\n", g, len(ids), strings.Join(ids, ", "))
+			p("  %s (%d): %s\n", g, len(ids), strings.Join(ids, ", "))
 		}
 	}
 
 	if out.RoundNotes != "" {
-		fmt.Fprintf(w, "\nround_notes: %d chars (excluded from summary)\n", len(out.RoundNotes))
+		p("\nround_notes: %d chars (excluded from summary)\n", len(out.RoundNotes))
 	}
 
 	if len(out.ReframesFrom) > 0 {
-		fmt.Fprintf(w, "\nreframes_from: %d entries\n", len(out.ReframesFrom))
+		p("\nreframes_from: %d entries\n", len(out.ReframesFrom))
 	}
 }
 
@@ -153,6 +165,9 @@ func printSummary(w io.Writer, path, format string, out *exchange.AnalystOutput)
 // IDs, flags, counts, signal type. Verdict and rationale (the prose)
 // are deliberately omitted.
 func printConclusionSummary(w io.Writer, f *exchange.Conclusion) {
+	p := func(f string, args ...any) {
+		_, _ = fmt.Fprintf(w, f, args...) //nolint:errcheck // best-effort CLI output
+	}
 	sevTag := string(f.Severity.Default)
 	if n := len(f.Severity.ByContext); n > 0 {
 		sevTag += fmt.Sprintf(" +%d ctx", n)
@@ -167,14 +182,14 @@ func printConclusionSummary(w io.Writer, f *exchange.Conclusion) {
 	if f.AnswersQuestion != nil && *f.AnswersQuestion != "" {
 		flags += fmt.Sprintf(" [answers %s]", *f.AnswersQuestion)
 	}
-	fmt.Fprintf(w, "  %s [%s]%s %s\n", f.ID, sevTag, flags, f.Category)
+	p("  %s [%s]%s %s\n", f.ID, sevTag, flags, f.Category)
 	if f.SignalType != nil {
-		fmt.Fprintf(w, "      signal_type: %s\n", *f.SignalType)
+		p("      signal_type: %s\n", *f.SignalType)
 	}
-	fmt.Fprintf(w, "      cite/prereq/fix: %d/%d/%d\n",
+	p("      cite/prereq/fix: %d/%d/%d\n",
 		len(f.Citations), len(f.Prerequisites), len(f.RemediationHints))
 	if n := len(f.RelatedConclusions); n > 0 {
-		fmt.Fprintf(w, "      related: %s\n", strings.Join(f.RelatedConclusions, ", "))
+		p("      related: %s\n", strings.Join(f.RelatedConclusions, ", "))
 	}
 }
 

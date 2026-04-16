@@ -271,7 +271,7 @@ func tryOpenFile(path string) (*os.File, string, bool) {
 	}
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
-		f.Close()
+		_ = f.Close() // already rejecting this file; close failure is not actionable
 		return nil, "", false
 	}
 	abs, err := filepath.Abs(path)
@@ -300,7 +300,7 @@ func ensureWritableDir(dir string) (string, error) {
 		return "", fmt.Errorf("probe %s: %w", abs, err)
 	}
 	name := probe.Name()
-	probe.Close()
+	_ = probe.Close() // probe was just created; close errors don't affect the writability check
 	if removeErr := os.Remove(name); removeErr != nil {
 		// Clean-up failure is logged implicitly via return error —
 		// probe creation succeeded, so the directory IS writable.

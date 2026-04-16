@@ -33,7 +33,7 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()
@@ -104,7 +104,7 @@ func (cmd *BurnListCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	burns, err := s.ListBurns(ctx)
 	if err != nil {

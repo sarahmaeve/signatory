@@ -48,7 +48,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	auditLog := globals.NewAuditLogger(s)
 	actor, err := identity.Current()

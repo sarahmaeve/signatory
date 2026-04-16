@@ -130,7 +130,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	if err != nil {
 		return nil, fmt.Errorf("list analyst_outputs: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var out []AnalystOutputSummary
 	for rows.Next() {
@@ -264,7 +264,7 @@ func (s *SQLite) ListConclusions(ctx context.Context, filter ConclusionFilter) (
 	if err != nil {
 		return nil, fmt.Errorf("list conclusions: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var out []ConclusionSummary
 	for rows.Next() {
@@ -389,7 +389,7 @@ func (s *SQLite) ListMethodologyPatterns(ctx context.Context, filter Methodology
 	if err != nil {
 		return nil, fmt.Errorf("list methodology_patterns: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var out []MethodologyPatternSummary
 	for rows.Next() {
@@ -561,7 +561,7 @@ func (s *SQLite) loadConclusions(ctx context.Context, outputID string) ([]exchan
 	if err != nil {
 		return nil, fmt.Errorf("query conclusions: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	type conclusionRow struct {
 		uuid    string
@@ -634,7 +634,7 @@ func (s *SQLite) loadConclusionSeverityContexts(ctx context.Context, conclusionI
 	if err != nil {
 		return nil, fmt.Errorf("query conclusion_severity_contexts: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []exchange.ContextualSeverity
 	for rows.Next() {
 		var cs exchange.ContextualSeverity
@@ -655,7 +655,7 @@ func (s *SQLite) loadConclusionSupersedes(ctx context.Context, conclusionID stri
 	if err != nil {
 		return nil, fmt.Errorf("query conclusion_supersedes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []exchange.Supersession
 	for rows.Next() {
 		var sup exchange.Supersession
@@ -697,7 +697,7 @@ func (s *SQLite) loadOrderedTexts(ctx context.Context, table, parentCol, parentI
 	if err != nil {
 		return nil, fmt.Errorf("query %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []string
 	for rows.Next() {
 		var text string
@@ -716,7 +716,7 @@ func (s *SQLite) loadConclusionRelated(ctx context.Context, conclusionID string)
 	if err != nil {
 		return nil, fmt.Errorf("query conclusion_related: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []string
 	for rows.Next() {
 		var rel string
@@ -736,7 +736,7 @@ func (s *SQLite) loadCitations(ctx context.Context, parentKind, parentID string)
 	if err != nil {
 		return nil, fmt.Errorf("query citations: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []exchange.Citation
 	for rows.Next() {
 		var c exchange.Citation
@@ -775,7 +775,7 @@ func (s *SQLite) loadPositiveAbsences(ctx context.Context, outputID string) ([]e
 	if err != nil {
 		return nil, fmt.Errorf("query positive_absences: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	type paRow struct {
 		uuid       string
@@ -818,7 +818,7 @@ func (s *SQLite) loadObservations(ctx context.Context, outputID string) ([]excha
 	if err != nil {
 		return nil, fmt.Errorf("query observations: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	type obsRow struct {
 		uuid    string
@@ -874,7 +874,7 @@ func (s *SQLite) loadMethodologyTrace(ctx context.Context, outputID string) (*ex
 	if err != nil {
 		return nil, fmt.Errorf("query methodology_patterns: %w", err)
 	}
-	defer patternRows.Close()
+	defer patternRows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	type patRow struct {
 		uuid    string
@@ -928,7 +928,7 @@ func (s *SQLite) loadComposesWith(ctx context.Context, patternID string) ([]stri
 	if err != nil {
 		return nil, fmt.Errorf("query methodology_pattern_composes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []string
 	for rows.Next() {
 		var c string
@@ -947,7 +947,7 @@ func (s *SQLite) loadOutputSupersedes(ctx context.Context, outputID string) ([]e
 	if err != nil {
 		return nil, fmt.Errorf("query output_supersedes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []exchange.Supersession
 	for rows.Next() {
 		var sup exchange.Supersession
@@ -967,7 +967,7 @@ func (s *SQLite) loadOutputReframesFrom(ctx context.Context, outputID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("query output_reframes_from: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	var out []string
 	for rows.Next() {
 		var t string

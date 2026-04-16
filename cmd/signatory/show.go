@@ -29,7 +29,7 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	filter := store.AnalystOutputFilter{
 		EntityURI: normalizeTargetForQuery(cmd.Target),
@@ -86,7 +86,7 @@ func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	severities, err := parseSeverities(cmd.Severity)
 	if err != nil {
@@ -151,7 +151,7 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	filter := store.MethodologyPatternFilter{
 		EntityURI:   normalizeTargetForQuery(cmd.Target),

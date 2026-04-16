@@ -148,7 +148,7 @@ func (s *Store) GetMessages(ctx context.Context, f MessageFilter) ([]Message, er
 	if err != nil {
 		return nil, fmt.Errorf("get messages: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var msgs []Message
 	for rows.Next() {
@@ -206,7 +206,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var sessions []Session
 	for rows.Next() {

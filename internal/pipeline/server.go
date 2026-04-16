@@ -279,7 +279,7 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("format") == "raw" && len(msgs) == 1 {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, msgs[0].Content)
+		_, _ = fmt.Fprint(w, msgs[0].Content) //nolint:errcheck // best-effort response write; client disconnect is not actionable
 		return
 	}
 
@@ -312,7 +312,7 @@ func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) 
 	if r.URL.Query().Get("format") == "raw" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, msg.Content)
+		_, _ = fmt.Fprint(w, msg.Content) //nolint:errcheck // best-effort response write; client disconnect is not actionable
 		return
 	}
 

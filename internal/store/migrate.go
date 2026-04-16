@@ -965,7 +965,7 @@ func backupDatabase(ctx context.Context, db *sql.DB, dbPath string, fromVersion 
 		}
 		return err
 	}
-	defer src.Close()
+	defer src.Close() //nolint:errcheck // read-only file; close errors are not actionable after the copy above
 
 	dir := filepath.Dir(dbPath)
 	pattern := fmt.Sprintf("%s.backup-v%d-%s-*",
@@ -978,16 +978,16 @@ func backupDatabase(ctx context.Context, db *sql.DB, dbPath string, fromVersion 
 	}
 
 	if _, err := io.Copy(dst, src); err != nil {
-		dst.Close()
+		_ = dst.Close() // already in error path; the real error is the copy failure
 		// Clean up the partial backup file on copy failure so we don't
 		// leave a truncated backup masquerading as a valid one.
-		os.Remove(dst.Name())
+		_ = os.Remove(dst.Name()) // best-effort cleanup; the copy failure is the primary error
 		return fmt.Errorf("copy database to backup: %w", err)
 	}
 
 	// Explicit close to catch flush errors (M1 from review).
 	if err := dst.Close(); err != nil {
-		os.Remove(dst.Name())
+		_ = os.Remove(dst.Name()) // best-effort cleanup; the finalize error is the primary error
 		return fmt.Errorf("finalize backup: %w", err)
 	}
 

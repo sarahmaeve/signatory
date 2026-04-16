@@ -54,7 +54,7 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
 	result, err := store.IngestAnalystOutput(ctx, out, cmd.File)
 	if err != nil {

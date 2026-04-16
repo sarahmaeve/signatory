@@ -103,7 +103,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close() // already in error path; close failure would mask the real error
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
@@ -112,7 +112,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	// already at 0600 from the pre-create above; this is a no-op for
 	// the common case.
 	if err := chmodFunc(path, 0600); err != nil {
-		db.Close()
+		_ = db.Close() // already in error path; close failure would mask the real error
 		return nil, fmt.Errorf("set database permissions: %w", err)
 	}
 
@@ -127,11 +127,11 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	// Verify WAL mode is enabled.
 	var journalMode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
-		db.Close()
+		_ = db.Close() // already in error path; close failure would mask the real error
 		return nil, fmt.Errorf("set journal_mode: %w", err)
 	}
 	if journalMode != "wal" {
-		db.Close()
+		_ = db.Close() // already in error path; close failure would mask the real error
 		return nil, fmt.Errorf("WAL mode not supported (got %q); signatory requires WAL for safe concurrent access", journalMode)
 	}
 
@@ -141,13 +141,13 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		"PRAGMA foreign_keys=ON",
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			db.Close()
+			_ = db.Close() // already in error path; close failure would mask the real error
 			return nil, fmt.Errorf("set %s: %w", pragma, err)
 		}
 	}
 
 	if err := migrate(ctx, db, path); err != nil {
-		db.Close()
+		_ = db.Close() // already in error path; close failure would mask the real error
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
@@ -248,7 +248,7 @@ func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Sig
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
@@ -292,7 +292,7 @@ func (s *SQLite) GetLatestSignals(ctx context.Context, entityID string) ([]profi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
@@ -308,7 +308,7 @@ func (s *SQLite) GetSignalsByGroup(ctx context.Context, entityID string, group p
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
@@ -335,7 +335,7 @@ func (s *SQLite) AppendSignals(ctx context.Context, signals []profile.Signal) er
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck // close on prepared statement; any real error surfaced during Exec above
 
 	for _, sig := range signals {
 		if !json.Valid(sig.Value) {
@@ -379,7 +379,7 @@ func (s *SQLite) GetPostures(ctx context.Context, entityID string) ([]profile.Po
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var postures []profile.Posture
 	for rows.Next() {
@@ -473,7 +473,7 @@ func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var burns []profile.Burn
 	for rows.Next() {
@@ -513,7 +513,7 @@ func (s *SQLite) AppendDependencyObservations(ctx context.Context, obs []profile
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck // close on prepared statement; any real error surfaced during Exec above
 
 	for _, o := range obs {
 		direct := 0
@@ -554,7 +554,7 @@ func (s *SQLite) GetLatestDependencies(ctx context.Context, projectID string) ([
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 
 	var observations []profile.DependencyObservation
 	for rows.Next() {
