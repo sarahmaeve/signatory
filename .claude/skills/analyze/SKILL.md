@@ -57,103 +57,115 @@ echo "exit: $?"
   argument, not `--target`), missing `~/.signatory/signatory.db`
   (run `signatory init` first), or a corrupted database file.
 
-## Step 1 — Generate handoff prompts with clone
+## Step 1 — Start pipeline service + create session + generate handoffs
 
-Generate both handoff prompts using `signatory handoff`. The binary
-handles target resolution, language/ecosystem detection, and
-shallow-cloning — you do NOT need to call `gh api` or `git clone`
-yourself.
-
-Capture the handoff content via stdout. Do NOT write to /tmp or any
-file — subagents cannot read /tmp, and fixed filenames cause
-collisions between concurrent sessions.
+The pipeline message service eliminates /tmp files and context-window
+pressure. Agents retrieve their instructions via WebFetch from a
+localhost URL instead of having 500 lines inlined in their prompt.
 
 ```bash
-# The security handoff clones the repo into filestore/clones/.
-# --clone-dir creates the shallow clone and fills TARGET_PATH.
-# --network-precheck auto-detects language and ecosystem from GitHub.
+# Start the pipeline service (if not already running).
+# Check first — if port 21517 is already listening, skip this.
+signatory serve --port 21517 &
+SERVE_PID=$!
+sleep 1  # wait for server startup
+
+# Create a session for this pipeline run.
+SESSION_ID=$(curl -s -X POST http://127.0.0.1:21517/api/sessions \
+  -H "Content-Type: application/json" \
+  -d "{\"target\":\"$TARGET\"}" | jq -r .id)
+echo "Session: $SESSION_ID"
+```
+
+Generate both handoff prompts and deposit them in the session.
+`signatory handoff` handles target resolution, language/ecosystem
+detection, and shallow-cloning — you do NOT need to call `gh api`
+or `git clone` yourself.
+
+```bash
+# Security handoff — clones the repo into filestore/clones/.
 SECURITY_HANDOFF=$(signatory handoff security "$TARGET" \
   --network-precheck --clone-dir filestore/clones/ 2>/dev/null)
 
-# The provenance handoff reuses the same clone — pass --path
-# to point at the existing checkout. Replace $TARGET_NAME with
-# the inferred repo name (last path segment of the URL).
+# Deposit in the pipeline service.
+curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<ENDJSON
+{"role":"security","msg_type":"handoff","content":$(echo "$SECURITY_HANDOFF" | jq -Rs .)}
+ENDJSON
+
+# Provenance handoff — reuses the same clone.
+TARGET_NAME=$(basename "$TARGET" .git)
 PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" \
   --network-precheck --path "filestore/clones/$TARGET_NAME" 2>/dev/null)
+
+curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<ENDJSON
+{"role":"provenance","msg_type":"handoff","content":$(echo "$PROVENANCE_HANDOFF" | jq -Rs .)}
+ENDJSON
 ```
 
-The binary accepts both full URLs (`https://github.com/owner/repo`)
-and shorthand (`owner/repo`).
-
 If a handoff command fails, remove `2>/dev/null` and check stderr.
-Common causes: missing `--ecosystem` for non-GitHub targets (pass
-it explicitly), or a clone failure (network/permissions).
 
 **Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_ROLE`) are
 expected and acceptable. Do NOT stop to fill them. Proceed.
 
 ## Step 2 — Dispatch analyst agents IN PARALLEL
 
-Spawn two agents in a single message. **INLINE the handoff content
-directly in each agent's prompt** — do not point at files. The agent
-produces structured markdown and writes it to a project-local path.
+Spawn two agents in a single message. Agent prompts are small —
+just a WebFetch URL to retrieve their instructions and a Write
+path for their output.
 
 **IMPORTANT**: send BOTH Agent calls in ONE message so they run
 concurrently.
 
 **IMPORTANT**: analyst agents do NOT have Bash. They use Read, Glob,
 Grep to analyze the local clone, and WebFetch for registry/GitHub
-API calls. The handoff template tells them what tools they have and
-what URLs to fetch. Do NOT give them Bash — it leads to chaotic
-shell command attempts.
+API calls and to retrieve their handoff. Do NOT give them Bash.
 
-For each agent prompt, paste the captured handoff content after the
-preamble. The structure is:
+The URL pattern for retrieving handoffs is:
+```
+http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role={ROLE}&type=handoff&format=raw
+```
+
+The `format=raw` parameter returns plain text (not JSON), which is
+what the agent needs.
 
 ```
 Agent(security-analyst):
   prompt: |
     You are a security analyst for signatory's trust analysis pipeline.
     
-    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
+    FIRST: Retrieve your full handoff instructions using WebFetch:
+      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
     
-    <paste $SECURITY_HANDOFF content here>
+    Follow those instructions exactly.
     
     IMPORTANT OUTPUT INSTRUCTIONS:
     - Write your output as STRUCTURED MARKDOWN (not JSON).
     - Write it to: filestore/analysis/{target-name}-security-structured.md
-    - Use the output format from your handoff instructions:
-      ## Conclusion: F001 with Severity/Category/Verdict fields,
-      Citation lines, rationale as body text.
-    - The orchestrator will convert your markdown to v1-schema JSON
-      using `signatory build-output`. You handle analysis; the
-      binary handles serialization.
+    - The orchestrator converts your markdown to v1-schema JSON.
     - Do NOT write JSON. Do NOT run signatory commands.
-    - The source is cloned at the TARGET_PATH shown in your handoff.
-      Use Read/Glob/Grep to analyze it. You do NOT have Bash.
+    - You do NOT have Bash.
   allowed-tools: Read Write Glob Grep WebFetch
 
 Agent(provenance-analyst):
   prompt: |
     You are a provenance analyst for signatory's trust analysis pipeline.
     
-    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
+    FIRST: Retrieve your full handoff instructions using WebFetch:
+      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
     
-    <paste $PROVENANCE_HANDOFF content here>
+    Follow those instructions exactly.
     
     IMPORTANT OUTPUT INSTRUCTIONS:
     - Write your output as STRUCTURED MARKDOWN (not JSON).
     - Write it to: filestore/analysis/{target-name}-provenance-structured.md
-    - Use the output format from your handoff instructions.
     - Do NOT write JSON. Do NOT run signatory commands.
-    - The source is cloned at the TARGET_PATH shown in your handoff.
-      Use Read/Glob/Grep for local files and WebFetch for registry
-      and GitHub API calls. You do NOT have Bash.
+    - You do NOT have Bash.
   allowed-tools: Read Write Glob Grep WebFetch
 ```
-
-The agents write to project-local paths (filestore/analysis/) which
-they DO have access to. No /tmp involvement.
 
 Wait for BOTH agents to complete before proceeding.
 
@@ -187,26 +199,28 @@ Do NOT try to fix JSON — the JSON doesn't exist yet at this stage.
 
 ## Step 4 — Dispatch synthesist agent
 
-Generate the synthesis handoff prompt and dispatch a synthesist agent.
-The synthesist reads the store (not source) and produces the combined
-assessment. Its instructions come from the template, not from this
-skill — the template IS the single source of truth for how to
-synthesize.
+Generate the synthesis handoff, deposit it in the session, and
+dispatch a synthesist agent that retrieves it via WebFetch.
 
 ```bash
 SYNTHESIS_HANDOFF=$(signatory handoff synthesist "$TARGET" 2>/dev/null)
-```
 
-Then dispatch the synthesist with the handoff content inlined:
+curl -s -X POST "http://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<ENDJSON
+{"role":"synthesist","msg_type":"handoff","content":$(echo "$SYNTHESIS_HANDOFF" | jq -Rs .)}
+ENDJSON
+```
 
 ```
 Agent(synthesist):
   prompt: |
     You are a synthesist for signatory's trust analysis pipeline.
     
-    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
+    FIRST: Retrieve your full handoff instructions using WebFetch:
+      http://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=synthesist&type=handoff&format=raw
     
-    <paste $SYNTHESIS_HANDOFF content here>
+    Follow those instructions exactly.
     
     IMPORTANT: The posture tier goes at the TOP of your output,
     before the reasoning — commit first, justify second. Read ALL
@@ -214,11 +228,12 @@ Agent(synthesist):
     
     Your output is a narrative trust assessment (markdown).
     Write it to: filestore/analysis/{target-name}-synthesis.md
-  allowed-tools: Bash Read Write Glob Grep
+  allowed-tools: Bash Read Write Glob Grep WebFetch
 ```
 
 The synthesist DOES need Bash (to run `signatory show-conclusions`,
-`signatory show-analyses`, `signatory show-methodology`).
+`signatory show-analyses`, `signatory show-methodology`) and
+WebFetch (to retrieve its handoff from the pipeline service).
 
 The synthesist's output is the human-readable assessment that makes
 the pipeline's data meaningful. Present it to the user as the final
