@@ -143,9 +143,9 @@ Most are post-v0.1 unless noted otherwise.
 ### Signal packages as a first-class concept (post-v0.1)
 
 The eventual federation primitive is **signal package definitions**, not
-findings. A signal package is a curated, versioned bundle of signal
+conclusions. A signal package is a curated, versioned bundle of signal
 types and methodology — closer in shape to OWASP Top Ten than to a CVE
-database. Findings stay local; methodologies are shareable.
+database. Conclusions stay local; methodologies are shareable.
 
 V0.1 already ships the registry as a Go code constant (per
 [signal-type-registry.md](signal-type-registry.md) §"Implementation
@@ -365,8 +365,8 @@ Local SQLite keeps its own counsel.
 The asymmetric federation principle (burns federate broadly;
 endorsements only within trust hierarchies) and the deeper insight
 that **what federates eventually is signal package definitions, not
-findings** are captured as design notes in
+conclusions** are captured as design notes in
 [threat-landscape/2026-04-14-openai-tac-gpt54-cyber.md] for v0.2+
 work. Public-feed / global-registry models are rejected as
 architecture for signatory's own infrastructure — signatory is a
-*tool* for trust analysis, not a registry of findings.
+*tool* for trust analysis, not a registry of conclusions.

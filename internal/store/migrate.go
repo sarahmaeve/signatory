@@ -48,6 +48,12 @@ var migrations = []Migration{
 		Up:          migrationV4Up,
 		Down:        migrationV4Down,
 	},
+	{
+		Version:     5,
+		Description: "rename Finding → Conclusion across all analyst-output tables",
+		Up:          migrationV5Up,
+		Down:        migrationV5Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -681,6 +687,68 @@ DROP TABLE IF EXISTS signal_evidence;
 -- Drop the v4 column from signals. Existing signal rows are
 -- preserved; the details column is removed.
 ALTER TABLE signals DROP COLUMN details;
+`
+
+// migrationV5Up renames the six finding-prefixed tables to their
+// conclusion-prefixed equivalents, and renames the finding_id column
+// in each child table to conclusion_id. The findings table itself
+// also gets its finding_local_id column renamed to conclusion_local_id.
+//
+// SQLite supports ALTER TABLE … RENAME (table and column) since 3.25.0
+// (2018). The modernc.org/sqlite driver ships SQLite 3.51+, so all
+// renames are safe.
+//
+// Each RENAME is reversible; migrationV5Down reverses the sequence.
+// Triggers and indexes are NOT renamed here — SQLite carries them with
+// the table on RENAME TABLE and does not support ALTER INDEX RENAME;
+// the trigger names stay findings_no_update etc. They still fire on the
+// renamed table because SQLite binds triggers to table OIDs, not names.
+// This is intentional: the triggers were created on the v4 table and
+// remain correct on the renamed table.
+const migrationV5Up = `
+-- Rename the main table and its internal column.
+ALTER TABLE findings RENAME TO conclusions;
+ALTER TABLE conclusions RENAME COLUMN finding_local_id TO conclusion_local_id;
+
+-- Rename child tables and their FK columns.
+ALTER TABLE finding_severity_contexts RENAME TO conclusion_severity_contexts;
+ALTER TABLE conclusion_severity_contexts RENAME COLUMN finding_id TO conclusion_id;
+
+ALTER TABLE finding_supersedes RENAME TO conclusion_supersedes;
+ALTER TABLE conclusion_supersedes RENAME COLUMN finding_id TO conclusion_id;
+
+ALTER TABLE finding_prerequisites RENAME TO conclusion_prerequisites;
+ALTER TABLE conclusion_prerequisites RENAME COLUMN finding_id TO conclusion_id;
+
+ALTER TABLE finding_remediation_hints RENAME TO conclusion_remediation_hints;
+ALTER TABLE conclusion_remediation_hints RENAME COLUMN finding_id TO conclusion_id;
+
+ALTER TABLE finding_related RENAME TO conclusion_related;
+ALTER TABLE conclusion_related RENAME COLUMN finding_id TO conclusion_id;
+`
+
+// migrationV5Down reverses migrationV5Up: renames conclusion-prefixed
+// tables and columns back to their finding-prefixed originals.
+// This is a recovery path only — running it on a populated database
+// that has been used via the v5 code reverts to the v4 naming.
+const migrationV5Down = `
+ALTER TABLE conclusion_related RENAME COLUMN conclusion_id TO finding_id;
+ALTER TABLE conclusion_related RENAME TO finding_related;
+
+ALTER TABLE conclusion_remediation_hints RENAME COLUMN conclusion_id TO finding_id;
+ALTER TABLE conclusion_remediation_hints RENAME TO finding_remediation_hints;
+
+ALTER TABLE conclusion_prerequisites RENAME COLUMN conclusion_id TO finding_id;
+ALTER TABLE conclusion_prerequisites RENAME TO finding_prerequisites;
+
+ALTER TABLE conclusion_supersedes RENAME COLUMN conclusion_id TO finding_id;
+ALTER TABLE conclusion_supersedes RENAME TO finding_supersedes;
+
+ALTER TABLE conclusion_severity_contexts RENAME COLUMN conclusion_id TO finding_id;
+ALTER TABLE conclusion_severity_contexts RENAME TO finding_severity_contexts;
+
+ALTER TABLE conclusions RENAME COLUMN conclusion_local_id TO finding_local_id;
+ALTER TABLE conclusions RENAME TO findings;
 `
 
 // migrate runs all pending migrations on the database. It:

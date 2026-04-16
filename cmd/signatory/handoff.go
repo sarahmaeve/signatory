@@ -41,10 +41,11 @@ import (
 // and the user didn't pass --name, the command errors rather than
 // emit a broken handoff.
 //
-// Network behavior: this command is offline. Auto-detecting language
-// or ecosystem from a remote repo would require network access and
-// isn't implemented yet — pass --language and --ecosystem explicitly.
-// A future --network-precheck flag will probe remote registries.
+// Network behavior: this command is offline by default. Language and
+// ecosystem auto-detection from a remote repo is available via the
+// --network-precheck flag, which probes the GitHub API for the
+// target's primary language and ecosystem markers. Without it, pass
+// --language and --ecosystem explicitly.
 type HandoffCmd struct {
 	Role   string `arg:"" enum:"security,provenance" help:"Analyst role: security or provenance."`
 	Target string `arg:"" help:"Target repository URL or local path (e.g., https://github.com/foo/bar or /Users/me/code/foo)."`

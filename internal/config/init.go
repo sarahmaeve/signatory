@@ -143,9 +143,9 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 	// (with --force) so the existence check and the write happen as
 	// one atomic operation. The previous stat-then-write shape had a
 	// TOCTOU window where a concurrent init or an adversary could
-	// slip a file in between (config reviewer F11). The handoff
-	// command's writeHandoff already uses this pattern; matching it
-	// here keeps the discipline consistent.
+	// slip a file in between. The handoff command's writeHandoff
+	// already uses this pattern; matching it here keeps the discipline
+	// consistent.
 	cfgPath := filepath.Join(absDir, ConfigFileName)
 	result.ConfigPath = cfgPath
 

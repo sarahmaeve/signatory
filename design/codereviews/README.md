@@ -1,7 +1,7 @@
 # Code Reviews
 
 Adversarial reviews of the signatory codebase. Each review is a point-in-time
-assessment against a specific tree state. Findings are tracked in GitHub issues
+assessment against a specific tree state. Conclusions are tracked in GitHub issues
 and should be closed as they are resolved — the report files are historical
 artifacts, not living documents.
 
@@ -20,11 +20,11 @@ security issues, and weak test coverage introduced by the large merge.
 | 3 | `review-3-post-v2-tests-sonnet.md` | Sonnet 4.6 | `golang-testing`, `golang-stretchr-testify` | Test quality — full codebase, with context |
 
 Reviews 2 and 3 ran in parallel. Review 2 was deliberately blind (no
-priming about prior findings or project context) to surface novel
+priming about prior conclusions or project context) to surface novel
 issues a fresh pair of eyes would catch. Review 3 had full project
 context and was calibrated toward the same test-quality focus.
 
-All findings from these three reviews were filed as GitHub issues
+All conclusions from these three reviews were filed as GitHub issues
 labelled `review-v2-entity` for triage.
 
 ## Process notes
@@ -34,11 +34,11 @@ labelled `review-v2-entity` for triage.
   skill-driven review catches issues that generic code reading misses.
   Review 3 (Sonnet + `golang-stretchr-testify`) surfaced testify
   anti-patterns that Review 2 (Opus + testing only) missed — evidence
-  that using multiple skills yields higher-quality findings.
-- **Cross-corroboration**: Findings that appeared independently across
+  that using multiple skills yields higher-quality conclusions.
+- **Cross-corroboration**: Conclusions that appeared independently across
   two or more reviews are higher-confidence and should be prioritized.
   Three reviews all caught the corrupted-timestamp security tests
-  (sqlite_security_test.go:16-65), giving that finding the highest
+  (sqlite_security_test.go:16-65), giving that conclusion the highest
   confidence level.
 - **Complementary depth**: Opus found package-scale structural issues
   (850+ lines of tautological mock-self-testing across three files);

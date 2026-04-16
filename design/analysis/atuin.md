@@ -286,8 +286,8 @@ schema evolution:
 
 This section was added after inspecting a local clone of atuin at
 `~/git/atuin` on the same day as the initial analysis. It corrects
-and extends the GitHub-API-based findings above. Where a later
-finding contradicts an earlier claim, the correction is called out
+and extends the GitHub-API-based conclusions above. Where a later
+conclusion contradicts an earlier claim, the correction is called out
 explicitly so the revision history is legible.
 
 No additional GitHub API calls were made for this section —
@@ -300,7 +300,7 @@ clone.
 
 - **Initial claim:** "All recent commits GPG-verified." (from
   `gh api .../commits .verified: true`)
-- **Local-repo finding:** `git log --format='%G?' -100` returns `N`
+- **Local-repo conclusion:** `git log --format='%G?' -100` returns `N`
   (no signature) for 100 of 100 recent commits. The commits carry no
   per-author GPG or SSH signatures.
 - **Interpretation:** GitHub's `verified: true` flag reflects
@@ -316,7 +316,7 @@ clone.
 
 #### Tags are unsigned lightweight commit refs, not annotated/signed tags
 
-- **New finding:** All 79 tags in the repo are lightweight commit-type
+- **New conclusion:** All 79 tags in the repo are lightweight commit-type
   refs. `git for-each-ref refs/tags --format='%(objecttype)'` returns
   79 occurrences of `commit`, zero of `tag`. `git tag -v v18.14.1`
   returns "cannot verify a non-tag object of type commit."
@@ -331,7 +331,7 @@ clone.
 
 - **Initial claim implied** deny.toml presence = strong hygiene
   positive.
-- **Local-repo finding:** `.github/workflows/rust.yml` runs
+- **Local-repo conclusion:** `.github/workflows/rust.yml` runs
   `cargo build`, `cargo nextest run`, `cargo check` (with several
   feature matrices), `cargo clippy -- -D warnings -D clippy::redundant_clone`,
   and `cargo fmt --check`. It does **not** invoke `cargo-deny check`
@@ -342,7 +342,7 @@ clone.
   common pattern and still better than having no policy file at all,
   but it's weaker than the initial analysis implied.
 
-### New findings: build provenance attestations exist (positive)
+### New conclusions: build provenance attestations exist (positive)
 
 - `dist-workspace.toml` sets `github-attestations = true`.
 - `release.yml` build-local-artifacts job has `id-token: write`
@@ -361,7 +361,7 @@ clone.
   the single largest remaining forgery-surface on the publication
   side.
 
-### New findings: atuin is becoming an AI-agent runtime
+### New conclusions: atuin is becoming an AI-agent runtime
 
 This substantially changes the role classification. As of v18.14.0
 (released the day before this analysis, 2026-04-13):
@@ -403,7 +403,7 @@ interpret their output, and execute commands under its permission
 model. The permissions subsystem becomes a security-critical module
 in its own right.
 
-### New findings: self-updating binaries
+### New conclusions: self-updating binaries
 
 - `dist-workspace.toml` sets `install-updater = true`.
 - The installer ships a self-update mechanism.
@@ -412,7 +412,7 @@ in its own right.
   provenance attestations, cargo-dist's release pipeline); mitigation
   absent (no visible version-pin discipline in the updater UX).
 
-### New findings: install.sh blast-radius details
+### New conclusions: install.sh blast-radius details
 
 Beyond "modifies shell rc files":
 
@@ -428,7 +428,7 @@ Beyond "modifies shell rc files":
   sync (opt-in, but it's the recommended flow — the prompt's default
   is `y`).
 
-### New findings: bus factor trend is improving
+### New conclusions: bus factor trend is improving
 
 Year-by-year author distribution (main branch, human commits):
 
@@ -447,7 +447,7 @@ API returned the 15 all-time leaders, and Michelle's all-time count
 **Revised bus factor:** ~2 as of 2026, up from ~1 through 2024. This
 is the single clearest governance improvement visible in the repo.
 
-### New findings: supply-chain composition is clean
+### New conclusions: supply-chain composition is clean
 
 From `Cargo.lock`:
 
@@ -462,7 +462,7 @@ From `Cargo.lock`:
 No unusual registry sources, no git-pinned deps, no vendored snapshots.
 A compromise would have to land via crates.io itself.
 
-### New findings: identity-graph signals from .mailmap
+### New conclusions: identity-graph signals from .mailmap
 
 `.mailmap` (maintained, 804 bytes) is a rich identity-consistency
 source not available through the GitHub API:
@@ -486,7 +486,7 @@ corporate-trust boundaries. This is a **high forgery-resistance**
 signal set that would be very expensive to fabricate across 6+
 contributors.
 
-### New findings: security policy gaps (confirmed and detailed)
+### New conclusions: security policy gaps (confirmed and detailed)
 
 - No `SECURITY.md` file in the repo (confirmed via filesystem search).
 - Issue #1867 "Add security contact" exists in CHANGELOG history but
@@ -503,7 +503,7 @@ reports don't get tagged in commits (plausible), or (c) there's no
 public incident history because there's no disclosure channel. The
 absence of a disclosure channel is the repeatable concern.
 
-### New findings: crypto design quality is above baseline
+### New conclusions: crypto design quality is above baseline
 
 `crates/atuin-client/src/record/encryption.rs` shows the PASETO V4
 implementation has **documented design rationale** in code comments:
@@ -521,7 +521,7 @@ implementation has **documented design rationale** in code comments:
 This is above-baseline crypto engineering — principled choices with
 documented rationale, no "roll your own" smell.
 
-### New findings: CI action pinning tightness
+### New conclusions: CI action pinning tightness
 
 - `actions/checkout@v6`, `actions/cache@v5`, `actions/upload-artifact@v6`,
   `actions/download-artifact@v7` — all major-version pinned.
@@ -572,7 +572,7 @@ pulled via API, because the atuin-ai crate is picked up by the
 **Recommendation if adopted (revised):** Trusted-for-now, with
 tighter caveats than the initial assessment.
 
-The extended findings pull in opposite directions:
+The extended conclusions pull in opposite directions:
 
 **Weaker than the initial analysis implied:**
 - Tags unsigned
@@ -660,7 +660,7 @@ table.
 
 ## 2026-04-14 Extended (2): Security-focused Code Review
 
-This section integrates findings from an **external security review**
+This section integrates conclusions from an **external security review**
 of the same commit, preserved verbatim in
 [atuin-security-review-external.md](atuin-security-review-external.md).
 That review was performed by a separate Claude Opus 4.6 agent running
@@ -695,7 +695,7 @@ the agent hooks specifically. The agent-runtime risk lives in
 
 ### What the security review caught that our analysis missed
 
-These are code-path-specific findings discoverable only by reading
+These are code-path-specific conclusions discoverable only by reading
 the source. They represent a real gap in what provenance-model
 analysis alone can surface.
 
@@ -827,13 +827,13 @@ model. That's the audit target, not the agent hooks.
 
 Still **Trusted-for-now** if adopted, with the caveats from the
 security review added to the action items. The security-review
-findings don't change the tier but they do change what "adopted
+conclusions don't change the tier but they do change what "adopted
 carefully" looks like.
 
 ### Revised action items (merged)
 
 Combining the original list, the extended deep-dive list, and the
-security-review findings. **New items are marked ★.**
+security-review conclusions. **New items are marked ★.**
 
 **Before installing / at install time:**
 - Do **not** run `curl … | sh`. Install the binary manually (brew /
@@ -919,7 +919,7 @@ different signal classes:
 |------|-----------|-----------|--------|
 | API-metadata (signatory skill, pass 1) | GitHub API, workflow YAML | Fixed trust-signal framework | Signal table, role, posture recommendation |
 | Local-clone deep dive (signatory skill, pass 2) | Filesystem + git history | Same framework, extended data | Corrections + new signal types |
-| Security code review (external agent) | Crate source code | Generative-skeptical threat modeling | Code-path-cited findings + defensive actions |
+| Security code review (external agent) | Crate source code | Generative-skeptical threat modeling | Code-path-cited conclusions + defensive actions |
 
 Each pass produced signals the others missed. The
 `design/signal-storage-evolution.md` note on collector design —
@@ -950,7 +950,7 @@ Round 1 by the same agent is in
 
 This round produced a material self-correction on the atuin-ai threat
 assessment, resolved the minor mysteries left from extended pass 2,
-and added one new medium-severity finding. It also produced two
+and added one new medium-severity conclusion. It also produced two
 methodology outputs (a 60-pattern grep catalog and a "checked and
 chose not to flag" list) that directly inform signatory's Layer 1
 collector design per
@@ -1009,7 +1009,7 @@ its prior position. Worth encoding as analyst metadata — see
 `design/mcp-dual-analyst-architecture.md` for the schema
 implications.
 
-### §8 New finding: sync protocol lacks monotonicity check
+### §8 New conclusion: sync protocol lacks monotonicity check
 
 **Medium severity.** Not surfaced in any prior pass.
 
@@ -1088,8 +1088,8 @@ earns ownership of a subsystem, ships defense-in-depth there."
 
 Merging all three passes plus round 2:
 
-| Finding | Severity |
-|---------|----------|
+| Conclusion | Severity |
+|------------|----------|
 | AI capability gating limits default-install attack surface | **positive** (reduces prior risk) |
 | Sync server can censor records (no monotonicity check) | **medium** |
 | Daemon Unix socket no peer-cred check | **medium** on shared hosts, **low** single-user |
@@ -1226,7 +1226,7 @@ What it does *not* yet do well (schema implications for
 `design/mcp-dual-analyst-architecture.md`):
 - Severity conditional on deployment context (single-user vs.
   shared host) needs structured representation
-- "Positive" severity (findings that reduce prior risk) needs to
+- "Positive" severity (conclusions that reduce prior risk) needs to
   be a first-class enum value
 - Supersession between analysis rounds needs to be tracked
 - Verdict-vs-rationale split is real (every round-2 section

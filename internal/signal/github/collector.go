@@ -472,8 +472,8 @@ func isRetryable(err error) bool {
 		strings.Contains(errMsg, "no such host") {
 		return true
 	}
-	// Server errors (5xx).
-	if strings.Contains(errMsg, "GitHub API error 5") {
+	// Server errors (5xx). Format after #93: "GitHub API returned status NNN".
+	if strings.Contains(errMsg, "GitHub API returned status 5") {
 		return true
 	}
 	return false

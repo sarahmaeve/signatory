@@ -227,7 +227,7 @@ func TestParseInputSchema_EmptySchema(t *testing.T) {
 // in the new behavior so a future refactor can't silently regress it.
 
 // integerLimitSchema mirrors the production schemas used by
-// show_analyses / show_findings / show_methodology: a single optional
+// show_analyses / show_conclusions / show_methodology: a single optional
 // integer field with a minimum of 0.
 var integerLimitSchema = json.RawMessage(`{
 	"type": "object",
@@ -256,7 +256,7 @@ func TestValidation_Integer_RejectsFloat(t *testing.T) {
 	s, err := parseInputSchema(integerLimitSchema)
 	require.NoError(t, err)
 
-	result := validateInput("signatory_show_findings", s,
+	result := validateInput("signatory_show_conclusions", s,
 		json.RawMessage(`{"limit": 1.5}`))
 	require.NotNil(t, result, "1.5 must not pass an integer schema")
 	assert.Equal(t, CodeSchemaViolation, result.Error.Code)
@@ -271,7 +271,7 @@ func TestValidation_Integer_AcceptsInteger(t *testing.T) {
 	s, err := parseInputSchema(integerLimitSchema)
 	require.NoError(t, err)
 
-	result := validateInput("signatory_show_findings", s,
+	result := validateInput("signatory_show_conclusions", s,
 		json.RawMessage(`{"limit": 42}`))
 	assert.Nil(t, result, "an in-range integer must pass")
 }
@@ -307,7 +307,7 @@ func TestValidation_Minimum_RejectsBelowBound(t *testing.T) {
 	s, err := parseInputSchema(integerLimitSchema)
 	require.NoError(t, err)
 
-	result := validateInput("signatory_show_findings", s,
+	result := validateInput("signatory_show_conclusions", s,
 		json.RawMessage(`{"limit": -1}`))
 	require.NotNil(t, result, "-1 must not pass a minimum:0 schema")
 	assert.Equal(t, CodeSchemaViolation, result.Error.Code)

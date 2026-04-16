@@ -51,7 +51,7 @@ type Store interface {
 	// Analyst output queries (read path).
 	ListAnalystOutputs(ctx context.Context, filter AnalystOutputFilter) ([]AnalystOutputSummary, error)
 	GetAnalystOutput(ctx context.Context, outputID string) (*exchange.AnalystOutput, error)
-	ListFindings(ctx context.Context, filter FindingFilter) ([]FindingSummary, error)
+	ListConclusions(ctx context.Context, filter ConclusionFilter) ([]ConclusionSummary, error)
 	ListMethodologyPatterns(ctx context.Context, filter MethodologyPatternFilter) ([]MethodologyPatternSummary, error)
 
 	// Close releases database resources.

@@ -28,7 +28,7 @@ type AnalystOutputSummary struct {
 	TargetCommit         string
 	SourcePath           string
 	ContentHash          string
-	FindingsCount        int
+	ConclusionsCount     int
 	PositiveAbsenceCount int
 	ObservationCount     int
 	PatternCount         int
@@ -116,7 +116,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 			ao.analyst_id, ao.model, ao.prompt_version,
 			ao.invoked_at, ao.ingested_at, ao.round,
 			ao.target_commit, ao.source_path, ao.content_hash,
-			(SELECT COUNT(*) FROM findings           WHERE output_id = ao.id) AS findings_count,
+			(SELECT COUNT(*) FROM conclusions         WHERE output_id = ao.id) AS conclusions_count,
 			(SELECT COUNT(*) FROM positive_absences  WHERE output_id = ao.id) AS absence_count,
 			(SELECT COUNT(*) FROM observations       WHERE output_id = ao.id) AS obs_count,
 			(SELECT COUNT(*) FROM methodology_patterns WHERE output_id = ao.id) AS pat_count
@@ -140,7 +140,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 			&s.AnalystID, &s.Model, &s.PromptVersion,
 			&s.InvokedAt, &s.IngestedAt, &s.Round,
 			&s.TargetCommit, &s.SourcePath, &s.ContentHash,
-			&s.FindingsCount, &s.PositiveAbsenceCount,
+			&s.ConclusionsCount, &s.PositiveAbsenceCount,
 			&s.ObservationCount, &s.PatternCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan analyst_output row: %w", err)
@@ -150,40 +150,40 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	return out, rows.Err()
 }
 
-// FindingSummary is the lightweight read-row for findings listings.
+// ConclusionSummary is the lightweight read-row for conclusions listings.
 // Verdict is included because it's the load-bearing identifier for
-// a finding when a human is scanning a list; rationale stays out
+// a conclusion when a human is scanning a list; rationale stays out
 // (per the same logic as format-check --summary).
-type FindingSummary struct {
-	OutputID        string
-	EntityID        string
-	EntityURI       string
-	AnalystID       string
-	IngestedAt      string
-	FindingID       string // UUID
-	FindingLocalID  string // "F001"
-	Verdict         string
-	SeverityDefault string
-	DesignIntent    bool
-	Category        string
-	SignalType      string // "" if absent
-	CitationCount   int
-	HasSupersedes   bool
-	BySupersedesIDs []string // populated only when filter.IncludeSupersedes is true
+type ConclusionSummary struct {
+	OutputID          string
+	EntityID          string
+	EntityURI         string
+	AnalystID         string
+	IngestedAt        string
+	ConclusionID      string // UUID
+	ConclusionLocalID string // "F001"
+	Verdict           string
+	SeverityDefault   string
+	DesignIntent      bool
+	Category          string
+	SignalType        string // "" if absent
+	CitationCount     int
+	HasSupersedes     bool
+	BySupersedesIDs   []string // populated only when filter.IncludeSupersedes is true
 }
 
-// FindingFilter narrows ListFindings results.
-type FindingFilter struct {
+// ConclusionFilter narrows ListConclusions results.
+type ConclusionFilter struct {
 	EntityID   string
 	EntityURI  string
 	AnalystID  string
 	SignalType string
 
-	// SeverityIn limits to findings whose severity_default is in
+	// SeverityIn limits to conclusions whose severity_default is in
 	// the provided set. Empty = all severities.
 	SeverityIn []exchange.SeverityValue
 
-	// DesignIntentOnly limits to findings with design_intent = true.
+	// DesignIntentOnly limits to conclusions with design_intent = true.
 	// Useful for "what does this project deliberately do that we
 	// should know about?" queries.
 	DesignIntentOnly bool
@@ -191,7 +191,7 @@ type FindingFilter struct {
 	Limit int
 }
 
-// ListFindings returns findings across one or more analyst outputs,
+// ListConclusions returns conclusions across one or more analyst outputs,
 // newest first by the parent output's ingested_at. Each row joins
 // to entities for the canonical_uri convenience field and to
 // analyst_outputs for analyst_id + ingested_at attribution.
@@ -199,7 +199,7 @@ type FindingFilter struct {
 // When the EntityURI filter is specified but does not resolve,
 // returns (nil, ErrNotFound); see ListAnalystOutputs for the
 // rationale.
-func (s *SQLite) ListFindings(ctx context.Context, filter FindingFilter) ([]FindingSummary, error) {
+func (s *SQLite) ListConclusions(ctx context.Context, filter ConclusionFilter) ([]ConclusionSummary, error) {
 	entityID := filter.EntityID
 	if entityID == "" && filter.EntityURI != "" {
 		ent, err := s.FindEntityByURI(ctx, filter.EntityURI)
@@ -249,35 +249,35 @@ func (s *SQLite) ListFindings(ctx context.Context, filter FindingFilter) ([]Find
 	query := fmt.Sprintf(`
 		SELECT
 			ao.id, ao.entity_id, e.canonical_uri, ao.analyst_id, ao.ingested_at,
-			f.id, f.finding_local_id, f.verdict, f.severity_default,
+			f.id, f.conclusion_local_id, f.verdict, f.severity_default,
 			f.design_intent, f.category, f.signal_type,
-			(SELECT COUNT(*) FROM citations WHERE parent_kind = 'finding' AND parent_id = f.id) AS cite_count,
-			(SELECT COUNT(*) FROM finding_supersedes WHERE finding_id = f.id) > 0 AS has_supersedes
-		FROM findings f
+			(SELECT COUNT(*) FROM citations WHERE parent_kind = 'conclusion' AND parent_id = f.id) AS cite_count,
+			(SELECT COUNT(*) FROM conclusion_supersedes WHERE conclusion_id = f.id) > 0 AS has_supersedes
+		FROM conclusions f
 		INNER JOIN analyst_outputs ao ON ao.id = f.output_id
 		INNER JOIN entities e ON e.id = ao.entity_id
 		%s
-		ORDER BY ao.ingested_at DESC, f.finding_local_id ASC
+		ORDER BY ao.ingested_at DESC, f.conclusion_local_id ASC
 		%s`, whereSQL, limitSQL)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list findings: %w", err)
+		return nil, fmt.Errorf("list conclusions: %w", err)
 	}
 	defer rows.Close()
 
-	var out []FindingSummary
+	var out []ConclusionSummary
 	for rows.Next() {
-		var f FindingSummary
+		var f ConclusionSummary
 		var designIntent int
 		if err := rows.Scan(
 			&f.OutputID, &f.EntityID, &f.EntityURI,
 			&f.AnalystID, &f.IngestedAt,
-			&f.FindingID, &f.FindingLocalID, &f.Verdict,
+			&f.ConclusionID, &f.ConclusionLocalID, &f.Verdict,
 			&f.SeverityDefault, &designIntent, &f.Category, &f.SignalType,
 			&f.CitationCount, &f.HasSupersedes,
 		); err != nil {
-			return nil, fmt.Errorf("scan finding row: %w", err)
+			return nil, fmt.Errorf("scan conclusion row: %w", err)
 		}
 		f.DesignIntent = designIntent != 0
 		out = append(out, f)
@@ -458,7 +458,7 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 	}
 	out.Target = targetURI
 
-	out.Findings, err = s.loadFindings(ctx, outputID)
+	out.Conclusions, err = s.loadConclusions(ctx, outputID)
 	if err != nil {
 		return nil, err
 	}
@@ -485,73 +485,139 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 	return out, nil
 }
 
-func (s *SQLite) loadFindings(ctx context.Context, outputID string) ([]exchange.Finding, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, finding_local_id, verdict, rationale,
+// GetConclusion returns the full Conclusion for one conclusion UUID, including
+// rationale, citations, severity contexts, supersession records,
+// prerequisites, remediation hints, and related conclusions. This is the
+// complement to ListConclusions (which returns summary rows) — use it
+// when the caller has a ConclusionID and wants every field.
+//
+// Returns ErrNotFound when the UUID does not exist. The query cost is
+// ~6 statements (one to load the row, one per child table); acceptable
+// for a detail lookup. The loader helpers are shared with the
+// output-level GetAnalystOutput path.
+func (s *SQLite) GetConclusion(ctx context.Context, conclusionID string) (*exchange.Conclusion, error) {
+	if conclusionID == "" {
+		return nil, fmt.Errorf("%w: conclusionID required", ErrNilInput)
+	}
+
+	var (
+		f            exchange.Conclusion
+		designIntent int
+		signalT      string
+		answers      string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT conclusion_local_id, verdict, rationale,
 		        severity_default, design_intent, category,
 		        signal_type, answers_question
-		 FROM findings WHERE output_id = ? ORDER BY finding_local_id`,
+		 FROM conclusions WHERE id = ?`, conclusionID).Scan(
+		&f.ID, &f.Verdict, &f.Rationale,
+		&f.Severity.Default, &designIntent, &f.Category,
+		&signalT, &answers,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load conclusion: %w", err)
+	}
+	f.DesignIntent = designIntent != 0
+	if signalT != "" {
+		f.SignalType = &signalT
+	}
+	if answers != "" {
+		f.AnswersQuestion = &answers
+	}
+
+	// Child tables — identical set to loadConclusions' per-row block.
+	if f.Severity.ByContext, err = s.loadConclusionSeverityContexts(ctx, conclusionID); err != nil {
+		return nil, err
+	}
+	if f.Supersedes, err = s.loadConclusionSupersedes(ctx, conclusionID); err != nil {
+		return nil, err
+	}
+	if f.Prerequisites, err = s.loadOrderedTexts(ctx, "conclusion_prerequisites", "conclusion_id", conclusionID); err != nil {
+		return nil, err
+	}
+	if f.RemediationHints, err = s.loadOrderedTexts(ctx, "conclusion_remediation_hints", "conclusion_id", conclusionID); err != nil {
+		return nil, err
+	}
+	if f.RelatedConclusions, err = s.loadConclusionRelated(ctx, conclusionID); err != nil {
+		return nil, err
+	}
+	if f.Citations, err = s.loadCitations(ctx, "conclusion", conclusionID); err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+func (s *SQLite) loadConclusions(ctx context.Context, outputID string) ([]exchange.Conclusion, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, conclusion_local_id, verdict, rationale,
+		        severity_default, design_intent, category,
+		        signal_type, answers_question
+		 FROM conclusions WHERE output_id = ? ORDER BY conclusion_local_id`,
 		outputID)
 	if err != nil {
-		return nil, fmt.Errorf("query findings: %w", err)
+		return nil, fmt.Errorf("query conclusions: %w", err)
 	}
 	defer rows.Close()
 
-	type findingRow struct {
+	type conclusionRow struct {
 		uuid    string
-		f       exchange.Finding
+		f       exchange.Conclusion
 		signalT string
 		answers string
 	}
-	var raw []findingRow
+	var raw []conclusionRow
 	for rows.Next() {
-		var fr findingRow
+		var cr conclusionRow
 		var designIntent int
 		if err := rows.Scan(
-			&fr.uuid, &fr.f.ID, &fr.f.Verdict, &fr.f.Rationale,
-			&fr.f.Severity.Default, &designIntent, &fr.f.Category,
-			&fr.signalT, &fr.answers,
+			&cr.uuid, &cr.f.ID, &cr.f.Verdict, &cr.f.Rationale,
+			&cr.f.Severity.Default, &designIntent, &cr.f.Category,
+			&cr.signalT, &cr.answers,
 		); err != nil {
 			return nil, err
 		}
-		fr.f.DesignIntent = designIntent != 0
-		if fr.signalT != "" {
-			fr.f.SignalType = &fr.signalT
+		cr.f.DesignIntent = designIntent != 0
+		if cr.signalT != "" {
+			cr.f.SignalType = &cr.signalT
 		}
-		if fr.answers != "" {
-			fr.f.AnswersQuestion = &fr.answers
+		if cr.answers != "" {
+			cr.f.AnswersQuestion = &cr.answers
 		}
-		raw = append(raw, fr)
+		raw = append(raw, cr)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	// Walk children for each finding.
-	out := make([]exchange.Finding, 0, len(raw))
+	// Walk children for each conclusion.
+	out := make([]exchange.Conclusion, 0, len(raw))
 	for i := range raw {
 		f := raw[i].f
-		f.Severity.ByContext, err = s.loadFindingSeverityContexts(ctx, raw[i].uuid)
+		f.Severity.ByContext, err = s.loadConclusionSeverityContexts(ctx, raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
-		f.Supersedes, err = s.loadFindingSupersedes(ctx, raw[i].uuid)
+		f.Supersedes, err = s.loadConclusionSupersedes(ctx, raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
-		f.Prerequisites, err = s.loadOrderedTexts(ctx, "finding_prerequisites", "finding_id", raw[i].uuid)
+		f.Prerequisites, err = s.loadOrderedTexts(ctx, "conclusion_prerequisites", "conclusion_id", raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
-		f.RemediationHints, err = s.loadOrderedTexts(ctx, "finding_remediation_hints", "finding_id", raw[i].uuid)
+		f.RemediationHints, err = s.loadOrderedTexts(ctx, "conclusion_remediation_hints", "conclusion_id", raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
-		f.RelatedFindings, err = s.loadFindingRelated(ctx, raw[i].uuid)
+		f.RelatedConclusions, err = s.loadConclusionRelated(ctx, raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
-		f.Citations, err = s.loadCitations(ctx, "finding", raw[i].uuid)
+		f.Citations, err = s.loadCitations(ctx, "conclusion", raw[i].uuid)
 		if err != nil {
 			return nil, err
 		}
@@ -560,13 +626,13 @@ func (s *SQLite) loadFindings(ctx context.Context, outputID string) ([]exchange.
 	return out, nil
 }
 
-func (s *SQLite) loadFindingSeverityContexts(ctx context.Context, findingID string) ([]exchange.ContextualSeverity, error) {
+func (s *SQLite) loadConclusionSeverityContexts(ctx context.Context, conclusionID string) ([]exchange.ContextualSeverity, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT host_isolation, platform, value
-		 FROM finding_severity_contexts WHERE finding_id = ?
-		 ORDER BY host_isolation, platform`, findingID)
+		 FROM conclusion_severity_contexts WHERE conclusion_id = ?
+		 ORDER BY host_isolation, platform`, conclusionID)
 	if err != nil {
-		return nil, fmt.Errorf("query finding_severity_contexts: %w", err)
+		return nil, fmt.Errorf("query conclusion_severity_contexts: %w", err)
 	}
 	defer rows.Close()
 	var out []exchange.ContextualSeverity
@@ -582,12 +648,12 @@ func (s *SQLite) loadFindingSeverityContexts(ctx context.Context, findingID stri
 	return out, rows.Err()
 }
 
-func (s *SQLite) loadFindingSupersedes(ctx context.Context, findingID string) ([]exchange.Supersession, error) {
+func (s *SQLite) loadConclusionSupersedes(ctx context.Context, conclusionID string) ([]exchange.Supersession, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT prior_id, prior_round, kind FROM finding_supersedes
-		 WHERE finding_id = ? ORDER BY prior_id`, findingID)
+		`SELECT prior_id, prior_round, kind FROM conclusion_supersedes
+		 WHERE conclusion_id = ? ORDER BY prior_id`, conclusionID)
 	if err != nil {
-		return nil, fmt.Errorf("query finding_supersedes: %w", err)
+		return nil, fmt.Errorf("query conclusion_supersedes: %w", err)
 	}
 	defer rows.Close()
 	var out []exchange.Supersession
@@ -610,12 +676,12 @@ func (s *SQLite) loadFindingSupersedes(ctx context.Context, findingID string) ([
 // table and column identifiers are interpolated, and those must come
 // from this allowlist.
 var orderedTextTables = map[string]string{
-	"finding_prerequisites":     "finding_id",
-	"finding_remediation_hints": "finding_id",
+	"conclusion_prerequisites":     "conclusion_id",
+	"conclusion_remediation_hints": "conclusion_id",
 }
 
-// loadOrderedTexts handles finding_prerequisites and finding_remediation_hints,
-// which share schema (finding_id, seq, text). Generalizes to keep the
+// loadOrderedTexts handles conclusion_prerequisites and conclusion_remediation_hints,
+// which share schema (conclusion_id, seq, text). Generalizes to keep the
 // per-loader code small.
 //
 // Safety: identifiers are interpolated (SQL does not support binding
@@ -643,12 +709,12 @@ func (s *SQLite) loadOrderedTexts(ctx context.Context, table, parentCol, parentI
 	return out, rows.Err()
 }
 
-func (s *SQLite) loadFindingRelated(ctx context.Context, findingID string) ([]string, error) {
+func (s *SQLite) loadConclusionRelated(ctx context.Context, conclusionID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT related_id FROM finding_related WHERE finding_id = ? ORDER BY related_id`,
-		findingID)
+		`SELECT related_id FROM conclusion_related WHERE conclusion_id = ? ORDER BY related_id`,
+		conclusionID)
 	if err != nil {
-		return nil, fmt.Errorf("query finding_related: %w", err)
+		return nil, fmt.Errorf("query conclusion_related: %w", err)
 	}
 	defer rows.Close()
 	var out []string

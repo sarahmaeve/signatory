@@ -59,8 +59,8 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		fmt.Printf("%s  %s  round=%d  ingested=%s\n",
 			r.OutputID[:8], r.AnalystID, r.Round, r.IngestedAt)
 		fmt.Printf("    target: %s\n", r.EntityURI)
-		fmt.Printf("    %d finding(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
-			r.FindingsCount, r.PositiveAbsenceCount, r.ObservationCount, r.PatternCount)
+		fmt.Printf("    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+			r.ConclusionsCount, r.PositiveAbsenceCount, r.ObservationCount, r.PatternCount)
 		if r.SourcePath != "" {
 			fmt.Printf("    source: %s\n", r.SourcePath)
 		}
@@ -68,20 +68,19 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 	return nil
 }
 
-// ShowFindingsCmd queries the findings table across analyst outputs.
+// ShowConclusionsCmd queries the conclusions table across analyst outputs.
 // Filtering by severity, signal_type, target, analyst is supported;
-// rationale is omitted from the output to keep the listing
-// scannable (use show-output --full to see one in detail).
-type ShowFindingsCmd struct {
+// rationale is omitted from the listing output to keep it scannable.
+type ShowConclusionsCmd struct {
 	Target       string   `help:"Filter by target URI (canonical or URL form)."`
 	Analyst      string   `help:"Filter by analyst_id."`
 	SignalType   string   `help:"Filter by signal_type (registry name)."`
 	Severity     []string `help:"Filter by one or more severity values: critical, high, medium, low, informational, positive."`
-	DesignIntent bool     `help:"Limit to findings flagged design_intent: true."`
+	DesignIntent bool     `help:"Limit to conclusions flagged design_intent: true."`
 	Limit        int      `help:"Maximum number of rows to return. 0 = no limit." default:"0"`
 }
 
-func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
+func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
 	ctx := context.Background()
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
@@ -93,7 +92,7 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	filter := store.FindingFilter{
+	filter := store.ConclusionFilter{
 		EntityURI:        normalizeTargetForQuery(cmd.Target),
 		AnalystID:        cmd.Analyst,
 		SignalType:       cmd.SignalType,
@@ -101,7 +100,7 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 		DesignIntentOnly: cmd.DesignIntent,
 		Limit:            cmd.Limit,
 	}
-	rows, err := s.ListFindings(ctx, filter)
+	rows, err := s.ListConclusions(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil
@@ -110,7 +109,7 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 		return err
 	}
 	if len(rows) == 0 {
-		fmt.Println("No findings match the filter")
+		fmt.Println("No conclusions match the filter")
 		return nil
 	}
 	for _, f := range rows {
@@ -126,7 +125,7 @@ func (cmd *ShowFindingsCmd) Run(globals *Globals) error {
 			signalTag = " (" + f.SignalType + ")"
 		}
 		fmt.Printf("%s  [%s]%s %s%s\n",
-			f.FindingLocalID, f.SeverityDefault, flags, f.Category, signalTag)
+			f.ConclusionLocalID, f.SeverityDefault, flags, f.Category, signalTag)
 		fmt.Printf("    target: %s   analyst: %s   citations: %d\n",
 			f.EntityURI, f.AnalystID, f.CitationCount)
 		fmt.Printf("    %s\n", truncateLine(f.Verdict, 110))

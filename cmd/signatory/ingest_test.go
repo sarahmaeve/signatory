@@ -65,7 +65,7 @@ func TestIngest_IdempotentReingest(t *testing.T) {
 
 func TestIngest_InvalidJSON_FailsAtValidation(t *testing.T) {
 	bad := `{
-  "findings": [{"id": "F001", "category": "x", "severity": {"default": "medium"}, "citations": [{"path": "p", "line_start": 1}]}]
+  "conclusions": [{"id": "F001", "category": "x", "severity": {"default": "medium"}, "citations": [{"path": "p", "line_start": 1}]}]
 }`
 	path := writeTempFile(t, "bad.json", bad)
 	g := newTestGlobals(t)

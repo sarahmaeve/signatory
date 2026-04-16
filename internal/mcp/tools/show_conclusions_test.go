@@ -12,27 +12,27 @@ import (
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
-func TestShowFindingsTool_HappyPath_EmptyList(t *testing.T) {
+func TestShowConclusionsTool_HappyPath_EmptyList(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	// Entity exists but has no analyst outputs / findings.
+	// Entity exists but has no analyst outputs / conclusions.
 	seedEntity(t, s, "repo:github/acme/findtest", "acme/findtest")
 
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/findtest"}`))
 
 	require.Equal(t, "ok", resp.Status)
 	data, ok := resp.Data.(map[string]interface{})
 	require.True(t, ok)
-	findings, ok := data["findings"].([]store.FindingSummary)
+	conclusions, ok := data["conclusions"].([]store.ConclusionSummary)
 	require.True(t, ok)
-	assert.Empty(t, findings)
+	assert.Empty(t, conclusions)
 }
 
-func TestShowFindingsTool_NotFound(t *testing.T) {
+func TestShowConclusionsTool_NotFound(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/ghost"}`))
 
@@ -42,21 +42,21 @@ func TestShowFindingsTool_NotFound(t *testing.T) {
 
 // Mutation check: if the not-found gate returned OK with empty list, this test
 // would fail. ErrNotFound must map to CodeNotFound.
-func TestShowFindingsTool_NotFound_MutationCheck(t *testing.T) {
+func TestShowConclusionsTool_NotFound_MutationCheck(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"repo:github/never/existed"}`))
 	assert.Equal(t, "error", resp.Status)
 	assert.Equal(t, mcp.CodeNotFound, resp.Error.Code,
-		"unknown entity in FindingFilter must produce CodeNotFound, not %s", resp.Error.Code)
+		"unknown entity in ConclusionFilter must produce CodeNotFound, not %s", resp.Error.Code)
 }
 
-func TestShowFindingsTool_SchemaViolation_UnknownField(t *testing.T) {
+func TestShowConclusionsTool_SchemaViolation_UnknownField(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/foo","nope":1}`))
 
@@ -64,10 +64,10 @@ func TestShowFindingsTool_SchemaViolation_UnknownField(t *testing.T) {
 	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
 }
 
-func TestShowFindingsTool_InvalidSeverity(t *testing.T) {
+func TestShowConclusionsTool_InvalidSeverity(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"severity":["catastrophic"]}`))
 
@@ -76,25 +76,25 @@ func TestShowFindingsTool_InvalidSeverity(t *testing.T) {
 	assert.Contains(t, resp.Error.Message, "catastrophic")
 }
 
-func TestShowFindingsTool_ValidSeverityFilter(t *testing.T) {
+func TestShowConclusionsTool_ValidSeverityFilter(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 
 	// All valid severities — should not produce a schema error.
 	resp := tool.Handle(context.Background(), json.RawMessage(
 		`{"severity":["critical","high","medium","low","informational","positive"]}`,
 	))
-	// No target → OK with empty list (store has no findings).
+	// No target → OK with empty list (store has no conclusions).
 	assert.Equal(t, "ok", resp.Status)
 }
 
-func TestShowFindingsTool_DesignIntent(t *testing.T) {
+func TestShowConclusionsTool_DesignIntent(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
 	seedEntity(t, s, "repo:github/acme/ditest", "acme/ditest")
 
-	tool := &ShowFindingsTool{Store: s}
+	tool := &ShowConclusionsTool{Store: s}
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/ditest","design_intent":true}`))
 
 	require.Equal(t, "ok", resp.Status)
@@ -103,8 +103,8 @@ func TestShowFindingsTool_DesignIntent(t *testing.T) {
 	assert.Equal(t, 0, data["count"])
 }
 
-func TestShowFindingsTool_Name(t *testing.T) {
+func TestShowConclusionsTool_Name(t *testing.T) {
 	t.Parallel()
-	tool := &ShowFindingsTool{}
-	assert.Equal(t, "signatory_show_findings", tool.Name())
+	tool := &ShowConclusionsTool{}
+	assert.Equal(t, "signatory_show_conclusions", tool.Name())
 }

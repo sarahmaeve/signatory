@@ -25,7 +25,7 @@ const minimalValidJSON = `{
     "invoked_at": "2026-04-14T00:00:00Z"
   },
   "target": "pkg:test/example",
-  "findings": [
+  "conclusions": [
     {
       "id": "F001",
       "verdict": "test verdict",
@@ -64,7 +64,7 @@ func TestFormatCheck_ValidMarkdown_Passes(t *testing.T) {
 			AnalystID: "test", Model: "test-model", InvokedAt: "2026-04-14T00:00:00Z",
 		},
 		Target: "pkg:test/example",
-		Findings: []exchange.Finding{
+		Conclusions: []exchange.Conclusion{
 			{
 				ID:        "F001",
 				Verdict:   verdict,
@@ -87,10 +87,10 @@ func TestFormatCheck_ValidMarkdown_Passes(t *testing.T) {
 }
 
 func TestFormatCheck_InvalidJSON_FailsWithSchemaErrors(t *testing.T) {
-	// Missing required fields: no attribution, no target, finding
+	// Missing required fields: no attribution, no target, conclusion
 	// missing verdict and rationale.
 	bad := `{
-  "findings": [{"id": "F001", "category": "x", "severity": {"default": "medium"}, "citations": [{"path": "p", "line_start": 1}]}]
+  "conclusions": [{"id": "F001", "category": "x", "severity": {"default": "medium"}, "citations": [{"path": "p", "line_start": 1}]}]
 }`
 	path := writeTempFile(t, "bad.json", bad)
 	cmd := &FormatCheckCmd{File: path, Format: "auto", Quiet: true}
@@ -120,7 +120,7 @@ func TestFormatCheck_UnknownField_Rejected(t *testing.T) {
 	bad := `{
   "attribution": {"analyst_id": "x", "model": "y", "invoked_at": "2026-04-14T00:00:00Z"},
   "target": "pkg:test/x",
-  "findings": [],
+  "conclusions": [],
   "this_is_not_a_real_field": "value"
 }`
 	path := writeTempFile(t, "unknown-field.json", bad)
@@ -137,8 +137,8 @@ func TestFormatCheck_ExplicitFormatOverridesAutoDetect(t *testing.T) {
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 		},
-		Target:   "pkg:test/x",
-		Findings: []exchange.Finding{},
+		Target:      "pkg:test/x",
+		Conclusions: []exchange.Conclusion{},
 	}
 	md, err := out.MarshalMarkdown()
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
 		},
 		Target:       "pkg:test/example",
 		TargetCommit: "abc123",
-		Findings: []exchange.Finding{
+		Conclusions: []exchange.Conclusion{
 			{
 				ID:           "F001",
 				Verdict:      verdict,
@@ -269,7 +269,7 @@ func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
 	assert.NotContains(t, got, roundNotes, "round_notes body should be excluded from summary")
 
 	// Structural data MUST appear.
-	assert.Contains(t, got, "F001", "finding ID")
+	assert.Contains(t, got, "F001", "conclusion ID")
 	assert.Contains(t, got, "high", "severity value")
 	assert.Contains(t, got, "test_category", "category")
 	assert.Contains(t, got, "test_signal", "signal type")
@@ -290,8 +290,8 @@ func TestPrintSummary_PositiveAbsences_ConfidenceAndPattern(t *testing.T) {
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 		},
-		Target:   "pkg:test/x",
-		Findings: []exchange.Finding{},
+		Target:      "pkg:test/x",
+		Conclusions: []exchange.Conclusion{},
 		PositiveAbsences: []exchange.PositiveAbsence{
 			{
 				PatternChecked: "use of pickle.load on network data",
@@ -321,8 +321,8 @@ func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 		},
-		Target:   "pkg:test/x",
-		Findings: []exchange.Finding{},
+		Target:      "pkg:test/x",
+		Conclusions: []exchange.Conclusion{},
 		MethodologyTrace: &exchange.MethodologyCatalog{
 			Source: exchange.AgentAttribution{
 				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
@@ -367,7 +367,7 @@ func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
 }
 
 func TestPrintSummary_OmitsAbsentSections(t *testing.T) {
-	// A document with only findings should not print empty
+	// A document with only conclusions should not print empty
 	// section headers for positive_absences, observations, or
 	// methodology_trace.
 	verdict := "v"
@@ -378,7 +378,7 @@ func TestPrintSummary_OmitsAbsentSections(t *testing.T) {
 			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 		},
 		Target: "pkg:test/x",
-		Findings: []exchange.Finding{
+		Conclusions: []exchange.Conclusion{
 			{
 				ID: "F001", Verdict: verdict, Rationale: rationale,
 				Severity:  exchange.Severity{Default: exchange.SeverityLow},
@@ -406,7 +406,7 @@ func TestPrintSummary_ConditionalSeverity(t *testing.T) {
 			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 		},
 		Target: "pkg:test/x",
-		Findings: []exchange.Finding{
+		Conclusions: []exchange.Conclusion{
 			{
 				ID: "F001", Verdict: verdict, Rationale: rationale,
 				Severity: exchange.Severity{
@@ -439,8 +439,8 @@ func TestPrintSummary_SortedDeterminism(t *testing.T) {
 			Attribution: exchange.AgentAttribution{
 				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
 			},
-			Target:   "pkg:test/x",
-			Findings: []exchange.Finding{},
+			Target:      "pkg:test/x",
+			Conclusions: []exchange.Conclusion{},
 			MethodologyTrace: &exchange.MethodologyCatalog{
 				Source: exchange.AgentAttribution{
 					AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
@@ -501,8 +501,8 @@ func TestParseAnalystOutput_RoundsTripsConcrete(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Equal(t, "pkg:test/example", out.Target)
-	require.Len(t, out.Findings, 1)
-	assert.Equal(t, "F001", out.Findings[0].ID)
+	require.Len(t, out.Conclusions, 1)
+	assert.Equal(t, "F001", out.Conclusions[0].ID)
 
 	// And confirm it would also pass Validate() at the package layer.
 	require.NoError(t, out.Validate())

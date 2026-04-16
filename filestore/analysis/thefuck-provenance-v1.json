@@ -9,7 +9,7 @@
   "target": "https://github.com/nvbn/thefuck",
   "target_commit": "HEAD-as-of-2024-01-25",
   "round_notes": "Provenance analysis of `thefuck`, a Python CLI for shell-command correction. Run in parallel with the security analyst (output at /tmp/thefuck-security-v1.json, not consulted before emitting this document). The dominant trust signal is project vitality: the repo is fallow (last commit 2024-01-25, last PyPI release 2022-01-02) despite 96K stars and an 11-year history. The maintainer's identity is strong (15-year GitHub tenure, public, cross-platform), but a fallow popular tool has a specific risk profile: any undiscovered vulnerability has years of unpatched window, and the dormant publisher account is a high-value account-takeover target. The user's specific question — 'likelihood of leaking credentials or code?' — is mostly the security analyst's beat. Provenance can say: the publisher chain (local-maintainer twine upload) and the absence of release signing are the unguarded paths by which a hostile release could reach users; whether the current code itself leaks is a code-reading question.",
-  "findings": [
+  "conclusions": [
     {
       "id": "F001",
       "verdict": "The project is effectively unmaintained: no PyPI release in over 4 years (3.32 on 2022-01-02), no commits in the past 21 months, and 5+ pull requests filed in March 2026 sit unreviewed despite contributor activity continuing.",

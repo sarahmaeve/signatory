@@ -8,7 +8,7 @@
   },
   "target": "https://github.com/nvbn/thefuck",
   "target_commit": "c7e7e1d884d3bb241ea6448f72a989434c2a35ec",
-  "findings": [
+  "conclusions": [
     {
       "id": "F001",
       "verdict": "Any Python package matching `thefuck_contrib_*` anywhere on `sys.path` has every file under its `rules/` subdirectory auto-loaded and executed on each `thefuck` invocation, turning the plugin model into an unauthenticated code-execution sink for typosquatted/compromised siblings.",
@@ -27,7 +27,7 @@
         "Verify the contrib package was loaded from a trusted site-packages location before scanning for rules",
         "Consider switching to declared `entry_points` rather than name-prefix globbing so the user sees the package in their normal dependency surface"
       ],
-      "related_findings": ["F002"]
+      "related_conclusions": ["F002"]
     },
     {
       "id": "F002",
@@ -119,7 +119,7 @@
         "Document this behavior more prominently in the README security section",
         "Default shell_logger/instant-mode when supported to avoid the re-run entirely"
       ],
-      "related_findings": ["F006", "F007"]
+      "related_conclusions": ["F006", "F007"]
     },
     {
       "id": "F006",
@@ -138,7 +138,7 @@
         "Log the env var *names* but not the values, or only explicitly whitelisted vars",
         "Add a README note warning users that `--debug` output should not be pasted into public bug reports"
       ],
-      "related_findings": ["F005", "F007"]
+      "related_conclusions": ["F005", "F007"]
     },
     {
       "id": "F007",
@@ -158,7 +158,7 @@
         "Redact credential patterns (`https://[^:]+:[^@]+@`) from captured output before storing it on `Command`",
         "Drop GIT_TRACE entirely and parse the shell alias output via a different mechanism"
       ],
-      "related_findings": ["F005", "F006"]
+      "related_conclusions": ["F005", "F006"]
     },
     {
       "id": "F008",
@@ -176,7 +176,7 @@
         "Gate the match on an output signature that suggests the hook is broken rather than functioning",
         "Add a distinct side-effect warning in the prompt"
       ],
-      "related_findings": ["F004"]
+      "related_conclusions": ["F004"]
     },
     {
       "id": "F009",

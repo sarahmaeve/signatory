@@ -12,7 +12,7 @@ import (
 // Validation covers required fields, enum values, the Citation
 // either-lines-or-scope invariant, and ID uniqueness within the
 // document. It does NOT validate cross-document references (such as
-// Finding.AnswersQuestion pointing to prompts in a separate handoff
+// Conclusion.AnswersQuestion pointing to prompts in a separate handoff
 // document) — those are free-form strings by design.
 func (o *AnalystOutput) Validate() error {
 	if o == nil {
@@ -27,15 +27,15 @@ func (o *AnalystOutput) Validate() error {
 		errs = append(errs, errors.New("target required"))
 	}
 
-	findingIDs := make(map[string]struct{}, len(o.Findings))
-	for i, f := range o.Findings {
-		path := fmt.Sprintf("findings[%d]", i)
+	conclusionIDs := make(map[string]struct{}, len(o.Conclusions))
+	for i, f := range o.Conclusions {
+		path := fmt.Sprintf("conclusions[%d]", i)
 		if f.ID == "" {
 			errs = append(errs, fmt.Errorf("%s: id required", path))
-		} else if _, dup := findingIDs[f.ID]; dup {
+		} else if _, dup := conclusionIDs[f.ID]; dup {
 			errs = append(errs, fmt.Errorf("%s: duplicate id %q", path, f.ID))
 		} else {
-			findingIDs[f.ID] = struct{}{}
+			conclusionIDs[f.ID] = struct{}{}
 		}
 		errs = append(errs, f.validate(path)...)
 	}
@@ -82,7 +82,7 @@ func (a *AgentAttribution) validate(path string) []error {
 	return errs
 }
 
-func (f *Finding) validate(path string) []error {
+func (f *Conclusion) validate(path string) []error {
 	var errs []error
 	if f.Verdict == "" {
 		errs = append(errs, fmt.Errorf("%s: verdict required", path))

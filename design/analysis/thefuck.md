@@ -64,7 +64,7 @@ code?" the integrated answer is:
   2022-01-02. Last commit 2024-01-25. 5+ open PRs from March 2026
   unreviewed. Open issue #1566 (2026-04-05) literally asks if the
   project is maintained. Whatever the security review surfaces —
-  even low-severity findings — has no remediation path beyond
+  even low-severity conclusions — has no remediation path beyond
   forking.
 - **Counterbalancing positives exist.** No telemetry, no phone-home
   endpoints, no credential storage, no install-time stealth
@@ -101,10 +101,10 @@ note that the user's question requires both.
   since 2022. Any "could be fixed in a future release" mitigation
   is unavailable.
 
-A maintained project's medium-severity finding has a remediation
+A maintained project's medium-severity conclusion has a remediation
 path (file an issue, contribute a PR, wait for next release). For
 thefuck, the path doesn't exist — the medium becomes effectively
-permanent. This matters across all of security's findings: F003
+permanent. This matters across all of security's conclusions: F003
 through F009 are all "could be tightened upstream" issues that won't
 be tightened, because there's no upstream to tighten them.
 
@@ -113,7 +113,7 @@ be tightened, because there's no upstream to tighten them.
 - Security **F001**: any `thefuck_contrib_*` package on `sys.path`
   is auto-imported and its `rules/*.py` files are executed.
   Documented plugin model, but no allowlist mechanism.
-- Provenance: no findings directly here, but **positive absence**
+- Provenance: no conclusions directly here, but **positive absence**
   confirmed there are no git-pinned deps and no alternative
   registries — so the typosquatting surface is exactly "PyPI itself"
   rather than "PyPI + git URLs + private indexes."
@@ -124,23 +124,23 @@ attack requires PyPI-side malice (publishing a malicious
 installed and that typosquat resolved into their interpreter. PyPI's
 organizational scrutiny narrows the threat but doesn't eliminate it.
 
-## Divergence and complementary findings
+## Divergence and complementary conclusions
 
 ### Security F010 [positive] strengthens provenance's silent positive
 
 Security explicitly searched for telemetry, phone-home, hardcoded
 URLs, and Sentry/posthog/segment/rollbar imports — found none. Marked
-as a positive finding (`severity: positive`).
+as a positive conclusion (`severity: positive`).
 
 Provenance noted no hardcoded callbacks but didn't actively look for
 telemetry libraries (out of methodology scope — that's a code-reading
-pattern). The dual finding produces: *high confidence that thefuck
+pattern). The dual conclusion produces: *high confidence that thefuck
 itself doesn't ship telemetry, even though it could plausibly have
 been added at any point in its 11-year history.*
 
 This is a worked example of the dual-analyst architecture's
 self-confirmation property: when both analysts arrive at the same
-absence-of-vector finding through different methods, confidence
+absence-of-vector conclusion through different methods, confidence
 compounds.
 
 ### Provenance F004 (no commit signing) doesn't change the security picture
@@ -159,7 +159,7 @@ compose without contradiction.
 
 ## Cross-cutting insight: dormancy is the risk multiplier
 
-The most useful cross-finding observation is one neither analyst
+The most useful cross-conclusion observation is one neither analyst
 could have produced alone. Looking at the security severity
 distribution:
 
@@ -169,11 +169,11 @@ distribution:
 - 1 positive (F010 no telemetry)
 
 Compare to atuin's distribution from the prior engagement: similar
-shape — most findings are low-severity hygiene gaps, with a couple of
+shape — most conclusions are low-severity hygiene gaps, with a couple of
 medium architectural surfaces. For atuin, those are reasonable
 "watch this on each release" items because atuin ships releases. For
-thefuck, **provenance F001's high-severity vitality finding
-multiplies all the security findings**: each one is permanent, not
+thefuck, **provenance F001's high-severity vitality conclusion
+multiplies all the security conclusions**: each one is permanent, not
 provisional. The signatory trust model already encodes "criticality
 as multiplier" (per `design/trust-model.md`); this engagement
 demonstrates *fallow status as multiplier* — a related but distinct
@@ -288,7 +288,7 @@ types beyond what each individual analyst found:
 
 - `fallow_status_amplifier` — when a project's vitality score
   drops below an "actively maintained" threshold, every other
-  finding's effective severity should be amplified (because there's
+  conclusion's effective severity should be amplified (because there's
   no remediation path). This is a meta-signal that operates on the
   rest of the signal set, similar to how `criticality` amplifies
   per the existing trust model.

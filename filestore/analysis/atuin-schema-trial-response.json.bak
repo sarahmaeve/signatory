@@ -8,8 +8,9 @@
   },
   "target": "pkg:cargo/atuin",
   "target_commit": "5471119c",
+  "supersedes": ["r1"],
   "round_notes": "One round-1 finding was materially wrong in the user's favor: the characterization of atuin-ai as a remote LLM that can instruct the CLI to run shell commands, read files, or write files, defended primarily by a permission prompt. Source reading in round 2 (see F001) shows that for `execute_shell_command`, `read_file`, and `create_file`, a client-hardcoded capability allowlist gates the tool at the transport layer before the permission prompt ever runs, and those capabilities are not advertised in any default or user-facing configuration. The permission prompt is the second line of defense, not the first. F001 supersedes the round-1 AI-subsystem assessment. F002 (sync censorship) and F003 (daemon peer-cred) are new findings surfaced by the round-2 source trace and do not correspond to prior round-1 findings.",
-  "conclusions": [
+  "findings": [
     {
       "id": "F001",
       "verdict": "The atuin-ai subsystem gates remote-instructed shell/read/write tool calls at the transport layer via a client-hardcoded capability allowlist that advertises only `client_v1_atuin_history` in any default or user-configurable configuration, placing capability enforcement ahead of the user-facing permission prompt.",
@@ -25,9 +26,9 @@
         { "path": "crates/atuin-ai/src/tools/descriptor.rs", "line_start": 24, "line_end": 58 },
         { "path": "crates/atuin-client/src/settings.rs", "line_start": 680, "line_end": 684, "quoted": "`AiCapabilities { enable_history_search: Option<bool> }` — single-field struct, no config surface for shell/read/write" }
       ],
-      "supersedes": [{"prior_id": "r1-ai-subsystem-threat", "prior_round": 1, "kind": "corrects"}],
+      "supersedes": ["r1-ai-subsystem-threat"],
       "answers_question": "§7",
-      "related_conclusions": []
+      "related_findings": []
     },
     {
       "id": "F002",
@@ -51,11 +52,11 @@
       "rationale": "`server.rs:67-70` binds the Unix socket at the configured path and returns it to the tonic server builder. No `std::fs::set_permissions(..., PermissionsExt::from_mode(0o600))` call follows the bind; socket permissions inherit from umask. No `SO_PEERCRED` / `getpeereid` read appears in any Interceptor or middleware.\n\nOn Windows (`server.rs:128-134`), the daemon binds `127.0.0.1:${tcp_port}` (default 8889) with no authentication. Loopback-only narrows the surface to same-host attackers.\n\nThe three gRPC services (`HistoryServer`, `SearchServer`, `ControlServer`) are attached with no auth middleware. `ControlServer` includes a shutdown RPC; anything that can connect can also stop the daemon.\n\n**Context dependence.** On a single-user machine with umask 022 and a 0700 parent data directory (typical default), the socket is reachable only by the owning user because the *directory* is restrictive, even though the socket file itself is not. On a shared host with a looser data-dir umask, or on a multi-user Windows box, any local process can speak the full gRPC surface.\n\n**Fix shape.** `chmod 0o600` after bind for defense-in-depth on the socket itself, plus a tonic Interceptor that reads SO_PEERCRED and rejects cross-UID callers. Both cheap.",
       "severity": {
         "default": "medium",
-        "by_context": [
-          {"context": {"host_isolation": "single_user"}, "value": "low"},
-          {"context": {"host_isolation": "shared_host"}, "value": "medium"},
-          {"context": {"host_isolation": "multi_user", "platform": "windows"}, "value": "medium"}
-        ]
+        "by_context": {
+          "single_user": "low",
+          "shared_host": "medium",
+          "multi_user_windows": "medium"
+        }
       },
       "category": "local_ipc_auth",
       "signal_type": "local_ipc_auth_mechanism",
@@ -100,7 +101,7 @@
         "signal_group": "network_endpoints",
         "description": "Hardcoded URLs in production code paths that should route through the sync_address / server_address configuration.",
         "pattern": "rg --type rust 'https?://[a-zA-Z0-9./-]+\\.(atuin|anthropic|inflection)\\.' crates/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "Hits in tests, doc comments, and help-text strings produce noise. Scope to function bodies by filtering lines preceded by `///` or inside `#[cfg(test)]` blocks.",
         "hit_on_target": true
       },
@@ -109,7 +110,7 @@
         "signal_group": "network_endpoints",
         "description": "Network fetches triggered by startup, login, or config-load rather than by explicit user action — potential background-call surface.",
         "pattern": "rg --type rust 'reqwest::(Client|get|post)' crates/",
-        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "collector_hint": "context_dependent",
         "false_positive_notes": "Every fetch matches; collector narrows the universe but human or LLM triage needed to distinguish 'happens during update-check tick' from 'happens because user ran atuin login'.",
         "hit_on_target": true
       },
@@ -118,7 +119,7 @@
         "signal_group": "network_endpoints",
         "description": "Telemetry or update-check endpoints that bypass the user-configured server, leaking requests to a vendor host even in self-hosted setups.",
         "pattern": null,
-        "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
+        "collector_hint": "requires_reasoning",
         "false_positive_notes": "Not grep-automatable: requires tracing from user-facing action to URL-construction and noticing the URL is NOT derived from settings. Surfaces as a finding only on source review.",
         "hit_on_target": true
       },
@@ -127,7 +128,7 @@
         "signal_group": "local_listeners",
         "description": "TcpListener / UnixListener bind followed by serve without an authentication middleware or peer-credential check on accepted connections.",
         "pattern": "rg --type rust '(TcpListener|UnixListener)::bind' crates/",
-        "collector_hint": {"grep_precision": "narrows", "reasoning_depth": "one_hop"},
+        "collector_hint": "context_dependent",
         "false_positive_notes": "The bind itself is trivially findable; whether an Interceptor is attached downstream requires following the Server::builder() chain.",
         "hit_on_target": true
       },
@@ -136,7 +137,7 @@
         "signal_group": "local_listeners",
         "description": "UnixListener::bind that is not followed by an explicit std::fs::set_permissions / PermissionsExt::from_mode call in the same function.",
         "pattern": "rg --type rust -A 10 'UnixListener::bind' crates/ | rg -B 10 'set_permissions' -v",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "Permissions may be set on the parent directory rather than the socket; collector should flag the shape, not claim exploit.",
         "hit_on_target": true
       },
@@ -145,7 +146,7 @@
         "signal_group": "file_credential_handling",
         "description": "File creation for a path named `key`, `token`, `session`, or `credentials` without an explicit 0o600 permission set nearby.",
         "pattern": "rg --type rust 'File::create\\([^)]*(key|token|session|credentials)' crates/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "Misses OpenOptions::new().write(true).create(true).open(...) idioms and tokio::fs::File::create; extend the pattern accordingly.",
         "hit_on_target": true
       },
@@ -154,7 +155,7 @@
         "signal_group": "temp_file_predictability",
         "description": "env::temp_dir() joined with an attacker-influenceable string, creating a predictable /tmp path on Linux shared hosts.",
         "pattern": "rg --type rust 'temp_dir\\(\\)\\.join\\(format!' crates/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "On macOS temp_dir() is user-private; severity varies by platform. Collector should note platform-conditional severity.",
         "hit_on_target": true
       },
@@ -163,7 +164,7 @@
         "signal_group": "default_on_capabilities",
         "description": "Option<bool> feature flag consumed via .unwrap_or(true) — defaults-to-enabled behavior that a config audit might miss.",
         "pattern": "rg --type rust '\\.unwrap_or\\(true\\)' crates/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "Hits on every unwrap_or(true); narrows only slightly. Cross-reference against struct field names containing `enabled` or capability-verb nouns to prioritize.",
         "hit_on_target": true
       },
@@ -172,7 +173,7 @@
         "signal_group": "env_variable_fallback",
         "description": "std::env::var reads that conditionally widen security-relevant behavior — appending to a capability list, disabling TLS verification, bypassing auth — without being documented in the config surface.",
         "pattern": "rg --type rust 'env::var\\(' crates/",
-        "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
+        "collector_hint": "requires_reasoning",
         "false_positive_notes": "Every env::var read matches; the reasoning step is whether the branch it enables weakens any security invariant. Most env reads are benign (HOME, XDG_CONFIG_HOME, ATUIN_SESSION).",
         "hit_on_target": true
       },
@@ -181,7 +182,7 @@
         "signal_group": "capability_allowlist_enforcement",
         "description": "Remote-instructed tool dispatch (SSE, MCP, etc.) that does not gate incoming tool names against a client-hardcoded enum before permission resolution. Miss case = the client blindly dispatches on server-chosen strings.",
         "pattern": null,
-        "collector_hint": {"grep_precision": "useless", "reasoning_depth": "multi_hop"},
+        "collector_hint": "requires_reasoning",
         "false_positive_notes": "Not detectable by grep alone; requires tracing the SSE/MCP frame handler to the tool-call dispatch and verifying a bounded match{} on tool names. LLM-grade analysis task.",
         "hit_on_target": false
       },
@@ -190,7 +191,7 @@
         "signal_group": "supply_chain_hygiene",
         "description": "deny.toml / audit.toml present at repo root but not invoked by any CI workflow step — declared-but-unenforced policy.",
         "pattern": "test -f deny.toml && ! rg -q 'cargo-deny|cargo deny|cargo-audit' .github/ .depot/ scripts/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "External CI (Branch Protection required-checks, GitHub Apps) can enforce without leaving a trace in-repo; collector should flag as probable-unenforced, not definitive.",
         "hit_on_target": true
       },
@@ -199,7 +200,7 @@
         "signal_group": "supply_chain_hygiene",
         "description": "cargo publish absent from any CI workflow when the project is published to crates.io — implies local-maintainer publish, exposing the crates.io API token on at least one laptop.",
         "pattern": "! rg -q 'cargo publish|cargo-release' .github/ .depot/",
-        "collector_hint": {"grep_precision": "high", "reasoning_depth": "none"},
+        "collector_hint": "automatable",
         "false_positive_notes": "Some projects publish via cargo-release with OIDC; collector should check for that variant too. Absence of both patterns is the real signal.",
         "hit_on_target": true
       }

@@ -44,7 +44,7 @@ type IngestResult struct {
 //     IngestResult{OutputID: <existing>, Idempotent: true}
 //     without writing anything.
 //  3. Finds the entity by target URI; if absent, creates one.
-//  4. Inserts the analyst_outputs row plus all the per-finding /
+//  4. Inserts the analyst_outputs row plus all the per-conclusion /
 //     observation / methodology rows in one transaction.
 //
 // Append-only invariants are enforced by triggers (migration v4),
@@ -111,7 +111,7 @@ func (s *SQLite) IngestAnalystOutput(
 	if err = insertAnalystOutputRow(ctx, tx, outputID, entityID, out, sourcePath, hash, now); err != nil {
 		return nil, err
 	}
-	if err = insertFindings(ctx, tx, outputID, out.Findings); err != nil {
+	if err = insertConclusions(ctx, tx, outputID, out.Conclusions); err != nil {
 		return nil, err
 	}
 	if err = insertPositiveAbsences(ctx, tx, outputID, out.PositiveAbsences); err != nil {
@@ -343,80 +343,80 @@ func insertAnalystOutputRow(
 	return nil
 }
 
-func insertFindings(ctx context.Context, tx *sql.Tx, outputID string, findings []exchange.Finding) error {
-	for i := range findings {
-		f := &findings[i]
-		findingID := uuid.NewString()
+func insertConclusions(ctx context.Context, tx *sql.Tx, outputID string, conclusions []exchange.Conclusion) error {
+	for i := range conclusions {
+		f := &conclusions[i]
+		conclusionID := uuid.NewString()
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO findings
-			 (id, output_id, finding_local_id, verdict, rationale,
+			`INSERT INTO conclusions
+			 (id, output_id, conclusion_local_id, verdict, rationale,
 			  severity_default, design_intent, category, signal_type,
 			  answers_question)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			findingID, outputID, f.ID, f.Verdict, f.Rationale,
+			conclusionID, outputID, f.ID, f.Verdict, f.Rationale,
 			string(f.Severity.Default), boolToInt(f.DesignIntent),
 			f.Category, derefString(f.SignalType), derefString(f.AnswersQuestion))
 		if err != nil {
-			return fmt.Errorf("insert finding %q: %w", f.ID, err)
+			return fmt.Errorf("insert conclusion %q: %w", f.ID, err)
 		}
 
 		// Conditional severity overrides
 		for _, ctxSeverity := range f.Severity.ByContext {
 			_, err = tx.ExecContext(ctx,
-				`INSERT INTO finding_severity_contexts
-				 (finding_id, host_isolation, platform, value)
+				`INSERT INTO conclusion_severity_contexts
+				 (conclusion_id, host_isolation, platform, value)
 				 VALUES (?, ?, ?, ?)`,
-				findingID, ctxSeverity.Context.HostIsolation,
+				conclusionID, ctxSeverity.Context.HostIsolation,
 				ctxSeverity.Context.Platform, string(ctxSeverity.Value))
 			if err != nil {
-				return fmt.Errorf("insert finding_severity_contexts for %q: %w", f.ID, err)
+				return fmt.Errorf("insert conclusion_severity_contexts for %q: %w", f.ID, err)
 			}
 		}
 
 		// Supersedes
 		for _, sup := range f.Supersedes {
 			_, err = tx.ExecContext(ctx,
-				`INSERT INTO finding_supersedes
-				 (finding_id, prior_id, prior_round, kind)
+				`INSERT INTO conclusion_supersedes
+				 (conclusion_id, prior_id, prior_round, kind)
 				 VALUES (?, ?, ?, ?)`,
-				findingID, sup.PriorID, sup.PriorRound, string(sup.Kind))
+				conclusionID, sup.PriorID, sup.PriorRound, string(sup.Kind))
 			if err != nil {
-				return fmt.Errorf("insert finding_supersedes for %q: %w", f.ID, err)
+				return fmt.Errorf("insert conclusion_supersedes for %q: %w", f.ID, err)
 			}
 		}
 
 		// Prerequisites (ordered)
 		for seq, text := range f.Prerequisites {
 			_, err = tx.ExecContext(ctx,
-				`INSERT INTO finding_prerequisites (finding_id, seq, text)
-				 VALUES (?, ?, ?)`, findingID, seq, text)
+				`INSERT INTO conclusion_prerequisites (conclusion_id, seq, text)
+				 VALUES (?, ?, ?)`, conclusionID, seq, text)
 			if err != nil {
-				return fmt.Errorf("insert finding_prerequisites for %q: %w", f.ID, err)
+				return fmt.Errorf("insert conclusion_prerequisites for %q: %w", f.ID, err)
 			}
 		}
 
 		// Remediation hints (ordered)
 		for seq, text := range f.RemediationHints {
 			_, err = tx.ExecContext(ctx,
-				`INSERT INTO finding_remediation_hints (finding_id, seq, text)
-				 VALUES (?, ?, ?)`, findingID, seq, text)
+				`INSERT INTO conclusion_remediation_hints (conclusion_id, seq, text)
+				 VALUES (?, ?, ?)`, conclusionID, seq, text)
 			if err != nil {
-				return fmt.Errorf("insert finding_remediation_hints for %q: %w", f.ID, err)
+				return fmt.Errorf("insert conclusion_remediation_hints for %q: %w", f.ID, err)
 			}
 		}
 
-		// Related findings
-		for _, rel := range f.RelatedFindings {
+		// Related conclusions
+		for _, rel := range f.RelatedConclusions {
 			_, err = tx.ExecContext(ctx,
-				`INSERT INTO finding_related (finding_id, related_id)
-				 VALUES (?, ?)`, findingID, rel)
+				`INSERT INTO conclusion_related (conclusion_id, related_id)
+				 VALUES (?, ?)`, conclusionID, rel)
 			if err != nil {
-				return fmt.Errorf("insert finding_related for %q: %w", f.ID, err)
+				return fmt.Errorf("insert conclusion_related for %q: %w", f.ID, err)
 			}
 		}
 
 		// Citations attach via polymorphic FK
-		if err = insertCitations(ctx, tx, "finding", findingID, f.Citations); err != nil {
+		if err = insertCitations(ctx, tx, "conclusion", conclusionID, f.Citations); err != nil {
 			return err
 		}
 	}
@@ -547,7 +547,7 @@ func insertOutputReframesFrom(
 }
 
 // insertCitations inserts a slice of Citations attached to a parent
-// row of a given kind. parentKind ∈ {"finding", "positive_absence",
+// row of a given kind. parentKind ∈ {"conclusion", "positive_absence",
 // "observation", "methodology_pattern"}.
 //
 // Citation's nullable LineStart/LineEnd are stored as -1 sentinel

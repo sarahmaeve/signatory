@@ -85,8 +85,8 @@ func TestMarkdown_NoRoundNotes_OmitsBody(t *testing.T) {
 		Attribution: AgentAttribution{
 			AnalystID: "x", Model: "y", InvokedAt: "2026-01-01T00:00:00Z",
 		},
-		Target:   "pkg:test/x",
-		Findings: []Finding{},
+		Target:      "pkg:test/x",
+		Conclusions: []Conclusion{},
 	}
 
 	md, err := o.MarshalMarkdown()
@@ -122,9 +122,9 @@ A trailing paragraph.`
 		Attribution: AgentAttribution{
 			AnalystID: "x", Model: "y", InvokedAt: "2026-01-01T00:00:00Z",
 		},
-		Target:     "pkg:test/x",
-		Findings:   []Finding{},
-		RoundNotes: body,
+		Target:      "pkg:test/x",
+		Conclusions: []Conclusion{},
+		RoundNotes:  body,
 	}
 
 	md, err := o.MarshalMarkdown()
@@ -166,7 +166,7 @@ attribution:
   model: y
   invoked_at: "2026-01-01T00:00:00Z"
 target: "pkg:test/x"
-findings: []
+conclusions: []
 round_notes: |
   this should not be here
 ---
@@ -184,7 +184,7 @@ func TestMarkdown_BOMHandling(t *testing.T) {
 	input := []byte{0xEF, 0xBB, 0xBF}
 	input = append(input, []byte("---\n"+
 		"attribution:\n  analyst_id: x\n  model: y\n  invoked_at: \"2026-01-01T00:00:00Z\"\n"+
-		"target: \"pkg:test/x\"\nfindings: []\n"+
+		"target: \"pkg:test/x\"\nconclusions: []\n"+
 		"---\n")...)
 	out, err := UnmarshalMarkdown(input)
 	require.NoError(t, err)
@@ -197,7 +197,7 @@ func TestMarkdown_CRLFHandling(t *testing.T) {
 	// sure.
 	input := []byte("---\r\n" +
 		"attribution:\r\n  analyst_id: x\r\n  model: y\r\n  invoked_at: \"2026-01-01T00:00:00Z\"\r\n" +
-		"target: \"pkg:test/x\"\r\nfindings: []\r\n" +
+		"target: \"pkg:test/x\"\r\nconclusions: []\r\n" +
 		"---\r\n" +
 		"\r\nbody line\r\n")
 	out, err := UnmarshalMarkdown(input)
@@ -224,7 +224,7 @@ func TestMarkdown_TagsConsistent(t *testing.T) {
 	types := []any{
 		AnalystOutput{},
 		AgentAttribution{},
-		Finding{},
+		Conclusion{},
 		Severity{},
 		ContextualSeverity{},
 		ContextSpec{},

@@ -25,11 +25,11 @@ surfaced signal classes the others systematically missed:
 | Local clone (signatory skill, pass 2) | Commit signing distribution, tag types, `.mailmap` identity graph, lockfile composition, multi-year author distribution, CI supply-chain-gate absence |
 | Security code review (external agent) | Hardcoded phone-home endpoints, unauthenticated TCP listeners, default-on risky features, enumerable AI tool surface, file-permission hygiene gaps, secrets-filter coverage gaps, shell-allowlist-not-sandbox composition, predictable temp-file paths |
 
-The security-review pass found ten concrete, user-affecting findings
+The security-review pass found ten concrete, user-affecting conclusions
 by *reading the source*. The signatory passes found an equally
 important set by *reading metadata and git history*. Neither pass
 was lazy; each was complete within its data grounding. The overlap
-was modest — most findings appeared in only one of the three passes.
+was modest — most conclusions appeared in only one of the three passes.
 
 The trust analysis improved materially with all three. Trying to
 collapse them into a single "mega-analyze" agent prompt would water
@@ -85,7 +85,7 @@ These modes don't blend cleanly in one prompt. A framework-applied
 agent asked to also "think about novel threats" tends to either
 rubber-stamp the framework or hallucinate novel issues. A
 generative-skeptical agent asked to also "fill in the framework"
-tends to skip framework cells while fixating on juicy findings.
+tends to skip framework cells while fixating on juicy conclusions.
 
 ### Axis 3: Output shape
 
@@ -176,7 +176,7 @@ target model.
   an attacker do if they control a release? A PR? An LLM response
   to a user's prompt? What's hardcoded that looks configurable?
   What's gated by user attention rather than by types? Cite
-  file:line for every finding."
+  file:line for every conclusion."
 - **Input:** a local clone path (or a sandboxed read-only view) +
   the signal bundle from Layer 1 for context.
 - **Output schema:** threat-list with file:line citations, defensive
@@ -380,7 +380,7 @@ needs the deeper pass, here's why."
    Layer 1.
 2. The `signals.details` JSON column proposed in
    `design/signal-storage-evolution.md` is required for this
-   architecture. Security-analyst findings and structured provenance
+   architecture. Security-analyst conclusions and structured provenance
    signals both land there.
 3. The MCP interface doc (`design/mcp-interface.md`) needs a section
    for the depth parameter and the analyst role split. This
@@ -403,11 +403,11 @@ analysis good. Mapping the session to the proposed layers:
 | External security review | Layer 2 security | Standalone Opus agent; the prompt framing is the template |
 | Integration in `atuin.md` | Layer 3 synthesis | Hand-authored; this is what the synthesist replicates |
 
-The concrete findings from the security review fall into a few
+The concrete conclusions from the security review fall into a few
 categories, each mapping to a collector vs. analyst decision:
 
-| Finding | Implementation |
-|---------|---------------|
+| Conclusion | Implementation |
+|------------|---------------|
 | Hardcoded `api.atuin.sh` | Collector (grep) |
 | Unauthenticated Windows TCP daemon | Collector (grep + auth-middleware presence check) |
 | `ai.enabled` defaults to Y | Collector (parse setup flow defaults) |
@@ -416,9 +416,9 @@ categories, each mapping to a collector vs. analyst decision:
 | AI tool surface enumeration | Collector (AST walk of tools/mod.rs enum) + analyst commentary |
 | Prompt-fatigue failure mode | Pure analyst — this is a threat-model observation |
 
-Most findings have a collector component. The analyst layer earns
-its cost on the composition/reasoning findings, not the
-enumeration findings. This is the right split.
+Most conclusions have a collector component. The analyst layer earns
+its cost on the composition/reasoning conclusions, not the
+enumeration conclusions. This is the right split.
 
 ---
 
@@ -487,10 +487,10 @@ Results bearing on this architecture:
 ### What broke the proposed schema
 
 The first-pass schema in
-`design/signal-storage-evolution.md` handled most findings but
+`design/signal-storage-evolution.md` handled most conclusions but
 had specific gaps the round-2 output exposed:
 
-1. **Severity isn't always a scalar.** A finding like "daemon
+1. **Severity isn't always a scalar.** A conclusion like "daemon
    unauthenticated" was rated "medium on shared hosts, low on
    single-user." Single-enum severity is too rigid; the schema
    needs:
@@ -502,10 +502,10 @@ had specific gaps the round-2 output exposed:
    }
    ```
 
-2. **"Positive" severity is needed.** The round-2 §7 finding
+2. **"Positive" severity is needed.** The round-2 §7 conclusion
    reduced prior risk rather than surfacing new risk. It doesn't
    fit critical/high/medium/low/informational. Add `positive` as
-   a first-class enum value with semantics "this finding reduces
+   a first-class enum value with semantics "this conclusion reduces
    a prior-assessed risk."
 3. **"Informational by design" distinct from "informational."**
    `Command::env_clear` not called for AI shell tool is a
@@ -516,7 +516,7 @@ had specific gaps the round-2 output exposed:
    watch this."
 4. **Supersession between rounds.** The round-2 §7 explicitly
    supersedes the round-1 atuin-ai assessment. Without a
-   `supersedes: []FindingID` field, the trail of "this was wrong,
+   `supersedes: []ConclusionID` field, the trail of "this was wrong,
    here's why" disappears — which is itself the trust signal
    about analyst quality.
 5. **Verdict-vs-rationale split is load-bearing.** Every round-2
@@ -525,7 +525,7 @@ had specific gaps the round-2 output exposed:
    code-path trace. The schema should have both:
 
    ```go
-   type Finding struct {
+   type Conclusion struct {
        Verdict   string  // one sentence, dense
        Rationale string  // markdown, multi-paragraph
        ...
@@ -536,7 +536,7 @@ had specific gaps the round-2 output exposed:
    losing the reasoning (serve rationale to humans).
 6. **Methodology catalog wants its own type.** The round-2 §B was
    a structured catalog of grep patterns organized by signal
-   group. Not a Finding, not a free-text sidebar. Needs:
+   group. Not a Conclusion, not a free-text sidebar. Needs:
 
    ```go
    type MethodologyCatalog struct {
@@ -556,7 +556,7 @@ had specific gaps the round-2 output exposed:
 7. **Positive-absence signals want a distinct type.** Round-2 §C
    listed "checked and chose not to flag" items: unsafe-code
    absent, panic paths absent from SSE parsing, SQL injection
-   shape absent from sqlx usage. These are *not* findings —
+   shape absent from sqlx usage. These are *not* conclusions —
    they're the inverse. Without representation they're
    indistinguishable from unexamined absences. Proposal:
 
@@ -577,15 +577,15 @@ now be:
 type AnalystOutput struct {
     Attribution        AgentAttribution
     Target             CanonicalURI
-    Findings           []Finding
+    Conclusions        []Conclusion
     PositiveAbsences   []PositiveAbsence
     MethodologyTrace   *MethodologyCatalog   // optional, requested
     Supersedes         []AnalystOutputID     // rounds before this one
     ReframesFrom       []string              // free-text notes on cross-analyst engagement
 }
 
-type Finding struct {
-    ID              FindingID
+type Conclusion struct {
+    ID              ConclusionID
     Verdict         string  // one sentence
     Rationale       string  // markdown body
     Severity        Severity
@@ -593,9 +593,9 @@ type Finding struct {
     Category        string
     SignalType      *string  // fk into registry
     Citations       []Citation
-    Supersedes      []FindingID
-    AnswersQuestion *QuestionID  // if this finding responds to a VerificationAsk
-    RelatedFindings []FindingID
+    Supersedes      []ConclusionID
+    AnswersQuestion *QuestionID  // if this conclusion responds to a VerificationAsk
+    RelatedConclusions []ConclusionID
 }
 
 type Severity struct {
@@ -609,7 +609,7 @@ type SeverityValue enum {
     Medium
     Low
     Informational
-    Positive  // finding reduces prior risk
+    Positive  // conclusion reduces prior risk
 }
 ```
 
@@ -624,13 +624,13 @@ The round-2 §7 revision is valuable enough to warrant its own
 invocation pattern beyond `analyze`:
 
 ```
-signatory://verify/{finding_id}?depth=security
+signatory://verify/{conclusion_id}?depth=security
 ```
 
-Re-invoke a specific prior finding with updated grounding (newer
+Re-invoke a specific prior conclusion with updated grounding (newer
 commit, different depth, different model). The output is a new
 AnalystOutput that `Supersedes` the prior one. This makes
-"re-analyze a specific uncertain finding" cheap relative to
+"re-analyze a specific uncertain conclusion" cheap relative to
 "re-run the whole analysis."
 
 ### Methodology trace as a side output
@@ -662,9 +662,9 @@ round 1 covers the pre-correction state; both rounds together
 exercise the supersession relationship.
 
 A reasonable v0.1 implementation discipline: **every struct
-field should be explainable via a specific concrete finding
+field should be explainable via a specific concrete conclusion
 from the atuin analysis.** If we can't point to "this field
-exists because this round-2 finding had this property," the
+exists because this round-2 conclusion had this property," the
 field is speculative and should wait.
 
 ---
@@ -672,30 +672,30 @@ field is speculative and should wait.
 ## Schema revisions post-trial (2026-04-14)
 
 We ran a targeted schema-validation trial with the security analyst:
-emit §5, §7, §8 as `Finding`s, the round-2 §B catalog as a
+emit §5, §7, §8 as `Conclusion`s, the round-2 §B catalog as a
 `MethodologyCatalog`, and two §C items as `PositiveAbsence`s, in
 structured JSON. The emission is preserved at
 [`analysis/atuin-schema-trial-response.json`](analysis/atuin-schema-trial-response.json)
 and the analyst's meta-feedback at
 [`analysis/atuin-schema-trial-feedback.md`](analysis/atuin-schema-trial-feedback.md).
 
-The schema held — every structure was used, no findings had to be
+The schema held — every structure was used, no conclusions had to be
 dropped or wholesale reshaped. But the meta-feedback identified
 five concrete gaps and four field-shape refinements.
 
 ### Gaps to close (must-have for v1)
 
-1. **`Finding.Prerequisites []string`** (or `ThreatModel`). Structural
+1. **`Conclusion.Prerequisites []string`** (or `ThreatModel`). Structural
    qualifiers like "requires sync-server compromise" (F002) or
    "requires `ATUIN_AI__ADDITIONAL_CAPS` env var set" (F001)
    belong alongside severity, not buried in rationale. Unqueryable
    otherwise.
-2. **`Finding.RemediationHint`** (or `FixShape`). Machine-consumable
+2. **`Conclusion.RemediationHint`** (or `FixShape`). Machine-consumable
    fix suggestions — "chmod 0600 after bind", "add cargo-deny CI
    step". Downstream tooling (issue-tracker backfills, automated
    PR suggestions) needs these structured.
 3. **`AnalystOutput.Observations []Observation`**. Top-level slot
-   for analysis that isn't a finding. The Michelle-trajectory trust
+   for analysis that isn't a conclusion. The Michelle-trajectory trust
    analysis from round 2 is the motivating case: trust-model
    observation about contributor shape, not a vuln, not an absence,
    not a methodology pattern. `RoundNotes` was too TL;DR-shaped.
@@ -756,14 +756,14 @@ five concrete gaps and four field-shape refinements.
        Kind       string // "corrects" | "refines" | "deprecates"
    }
 
-   type Finding struct {
+   type Conclusion struct {
        ...
        Supersedes []Supersession   // was []string
    }
    ```
 
-   The `Kind` distinction is useful: *corrects* = prior finding was
-   wrong, *refines* = same finding with better detail, *deprecates*
+   The `Kind` distinction is useful: *corrects* = prior conclusion was
+   wrong, *refines* = same conclusion with better detail, *deprecates*
    = the prior concern no longer applies (e.g., upstream fixed it).
    Same structure at AnalystOutput level for round-to-round
    supersession.
@@ -772,7 +772,7 @@ five concrete gaps and four field-shape refinements.
    verdict-for-F001 thin because it didn't convey "this is a
    correction." No schema field fix — instead, the skill/prompt
    style guide should say: *for corrections (severity: positive,
-   non-empty supersedes), the verdict should state the finding
+   non-empty supersedes), the verdict should state the conclusion
    **and** frame it as correcting prior work.* Schema handles the
    structure; style handles the prose affordances.
 
@@ -789,7 +789,7 @@ five concrete gaps and four field-shape refinements.
   corpus scale when absences cross-reference methodology patterns,
   but will often be empty for small runs.
 
-### One meta-finding worth preserving
+### One meta-conclusion worth preserving
 
 The analyst's answer to trial question 8:
 
@@ -815,7 +815,7 @@ type AnalystOutput struct {
     Attribution      AgentAttribution          `json:"attribution"`
     Target           string                    `json:"target"`
     TargetCommit     string                    `json:"target_commit,omitempty"`
-    Findings         []Finding                 `json:"findings"`
+    Conclusions      []Conclusion              `json:"conclusions"`
     PositiveAbsences []PositiveAbsence         `json:"positive_absences,omitempty"`
     Observations     []Observation             `json:"observations,omitempty"` // NEW
     MethodologyTrace *MethodologyCatalog       `json:"methodology_trace,omitempty"`
@@ -833,7 +833,7 @@ type Observation struct {
     Citations   []Citation `json:"citations,omitempty"`
 }
 
-type Finding struct {
+type Conclusion struct {
     ID              string          `json:"id"`
     Verdict         string          `json:"verdict"`
     Rationale       string          `json:"rationale"`
@@ -842,11 +842,11 @@ type Finding struct {
     Category        string          `json:"category"`
     SignalType      *string         `json:"signal_type,omitempty"`
     Citations       []Citation      `json:"citations,omitempty"`
-    Prerequisites  []string         `json:"prerequisites,omitempty"` // NEW
+    Prerequisites   []string        `json:"prerequisites,omitempty"` // NEW
     RemediationHints []string       `json:"remediation_hints,omitempty"` // NEW
     Supersedes      []Supersession  `json:"supersedes,omitempty"`    // CHANGED
     AnswersQuestion *string         `json:"answers_question,omitempty"`
-    RelatedFindings []string        `json:"related_findings,omitempty"`
+    RelatedConclusions []string     `json:"related_conclusions,omitempty"`
 }
 
 type Citation struct {
@@ -892,5 +892,5 @@ Not blocking v1 but worth tracking:
 - `RunMetadata` envelope placement (MCP response vs. analyst
   output) — design decision, can land in a follow-up.
 - Style guide for verdict phrasing (corrections, conditional
-  severity, design-intent findings) — lives in the
+  severity, design-intent conclusions) — lives in the
   `vet-dependency` skill, not in the schema.

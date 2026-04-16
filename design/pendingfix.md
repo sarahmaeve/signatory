@@ -11,7 +11,7 @@ git history is the record.
 ## Conventions
 
 Each item has:
-- **Source:** which review surfaced it (commit hash + finding ID)
+- **Source:** which review surfaced it (commit hash + conclusion ID)
 - **Severity:** must-fix / should-fix / nice-to-have
 - **Sketch:** what to do (specific, not "consider improving")
 
@@ -419,7 +419,7 @@ boundary before acting on."
 When a review surfaces something we can't fix in the same change,
 append an entry with:
 - A short, action-shaped heading
-- The source review (commit hash / agent / finding ID)
+- The source review (commit hash / agent / conclusion ID)
 - Severity per the convention above
 - A specific sketch of what to do — not "consider improving"
 

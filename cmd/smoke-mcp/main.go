@@ -173,7 +173,7 @@ func run() error {
 		"signatory_detail",
 		"signatory_signals",
 		"signatory_show_analyses",
-		"signatory_show_findings",
+		"signatory_show_conclusions",
 		"signatory_show_methodology",
 		"signatory_survey",
 	} {
@@ -230,9 +230,9 @@ func run() error {
 		return rep.finish(session)
 	}
 	rep.assertTrue("help: content is non-empty", helpData.Content != "")
-	rep.assertTrue("help: content mentions analyze/show_findings/posture",
+	rep.assertTrue("help: content mentions analyze/show_conclusions/posture",
 		containsAll(helpData.Content,
-			"signatory_analyze", "signatory_show_findings", "signatory://posture"))
+			"signatory_analyze", "signatory_show_conclusions", "signatory://posture"))
 
 	// 6. resources/read signatory://config — the refactor-critical
 	//    assertion: the dispatch layer stamped metadata.server_version

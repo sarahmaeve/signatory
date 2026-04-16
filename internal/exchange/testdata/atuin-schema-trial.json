@@ -12,7 +12,7 @@
     {"prior_id": "r1", "prior_round": 1, "kind": "refines"}
   ],
   "round_notes": "One round-1 finding was materially wrong in the user's favor: the characterization of atuin-ai as a remote LLM that can instruct the CLI to run shell commands, read files, or write files, defended primarily by a permission prompt. Source reading in round 2 (see F001) shows that for `execute_shell_command`, `read_file`, and `create_file`, a client-hardcoded capability allowlist gates the tool at the transport layer before the permission prompt ever runs, and those capabilities are not advertised in any default or user-facing configuration. The permission prompt is the second line of defense, not the first. F001 supersedes the round-1 AI-subsystem assessment. F002 (sync censorship) and F003 (daemon peer-cred) are new findings surfaced by the round-2 source trace and do not correspond to prior round-1 findings.",
-  "findings": [
+  "conclusions": [
     {
       "id": "F001",
       "verdict": "The atuin-ai subsystem gates remote-instructed shell/read/write tool calls at the transport layer via a client-hardcoded capability allowlist that advertises only `client_v1_atuin_history` in any default or user-configurable configuration, placing capability enforcement ahead of the user-facing permission prompt.",

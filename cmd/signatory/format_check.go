@@ -15,7 +15,7 @@ import (
 
 // FormatCheckCmd checks an analyst output file for structural
 // conformance to the signatory v1 schema. It is NOT a semantic
-// validator: it does not assess whether the analyst's findings are
+// validator: it does not assess whether the analyst's conclusions are
 // correct, well-calibrated, or trustworthy. It only confirms that
 // the document parses, has every required field, uses valid enum
 // values, and satisfies the structural invariants encoded in
@@ -34,7 +34,7 @@ type FormatCheckCmd struct {
 	File    string `arg:"" help:"Path to a JSON or markdown analyst output file." type:"existingfile"`
 	Format  string `help:"Input format: json, markdown, or auto (detect from extension/content)." default:"auto" enum:"json,markdown,auto"`
 	Quiet   bool   `help:"Suppress the one-line OK summary; errors still print. Mutually exclusive with --summary." short:"q"`
-	Summary bool   `help:"Print structural summary of the document (findings, absences, methodology) without prose. Replaces the one-line OK." short:"s"`
+	Summary bool   `help:"Print structural summary of the document (conclusions, absences, methodology) without prose. Replaces the one-line OK." short:"s"`
 }
 
 func (cmd *FormatCheckCmd) Run(globals *Globals) error {
@@ -65,9 +65,9 @@ func (cmd *FormatCheckCmd) Run(globals *Globals) error {
 		if out.MethodologyTrace != nil {
 			patternCount = len(out.MethodologyTrace.Patterns)
 		}
-		fmt.Printf("OK %s (%s): %d finding(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+		fmt.Printf("OK %s (%s): %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
 			cmd.File, format,
-			len(out.Findings),
+			len(out.Conclusions),
 			len(out.PositiveAbsences),
 			len(out.Observations),
 			patternCount,
@@ -80,12 +80,12 @@ func (cmd *FormatCheckCmd) Run(globals *Globals) error {
 // without including any of its prose fields (verdict, rationale,
 // observation body, round_notes content). The intent is to let a
 // reader see the *shape* of an analysis — what severities, what
-// signal types, what categories, how many citations per finding,
+// signal types, what categories, how many citations per conclusion,
 // what methodology groups — without spoilers on the actual claims
 // or having to read several thousand words of nested rationale.
 //
 // Rendering guidelines:
-//   - Identifying fields are shown verbatim (Finding.ID, IDs of
+//   - Identifying fields are shown verbatim (Conclusion.ID, IDs of
 //     methodology patterns, etc.).
 //   - Naming fields that ARE prose but identify entries are
 //     truncated to a fixed width (PositiveAbsence.PatternChecked,
@@ -108,9 +108,9 @@ func printSummary(w io.Writer, path, format string, out *exchange.AnalystOutput)
 		fmt.Fprintf(w, "  supersedes %d prior\n", len(out.Supersedes))
 	}
 
-	fmt.Fprintf(w, "\nfindings (%d):\n", len(out.Findings))
-	for i := range out.Findings {
-		printFindingSummary(w, &out.Findings[i])
+	fmt.Fprintf(w, "\nconclusions (%d):\n", len(out.Conclusions))
+	for i := range out.Conclusions {
+		printConclusionSummary(w, &out.Conclusions[i])
 	}
 
 	if len(out.PositiveAbsences) > 0 {
@@ -149,10 +149,10 @@ func printSummary(w io.Writer, path, format string, out *exchange.AnalystOutput)
 	}
 }
 
-// printFindingSummary writes the structural summary of one Finding:
+// printConclusionSummary writes the structural summary of one Conclusion:
 // IDs, flags, counts, signal type. Verdict and rationale (the prose)
 // are deliberately omitted.
-func printFindingSummary(w io.Writer, f *exchange.Finding) {
+func printConclusionSummary(w io.Writer, f *exchange.Conclusion) {
 	sevTag := string(f.Severity.Default)
 	if n := len(f.Severity.ByContext); n > 0 {
 		sevTag += fmt.Sprintf(" +%d ctx", n)
@@ -173,8 +173,8 @@ func printFindingSummary(w io.Writer, f *exchange.Finding) {
 	}
 	fmt.Fprintf(w, "      cite/prereq/fix: %d/%d/%d\n",
 		len(f.Citations), len(f.Prerequisites), len(f.RemediationHints))
-	if n := len(f.RelatedFindings); n > 0 {
-		fmt.Fprintf(w, "      related: %s\n", strings.Join(f.RelatedFindings, ", "))
+	if n := len(f.RelatedConclusions); n > 0 {
+		fmt.Fprintf(w, "      related: %s\n", strings.Join(f.RelatedConclusions, ", "))
 	}
 }
 

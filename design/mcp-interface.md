@@ -49,7 +49,7 @@ Retrieve or collect the trust profile for a package, repo, or identity.
 - Burn status (if any)
 - Key signals grouped by category (vitality, governance, publication
   integrity, hygiene, criticality)
-- Anomalies or notable findings highlighted
+- Anomalies or notable conclusions highlighted
 - Forgery resistance level for each signal
 
 **Design note:** The LLM should use this tool with `refresh: false`

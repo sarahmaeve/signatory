@@ -44,12 +44,12 @@ func TestHelpResource_HappyPath(t *testing.T) {
 	// fail because we legitimately renamed a concept, update the
 	// anchors; don't just delete them.
 	for _, anchor := range []string{
-		"signatory",               // the project name appears
-		"supply-chain",            // scope statement
-		"signatory_analyze",       // question→tool map includes analyze
-		"signatory_show_findings", // and findings
-		"signatory://posture",     // and posture resource
-		"NotFound",                // failure-mode explanation
+		"signatory",                  // the project name appears
+		"supply-chain",               // scope statement
+		"signatory_analyze",          // question→tool map includes analyze
+		"signatory_show_conclusions", // and conclusions
+		"signatory://posture",        // and posture resource
+		"NotFound",                   // failure-mode explanation
 	} {
 		assert.True(t,
 			strings.Contains(decoded.Content, anchor),

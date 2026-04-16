@@ -8,8 +8,8 @@ import (
 
 // IngestCmd loads a JSON or markdown analyst output file into the
 // signatory store. It validates the document via format-check
-// internals, then writes the structured rows per migration v4
-// (analyst_outputs + findings + observations + methodology + ...).
+// internals, then writes the structured rows per migration v5
+// (analyst_outputs + conclusions + observations + methodology + ...).
 //
 // Idempotent on content: re-ingesting the same file is a no-op
 // because analyst_outputs.content_hash has a UNIQUE constraint.
@@ -72,8 +72,8 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 		}
 		fmt.Printf("Ingested %s (%s) → output_id=%s entity_id=%s%s\n",
 			cmd.File, format, result.OutputID, result.EntityID, idempotency)
-		fmt.Printf("  %d finding(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
-			len(out.Findings), len(out.PositiveAbsences),
+		fmt.Printf("  %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+			len(out.Conclusions), len(out.PositiveAbsences),
 			len(out.Observations), patternCount)
 	}
 	return nil

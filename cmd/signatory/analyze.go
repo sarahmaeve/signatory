@@ -280,14 +280,14 @@ func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
 				ao.OutputID[:8], ao.AnalystID, ao.Round, ageStr)
 			fmt.Printf("    model=%s  ingested=%s\n",
 				ao.Model, ao.IngestedAt)
-			fmt.Printf("    %d finding(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
-				ao.FindingsCount, ao.PositiveAbsenceCount,
+			fmt.Printf("    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+				ao.ConclusionsCount, ao.PositiveAbsenceCount,
 				ao.ObservationCount, ao.PatternCount)
 			if ao.SourcePath != "" {
 				fmt.Printf("    source: %s\n", ao.SourcePath)
 			}
 		}
-		fmt.Printf("Use `signatory show-findings --target %s` for cross-output finding queries.\n",
+		fmt.Printf("Use `signatory show-conclusions --target %s` for cross-output conclusion queries.\n",
 			p.Entity.CanonicalURI)
 		fmt.Println()
 	}

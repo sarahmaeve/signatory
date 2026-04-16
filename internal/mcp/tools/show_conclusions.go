@@ -12,24 +12,24 @@ import (
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
-// ShowFindingsTool implements signatory_show_findings.
+// ShowConclusionsTool implements signatory_show_conclusions.
 //
-// Queries findings across ingested analyst outputs. The severity filter
+// Queries conclusions across ingested analyst outputs. The severity filter
 // accepts an array of string values matching exchange.SeverityValue; each
 // value is validated — an unrecognised severity is a schema violation.
 // design_intent is a nullable bool (pointer): when present, limits to
-// findings with that design_intent flag value.
-type ShowFindingsTool struct {
+// conclusions with that design_intent flag value.
+type ShowConclusionsTool struct {
 	Store store.Store
 }
 
-func (t *ShowFindingsTool) Name() string { return "signatory_show_findings" }
+func (t *ShowConclusionsTool) Name() string { return "signatory_show_conclusions" }
 
-func (t *ShowFindingsTool) Description() string {
-	return "USE THIS when the user asks about specific concerns or findings across analyses — 'what findings mention supply-chain risk?', 'show medium-severity findings for X', 'are there design-intent positives recorded?'. Searches individual Finding records across every ingested analysis, with filters for target, severity, category, signal_type, and design-intent. Returns per-finding records; use signatory_show_analyses when the user wants analysis-level summaries, not individual findings."
+func (t *ShowConclusionsTool) Description() string {
+	return "USE THIS when the user asks about specific concerns or conclusions across analyses — 'what conclusions mention supply-chain risk?', 'show medium-severity conclusions for X', 'are there design-intent positives recorded?'. Searches individual Conclusion records across every ingested analysis, with filters for target, severity, category, signal_type, and design-intent. Returns per-conclusion records; use signatory_show_analyses when the user wants analysis-level summaries, not individual conclusions."
 }
 
-func (t *ShowFindingsTool) InputSchema() json.RawMessage {
+func (t *ShowConclusionsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -50,9 +50,9 @@ func (t *ShowFindingsTool) InputSchema() json.RawMessage {
 	}`)
 }
 
-// showFindingsInput is the typed input for signatory_show_findings.
+// showConclusionsInput is the typed input for signatory_show_conclusions.
 // design_intent uses *bool so we can distinguish "not set" from false.
-type showFindingsInput struct {
+type showConclusionsInput struct {
 	Target       string   `json:"target,omitempty"`
 	AnalystID    string   `json:"analyst_id,omitempty"`
 	SignalType   string   `json:"signal_type,omitempty"`
@@ -62,10 +62,10 @@ type showFindingsInput struct {
 }
 
 // Compile-time interface check.
-var _ mcp.Tool = (*ShowFindingsTool)(nil)
+var _ mcp.Tool = (*ShowConclusionsTool)(nil)
 
-func (t *ShowFindingsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Response {
-	var in showFindingsInput
+func (t *ShowConclusionsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Response {
+	var in showConclusionsInput
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
@@ -89,7 +89,7 @@ func (t *ShowFindingsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 		limit = 20
 	}
 
-	filter := store.FindingFilter{
+	filter := store.ConclusionFilter{
 		EntityURI:  normalizeTargetURI(in.Target),
 		AnalystID:  in.AnalystID,
 		SignalType: in.SignalType,
@@ -100,22 +100,22 @@ func (t *ShowFindingsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 		filter.DesignIntentOnly = true
 	}
 
-	rows, err := t.Store.ListFindings(ctx, filter)
+	rows, err := t.Store.ListConclusions(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
 		return mcp.Err(mcp.CodeNotFound,
 			"entity not found: "+in.Target,
 			map[string]string{"target": in.Target})
 	}
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, "list findings failed: "+err.Error(), nil)
+		return mcp.Err(mcp.CodeInternalError, "list conclusions failed: "+err.Error(), nil)
 	}
 
 	if rows == nil {
-		rows = []store.FindingSummary{}
+		rows = []store.ConclusionSummary{}
 	}
 
 	return mcp.OK(map[string]interface{}{
-		"findings": rows,
-		"count":    len(rows),
+		"conclusions": rows,
+		"count":       len(rows),
 	})
 }

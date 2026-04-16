@@ -2,7 +2,7 @@
 // analyst exchange in signatory's dual-analyst architecture.
 //
 // An AnalystOutput is the top-level envelope produced by a provenance
-// or security analyst. It contains findings, positive absences,
+// or security analyst. It contains conclusions, positive absences,
 // observations, an optional methodology catalog, and supersession /
 // cross-analyst reference metadata. The shape was validated against
 // a three-round analysis of atuin (see
@@ -22,7 +22,7 @@ type AnalystOutput struct {
 	Attribution      AgentAttribution    `json:"attribution" yaml:"attribution"`
 	Target           string              `json:"target" yaml:"target"`
 	TargetCommit     string              `json:"target_commit,omitempty" yaml:"target_commit,omitempty"`
-	Findings         []Finding           `json:"findings" yaml:"findings"`
+	Conclusions      []Conclusion        `json:"conclusions" yaml:"conclusions"`
 	PositiveAbsences []PositiveAbsence   `json:"positive_absences,omitempty" yaml:"positive_absences,omitempty"`
 	Observations     []Observation       `json:"observations,omitempty" yaml:"observations,omitempty"`
 	MethodologyTrace *MethodologyCatalog `json:"methodology_trace,omitempty" yaml:"methodology_trace,omitempty"`
@@ -43,28 +43,28 @@ type AgentAttribution struct {
 	Round         int    `json:"round,omitempty" yaml:"round,omitempty"`
 }
 
-// Finding describes a single issue the analyst surfaced. Verdict is
+// Conclusion describes a single issue the analyst surfaced. Verdict is
 // the one-sentence distilled answer; Rationale is the markdown-bodied
 // justification. Severity may be conditional on deployment context.
 //
 // Prerequisites captures exploit preconditions ("requires sync-server
 // compromise") as structured data rather than prose. RemediationHints
-// gives machine-consumable fix suggestions. Supersedes marks findings
+// gives machine-consumable fix suggestions. Supersedes marks conclusions
 // that revise earlier analysis rounds.
-type Finding struct {
-	ID               string         `json:"id" yaml:"id"`
-	Verdict          string         `json:"verdict" yaml:"verdict"`
-	Rationale        string         `json:"rationale" yaml:"rationale"`
-	Severity         Severity       `json:"severity" yaml:"severity"`
-	DesignIntent     bool           `json:"design_intent,omitempty" yaml:"design_intent,omitempty"`
-	Category         string         `json:"category" yaml:"category"`
-	SignalType       *string        `json:"signal_type,omitempty" yaml:"signal_type,omitempty"`
-	Citations        []Citation     `json:"citations,omitempty" yaml:"citations,omitempty"`
-	Prerequisites    []string       `json:"prerequisites,omitempty" yaml:"prerequisites,omitempty"`
-	RemediationHints []string       `json:"remediation_hints,omitempty" yaml:"remediation_hints,omitempty"`
-	Supersedes       []Supersession `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
-	AnswersQuestion  *string        `json:"answers_question,omitempty" yaml:"answers_question,omitempty"`
-	RelatedFindings  []string       `json:"related_findings,omitempty" yaml:"related_findings,omitempty"`
+type Conclusion struct {
+	ID                 string         `json:"id" yaml:"id"`
+	Verdict            string         `json:"verdict" yaml:"verdict"`
+	Rationale          string         `json:"rationale" yaml:"rationale"`
+	Severity           Severity       `json:"severity" yaml:"severity"`
+	DesignIntent       bool           `json:"design_intent,omitempty" yaml:"design_intent,omitempty"`
+	Category           string         `json:"category" yaml:"category"`
+	SignalType         *string        `json:"signal_type,omitempty" yaml:"signal_type,omitempty"`
+	Citations          []Citation     `json:"citations,omitempty" yaml:"citations,omitempty"`
+	Prerequisites      []string       `json:"prerequisites,omitempty" yaml:"prerequisites,omitempty"`
+	RemediationHints   []string       `json:"remediation_hints,omitempty" yaml:"remediation_hints,omitempty"`
+	Supersedes         []Supersession `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
+	AnswersQuestion    *string        `json:"answers_question,omitempty" yaml:"answers_question,omitempty"`
+	RelatedConclusions []string       `json:"related_conclusions,omitempty" yaml:"related_conclusions,omitempty"`
 }
 
 // Severity captures a finding's severity, optionally varying by
@@ -110,7 +110,7 @@ type Citation struct {
 }
 
 // ScopeRef references a broader-than-line scope of source — used
-// when a finding or absence applies to a whole crate, directory,
+// when a conclusion or absence applies to a whole crate, directory,
 // tree, or workspace rather than specific lines.
 type ScopeRef struct {
 	Kind string `json:"kind" yaml:"kind"` // see enums.go
@@ -133,9 +133,9 @@ type PositiveAbsence struct {
 }
 
 // Observation holds trust-model-relevant analysis that isn't a
-// finding, positive absence, or methodology pattern. Typical uses:
+// conclusion, positive absence, or methodology pattern. Typical uses:
 // contributor-trajectory notes, project-personality texture,
-// cross-cutting context that resists the Finding shape.
+// cross-cutting context that resists the Conclusion shape.
 //
 // Introduced in v1 after the atuin trial surfaced the need for a
 // slot for the "Michelle Tilley clean-trajectory" analysis, which
@@ -163,7 +163,7 @@ type MethodologyCatalog struct {
 // across projects. CollectorHint tells downstream whether a
 // deterministic collector can implement the pattern and how precisely.
 // ComposesWith lists other pattern IDs whose co-occurrence surfaces
-// findings neither pattern alone can produce.
+// conclusions neither pattern alone can produce.
 type MethodologyPattern struct {
 	ID                 string        `json:"id" yaml:"id"`
 	SignalGroup        string        `json:"signal_group" yaml:"signal_group"`
@@ -189,7 +189,7 @@ type CollectorHint struct {
 	MissMode       MissMode       `json:"miss_mode,omitempty" yaml:"miss_mode,omitempty"`
 }
 
-// Supersession marks that a later finding or AnalystOutput replaces
+// Supersession marks that a later conclusion or AnalystOutput replaces
 // an earlier one. Kind distinguishes correction (prior was wrong)
 // from refinement (prior was incomplete) from deprecation (prior no
 // longer applies — e.g., upstream fixed it).

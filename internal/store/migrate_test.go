@@ -226,10 +226,8 @@ func TestMigration_BackupNonexistentFile(t *testing.T) {
 // --- Rollback ---
 
 // TestMigration_RollbackDown verifies that rolling back one migration
-// at a time unwinds the schema step-by-step. With three migrations in
-// place (v1: initial schema, v2: entity-model-v2, v3: append-only
-// triggers), a full rollback walks vN → vN-1 → ... → v0 through N
-// migrateDown calls.
+// at a time unwinds the schema step-by-step. A full rollback walks
+// vN → vN-1 → ... → v0 through N migrateDown calls.
 func TestMigration_RollbackDown(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rollback.db")
@@ -253,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v4 → v3. Drops the analyst-output stream
+	// First rollback: v5 → v4. Renames conclusion tables back to finding
+	// tables. The v4-and-earlier data we care about (entities, signals,
+	// burns) is unaffected.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 4, version)
+
+	// Second rollback: v4 → v3. Drops the analyst-output stream
 	// tables and signal_evidence; removes the signals.details column.
 	// The v3-and-earlier data we care about (entities, signals,
 	// burns) is unaffected.
@@ -264,7 +272,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, version)
 
-	// Second rollback: v3 → v2. Drops the append-only triggers.
+	// Third rollback: v3 → v2. Drops the append-only triggers.
 	// Data is unaffected.
 	err = migrateDown(t.Context(), db, path)
 	require.NoError(t, err)
@@ -278,7 +286,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err, "entity should still be readable after v3 rollback")
 	assert.Equal(t, "rollback-test", v2ShortName)
 
-	// Third rollback: v2 → v1. Data should survive; name column restored.
+	// Fourth rollback: v2 → v1. Data should survive; name column restored.
 	err = migrateDown(t.Context(), db, path)
 	require.NoError(t, err)
 
@@ -291,7 +299,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err, "v1 name column should be readable after rollback from v2")
 	assert.Equal(t, "rollback-test", v1Name, "v2 short_name should have been copied back to v1 name")
 
-	// Fourth rollback: v1 → v0. Entities table dropped.
+	// Fifth rollback: v1 → v0. Entities table dropped.
 	err = migrateDown(t.Context(), db, path)
 	require.NoError(t, err)
 
@@ -494,7 +502,17 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v3 (drops analyst-output stream + signal evidence). ---
+	// --- Down: vN → v4 (renames conclusion tables back to finding tables). ---
+	// The v5 migration only renames tables; no data is dropped.
+	// The v2 entity/signal data we care about for this test is untouched.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 4, version)
+
+	// --- Down: v4 → v3 (drops analyst-output stream + signal evidence). ---
 	// The v4 migration adds new tables that have no v3 precedent;
 	// rolling back drops them and removes the signals.details column.
 	// The v2 entity/signal data we care about for this test is

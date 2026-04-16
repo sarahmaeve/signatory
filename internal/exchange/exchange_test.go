@@ -52,7 +52,7 @@ func TestAtuinTrial_FixtureValidates(t *testing.T) {
 
 func TestAtuinTrial_Counts(t *testing.T) {
 	out := decodeFixture(t)
-	assert.Len(t, out.Findings, 3, "three findings from round 2 (§7, §8, §5)")
+	assert.Len(t, out.Conclusions, 3, "three conclusions from round 2 (§7, §8, §5)")
 	assert.Len(t, out.PositiveAbsences, 2, "two positive absences from §C")
 
 	require.NotNil(t, out.MethodologyTrace, "methodology_trace required for this fixture")
@@ -101,15 +101,15 @@ func TestAtuinTrial_Roundtrip(t *testing.T) {
 }
 
 func TestAtuinTrial_F001_PositiveCorrection(t *testing.T) {
-	// F001 is the canonical "self-correction" finding: severity
-	// positive, supersedes a prior finding with kind=corrects,
+	// F001 is the canonical "self-correction" conclusion: severity
+	// positive, supersedes a prior conclusion with kind=corrects,
 	// design_intent=true (the capability-gating is deliberate).
 	// This pattern was the primary motivator for several v1
 	// schema changes, so it deserves a focused test.
 	out := decodeFixture(t)
-	require.NotEmpty(t, out.Findings)
+	require.NotEmpty(t, out.Conclusions)
 
-	f := findFinding(t, out, "F001")
+	f := findConclusion(t, out, "F001")
 
 	assert.Equal(t, SeverityPositive, f.Severity.Default,
 		"F001 reduces a prior-assessed risk; severity should be positive")
@@ -126,12 +126,12 @@ func TestAtuinTrial_F001_PositiveCorrection(t *testing.T) {
 	assert.Equal(t, "ai_capability_gating_model", *f.SignalType)
 }
 
-func TestAtuinTrial_F002_NewMediumFinding(t *testing.T) {
-	// F002 is the new medium-severity finding (sync censorship).
+func TestAtuinTrial_F002_NewMediumConclusion(t *testing.T) {
+	// F002 is the new medium-severity conclusion (sync censorship).
 	// Has prerequisites and remediation_hints — both v1 additions
 	// driven by trial feedback.
 	out := decodeFixture(t)
-	f := findFinding(t, out, "F002")
+	f := findConclusion(t, out, "F002")
 
 	assert.Equal(t, SeverityMedium, f.Severity.Default)
 	assert.Empty(t, f.Severity.ByContext, "F002 severity is not context-conditional")
@@ -139,7 +139,7 @@ func TestAtuinTrial_F002_NewMediumFinding(t *testing.T) {
 		"F002's threat model includes the precondition 'adversary controls sync server'")
 	assert.NotEmpty(t, f.RemediationHints,
 		"F002 has concrete fix shapes the analyst surfaced")
-	assert.Empty(t, f.Supersedes, "F002 is a new finding, not a revision")
+	assert.Empty(t, f.Supersedes, "F002 is a new conclusion, not a revision")
 }
 
 func TestAtuinTrial_F003_ConditionalSeverity(t *testing.T) {
@@ -147,7 +147,7 @@ func TestAtuinTrial_F003_ConditionalSeverity(t *testing.T) {
 	// entries covering single_user (low), shared_host (medium),
 	// and multi_user+windows (medium).
 	out := decodeFixture(t)
-	f := findFinding(t, out, "F003")
+	f := findConclusion(t, out, "F003")
 
 	assert.Equal(t, SeverityMedium, f.Severity.Default)
 	require.Len(t, f.Severity.ByContext, 3,
@@ -226,7 +226,7 @@ func TestAtuinTrial_MethodologyCatalog_HitOnTargetFlag(t *testing.T) {
 	// Guard the analyst's documented split: 11 hit, 1 miss.
 	// MP-CAP-01 is the documented miss because its detection
 	// confirmed atuin's *positive* defense rather than a vuln.
-	assert.Equal(t, 11, hits, "11 patterns surfaced findings on atuin")
+	assert.Equal(t, 11, hits, "11 patterns surfaced conclusions on atuin")
 	assert.Equal(t, 1, misses, "MP-CAP-01 didn't surface a vuln on atuin (positive defense)")
 }
 
@@ -260,7 +260,7 @@ func TestAtuinTrial_TopLevelSupersedes_RefinesRound1(t *testing.T) {
 	assert.Equal(t, "r1", out.Supersedes[0].PriorID)
 	assert.Equal(t, 1, out.Supersedes[0].PriorRound)
 	assert.Equal(t, SupersessionKindRefines, out.Supersedes[0].Kind,
-		"round 2 refines round 1 — most findings preserved, one corrected, new ones added")
+		"round 2 refines round 1 — most conclusions preserved, one corrected, new ones added")
 }
 
 func TestEmptyOutput_FailsValidation(t *testing.T) {
@@ -282,17 +282,17 @@ func TestNilOutput_FailsValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "nil")
 }
 
-// findFinding looks up a Finding by ID and fails the test if absent.
+// findConclusion looks up a Conclusion by ID and fails the test if absent.
 // Used so failures in the F001/F002/F003 specific tests give a clear
-// "this finding ID is missing from the fixture" error rather than a
+// "this conclusion ID is missing from the fixture" error rather than a
 // nil-deref panic.
-func findFinding(t *testing.T, out *AnalystOutput, id string) *Finding {
+func findConclusion(t *testing.T, out *AnalystOutput, id string) *Conclusion {
 	t.Helper()
-	for i := range out.Findings {
-		if out.Findings[i].ID == id {
-			return &out.Findings[i]
+	for i := range out.Conclusions {
+		if out.Conclusions[i].ID == id {
+			return &out.Conclusions[i]
 		}
 	}
-	t.Fatalf("finding %q not found in fixture", id)
+	t.Fatalf("conclusion %q not found in fixture", id)
 	return nil
 }

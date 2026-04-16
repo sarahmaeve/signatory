@@ -49,7 +49,7 @@ func TestIngest_AtuinTrialFixture(t *testing.T) {
 
 	// Validate counts in the DB match the source document.
 	assertCount(t, s, "analyst_outputs", "id = ?", result.OutputID, 1)
-	assertCount(t, s, "findings", "output_id = ?", result.OutputID, len(out.Findings))
+	assertCount(t, s, "conclusions", "output_id = ?", result.OutputID, len(out.Conclusions))
 	assertCount(t, s, "positive_absences", "output_id = ?", result.OutputID, len(out.PositiveAbsences))
 	assertCount(t, s, "observations", "output_id = ?", result.OutputID, len(out.Observations))
 	if out.MethodologyTrace != nil {
@@ -179,7 +179,7 @@ func TestIngest_ReusesExistingEntity(t *testing.T) {
 		"existing entity's short_name should not be overwritten by ingest")
 }
 
-func TestIngest_FindingFields_PreservedFully(t *testing.T) {
+func TestIngest_ConclusionFields_PreservedFully(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 	out := loadFixture(t, "atuin-schema-trial.json")
@@ -187,13 +187,13 @@ func TestIngest_FindingFields_PreservedFully(t *testing.T) {
 	result, err := s.IngestAnalystOutput(ctx, out, "")
 	require.NoError(t, err)
 
-	// Spot-check F001 — the "positive correction" finding with
+	// Spot-check F001 — the "positive correction" conclusion with
 	// supersession, design_intent, severity_default=positive.
 	var verdict, severityDefault string
 	var designIntent int
 	err = s.db.QueryRowContext(ctx,
 		`SELECT verdict, severity_default, design_intent
-		 FROM findings WHERE output_id = ? AND finding_local_id = 'F001'`,
+		 FROM conclusions WHERE output_id = ? AND conclusion_local_id = 'F001'`,
 		result.OutputID).Scan(&verdict, &severityDefault, &designIntent)
 	require.NoError(t, err)
 	assert.Contains(t, verdict, "atuin-ai")
@@ -203,10 +203,10 @@ func TestIngest_FindingFields_PreservedFully(t *testing.T) {
 	// Supersedes row exists.
 	var priorID, kind string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT fs.prior_id, fs.kind
-		 FROM finding_supersedes fs
-		 INNER JOIN findings f ON fs.finding_id = f.id
-		 WHERE f.output_id = ? AND f.finding_local_id = 'F001'`,
+		`SELECT cs.prior_id, cs.kind
+		 FROM conclusion_supersedes cs
+		 INNER JOIN conclusions c ON cs.conclusion_id = c.id
+		 WHERE c.output_id = ? AND c.conclusion_local_id = 'F001'`,
 		result.OutputID).Scan(&priorID, &kind)
 	require.NoError(t, err)
 	assert.Equal(t, "r1-ai-subsystem-threat", priorID)
@@ -221,13 +221,13 @@ func TestIngest_ConditionalSeverity_Stored(t *testing.T) {
 	require.NoError(t, err)
 
 	// F003 has three by_context entries (single_user, shared_host,
-	// multi_user+windows). All should be in finding_severity_contexts.
+	// multi_user+windows). All should be in conclusion_severity_contexts.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT fsc.host_isolation, fsc.platform, fsc.value
-		 FROM finding_severity_contexts fsc
-		 INNER JOIN findings f ON fsc.finding_id = f.id
-		 WHERE f.output_id = ? AND f.finding_local_id = 'F003'
-		 ORDER BY fsc.host_isolation, fsc.platform`,
+		`SELECT csc.host_isolation, csc.platform, csc.value
+		 FROM conclusion_severity_contexts csc
+		 INNER JOIN conclusions c ON csc.conclusion_id = c.id
+		 WHERE c.output_id = ? AND c.conclusion_local_id = 'F003'
+		 ORDER BY csc.host_isolation, csc.platform`,
 		result.OutputID)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -257,7 +257,7 @@ func TestIngest_Citations_PolymorphicFK(t *testing.T) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT parent_kind, COUNT(*) FROM citations
 		 WHERE parent_id IN (
-		   SELECT id FROM findings WHERE output_id = ?
+		   SELECT id FROM conclusions WHERE output_id = ?
 		   UNION SELECT id FROM positive_absences WHERE output_id = ?
 		 )
 		 GROUP BY parent_kind`,
@@ -272,7 +272,7 @@ func TestIngest_Citations_PolymorphicFK(t *testing.T) {
 		require.NoError(t, rows.Scan(&kind, &count))
 		kinds[kind] = count
 	}
-	assert.Greater(t, kinds["finding"], 0, "findings have citations")
+	assert.Greater(t, kinds["conclusion"], 0, "conclusions have citations")
 	assert.Greater(t, kinds["positive_absence"], 0, "positive_absences have scope-based citations")
 
 	// Scope-based citation (positive_absence) should have line_start = -1.

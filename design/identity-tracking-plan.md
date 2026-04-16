@@ -15,7 +15,7 @@ the worked example at `design/example-identity-analysis-rsc.md`).
 But the data layer doesn't currently support it.
 
 Concrete gap: in every engagement we've run, rich identity data
-ends up as **prose** in `Observation.body` or `Finding.rationale`
+ends up as **prose** in `Observation.body` or `Conclusion.rationale`
 fields. From the atuin analysis alone, we collected:
 
 - Ellie Huxtable: 6.7-year GitHub tenure, blog at ellie.wtf, three
@@ -87,7 +87,7 @@ currently aspirational:
 > they reviewed or approved."
 
 This is a graph-traversal operation: identity → contributions →
-signals/findings/observations that cited those contributions →
+signals/conclusions/observations that cited those contributions →
 entities that depend on those signals. None of those edges exist in
 the current data model. After this work:
 
@@ -269,7 +269,7 @@ created/updated at this time, in a *post-ingest enrichment pass*:
      skip for now
    - `Citation.commit_sha` if commits link to authors via the
      `git log` of the target repo (requires local clone access)
-   - Heuristic: scan `Finding.rationale` and `Observation.body`
+   - Heuristic: scan `Conclusion.rationale` and `Observation.body`
      prose for backtick-quoted GitHub usernames (e.g., `\`nvbn\``,
      `\`@ellie\``)
 3. For each identified handle, ensure an identity entity exists.
@@ -277,7 +277,7 @@ created/updated at this time, in a *post-ingest enrichment pass*:
    identities (rate-limit-aware).
 5. Create `contribution_observations` rows linking identity →
    project → role, where the role can be inferred (author,
-   co-maintainer, lead) from the finding/observation context.
+   co-maintainer, lead) from the conclusion/observation context.
 
 The heuristic step (#2) is fuzzy by design. Worth flagging
 discoveries as `confidence: inferred` until manual or programmatic
@@ -302,7 +302,7 @@ signatory list-identities --project=pkg:cargo/atuin --role=co-maintainer
 
 signatory burn identity:github/{compromised} --reason=...
   → automatic retroactive degradation across all linked
-    contribution_observations and the signals/findings that cite
+    contribution_observations and the signals/conclusions that cite
     them. Audit-logged with full traversal scope.
 
 signatory show-identity-graph identity:github/ellie
@@ -433,7 +433,7 @@ case becomes concrete.
 
 ### Synthesis-time identity extraction
 
-The ingestion enrichment pass scans Finding.rationale prose for
+The ingestion enrichment pass scans Conclusion.rationale prose for
 identity references. That's a heuristic with both false positives
 ("ellie" as a generic word) and false negatives ("the maintainer"
 unattributed). Two refinements worth considering:

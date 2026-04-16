@@ -22,7 +22,7 @@ func validBase() *AnalystOutput {
 			InvokedAt: "2026-04-14T00:00:00Z",
 		},
 		Target: "pkg:test/example",
-		Findings: []Finding{
+		Conclusions: []Conclusion{
 			{
 				ID:        "F001",
 				Verdict:   verdict,
@@ -84,40 +84,40 @@ func TestValidate_TargetRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), "target required")
 }
 
-func TestValidate_FindingFields(t *testing.T) {
+func TestValidate_ConclusionFields(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(*Finding)
+		mutate  func(*Conclusion)
 		wantErr string
 	}{
 		{
 			name:    "missing id",
-			mutate:  func(f *Finding) { f.ID = "" },
+			mutate:  func(f *Conclusion) { f.ID = "" },
 			wantErr: "id required",
 		},
 		{
 			name:    "missing verdict",
-			mutate:  func(f *Finding) { f.Verdict = "" },
+			mutate:  func(f *Conclusion) { f.Verdict = "" },
 			wantErr: "verdict required",
 		},
 		{
 			name:    "missing rationale",
-			mutate:  func(f *Finding) { f.Rationale = "" },
+			mutate:  func(f *Conclusion) { f.Rationale = "" },
 			wantErr: "rationale required",
 		},
 		{
 			name:    "missing category",
-			mutate:  func(f *Finding) { f.Category = "" },
+			mutate:  func(f *Conclusion) { f.Category = "" },
 			wantErr: "category required",
 		},
 		{
 			name:    "invalid severity default",
-			mutate:  func(f *Finding) { f.Severity.Default = "purple" },
+			mutate:  func(f *Conclusion) { f.Severity.Default = "purple" },
 			wantErr: "severity.default \"purple\" invalid",
 		},
 		{
 			name: "invalid severity by_context value",
-			mutate: func(f *Finding) {
+			mutate: func(f *Conclusion) {
 				f.Severity.ByContext = []ContextualSeverity{
 					{Context: ContextSpec{HostIsolation: HostIsolationSingleUser}, Value: "bogus"},
 				}
@@ -128,7 +128,7 @@ func TestValidate_FindingFields(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := validBase()
-			tt.mutate(&o.Findings[0])
+			tt.mutate(&o.Conclusions[0])
 			err := o.Validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
@@ -136,10 +136,10 @@ func TestValidate_FindingFields(t *testing.T) {
 	}
 }
 
-func TestValidate_DuplicateFindingIDs(t *testing.T) {
+func TestValidate_DuplicateConclusionIDs(t *testing.T) {
 	o := validBase()
-	dup := o.Findings[0]
-	o.Findings = append(o.Findings, dup)
+	dup := o.Conclusions[0]
+	o.Conclusions = append(o.Conclusions, dup)
 	err := o.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate id \"F001\"")
@@ -147,7 +147,7 @@ func TestValidate_DuplicateFindingIDs(t *testing.T) {
 
 func TestValidate_CitationLineOrScopeRequired(t *testing.T) {
 	o := validBase()
-	o.Findings[0].Citations = []Citation{
+	o.Conclusions[0].Citations = []Citation{
 		{Path: "src/main.rs"}, // neither line_start nor scope
 	}
 	err := o.Validate()
@@ -158,7 +158,7 @@ func TestValidate_CitationLineOrScopeRequired(t *testing.T) {
 func TestValidate_CitationLineAndScopeMutuallyExclusive(t *testing.T) {
 	o := validBase()
 	lineStart := 10
-	o.Findings[0].Citations = []Citation{
+	o.Conclusions[0].Citations = []Citation{
 		{
 			Path:      "src/main.rs",
 			LineStart: &lineStart,
@@ -174,7 +174,7 @@ func TestValidate_CitationLineEndBeforeStart(t *testing.T) {
 	o := validBase()
 	start := 50
 	end := 10
-	o.Findings[0].Citations = []Citation{
+	o.Conclusions[0].Citations = []Citation{
 		{Path: "src/main.rs", LineStart: &start, LineEnd: &end},
 	}
 	err := o.Validate()
@@ -185,7 +185,7 @@ func TestValidate_CitationLineEndBeforeStart(t *testing.T) {
 func TestValidate_CitationLineStartZero(t *testing.T) {
 	o := validBase()
 	zero := 0
-	o.Findings[0].Citations = []Citation{
+	o.Conclusions[0].Citations = []Citation{
 		{Path: "src/main.rs", LineStart: &zero},
 	}
 	err := o.Validate()
@@ -195,7 +195,7 @@ func TestValidate_CitationLineStartZero(t *testing.T) {
 
 func TestValidate_CitationScopeKindInvalid(t *testing.T) {
 	o := validBase()
-	o.Findings[0].Citations = []Citation{
+	o.Conclusions[0].Citations = []Citation{
 		{Scope: &ScopeRef{Kind: "moon", Path: "/"}},
 	}
 	err := o.Validate()
@@ -210,7 +210,7 @@ func TestValidate_CitationScopeAllValidKinds(t *testing.T) {
 	} {
 		t.Run(kind, func(t *testing.T) {
 			o := validBase()
-			o.Findings[0].Citations = []Citation{
+			o.Conclusions[0].Citations = []Citation{
 				{Scope: &ScopeRef{Kind: kind, Path: "some/path"}},
 			}
 			require.NoError(t, o.Validate())
@@ -336,7 +336,7 @@ func TestValidate_MethodologyPatternHighPrecisionWithoutPattern(t *testing.T) {
 
 func TestValidate_SupersessionFields(t *testing.T) {
 	o := validBase()
-	o.Findings[0].Supersedes = []Supersession{
+	o.Conclusions[0].Supersedes = []Supersession{
 		{PriorID: "", Kind: "purple"},
 	}
 	err := o.Validate()
@@ -352,7 +352,7 @@ func TestValidate_AccumulatesMultipleErrors(t *testing.T) {
 	o := &AnalystOutput{
 		// missing attribution fields
 		// missing target
-		Findings: []Finding{
+		Conclusions: []Conclusion{
 			{ID: "F1"}, // missing verdict, rationale, category, severity
 			{ID: "F1"}, // duplicate id
 		},

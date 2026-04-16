@@ -26,7 +26,7 @@ type CLI struct {
 	FormatCheck     FormatCheckCmd     `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
 	Ingest          IngestCmd          `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
 	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
-	ShowFindings    ShowFindingsCmd    `cmd:"show-findings" help:"Query findings across ingested analyst outputs."`
+	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs."`
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
 	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
 	Version         VersionCmd         `cmd:"" help:"Print version information."`

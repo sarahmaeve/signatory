@@ -47,7 +47,7 @@ func TestListAnalystOutputs_All(t *testing.T) {
 		assert.NotEmpty(t, o.OutputID)
 		assert.NotEmpty(t, o.EntityURI)
 		assert.NotZero(t, o.IngestedAt)
-		assert.NotZero(t, o.FindingsCount)
+		assert.NotZero(t, o.ConclusionsCount)
 	}
 }
 
@@ -126,12 +126,12 @@ func TestListAnalystOutputs_FilterByAnalystID(t *testing.T) {
 	assert.Len(t, secList, 2)
 }
 
-func TestListFindings_FilterBySeverity(t *testing.T) {
+func TestListConclusions_FilterBySeverity(t *testing.T) {
 	s := ingestAll(t)
 	ctx := context.Background()
 
 	// Filter to medium-and-up severities (medium, high, critical).
-	high, err := s.ListFindings(ctx, FindingFilter{
+	high, err := s.ListConclusions(ctx, ConclusionFilter{
 		SeverityIn: []exchange.SeverityValue{
 			exchange.SeverityHigh, exchange.SeverityCritical,
 		},
@@ -139,22 +139,22 @@ func TestListFindings_FilterBySeverity(t *testing.T) {
 	require.NoError(t, err)
 	// Provenance F001 is the only high we emitted across the corpus.
 	assert.Len(t, high, 1)
-	assert.Equal(t, "F001", high[0].FindingLocalID)
+	assert.Equal(t, "F001", high[0].ConclusionLocalID)
 	assert.Equal(t, "high", high[0].SeverityDefault)
 
-	// Positive findings (the security analyst's F010 + atuin F001).
-	positives, err := s.ListFindings(ctx, FindingFilter{
+	// Positive conclusions (the security analyst's F010 + atuin F001).
+	positives, err := s.ListConclusions(ctx, ConclusionFilter{
 		SeverityIn: []exchange.SeverityValue{exchange.SeverityPositive},
 	})
 	require.NoError(t, err)
 	assert.Len(t, positives, 2)
 }
 
-func TestListFindings_FilterBySignalType(t *testing.T) {
+func TestListConclusions_FilterBySignalType(t *testing.T) {
 	s := ingestAll(t)
 	ctx := context.Background()
 
-	out, err := s.ListFindings(ctx, FindingFilter{
+	out, err := s.ListConclusions(ctx, ConclusionFilter{
 		SignalType: "default_on_risky_features",
 	})
 	require.NoError(t, err)
@@ -165,47 +165,47 @@ func TestListFindings_FilterBySignalType(t *testing.T) {
 	}
 }
 
-func TestListFindings_FilterByDesignIntent(t *testing.T) {
+func TestListConclusions_FilterByDesignIntent(t *testing.T) {
 	s := ingestAll(t)
 	ctx := context.Background()
 
-	out, err := s.ListFindings(ctx, FindingFilter{DesignIntentOnly: true})
+	out, err := s.ListConclusions(ctx, ConclusionFilter{DesignIntentOnly: true})
 	require.NoError(t, err)
 	// thefuck-security: F001, F004, F005, F007, F008. atuin trial F001.
-	assert.Len(t, out, 6, "six design_intent findings across the corpus")
+	assert.Len(t, out, 6, "six design_intent conclusions across the corpus")
 	for _, f := range out {
 		assert.True(t, f.DesignIntent)
 	}
 }
 
-func TestListFindings_FilterByEntity(t *testing.T) {
+func TestListConclusions_FilterByEntity(t *testing.T) {
 	s := ingestAll(t)
 	ctx := context.Background()
 
-	thefuckFindings, err := s.ListFindings(ctx, FindingFilter{
+	thefuckConclusions, err := s.ListConclusions(ctx, ConclusionFilter{
 		EntityURI: "repo:github/nvbn/thefuck",
 	})
 	require.NoError(t, err)
 	// 10 security + 6 provenance = 16
-	assert.Len(t, thefuckFindings, 16)
+	assert.Len(t, thefuckConclusions, 16)
 
-	atuinFindings, err := s.ListFindings(ctx, FindingFilter{
+	atuinConclusions, err := s.ListConclusions(ctx, ConclusionFilter{
 		EntityURI: "pkg:cargo/atuin",
 	})
 	require.NoError(t, err)
-	assert.Len(t, atuinFindings, 3)
+	assert.Len(t, atuinConclusions, 3)
 }
 
-func TestListFindings_PreservesSupersedesFlag(t *testing.T) {
+func TestListConclusions_PreservesSupersedesFlag(t *testing.T) {
 	s := ingestAll(t)
 	ctx := context.Background()
 
-	out, err := s.ListFindings(ctx, FindingFilter{
+	out, err := s.ListConclusions(ctx, ConclusionFilter{
 		EntityURI: "pkg:cargo/atuin",
 	})
 	require.NoError(t, err)
 	for _, f := range out {
-		if f.FindingLocalID == "F001" {
+		if f.ConclusionLocalID == "F001" {
 			assert.True(t, f.HasSupersedes,
 				"atuin trial F001 supersedes r1-ai-subsystem-threat")
 			return
@@ -274,8 +274,8 @@ func TestGetAnalystOutput_RoundTripsAtuinFixture(t *testing.T) {
 	assert.Equal(t, original.RoundNotes, got.RoundNotes)
 	assert.Equal(t, original.TargetCommit, got.TargetCommit)
 
-	require.Len(t, got.Findings, len(original.Findings))
-	assertFindingsEquivalent(t, original.Findings, got.Findings)
+	require.Len(t, got.Conclusions, len(original.Conclusions))
+	assertConclusionsEquivalent(t, original.Conclusions, got.Conclusions)
 
 	require.Len(t, got.PositiveAbsences, len(original.PositiveAbsences))
 	for i, pa := range original.PositiveAbsences {
@@ -314,10 +314,10 @@ func TestGetAnalystOutput_PreservesPolyCitations(t *testing.T) {
 	got, err := s.GetAnalystOutput(ctx, res.OutputID)
 	require.NoError(t, err)
 
-	// A finding's line-based citation should round-trip with line_start
+	// A conclusion's line-based citation should round-trip with line_start
 	// set and Scope nil; a positive_absence's scope-based citation
 	// should round-trip with Scope set and LineStart nil.
-	for _, f := range got.Findings {
+	for _, f := range got.Conclusions {
 		if f.ID != "F001" {
 			continue
 		}
@@ -336,32 +336,32 @@ func TestGetAnalystOutput_PreservesPolyCitations(t *testing.T) {
 	}
 }
 
-// assertFindingsEquivalent checks the load-bearing Finding fields
+// assertConclusionsEquivalent checks the load-bearing Conclusion fields
 // match. Doesn't try DeepEqual because pointer-vs-empty on optional
 // fields varies between marshal/unmarshal cycles (same omitempty
 // caveat that the round-trip tests have always had).
-func assertFindingsEquivalent(t *testing.T, want, got []exchange.Finding) {
+func assertConclusionsEquivalent(t *testing.T, want, got []exchange.Conclusion) {
 	t.Helper()
 	for i := range want {
 		w, g := &want[i], &got[i]
-		assert.Equal(t, w.ID, g.ID, "finding[%d] ID", i)
-		assert.Equal(t, w.Verdict, g.Verdict, "finding[%d] Verdict", i)
-		assert.Equal(t, w.Rationale, g.Rationale, "finding[%d] Rationale", i)
-		assert.Equal(t, w.Severity.Default, g.Severity.Default, "finding[%d] severity.default", i)
-		assert.Equal(t, w.DesignIntent, g.DesignIntent, "finding[%d] design_intent", i)
-		assert.Equal(t, w.Category, g.Category, "finding[%d] category", i)
+		assert.Equal(t, w.ID, g.ID, "conclusion[%d] ID", i)
+		assert.Equal(t, w.Verdict, g.Verdict, "conclusion[%d] Verdict", i)
+		assert.Equal(t, w.Rationale, g.Rationale, "conclusion[%d] Rationale", i)
+		assert.Equal(t, w.Severity.Default, g.Severity.Default, "conclusion[%d] severity.default", i)
+		assert.Equal(t, w.DesignIntent, g.DesignIntent, "conclusion[%d] design_intent", i)
+		assert.Equal(t, w.Category, g.Category, "conclusion[%d] category", i)
 		// SignalType is *string; nil-vs-pointer-to-empty-string
 		// matters. Compare via deref.
 		assert.Equal(t,
 			derefStringPtr(w.SignalType), derefStringPtr(g.SignalType),
-			"finding[%d] signal_type", i)
-		assert.Len(t, g.Citations, len(w.Citations), "finding[%d] citation count", i)
-		assert.Len(t, g.Supersedes, len(w.Supersedes), "finding[%d] supersedes count", i)
+			"conclusion[%d] signal_type", i)
+		assert.Len(t, g.Citations, len(w.Citations), "conclusion[%d] citation count", i)
+		assert.Len(t, g.Supersedes, len(w.Supersedes), "conclusion[%d] supersedes count", i)
 		assert.Equal(t, len(w.Severity.ByContext), len(g.Severity.ByContext),
-			"finding[%d] by_context count", i)
-		// RelatedFindings round-trips
-		assert.True(t, reflect.DeepEqual(sortedCopy(w.RelatedFindings), sortedCopy(g.RelatedFindings)),
-			"finding[%d] related_findings", i)
+			"conclusion[%d] by_context count", i)
+		// RelatedConclusions round-trips
+		assert.True(t, reflect.DeepEqual(sortedCopy(w.RelatedConclusions), sortedCopy(g.RelatedConclusions)),
+			"conclusion[%d] related_conclusions", i)
 	}
 }
 

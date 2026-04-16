@@ -82,7 +82,7 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 	srv.Register(&tools.DetailTool{Store: s})
 	srv.Register(&tools.SignalsTool{Store: s})
 	srv.Register(&tools.ShowAnalysesTool{Store: s})
-	srv.Register(&tools.ShowFindingsTool{Store: s})
+	srv.Register(&tools.ShowConclusionsTool{Store: s})
 	srv.Register(&tools.ShowMethodologyTool{Store: s})
 	// SurveyTool is a pure read-only dispatcher in Phase 1: it wraps
 	// AnalyzeTool across a project's dep tree. No store field required.

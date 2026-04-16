@@ -36,7 +36,7 @@ func (r *HelpResource) URIPattern() string {
 // an explicit affordance so an LLM scanning the list on first
 // connect is nudged to read this before picking tools.
 func (r *HelpResource) Description() string {
-	return "READ THIS FIRST on a fresh session to orient on what signatory is and which tools match which user questions. Contains a question→tool lookup, key-concept glossary (signals vs. findings, posture vs. burns), and failure-mode notes (e.g. NotFound means 'nothing in store', not 'tool broken')."
+	return "READ THIS FIRST on a fresh session to orient on what signatory is and which tools match which user questions. Contains a question→tool lookup, key-concept glossary (signals vs. conclusions, posture vs. burns), and failure-mode notes (e.g. NotFound means 'nothing in store', not 'tool broken')."
 }
 
 // Read returns the static help text. No store access needed.
@@ -58,7 +58,7 @@ const helpText = `# signatory — MCP server orientation
 
 signatory is a supply-chain trust analysis tool. The MCP surface
 provides read-only access to a local store of trust analyses,
-findings, postures, and burns produced by analyst agents.
+conclusions, postures, and burns produced by analyst agents.
 
 ## When to reach for signatory
 
@@ -67,7 +67,7 @@ When the user asks about any of:
 - dependency safety / "is X safe to use?"
 - supply-chain risk for a specific package or repo
 - trust posture of a dep or repo
-- findings, concerns, or positives recorded for a target
+- conclusions, concerns, or positives recorded for a target
 - what's been analysed / not yet analysed
 - methodology: how signatory assesses things
 
@@ -83,7 +83,7 @@ signatory has assessed"; the filesystem and the web are not.
 | "What are the raw signals for X?" | signatory_signals |
 | "What does the vitality/hygiene/governance of X look like?" | signatory_detail |
 | "What has signatory analyzed?" | signatory_show_analyses |
-| "What findings exist for X?" / "Any concerns about X?" | signatory_show_findings |
+| "What conclusions exist for X?" / "Any concerns about X?" | signatory_show_conclusions |
 | "What patterns does signatory look for?" | signatory_show_methodology |
 | "What's the posture distribution?" / "How many deps assessed?" | signatory://posture |
 | "What's unexamined?" / "What haven't I vetted?" | signatory://unexamined |
@@ -100,13 +100,13 @@ signatory has assessed"; the filesystem and the web are not.
   failure.
 
 - **Signals** are Layer 1 evidence records (what the collectors saw).
-  **Findings** are Layer 2 conclusions the analyst built from
-  signals. Use signatory_signals for signals, signatory_show_findings
-  for findings.
+  **Conclusions** are Layer 2 reasoned interpretations the analyst built from
+  signals. Use signatory_signals for signals, signatory_show_conclusions
+  for conclusions.
 
 - **Posture** is a human trust decision attached to an entity. Tiers:
   vetted-frozen > trusted-for-now > unexamined > unknown-provenance >
-  rejected. An entity can have signals and findings without a posture.
+  rejected. An entity can have signals and conclusions without a posture.
 
 - **"Posture" has two meanings — do not confuse them.**
   (1) A Layer-2 trust decision stored in the ` + "`postures`" + ` table: query
@@ -124,8 +124,8 @@ signatory has assessed"; the filesystem and the web are not.
   means "do not use, regardless of other signals."
 
 - **Methodology patterns** are the reusable detection recipes that
-  produce findings. Filterable by automation hint (how grep-friendly)
-  and by hit_on_target (did this pattern produce a finding on the
+  produce conclusions. Filterable by automation hint (how grep-friendly)
+  and by hit_on_target (did this pattern produce a conclusion on the
   current target).
 
 ## Failure modes the caller should distinguish
@@ -133,7 +133,7 @@ signatory has assessed"; the filesystem and the web are not.
 - NotFound from signatory_analyze / signatory_signals / signatory_detail:
   the target is not in the store. Tell the user; do not invent data.
 
-- Empty array from signatory_show_analyses / show_findings /
+- Empty array from signatory_show_analyses / show_conclusions /
   show_methodology: matched nothing under the given filters. Try
   broader filters or tell the user.
 
@@ -148,7 +148,7 @@ signatory has assessed"; the filesystem and the web are not.
 - Live network scans. signatory queries a local store.
 - Generating new analyses. v0.1 is read-only; write paths are Phase 2.
 - Cross-ecosystem vulnerability databases (CVE, OSV). signatory tracks
-  its own findings, not public advisories.
+  its own conclusions, not public advisories.
 
 For the server's version and transport, read signatory://config.
 `

@@ -28,7 +28,7 @@ without re-running — which only works if past analyses are indexed.
 Ingestion is the bridge between the two layers. It's also a
 prerequisite for several downstream goals:
 
-1. **MCP query endpoints** that return findings/observations by
+1. **MCP query endpoints** that return conclusions/observations by
    target, signal type, severity, analyst, freshness, etc.
 2. **Burn propagation** that retroactively degrades trust signals
    tied to a compromised entity (per trust-model.md principle #3).
@@ -42,11 +42,11 @@ prerequisite for several downstream goals:
 
 ## Schema tension and the chosen resolution
 
-A `Finding` is much richer than a signal. The existing `signals`
+A `Conclusion` is much richer than a signal. The existing `signals`
 table (atomic observation: `value` is a TEXT scalar) cannot hold
 verdict + rationale + multi-citation + conditional-severity +
 prerequisites + supersession without losing the structure that
-makes findings queryable.
+makes conclusions queryable.
 
 **Chosen resolution: parallel storage, joined by entity.**
 
@@ -56,22 +56,22 @@ into a small set of new tables. Both streams attach to the
 existing `entities` table via FK. A query like "what does
 signatory know about target X?" joins both streams on entity_id.
 
-Why not collapse findings into signals (signals.value = JSON
-finding)?
+Why not collapse conclusions into signals (signals.value = JSON
+conclusion)?
 - Citations need to be queryable as their own rows
-- Findings have polymorphic relationships (citations attach to
-  findings AND positive_absences AND observations)
-- Findings supersede other findings; signals supersede via a
+- Conclusions have polymorphic relationships (citations attach to
+  conclusions AND positive_absences AND observations)
+- Conclusions supersede other conclusions; signals supersede via a
   separate `signal_resolutions` table — different mechanics
 - Severity-by-context wants its own table or JSON column
 
-Why not collapse signals into findings (one stream)?
-- Signals are atomic; findings are judgment-laden
+Why not collapse signals into conclusions (one stream)?
+- Signals are atomic; conclusions are judgment-laden
 - Layer 1 collectors emit signals as a stream of rows; doing the
-  same with finding-shape would force them to fabricate
+  same with conclusion-shape would force them to fabricate
   verdict/rationale fields they don't have
 - The two have different write rates (signals: high, every
-  collector run; findings: low, every analyst run)
+  collector run; conclusions: low, every analyst run)
 
 ## Proposed schema (migration v4)
 
@@ -101,65 +101,65 @@ CREATE TABLE analyst_outputs (
 CREATE INDEX idx_outputs_entity ON analyst_outputs(entity_id);
 CREATE INDEX idx_outputs_analyst_target ON analyst_outputs(analyst_id, entity_id, invoked_at);
 
--- One row per Finding.
-CREATE TABLE findings (
-    id                  TEXT PRIMARY KEY,         -- UUID
-    output_id           TEXT NOT NULL REFERENCES analyst_outputs(id),
-    finding_local_id    TEXT NOT NULL,            -- "F001" — stable within output
-    verdict             TEXT NOT NULL,
-    rationale           TEXT NOT NULL,
-    severity_default    TEXT NOT NULL,
-    design_intent       INTEGER NOT NULL DEFAULT 0,
-    category            TEXT NOT NULL,
-    signal_type         TEXT NOT NULL DEFAULT '', -- FK into registry; '' if absent
-    answers_question    TEXT NOT NULL DEFAULT '',
-    UNIQUE (output_id, finding_local_id)
+-- One row per Conclusion.
+CREATE TABLE conclusions (
+    id                    TEXT PRIMARY KEY,         -- UUID
+    output_id             TEXT NOT NULL REFERENCES analyst_outputs(id),
+    conclusion_local_id   TEXT NOT NULL,            -- "F001" — stable within output
+    verdict               TEXT NOT NULL,
+    rationale             TEXT NOT NULL,
+    severity_default      TEXT NOT NULL,
+    design_intent         INTEGER NOT NULL DEFAULT 0,
+    category              TEXT NOT NULL,
+    signal_type           TEXT NOT NULL DEFAULT '', -- FK into registry; '' if absent
+    answers_question      TEXT NOT NULL DEFAULT '',
+    UNIQUE (output_id, conclusion_local_id)
 );
-CREATE INDEX idx_findings_output ON findings(output_id);
-CREATE INDEX idx_findings_severity ON findings(severity_default);
-CREATE INDEX idx_findings_signal_type ON findings(signal_type);
+CREATE INDEX idx_conclusions_output ON conclusions(output_id);
+CREATE INDEX idx_conclusions_severity ON conclusions(severity_default);
+CREATE INDEX idx_conclusions_signal_type ON conclusions(signal_type);
 
 -- Conditional severity overrides: (host_isolation, platform) → value.
-CREATE TABLE finding_severity_contexts (
-    finding_id      TEXT NOT NULL REFERENCES findings(id),
+CREATE TABLE conclusion_severity_contexts (
+    conclusion_id   TEXT NOT NULL REFERENCES conclusions(id),
     host_isolation  TEXT NOT NULL DEFAULT '',
     platform        TEXT NOT NULL DEFAULT '',
     value           TEXT NOT NULL,
-    PRIMARY KEY (finding_id, host_isolation, platform)
+    PRIMARY KEY (conclusion_id, host_isolation, platform)
 );
 
--- Supersession: this finding revises one or more priors.
-CREATE TABLE finding_supersedes (
-    finding_id      TEXT NOT NULL REFERENCES findings(id),
+-- Supersession: this conclusion revises one or more priors.
+CREATE TABLE conclusion_supersedes (
+    conclusion_id   TEXT NOT NULL REFERENCES conclusions(id),
     prior_id        TEXT NOT NULL,            -- string from JSON; may not match a row in this DB
     prior_round     INTEGER NOT NULL DEFAULT 0,
     kind            TEXT NOT NULL,            -- corrects | refines | deprecates
-    PRIMARY KEY (finding_id, prior_id)
+    PRIMARY KEY (conclusion_id, prior_id)
 );
 
--- Per-Finding prerequisites and remediation_hints: simple lists, kept as
+-- Per-Conclusion prerequisites and remediation_hints: simple lists, kept as
 -- single-column join tables for queryability.
-CREATE TABLE finding_prerequisites (
-    finding_id  TEXT NOT NULL REFERENCES findings(id),
-    seq         INTEGER NOT NULL,
-    text        TEXT NOT NULL,
-    PRIMARY KEY (finding_id, seq)
+CREATE TABLE conclusion_prerequisites (
+    conclusion_id TEXT NOT NULL REFERENCES conclusions(id),
+    seq           INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    PRIMARY KEY (conclusion_id, seq)
 );
-CREATE TABLE finding_remediation_hints (
-    finding_id  TEXT NOT NULL REFERENCES findings(id),
-    seq         INTEGER NOT NULL,
-    text        TEXT NOT NULL,
-    PRIMARY KEY (finding_id, seq)
-);
-
--- Related-finding cross-references within the same output.
-CREATE TABLE finding_related (
-    finding_id  TEXT NOT NULL REFERENCES findings(id),
-    related_id  TEXT NOT NULL,                -- finding_local_id from JSON
-    PRIMARY KEY (finding_id, related_id)
+CREATE TABLE conclusion_remediation_hints (
+    conclusion_id TEXT NOT NULL REFERENCES conclusions(id),
+    seq           INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    PRIMARY KEY (conclusion_id, seq)
 );
 
--- Positive absences: same shape as findings but lighter, distinct semantics.
+-- Related-conclusion cross-references within the same output.
+CREATE TABLE conclusion_related (
+    conclusion_id TEXT NOT NULL REFERENCES conclusions(id),
+    related_id    TEXT NOT NULL,                -- conclusion_local_id from JSON
+    PRIMARY KEY (conclusion_id, related_id)
+);
+
+-- Positive absences: same shape as conclusions but lighter, distinct semantics.
 CREATE TABLE positive_absences (
     id                  TEXT PRIMARY KEY,         -- UUID
     output_id           TEXT NOT NULL REFERENCES analyst_outputs(id),
@@ -170,7 +170,7 @@ CREATE TABLE positive_absences (
 );
 CREATE INDEX idx_absences_output ON positive_absences(output_id);
 
--- Observations: trust-model commentary that doesn't fit the Finding shape.
+-- Observations: trust-model commentary that doesn't fit the Conclusion shape.
 CREATE TABLE observations (
     id                  TEXT PRIMARY KEY,         -- UUID
     output_id           TEXT NOT NULL REFERENCES analyst_outputs(id),
@@ -220,7 +220,7 @@ CREATE TABLE methodology_pattern_composes (
 -- Citations: polymorphic FK via a kind+target_id pair.
 CREATE TABLE citations (
     id              TEXT PRIMARY KEY,             -- UUID
-    parent_kind     TEXT NOT NULL,                -- finding | positive_absence | observation | methodology_pattern
+    parent_kind     TEXT NOT NULL,                -- conclusion | positive_absence | observation | methodology_pattern
     parent_id       TEXT NOT NULL,                -- UUID of the parent row
     seq             INTEGER NOT NULL,             -- order within the parent's citations array
     path            TEXT NOT NULL DEFAULT '',
@@ -247,7 +247,7 @@ CREATE TABLE output_supersedes (
 All append-only — same trigger pattern as migration v3 applied to
 each new table. Re-ingesting the same file is a no-op via the
 `content_hash` UNIQUE constraint on `analyst_outputs`. Re-running
-the same analyst on the same target with new findings produces a
+the same analyst on the same target with new conclusions produces a
 new `analyst_outputs` row (different invoked_at, different content
 hash) and the supersession metadata indicates the relationship.
 
@@ -275,18 +275,18 @@ analyst-output structure) and don't conflict.
   - `ListAnalystOutputs(filter)`, `GetAnalystOutput(id)`, `GetFindings(filter)`, etc.
 - Query CLI:
   - `signatory show-analyses <target>` — list AnalystOutputs for an entity
-  - `signatory show-findings [--severity=...] [--signal-type=...] [--target=...]`
+  - `signatory show-conclusions [--severity=...] [--signal-type=...] [--target=...]`
   - `signatory show-methodology [--hit-on-target] [--signal-group=...]`
 
 ### Phase C — MCP integration (separate work, larger scope)
 - Endpoints sketched in chat:
   - `signatory://analyses?target=...`
-  - `signatory://findings?signal_type=...&severity_gte=...`
+  - `signatory://conclusions?signal_type=...&severity_gte=...`
   - `signatory://analyses/freshness?target=...`
 - Freshness check baked into `signatory analyze` orchestration
 
 ### Phase D — Write-back sync (later)
-- When agents write findings via MCP rather than via JSON-file
+- When agents write conclusions via MCP rather than via JSON-file
   ingestion, we need a "DB → file" synchronizer to maintain the
   source-of-truth property of `filestore/analysis/`.
 
@@ -330,7 +330,7 @@ Three plausible policies:
    skip. **Recommended.** Same file re-ingested = no-op. Same
    analyst re-run with new content = new row. Different content
    = different hash = different row.
-3. **Per-finding semantic dedupe:** hash the finding content
+3. **Per-conclusion semantic dedupe:** hash the conclusion content
    (verdict + citations + signal_type) and dedupe at row level.
    Overkill for v1 — wait until we see a real use case.
 
@@ -352,7 +352,7 @@ work product* of an extended interactive session, not a single
 machine output.
 
 The synthesist role is real and useful, but it produces something
-narrower: an *integrated structured AnalystOutput* (joins findings,
+narrower: an *integrated structured AnalystOutput* (joins conclusions,
 identifies overlaps, addresses intake question, produces posture
 recommendation, possibly emits the synthesis-only signal types
 like `dual_analyst_self_confirmation`). That's storable in the

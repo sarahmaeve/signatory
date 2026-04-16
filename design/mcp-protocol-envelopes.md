@@ -274,9 +274,9 @@ List ingested analyst outputs. Mirrors the CLI `signatory show-analyses`.
 
 **Output:** array of `AnalystOutputSummary` records from the store.
 
-### `signatory_show_findings`
+### `signatory_show_conclusions`
 
-Query findings across ingested outputs. Mirrors CLI.
+Query conclusions across ingested outputs. Mirrors CLI.
 
 **Input:**
 ```json
@@ -290,7 +290,7 @@ Query findings across ingested outputs. Mirrors CLI.
 }
 ```
 
-**Output:** array of `FindingSummary` from `store.ListFindings`.
+**Output:** array of `ConclusionSummary` from `store.ListConclusions`.
 
 ### `signatory_show_methodology`
 
@@ -422,7 +422,7 @@ Accept a v1-schema analyst output file, validate, persist.
   "output_id": "uuid",
   "entity_id": "uuid",
   "idempotent": false,
-  "finding_count": 7,
+  "conclusion_count": 7,
   "positive_absence_count": 4,
   "observation_count": 1,
   "methodology_pattern_count": 14
@@ -438,8 +438,8 @@ Accept a v1-schema analyst output file, validate, persist.
     "message": "File <path> did not pass v1 schema validation.",
     "details": {
       "violations": [
-        {"path": "findings[2].severity.default", "message": "must be one of ..."},
-        {"path": "findings[2].citations", "message": "required"}
+        {"path": "conclusions[2].severity.default", "message": "must be one of ..."},
+        {"path": "conclusions[2].citations", "message": "required"}
       ]
     }
   }

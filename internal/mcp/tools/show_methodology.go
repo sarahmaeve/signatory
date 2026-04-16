@@ -23,7 +23,7 @@ type ShowMethodologyTool struct {
 func (t *ShowMethodologyTool) Name() string { return "signatory_show_methodology" }
 
 func (t *ShowMethodologyTool) Description() string {
-	return "USE THIS when the user asks *how* signatory analyzes something — 'what patterns does signatory look for?', 'which methodology hit on X?', 'show the grep-automatable patterns'. Methodology patterns are the reusable detection recipes that produce findings; findings are what those patterns turn up. Filterable by signal_group (vitality, hygiene, etc.), automation hint (grep_precision), and hit_on_target (hit/miss)."
+	return "USE THIS when the user asks *how* signatory analyzes something — 'what patterns does signatory look for?', 'which methodology hit on X?', 'show the grep-automatable patterns'. Methodology patterns are the reusable detection recipes that produce conclusions; conclusions are what those patterns turn up. Filterable by signal_group (vitality, hygiene, etc.), automation hint (grep_precision), and hit_on_target (hit/miss)."
 }
 
 func (t *ShowMethodologyTool) InputSchema() json.RawMessage {

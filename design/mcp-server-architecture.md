@@ -203,7 +203,7 @@ Organized by complexity and dependency on the dispatch-subagent flow.
   (vitality, governance, publication, hygiene, criticality, history).
 - **`signatory_survey`** — dependency-tree posture overview.
 - **`signatory_show_analyses`** — list ingested analyst outputs, filterable.
-- **`signatory_show_findings`** — query findings across ingested outputs.
+- **`signatory_show_conclusions`** — query conclusions across ingested outputs.
 - **`signatory_show_methodology`** — query methodology patterns.
 
 ### Fresh-collection tools (network, explicit opt-in via user approval)

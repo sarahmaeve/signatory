@@ -12,7 +12,7 @@
 - **Received by signatory:** 2026-04-14
 - **Purpose:** Validate the proposed schema for `internal/exchange/`
   (per `design/mcp-dual-analyst-architecture.md`) by having the
-  security analyst emit three findings, a methodology catalog, and
+  security analyst emit three conclusions, a methodology catalog, and
   two positive absences in structured JSON form. This file preserves
   the analyst's feedback on the schema; the fixture JSON preserves
   the emission itself.
@@ -30,17 +30,17 @@ feedback are folded into
 
 ## 1. Wanted but absent.
 
-- **Finding.ThreatModel or Finding.Prerequisites []string.** For
+- **Conclusion.ThreatModel or Conclusion.Prerequisites []string.** For
   F002 the qualifier "requires sync-server compromise" is structural
   info that belongs alongside severity, not buried in rationale.
   Same for F001's env-var escape hatch. I put both in rationale and
   felt the loss.
-- **Finding.RemediationHint (or FixShape).** Several findings had
+- **Conclusion.RemediationHint (or FixShape).** Several conclusions had
   cheap fixes I wanted downstream tooling to consume ("chmod 0600
   after bind", "add a cargo deny check step"). Embedded in
   rationale they're not machine-readable.
 - **Top-level Observations []Observation.** The Michelle-scope
-  trust analysis from round 2 doesn't fit Finding, PositiveAbsence,
+  trust analysis from round 2 doesn't fit Conclusion, PositiveAbsence,
   or Pattern — it's a trust-model observation about contributor
   trajectory. RoundNotes is too TL;DR-shaped to hold it.
 - **MethodologyPattern.ComposesWith []string.** MP-ENV-01 ×
@@ -64,8 +64,8 @@ feedback are folded into
 ## 3. Verdict/rationale split.
 
 Worked for F002 and F003. Awkward for F001 — "one dense sentence"
-felt thin for a finding that inverts a prior assessment. I wanted a
-verdict-pair: one sentence stating the finding, one framing it as a
+felt thin for a conclusion that inverts a prior assessment. I wanted a
+verdict-pair: one sentence stating the conclusion, one framing it as a
 correction. Supersedes + RoundNotes cover it structurally, but the
 urgency of the correction doesn't land in verdict-alone.
 
@@ -94,13 +94,13 @@ false-positive-heavy (wastes triage) vs. false-negative-heavy
 Synthetic ID `r1-ai-subsystem-threat` felt hacky when round 1 emitted
 no stable IDs. Prefer explicit structure: `Supersession { prior_id,
 prior_round, kind: corrects|refines|deprecates }`. Both levels right
-— output-level "doc replaces doc," finding-level "this correction
-only, other findings stand." I used both.
+— output-level "doc replaces doc," conclusion-level "this correction
+only, other conclusions stand." I used both.
 
 ## 7. Prose-only commentary.
 
 RoundNotes at top absorbed the correction TL;DR well. No itch for
-prose between findings. But an Observations slot at output level
+prose between conclusions. But an Observations slot at output level
 would have held the Michelle-scope trust analysis and the "Crates is
 so frustrating sometimes" / project-personality texture that doesn't
 belong anywhere structured.
@@ -112,5 +112,5 @@ citations, and signal-type mapping — discipline markdown lets me
 handwave. For my thinking: mild positive — drafting verdict first is
 a useful forcing function. For texture: mild negative — round-2
 prose had a color the structured version lacks. Net: use structured
-for findings + methodology, keep round_notes and add observations
+for conclusions + methodology, keep round_notes and add observations
 for what the structure can't carry. Worth building.

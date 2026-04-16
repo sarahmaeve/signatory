@@ -8,7 +8,7 @@
   },
   "target": "https://github.com/sarahmaeve/signatory",
   "target_commit": "b55e5ef0b046f505cbc0ab971c553cbb2603c1ab",
-  "findings": [
+  "conclusions": [
     {
       "id": "F001",
       "verdict": "IngestAnalystOutput auto-creates entities for arbitrary targets in the analyst JSON, letting any ingested document spawn new project entries that downstream listings and posture decisions treat as first-class.",
