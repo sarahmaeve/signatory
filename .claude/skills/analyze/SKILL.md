@@ -63,79 +63,81 @@ gh api repos/{owner}/{repo} --jq '{default_branch, pushed_at}'
 gh api repos/{owner}/{repo}/commits --jq '.[0].sha' | head -c 12
 ```
 
-## Step 2 — Generate handoff prompts
+## Step 2 — Generate handoff prompts (capture to variables, NOT files)
 
-Use `--network-precheck` to auto-detect language and ecosystem from
-the GitHub API. Use `--force` to overwrite stale files from prior runs.
+Capture the handoff content via stdout. Do NOT write to /tmp or any
+file — subagents cannot read /tmp, and fixed filenames cause
+collisions between concurrent sessions.
 
 ```bash
-signatory handoff security "$TARGET" \
-  --network-precheck --force \
-  -o /tmp/signatory-handoff-security.md
-
-signatory handoff provenance "$TARGET" \
-  --network-precheck --force \
-  -o /tmp/signatory-handoff-provenance.md
+SECURITY_HANDOFF=$(signatory handoff security "$TARGET" --network-precheck 2>/dev/null)
+PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" --network-precheck 2>/dev/null)
 ```
 
-`--network-precheck` calls the GitHub API to detect the language and
-ecosystem (Python→pypi, Go→go, Rust→crates, JS→npm) and fills the
-`--language` and `--ecosystem` flags automatically. The binary does
-the detection — you don't need to call `gh api` yourself.
+`--network-precheck` auto-detects language and ecosystem from the
+GitHub API. The binary accepts both full URLs (`https://github.com/
+owner/repo`) and shorthand (`owner/repo`).
+
+If a handoff command fails, check stderr — usually a missing
+`--ecosystem` override for non-GitHub targets. Pass it explicitly.
 
 **Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_PATH`) are
-expected and acceptable. Do NOT stop to fill them. Proceed to Step 3.
+expected and acceptable. Do NOT stop to fill them. Proceed.
 
 ## Step 3 — Dispatch analyst agents IN PARALLEL
 
-Spawn two agents in a single message (parallel dispatch). Each agent
-follows its handoff prompt and produces **structured markdown** — NOT
-JSON. The agent's job is analysis; the binary handles serialization.
+Spawn two agents in a single message. **INLINE the handoff content
+directly in each agent's prompt** — do not point at files. The agent
+produces structured markdown and returns it in its response (or
+writes it to a project-local path). No /tmp files involved.
 
 **IMPORTANT**: send BOTH Agent calls in ONE message so they run
-concurrently. Do NOT wait for one to finish before starting the other.
+concurrently.
+
+For each agent prompt, paste the captured handoff content after the
+preamble. The structure is:
 
 ```
 Agent(security-analyst):
   prompt: |
-    You are a security analyst. Follow the instructions in
-    /tmp/signatory-handoff-security.md exactly.
+    You are a security analyst for signatory's trust analysis pipeline.
     
-    Write your output as STRUCTURED MARKDOWN (not JSON) to:
-      /tmp/signatory-output-security.md
+    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
     
-    The output format is defined in your handoff instructions.
-    Use the structured section format (## Conclusion: F001,
-    Severity/Category/Verdict fields, Citation lines, rationale
-    as body text). The orchestrator will convert your markdown to
-    v1-schema JSON using `signatory build-output`.
+    <paste $SECURITY_HANDOFF content here>
     
-    Do NOT write JSON. Do NOT run format-check. Focus entirely on
-    analysis quality — the pipeline handles serialization.
+    IMPORTANT OUTPUT INSTRUCTIONS:
+    - Write your output as STRUCTURED MARKDOWN (not JSON).
+    - Write it to: filestore/analysis/click-security-structured.md
+      (substitute the actual target name for "click")
+    - Use the output format from your handoff instructions:
+      ## Conclusion: F001 with Severity/Category/Verdict fields,
+      Citation lines, rationale as body text.
+    - The orchestrator will convert your markdown to v1-schema JSON
+      using `signatory build-output`. You handle analysis; the
+      binary handles serialization.
+    - Do NOT write JSON. Do NOT run signatory commands.
   allowed-tools: Read Write Glob Grep WebFetch
 
 Agent(provenance-analyst):
   prompt: |
-    You are a provenance analyst. Follow the instructions in
-    /tmp/signatory-handoff-provenance.md exactly.
+    You are a provenance analyst for signatory's trust analysis pipeline.
     
-    Write your output as STRUCTURED MARKDOWN (not JSON) to:
-      /tmp/signatory-output-provenance.md
+    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
     
-    The output format is defined in your handoff instructions.
-    Use the structured section format (## Conclusion: F001,
-    Severity/Category/Verdict fields, Citation lines, rationale
-    as body text). The orchestrator will convert your markdown to
-    v1-schema JSON using `signatory build-output`.
+    <paste $PROVENANCE_HANDOFF content here>
     
-    Do NOT write JSON. Do NOT run format-check. Focus entirely on
-    analysis quality — the pipeline handles serialization.
+    IMPORTANT OUTPUT INSTRUCTIONS:
+    - Write your output as STRUCTURED MARKDOWN (not JSON).
+    - Write it to: filestore/analysis/click-provenance-structured.md
+      (substitute the actual target name for "click")
+    - Use the output format from your handoff instructions.
+    - Do NOT write JSON. Do NOT run signatory commands.
   allowed-tools: Read Write Glob Grep WebFetch
 ```
 
-Note: Bash is NOT in the agents' allowed-tools. They don't need it —
-they use Read/Write/Glob/Grep for code inspection and WebFetch for
-registry APIs. The orchestrator handles all CLI commands.
+The agents write to project-local paths (filestore/analysis/) which
+they DO have access to. No /tmp involvement.
 
 Wait for BOTH agents to complete before proceeding.
 
@@ -146,11 +148,11 @@ validates, and ingests. The agents never touch JSON.
 
 ```bash
 # Convert structured text → v1 JSON
-signatory build-output /tmp/signatory-output-security.md \
+signatory build-output filestore/analysis/{target-name}-security-structured.md \
   --target "$CANONICAL_URI" --force \
   -o filestore/analysis/{target-name}-security-v1.json
 
-signatory build-output /tmp/signatory-output-provenance.md \
+signatory build-output filestore/analysis/{target-name}-provenance-structured.md \
   --target "$CANONICAL_URI" --force \
   -o filestore/analysis/{target-name}-provenance-v1.json
 
@@ -176,29 +178,31 @@ skill — the template IS the single source of truth for how to
 synthesize.
 
 ```bash
-signatory handoff synthesist "$TARGET" --force -o /tmp/signatory-handoff-synthesis.md
+SYNTHESIS_HANDOFF=$(signatory handoff synthesist "$TARGET" 2>/dev/null)
 ```
 
-Read the generated prompt to verify it rendered correctly.
-
-Then dispatch the synthesist:
+Then dispatch the synthesist with the handoff content inlined:
 
 ```
 Agent(synthesist):
   prompt: |
-    You are a synthesist. Follow the instructions in
-    /tmp/signatory-handoff-synthesis.md exactly.
+    You are a synthesist for signatory's trust analysis pipeline.
     
-    Your output is a narrative trust assessment (markdown), not
-    v1-schema JSON. Present it directly — it will be shown to the
-    user as the final pipeline output.
+    YOUR HANDOFF INSTRUCTIONS (follow these exactly):
     
-    IMPORTANT: Read ALL conclusions and positive absences from the
-    store before writing anything. The posture tier goes at the TOP
-    of your output, before the reasoning — commit first, justify
-    second.
+    <paste $SYNTHESIS_HANDOFF content here>
+    
+    IMPORTANT: The posture tier goes at the TOP of your output,
+    before the reasoning — commit first, justify second. Read ALL
+    conclusions from the store before writing anything.
+    
+    Your output is a narrative trust assessment (markdown).
+    Write it to: filestore/analysis/{target-name}-synthesis.md
   allowed-tools: Bash Read Write Glob Grep
 ```
+
+The synthesist DOES need Bash (to run `signatory show-conclusions`,
+`signatory show-analyses`, `signatory show-methodology`).
 
 The synthesist's output is the human-readable assessment that makes
 the pipeline's data meaningful. Present it to the user as the final

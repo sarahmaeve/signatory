@@ -217,12 +217,16 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 //     takes effect. We'll extend this as we add more language
 //     variants of the security template.
 func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error) {
-	if !looksLikeGitHubURL(cmd.Target) {
-		return "", fmt.Errorf("target %q is not a github.com URL; only GitHub is supported for --network-precheck in v1", cmd.Target)
-	}
+	// Accept both full GitHub URLs and owner/repo shorthand. The
+	// NormalizeGitHubRepoInput function handles all forms:
+	//   https://github.com/owner/repo
+	//   github.com/owner/repo
+	//   owner/repo
+	//   git@github.com:owner/repo
+	// If it can extract owner+name, the target is GitHub-resolvable.
 	_, owner, name, err := profile.NormalizeGitHubRepoInput(cmd.Target)
 	if err != nil {
-		return "", fmt.Errorf("parse target: %w", err)
+		return "", fmt.Errorf("target %q is not a recognizable GitHub reference (expected https://github.com/owner/repo or owner/repo): %w", cmd.Target, err)
 	}
 
 	source := cmd.PrecheckSource
