@@ -519,8 +519,7 @@ func TestHTTP_LargeMessageContent(t *testing.T) {
 	client := ts.Client()
 
 	// Create session.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/large/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -538,9 +537,8 @@ func TestHTTP_LargeMessageContent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err = client.Post(
+	resp, err = doPost(t, client,
 		ts.URL+"/api/sessions/"+sess.ID+"/messages",
-		"application/json",
 		strings.NewReader(string(reqBody)))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -557,8 +555,7 @@ func TestHTTP_EmptySessionReturnsEmptyArray(t *testing.T) {
 	client := ts.Client()
 
 	// Create session, deposit nothing.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/empty/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -567,7 +564,7 @@ func TestHTTP_EmptySessionReturnsEmptyArray(t *testing.T) {
 	resp.Body.Close()
 
 	// GET messages should return [] not null.
-	resp, err = client.Get(ts.URL + "/api/sessions/" + sess.ID + "/messages")
+	resp, err = doGet(t, client, ts.URL+"/api/sessions/"+sess.ID+"/messages")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -591,7 +588,7 @@ func TestHTTP_ListSessionsEmptyReturnsEmptyArray(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Get(ts.URL + "/api/sessions")
+	resp, err := doGet(t, client, ts.URL+"/api/sessions")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -610,8 +607,7 @@ func TestHTTP_DuplicateTargetSessions(t *testing.T) {
 
 	target := "repo:github/duplicate/target"
 	createSession := func() pipeline.Session {
-		resp, err := client.Post(ts.URL+"/api/sessions",
-			"application/json",
+		resp, err := doPost(t, client, ts.URL+"/api/sessions",
 			strings.NewReader(fmt.Sprintf(`{"target":%q}`, target)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -634,8 +630,7 @@ func TestHTTP_MessageOrderingViaHTTP(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/order/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -651,16 +646,15 @@ func TestHTTP_MessageOrderingViaHTTP(t *testing.T) {
 			"content":  c,
 		})
 		require.NoError(t, err)
-		resp, err := client.Post(
+		resp, err := doPost(t, client,
 			ts.URL+"/api/sessions/"+sess.ID+"/messages",
-			"application/json",
 			strings.NewReader(string(body)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 		resp.Body.Close()
 	}
 
-	resp, err = client.Get(ts.URL + "/api/sessions/" + sess.ID + "/messages")
+	resp, err = doGet(t, client, ts.URL+"/api/sessions/"+sess.ID+"/messages")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var msgs []pipeline.Message
@@ -731,8 +725,7 @@ func TestHTTP_MalformedJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := client.Post(ts.URL+tt.path,
-				"application/json",
+			resp, err := doPost(t, client, ts.URL+tt.path,
 				strings.NewReader(tt.body))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expect, resp.StatusCode, "body: %s", tt.body)
@@ -748,8 +741,7 @@ func TestHTTP_MalformedJSON_DepositMessage(t *testing.T) {
 	client := ts.Client()
 
 	// Create a valid session first.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/malformed/deposit"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -813,8 +805,7 @@ func TestHTTP_MalformedJSON_DepositMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := client.Post(msgURL,
-				"application/json",
+			resp, err := doPost(t, client, msgURL,
 				strings.NewReader(tt.body))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expect, resp.StatusCode, "body: %s", tt.body)
@@ -829,8 +820,7 @@ func TestHTTP_UnicodeContentRoundTrip(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/unicode/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -862,8 +852,7 @@ func TestHTTP_UnicodeContentRoundTrip(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			resp, err := client.Post(msgURL,
-				"application/json",
+			resp, err := doPost(t, client, msgURL,
 				strings.NewReader(string(body)))
 			require.NoError(t, err)
 			require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -873,7 +862,7 @@ func TestHTTP_UnicodeContentRoundTrip(t *testing.T) {
 			assert.Equal(t, tt.content, msg.Content)
 
 			// Verify round-trip via raw format.
-			resp, err = client.Get(msgURL + "/latest?role=security&type=output&format=raw")
+			resp, err = doGet(t, client, msgURL+"/latest?role=security&type=output&format=raw")
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			rawBody, err := io.ReadAll(resp.Body)
@@ -906,9 +895,7 @@ func TestHTTP_MethodMismatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(tt.method, ts.URL+tt.path, nil)
-			require.NoError(t, err)
-			resp, err := client.Do(req)
+			resp, err := doRequest(t, client, tt.method, ts.URL+tt.path, nil)
 			require.NoError(t, err)
 
 			// Go 1.22+ method-scoped routing returns 405 Method Not Allowed
@@ -929,8 +916,7 @@ func TestHTTP_GetMessages_FilterCombinationsViaHTTP(t *testing.T) {
 	client := ts.Client()
 
 	// Create session and deposit a matrix of messages.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/filter/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -948,7 +934,7 @@ func TestHTTP_GetMessages_FilterCombinationsViaHTTP(t *testing.T) {
 				"msg_type": msgType,
 				"content":  fmt.Sprintf("%s-%s-content", role, msgType),
 			})
-			resp, err := client.Post(msgURL, "application/json",
+			resp, err := doPost(t, client, msgURL,
 				strings.NewReader(string(body)))
 			require.NoError(t, err)
 			require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -971,7 +957,7 @@ func TestHTTP_GetMessages_FilterCombinationsViaHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := client.Get(msgURL + tt.query)
+			resp, err := doGet(t, client, msgURL+tt.query)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			var msgs []pipeline.Message
@@ -988,8 +974,7 @@ func TestHTTP_RawFormatMultipleMessages(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/raw/multi"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -1006,7 +991,7 @@ func TestHTTP_RawFormatMultipleMessages(t *testing.T) {
 			"msg_type": "handoff",
 			"content":  content,
 		})
-		resp, err := client.Post(msgURL, "application/json",
+		resp, err := doPost(t, client, msgURL,
 			strings.NewReader(string(body)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -1015,7 +1000,7 @@ func TestHTTP_RawFormatMultipleMessages(t *testing.T) {
 
 	// Raw format with multiple matching messages should fall through
 	// to JSON array (raw only applies when exactly 1 message matches).
-	resp, err = client.Get(msgURL + "?role=security&type=handoff&format=raw")
+	resp, err = doGet(t, client, msgURL+"?role=security&type=handoff&format=raw")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"),
@@ -1040,8 +1025,7 @@ func TestHTTP_ConcurrentDepositsViaHTTP(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/concurrent/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -1065,7 +1049,7 @@ func TestHTTP_ConcurrentDepositsViaHTTP(t *testing.T) {
 					"msg_type": "output",
 					"content":  fmt.Sprintf("g%d-m%d", gID, m),
 				})
-				resp, err := client.Post(msgURL, "application/json",
+				resp, err := doPost(t, client, msgURL,
 					strings.NewReader(string(body)))
 				assert.NoError(t, err)
 				if resp != nil {
@@ -1078,7 +1062,7 @@ func TestHTTP_ConcurrentDepositsViaHTTP(t *testing.T) {
 	wg.Wait()
 
 	// Verify all messages were deposited.
-	resp, err = client.Get(msgURL)
+	resp, err = doGet(t, client, msgURL)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var msgs []pipeline.Message
@@ -1101,9 +1085,8 @@ func TestHTTP_DepositToNonexistentSession(t *testing.T) {
 		"msg_type": "handoff",
 		"content":  "orphaned message",
 	})
-	resp, err := client.Post(
+	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/nonexistent-session-id/messages",
-		"application/json",
 		strings.NewReader(string(body)))
 	require.NoError(t, err)
 	// NOTE: Without PRAGMA foreign_keys=ON, SQLite silently accepts
@@ -1127,8 +1110,7 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/race/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -1145,7 +1127,7 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 			"msg_type": "output",
 			"content":  fmt.Sprintf("message-%d", i),
 		})
-		resp, err := client.Post(msgURL, "application/json",
+		resp, err := doPost(t, client, msgURL,
 			strings.NewReader(string(body)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -1158,7 +1140,7 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 20; i++ {
-			resp, err := client.Get(msgURL)
+			resp, err := doGet(t, client, msgURL)
 			if err == nil {
 				resp.Body.Close()
 			}
@@ -1166,8 +1148,7 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/sessions/"+sess.ID, nil)
-		resp, err := client.Do(req)
+		resp, err := doRequest(t, client, http.MethodDelete, ts.URL+"/api/sessions/"+sess.ID, nil)
 		if err == nil {
 			resp.Body.Close()
 		}
@@ -1184,15 +1165,13 @@ func TestHTTP_GetSessionNotFoundVsDeleteNotFound(t *testing.T) {
 	client := ts.Client()
 
 	// GET missing session = 404
-	resp, err := client.Get(ts.URL + "/api/sessions/nonexistent")
+	resp, err := doGet(t, client, ts.URL+"/api/sessions/nonexistent")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
 
 	// DELETE missing session = 204 (the delete queries are no-ops)
-	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/sessions/nonexistent", nil)
-	require.NoError(t, err)
-	resp, err = client.Do(req)
+	resp, err = doRequest(t, client, http.MethodDelete, ts.URL+"/api/sessions/nonexistent", nil)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	resp.Body.Close()
@@ -1206,14 +1185,13 @@ func TestHTTP_ContentTypeJSON(t *testing.T) {
 	client := ts.Client()
 
 	// List sessions (empty).
-	resp, err := client.Get(ts.URL + "/api/sessions")
+	resp, err := doGet(t, client, ts.URL+"/api/sessions")
 	require.NoError(t, err)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 	resp.Body.Close()
 
 	// Create session.
-	resp, err = client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err = doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/content-type/test"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
@@ -1222,14 +1200,13 @@ func TestHTTP_ContentTypeJSON(t *testing.T) {
 	resp.Body.Close()
 
 	// Get session.
-	resp, err = client.Get(ts.URL + "/api/sessions/" + sess.ID)
+	resp, err = doGet(t, client, ts.URL+"/api/sessions/"+sess.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 	resp.Body.Close()
 
 	// Error response should also be JSON.
-	resp, err = client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err = doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{}`))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -1251,7 +1228,7 @@ func TestHTTP_NewServerNilLogger(t *testing.T) {
 	defer ts.Close()
 
 	// Verify it works.
-	resp, err := ts.Client().Get(ts.URL + "/api/sessions")
+	resp, err := doGet(t, ts.Client(), ts.URL+"/api/sessions")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()

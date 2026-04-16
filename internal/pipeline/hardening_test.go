@@ -35,8 +35,8 @@ func TestHardening_MaxBytesReader_SessionEndpoint(t *testing.T) {
 	bigMetadata := strings.Repeat("x", 5*1024) // 5 KB of metadata
 	body := fmt.Sprintf(`{"target":"test","metadata":"%s"}`, bigMetadata)
 
-	resp, err := ts.Client().Post(ts.URL+"/api/sessions",
-		"application/json", strings.NewReader(body))
+	resp, err := doPost(t, ts.Client(), ts.URL+"/api/sessions",
+		strings.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -52,8 +52,7 @@ func TestHardening_MaxBytesReader_MessageEndpoint(t *testing.T) {
 	client := ts.Client()
 
 	// Create a session first.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"test"}`))
 	require.NoError(t, err)
 	var sess pipeline.Session
@@ -64,9 +63,9 @@ func TestHardening_MaxBytesReader_MessageEndpoint(t *testing.T) {
 	bigContent := strings.Repeat("z", 11*1024*1024) // 11 MB
 	body := fmt.Sprintf(`{"role":"security","msg_type":"handoff","content":"%s"}`, bigContent)
 
-	resp, err = client.Post(
+	resp, err = doPost(t, client,
 		ts.URL+"/api/sessions/"+sess.ID+"/messages",
-		"application/json", strings.NewReader(body))
+		strings.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -89,9 +88,9 @@ func TestHardening_ErrorSanitization(t *testing.T) {
 	// this triggers a FOREIGN KEY constraint error inside SQLite. The
 	// HTTP response must not leak internal details.
 	body := `{"role":"security","msg_type":"handoff","content":"trigger FK violation"}`
-	resp, err := client.Post(
+	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/nonexistent-session-id/messages",
-		"application/json", strings.NewReader(body))
+		strings.NewReader(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -133,8 +132,8 @@ func TestHardening_SessionCountLimit(t *testing.T) {
 	// Helper to create a session and return its ID and status code.
 	createSession := func(idx int) (string, int) {
 		body := fmt.Sprintf(`{"target":"target-%d"}`, idx)
-		resp, err := client.Post(ts.URL+"/api/sessions",
-			"application/json", strings.NewReader(body))
+		resp, err := doPost(t, client, ts.URL+"/api/sessions",
+			strings.NewReader(body))
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated {
@@ -160,10 +159,8 @@ func TestHardening_SessionCountLimit(t *testing.T) {
 		"session 101 should be rejected (at limit)")
 
 	// Delete one session.
-	req, err := http.NewRequest(http.MethodDelete,
+	resp, err := doRequest(t, client, http.MethodDelete,
 		ts.URL+"/api/sessions/"+ids[0], nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
@@ -186,9 +183,8 @@ func TestHardening_EnumValidation_InvalidRole(t *testing.T) {
 
 	sess := createTestSession(t, client, ts.URL)
 
-	resp, err := client.Post(
+	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/"+sess+"/messages",
-		"application/json",
 		strings.NewReader(`{"role":"hacker","msg_type":"handoff","content":"x"}`))
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -203,9 +199,8 @@ func TestHardening_EnumValidation_InvalidMsgType(t *testing.T) {
 
 	sess := createTestSession(t, client, ts.URL)
 
-	resp, err := client.Post(
+	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/"+sess+"/messages",
-		"application/json",
 		strings.NewReader(`{"role":"security","msg_type":"exploit","content":"x"}`))
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -229,9 +224,9 @@ func TestHardening_EnumValidation_AllValidValues(t *testing.T) {
 				body := fmt.Sprintf(
 					`{"role":%q,"msg_type":%q,"content":"test %s %s"}`,
 					role, mt, role, mt)
-				resp, err := client.Post(
+				resp, err := doPost(t, client,
 					ts.URL+"/api/sessions/"+sess+"/messages",
-					"application/json", strings.NewReader(body))
+					strings.NewReader(body))
 				require.NoError(t, err)
 				defer resp.Body.Close()
 				assert.Equal(t, http.StatusCreated, resp.StatusCode,
@@ -250,7 +245,7 @@ func TestHardening_NotFound_NonexistentSession(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
-	resp, err := ts.Client().Get(ts.URL + "/api/sessions/does-not-exist")
+	resp, err := doGet(t, ts.Client(), ts.URL+"/api/sessions/does-not-exist")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -266,7 +261,7 @@ func TestHardening_NotFound_LatestMessageEmptySession(t *testing.T) {
 
 	sess := createTestSession(t, client, ts.URL)
 
-	resp, err := client.Get(ts.URL + "/api/sessions/" + sess + "/messages/latest")
+	resp, err := doGet(t, client, ts.URL+"/api/sessions/"+sess+"/messages/latest")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -366,16 +361,16 @@ func TestHardening_LargeContentRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err := client.Post(
+	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/"+sess+"/messages",
-		"application/json", strings.NewReader(string(body)))
+		strings.NewReader(string(body)))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	// Retrieve via raw format and verify exact round-trip.
-	resp2, err := client.Get(
-		ts.URL + "/api/sessions/" + sess + "/messages/latest?role=security&type=output&format=raw")
+	resp2, err := doGet(t, client,
+		ts.URL+"/api/sessions/"+sess+"/messages/latest?role=security&type=output&format=raw")
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
@@ -419,9 +414,9 @@ func TestHardening_UnicodeContentRoundTrip(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			resp, err := client.Post(
+			resp, err := doPost(t, client,
 				ts.URL+"/api/sessions/"+sess+"/messages",
-				"application/json", strings.NewReader(string(body)))
+				strings.NewReader(string(body)))
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			require.Equal(t, http.StatusCreated, resp.StatusCode,
@@ -434,8 +429,8 @@ func TestHardening_UnicodeContentRoundTrip(t *testing.T) {
 				"deposited content should match for %s", tc.name)
 
 			// Also verify via GET latest (JSON decode).
-			resp2, err := client.Get(
-				ts.URL + "/api/sessions/" + sess +
+			resp2, err := doGet(t, client,
+				ts.URL+"/api/sessions/"+sess+
 					"/messages/latest?role=synthesist&type=output")
 			require.NoError(t, err)
 			defer resp2.Body.Close()
@@ -456,8 +451,7 @@ func TestHardening_UnicodeContentRoundTrip(t *testing.T) {
 // createTestSession creates a session and returns its ID.
 func createTestSession(t *testing.T, client *http.Client, baseURL string) string {
 	t.Helper()
-	resp, err := client.Post(baseURL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, baseURL+"/api/sessions",
 		strings.NewReader(`{"target":"hardening-test"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)

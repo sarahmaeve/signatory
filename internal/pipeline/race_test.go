@@ -214,8 +214,7 @@ func TestRace_HTTPConcurrentOperations(t *testing.T) {
 	client := ts.Client()
 
 	// Create a shared session for concurrent operations.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/race/http"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -235,9 +234,8 @@ func TestRace_HTTPConcurrentOperations(t *testing.T) {
 			role := roles[n%len(roles)]
 			body := fmt.Sprintf(
 				`{"role":%q,"msg_type":"output","content":"http message %d"}`, role, n)
-			r, postErr := client.Post(
+			r, postErr := doPost(t, client,
 				ts.URL+"/api/sessions/"+sess.ID+"/messages",
-				"application/json",
 				strings.NewReader(body))
 			if postErr != nil {
 				t.Errorf("deposit %d: %v", n, postErr)
@@ -255,8 +253,8 @@ func TestRace_HTTPConcurrentOperations(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			r, getErr := client.Get(
-				ts.URL + "/api/sessions/" + sess.ID + "/messages")
+			r, getErr := doGet(t, client,
+				ts.URL+"/api/sessions/"+sess.ID+"/messages")
 			if getErr != nil {
 				t.Errorf("read %d: %v", n, getErr)
 				return
@@ -270,7 +268,7 @@ func TestRace_HTTPConcurrentOperations(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			r, listErr := client.Get(ts.URL + "/api/sessions")
+			r, listErr := doGet(t, client, ts.URL+"/api/sessions")
 			if listErr != nil {
 				t.Errorf("list %d: %v", n, listErr)
 				return
@@ -285,9 +283,8 @@ func TestRace_HTTPConcurrentOperations(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			body := fmt.Sprintf(`{"target":"repo:github/race/http-concurrent-%d"}`, n)
-			r, createErr := client.Post(
+			r, createErr := doPost(t, client,
 				ts.URL+"/api/sessions",
-				"application/json",
 				strings.NewReader(body))
 			if createErr != nil {
 				t.Errorf("create %d: %v", n, createErr)

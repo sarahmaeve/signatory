@@ -34,8 +34,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	client := ts.Client()
 
 	// --- Create session ---
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"repo:github/spf13/cobra","metadata":"{\"lang\":\"go\"}"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -50,7 +49,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	sessionURL := ts.URL + "/api/sessions/" + sess.ID
 
 	// --- List sessions ---
-	resp, err = client.Get(ts.URL + "/api/sessions")
+	resp, err = doGet(t, client, ts.URL+"/api/sessions")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var sessions []pipeline.Session
@@ -61,8 +60,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 
 	// --- Deposit security handoff ---
 	handoffContent := "# Security review for cobra\n\nThis is the full handoff."
-	resp, err = client.Post(sessionURL+"/messages",
-		"application/json",
+	resp, err = doPost(t, client, sessionURL+"/messages",
 		strings.NewReader(`{"role":"security","msg_type":"handoff","content":"`+
 			strings.ReplaceAll(handoffContent, "\n", "\\n")+`"}`))
 	require.NoError(t, err)
@@ -75,15 +73,14 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Equal(t, handoffContent, msg.Content)
 
 	// --- Deposit provenance handoff ---
-	resp, err = client.Post(sessionURL+"/messages",
-		"application/json",
+	resp, err = doPost(t, client, sessionURL+"/messages",
 		strings.NewReader(`{"role":"provenance","msg_type":"handoff","content":"# Provenance handoff"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	resp.Body.Close()
 
 	// --- Retrieve as JSON (filtered by role + type) ---
-	resp, err = client.Get(sessionURL + "/messages?role=security&type=handoff")
+	resp, err = doGet(t, client, sessionURL+"/messages?role=security&type=handoff")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var msgs []pipeline.Message
@@ -93,7 +90,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Equal(t, handoffContent, msgs[0].Content)
 
 	// --- Retrieve as raw text (what WebFetch agents get) ---
-	resp, err = client.Get(sessionURL + "/messages?role=security&type=handoff&format=raw")
+	resp, err = doGet(t, client, sessionURL+"/messages?role=security&type=handoff&format=raw")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
@@ -103,15 +100,14 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Equal(t, handoffContent, string(body))
 
 	// --- Deposit feedback ---
-	resp, err = client.Post(sessionURL+"/messages",
-		"application/json",
+	resp, err = doPost(t, client, sessionURL+"/messages",
 		strings.NewReader(`{"role":"security","msg_type":"feedback","content":"absence A001 missing description"}`))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	resp.Body.Close()
 
 	// --- Get latest feedback ---
-	resp, err = client.Get(sessionURL + "/messages/latest?role=security&type=feedback")
+	resp, err = doGet(t, client, sessionURL+"/messages/latest?role=security&type=feedback")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var latestMsg pipeline.Message
@@ -120,7 +116,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Equal(t, "absence A001 missing description", latestMsg.Content)
 
 	// --- Get latest as raw ---
-	resp, err = client.Get(sessionURL + "/messages/latest?role=security&type=feedback&format=raw")
+	resp, err = doGet(t, client, sessionURL+"/messages/latest?role=security&type=feedback&format=raw")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err = io.ReadAll(resp.Body)
@@ -129,7 +125,7 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Equal(t, "absence A001 missing description", string(body))
 
 	// --- Verify all messages for session ---
-	resp, err = client.Get(sessionURL + "/messages")
+	resp, err = doGet(t, client, sessionURL+"/messages")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&msgs))
@@ -137,15 +133,13 @@ func TestHTTP_EndToEnd_SmokeTest(t *testing.T) {
 	assert.Len(t, msgs, 3) // 2 handoffs + 1 feedback
 
 	// --- Delete session ---
-	req, err := http.NewRequest(http.MethodDelete, sessionURL, nil)
-	require.NoError(t, err)
-	resp, err = client.Do(req)
+	resp, err = doRequest(t, client, http.MethodDelete, sessionURL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	resp.Body.Close()
 
 	// --- Verify deletion ---
-	resp, err = client.Get(sessionURL)
+	resp, err = doGet(t, client, sessionURL)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
@@ -161,8 +155,7 @@ func TestHTTP_SessionIsolation(t *testing.T) {
 
 	// Create two sessions.
 	createSession := func(target string) string {
-		resp, err := client.Post(ts.URL+"/api/sessions",
-			"application/json",
+		resp, err := doPost(t, client, ts.URL+"/api/sessions",
 			strings.NewReader(`{"target":"`+target+`"}`))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -176,9 +169,8 @@ func TestHTTP_SessionIsolation(t *testing.T) {
 
 	// Deposit in each.
 	deposit := func(sessionID, content string) {
-		resp, err := client.Post(
+		resp, err := doPost(t, client,
 			ts.URL+"/api/sessions/"+sessionID+"/messages",
-			"application/json",
 			strings.NewReader(`{"role":"security","msg_type":"handoff","content":"`+content+`"}`))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -189,8 +181,8 @@ func TestHTTP_SessionIsolation(t *testing.T) {
 
 	// Each session only sees its own.
 	getContent := func(sessionID string) string {
-		resp, err := client.Get(
-			ts.URL + "/api/sessions/" + sessionID + "/messages?role=security&type=handoff&format=raw")
+		resp, err := doGet(t, client,
+			ts.URL+"/api/sessions/"+sessionID+"/messages?role=security&type=handoff&format=raw")
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		body, err := io.ReadAll(resp.Body)
@@ -210,48 +202,44 @@ func TestHTTP_ValidationErrors(t *testing.T) {
 	client := ts.Client()
 
 	// Create session missing target.
-	resp, err := client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{}`))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	resp.Body.Close()
 
 	// Deposit message missing role.
-	resp, err = client.Post(ts.URL+"/api/sessions",
-		"application/json",
+	resp, err = doPost(t, client, ts.URL+"/api/sessions",
 		strings.NewReader(`{"target":"test"}`))
 	require.NoError(t, err)
 	var sess pipeline.Session
-	json.NewDecoder(resp.Body).Decode(&sess)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&sess))
 	resp.Body.Close()
 
-	resp, err = client.Post(
+	resp, err = doPost(t, client,
 		ts.URL+"/api/sessions/"+sess.ID+"/messages",
-		"application/json",
 		strings.NewReader(`{"msg_type":"handoff","content":"test"}`))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	resp.Body.Close()
 
 	// Deposit message missing content.
-	resp, err = client.Post(
+	resp, err = doPost(t, client,
 		ts.URL+"/api/sessions/"+sess.ID+"/messages",
-		"application/json",
 		strings.NewReader(`{"role":"security","msg_type":"handoff","content":""}`))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	resp.Body.Close()
 
 	// Get non-existent session.
-	resp, err = client.Get(ts.URL + "/api/sessions/nonexistent")
+	resp, err = doGet(t, client, ts.URL+"/api/sessions/nonexistent")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
 
 	// Get latest from empty session.
-	resp, err = client.Get(
-		ts.URL + "/api/sessions/" + sess.ID + "/messages/latest?role=security&type=feedback")
+	resp, err = doGet(t, client,
+		ts.URL+"/api/sessions/"+sess.ID+"/messages/latest?role=security&type=feedback")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
