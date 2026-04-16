@@ -98,7 +98,7 @@ func (s *Server) ListenAndServe(ctx context.Context, port int, certFile, keyFile
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.server.Shutdown(shutdownCtx); err != nil {
+		if err := s.server.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // shutdownCtx is deliberately rooted at Background; see graceful-shutdown comment above
 			s.logger.Error("server shutdown", "error", err)
 		}
 	}()
