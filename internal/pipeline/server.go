@@ -87,8 +87,14 @@ func (s *Server) ListenAndServe(ctx context.Context, port int, certFile, keyFile
 		BaseContext:       func(_ net.Listener) context.Context { return ctx },
 	}
 
-	// Graceful shutdown on context cancellation.
-	go func() {
+	// Graceful shutdown on context cancellation. The goroutine uses
+	// context.Background() for the shutdown deadline deliberately:
+	// when we reach the WithTimeout call below, the parent ctx has
+	// already been cancelled (we waited for <-ctx.Done()). Deriving
+	// the shutdown context from it would produce an immediately-dead
+	// context and abort the graceful drain before any in-flight
+	// request could finish. Background + a 5s timeout is correct.
+	go func() { //nolint:gosec // G118: Background is deliberate; see comment above — parent ctx is already cancelled at the point of WithTimeout
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -324,12 +330,12 @@ func (s *Server) handleGetLatestMessage(w http.ResponseWriter, r *http.Request) 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v) //nolint:errcheck // best-effort response write
+	json.NewEncoder(w).Encode(v) //nolint:errcheck,gosec // G104: best-effort response write; headers already committed, encode errors are not actionable
 }
 
 func writeError(w http.ResponseWriter, status int, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck // best-effort
+	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck,gosec // G104: best-effort response write; headers already committed, encode errors are not actionable
 }

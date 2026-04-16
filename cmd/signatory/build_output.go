@@ -62,7 +62,7 @@ func (cmd *BuildOutputCmd) Run(globals *Globals) error {
 	if !cmd.Force {
 		flag = os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	}
-	w, err := os.OpenFile(cmd.Output, flag, 0o644)
+	w, err := os.OpenFile(cmd.Output, flag, 0o644) //nolint:gosec // G302: user-facing v1-schema analyst output, not secrets; 0o600 would block scripted ingest tooling running as non-owner in the same project
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("%s already exists; pass --force to overwrite", cmd.Output)
