@@ -88,6 +88,9 @@ func TestRegistry_GitCollectorTypesHaveExpectedShape(t *testing.T) {
 	}{
 		{"first_commit_date", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
 		{"tag_signing_status", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"identity_graph_depth", profile.SignalGroupGovernance, profile.ForgeryVeryHigh},
+		{"identity_domain_consistency", profile.SignalGroupGovernance, profile.ForgeryHigh},
+		{"effective_maintainer_concentration", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
 	}
 
 	for _, tc := range cases {

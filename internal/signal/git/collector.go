@@ -119,6 +119,8 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 
 	c.collectCommitSigning(ctx, &result, entity.ID, now, defaultTTL)
 	c.collectTags(ctx, &result, entity.ID, now, defaultTTL)
+	c.collectIdentityGraphDepth(ctx, &result, entity.ID, now, defaultTTL)
+	c.collectAuthorshipSignals(ctx, &result, entity.ID, now, defaultTTL)
 
 	return &result, nil
 }
