@@ -128,6 +128,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"age alone is not positive — a one-commit-per-year fallow repo has high age and low vitality",
 		},
 	},
+	"first_commit_date": {
+		Type:              "first_commit_date",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Timestamp of the first commit in the default branch's history, derived from a local clone.",
+		Caveats: []string{
+			"commit dates are user-controllable in git; a rewritten history can backdate or forward-date the first commit",
+			"requires a full clone — shallow clones truncate history and will report the oldest commit within the depth window rather than the repo's actual first commit",
+			"distinct from repo_age, which reports the hosting platform's repository creation timestamp and is harder to forge once observed",
+		},
+	},
 	"open_issues": {
 		Type:              "open_issues",
 		Group:             profile.SignalGroupVitality,

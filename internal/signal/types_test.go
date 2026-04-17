@@ -62,6 +62,46 @@ func TestRegistry_CurrentGitHubTypesMatchHardcodedBehavior(t *testing.T) {
 	}
 }
 
+// TestRegistry_GitCollectorTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types that the
+// local-clone git collector (internal/signal/git/) emits. Each type
+// must be registered before the collector emits it — signal.Make
+// panics on unregistered types, so registering here is a strict
+// prerequisite.
+//
+// When adding a new git-collector signal, register it in types.go
+// AND extend this table in the same commit. The coupling is
+// deliberate: it prevents a silent drift where a collector emits
+// a type but the registry's Group / ForgeryResistance metadata
+// doesn't match the collector's intent.
+//
+// See design/v0.1-invariants.md §"Invariant 2" for why mechanical
+// git-level collection belongs in a Go collector rather than in
+// an analyst subagent's grep pass.
+func TestRegistry_GitCollectorTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"first_commit_date", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — git collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match git collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match git collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.
