@@ -87,6 +87,7 @@ func TestRegistry_GitCollectorTypesHaveExpectedShape(t *testing.T) {
 		forgery    profile.ForgeryResistance
 	}{
 		{"first_commit_date", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
+		{"tag_signing_status", profile.SignalGroupPublication, profile.ForgeryHigh},
 	}
 
 	for _, tc := range cases {

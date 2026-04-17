@@ -118,6 +118,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	var result signal.CollectionResult
 
 	c.collectCommitSigning(ctx, &result, entity.ID, now, defaultTTL)
+	c.collectTags(ctx, &result, entity.ID, now, defaultTTL)
 
 	return &result, nil
 }
