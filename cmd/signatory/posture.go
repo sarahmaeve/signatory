@@ -125,7 +125,7 @@ func printPosture(entity *profile.Entity, p *profile.Posture) {
 // is omitted.
 type PostureSetCmd struct {
 	Target    string `arg:"" help:"Entity to set posture for."`
-	Tier      string `help:"Posture tier." enum:"vetted-frozen,trusted-for-now,unexamined,unknown-provenance" required:""`
+	Tier      string `help:"Posture tier (vetted-frozen, trusted-for-now, unexamined, unknown-provenance, or rejected)." enum:"vetted-frozen,trusted-for-now,unexamined,unknown-provenance,rejected" required:""`
 	Rationale string `help:"Rationale for the posture decision." required:""`
 	Version   string `help:"Specific version being attested (strongly recommended)." optional:""`
 }

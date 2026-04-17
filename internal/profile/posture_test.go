@@ -12,11 +12,19 @@ import (
 func TestPostureTierConstants(t *testing.T) {
 	t.Parallel()
 
+	// The five-tier vocabulary specified in
+	// design/trust-policy-v1.md and documented in the synthesis
+	// handoff template. Any future addition or rename must update
+	// this table, the synthesis template, and the CLI's enum tag
+	// in lockstep — drift between them is what a fresh dogfood
+	// run caught when the synthesist returned "rejected" (a valid
+	// design tier) and the CLI rejected it as unrecognized.
 	tiers := []PostureTier{
 		PostureVettedFrozen,
 		PostureTrustedForNow,
 		PostureUnexamined,
 		PostureUnknownProvenance,
+		PostureRejected,
 	}
 
 	for _, tier := range tiers {
@@ -28,6 +36,21 @@ func TestPostureTierConstants(t *testing.T) {
 		assert.False(t, seen[tier], "duplicate PostureTier: %s", tier)
 		seen[tier] = true
 	}
+}
+
+// TestPostureTier_LiteralValues pins the wire-format string for
+// each tier. These literals land in the database, the audit log
+// detail JSON, and MCP response envelopes — a silent rename would
+// break historical queries and any external tooling that pattern-
+// matches on the tier string. Renames are allowed, but they must
+// change this test in the same commit so the intent is explicit.
+func TestPostureTier_LiteralValues(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "vetted-frozen", string(PostureVettedFrozen))
+	assert.Equal(t, "trusted-for-now", string(PostureTrustedForNow))
+	assert.Equal(t, "unexamined", string(PostureUnexamined))
+	assert.Equal(t, "unknown-provenance", string(PostureUnknownProvenance))
+	assert.Equal(t, "rejected", string(PostureRejected))
 }
 
 func TestBurnSourceConstants(t *testing.T) {

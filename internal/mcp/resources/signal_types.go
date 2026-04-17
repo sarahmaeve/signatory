@@ -57,7 +57,7 @@ func (r *SignalTypesResource) Read(_ context.Context, _ string) *mcp.Response {
 			{Name: string(profile.SignalGroupGovernance), Description: "Who is responsible? (maintainer count, commit signing, org backing)"},
 			{Name: string(profile.SignalGroupPublication), Description: "How was this published? (registry presence, signing, provenance)"},
 			{Name: string(profile.SignalGroupHygiene), Description: "Does it look like they care? (security policy, CI, dependency management)"},
-			{Name: string(profile.SignalGroupPosture), Description: "What is the consumer's posture? (vetted-frozen, trusted-for-now, unexamined, unknown-provenance)"},
+			{Name: string(profile.SignalGroupPosture), Description: "What is the consumer's posture? (vetted-frozen, trusted-for-now, unexamined, unknown-provenance, rejected)"},
 			{Name: string(profile.SignalGroupCriticality), Description: "How critical is this? (stars, downstream adoption, transitive fan-out)"},
 		},
 		ForgeryResistanceScale: []string{
