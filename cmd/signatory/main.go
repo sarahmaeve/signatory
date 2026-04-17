@@ -8,7 +8,6 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/sarahmaeve/signatory/internal/audit"
 	"github.com/sarahmaeve/signatory/internal/signal"
-	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -51,9 +50,13 @@ func main() {
 		},
 	)
 	err := ctx.Run(&Globals{
-		DBPath:     cli.DB,
-		Verbose:    cli.Verbose,
-		Collectors: defaultCollectors(),
+		DBPath:  cli.DB,
+		Verbose: cli.Verbose,
+		// Globals.Collectors is intentionally left nil in
+		// production — AnalyzeCmd.Run builds the collector list
+		// per-target via collectorsFor(), which knows about
+		// --path / --clone. Tests override this field with
+		// mocks; see functional_test.go's testGlobals helper.
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -63,8 +66,15 @@ func main() {
 
 // Globals holds flags and dependencies shared across all commands.
 type Globals struct {
-	DBPath     string
-	Verbose    bool
+	DBPath  string
+	Verbose bool
+
+	// Collectors overrides the per-target collector list produced
+	// by cmd/signatory/collectors.go's collectorsFor. Set by tests
+	// (see functional_test.go's testGlobals) to inject mock
+	// collectors without needing to stand up real git/github
+	// plumbing. Left nil in production; AnalyzeCmd.Run calls
+	// collectorsFor when this is empty.
 	Collectors []signal.Collector
 
 	// AuditFilePath overrides the audit log file path. Empty means
@@ -98,10 +108,4 @@ func (g *Globals) NewAuditLogger(s store.Store) *audit.Logger {
 		}
 	}
 	return audit.New(s, path)
-}
-
-func defaultCollectors() []signal.Collector {
-	return []signal.Collector{
-		ghcollector.NewCollector(),
-	}
 }

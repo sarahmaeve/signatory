@@ -26,6 +26,17 @@ type AnalyzeCmd struct {
 	Refresh bool          `help:"Collect fresh signals from network sources." default:"false"`
 	JSON    bool          `help:"Output as JSON." default:"false"`
 	MaxAge  time.Duration `help:"Surface only analyst outputs ingested within this duration (Go duration syntax: 24h, 168h, 720h). 0 = no age filter." default:"0"`
+
+	// --path points at an existing local clone of the target. Required
+	// with --refresh for git-hosted entities unless --clone is also
+	// passed. See design/v0.1-invariants.md §"Invariant 2" for the
+	// "no implicit network" principle this flag serves.
+	Path string `name:"path" help:"Filesystem path to an existing local clone of the target. Required with --refresh for git-hosted entities unless --clone is passed." type:"path"`
+
+	// --clone creates a new clone at --path. Always a full clone;
+	// shallow clones silently degrade historical signals. Refuses to
+	// run if --path is non-empty.
+	Clone bool `name:"clone" help:"Create a new clone at --path by fetching from the target's origin. Fails loudly if --path is non-empty."`
 }
 
 // AnalysisDisplay wraps the runtime profile with any ingested
@@ -126,8 +137,21 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 
 	fmt.Printf("Collecting signals for: %s\n", entity.CanonicalURI)
 
+	// Decide which collectors to run. Tests inject mocks via
+	// globals.Collectors (see functional_test.go); in production that
+	// field is empty and we build the collector list per-target based
+	// on the entity's shape plus --path / --clone.
+	collectors := globals.Collectors
+	if len(collectors) == 0 {
+		c, err := collectorsFor(ctx, entity, CollectOpts{Path: cmd.Path, Clone: cmd.Clone})
+		if err != nil {
+			return err
+		}
+		collectors = c
+	}
+
 	var allSignals []profile.Signal
-	for _, collector := range globals.Collectors {
+	for _, collector := range collectors {
 		result, err := collector.Collect(ctx, entity)
 		if err != nil {
 			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
