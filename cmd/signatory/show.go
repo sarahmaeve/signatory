@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -206,32 +206,31 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 	return nil
 }
 
-// normalizeTargetForQuery accepts either a canonical URI or a
-// recognized URL and returns the canonical form to use in the
-// query filter. On unrecognized input, returns the input unchanged
-// (the store will then no-op the lookup).
+// normalizeTargetForQuery resolves a user-supplied target to the
+// canonical URI used as the entities.canonical_uri lookup key.
+// Empty input is preserved (no filter applied); unresolvable
+// input is passed through so the store returns an ErrNotFound the
+// command surfaces as "no entity matches" — clearer than silently
+// returning zero rows.
 //
-// This is the read-side mirror of normalizeTargetToCanonicalURI in
-// the store package — keeping them aligned matters because
-// otherwise a `signatory ingest` followed by `signatory show` for
-// the same target would fail to find anything.
+// profile.ResolveTarget is the single source of truth for target
+// acceptance across signatory's CLI surface; see its doc and
+// target_test.go for the full accepted-forms matrix. This wrapper
+// just handles the show-command ergonomics (empty input is fine;
+// unresolvable input should pass through rather than error).
 func normalizeTargetForQuery(target string) string {
 	if target == "" {
 		return ""
 	}
-	// Canonical purl/repo/identity/etc. URIs all start with a known
-	// scheme prefix; pass through unmodified.
-	for _, prefix := range []string{"pkg:", "repo:", "identity:", "org:", "patch:"} {
-		if strings.HasPrefix(target, prefix) {
-			return target
-		}
+	resolved, err := profile.ResolveTarget(target)
+	if err != nil {
+		// Pass through to the store so the "No entity matches"
+		// branch fires with the user's original input quoted
+		// back to them. Bailing out here with an error would
+		// suppress that helpful message.
+		return target
 	}
-	// Anything else (e.g., a GitHub URL) gets normalized by the
-	// store-side FindEntityByURI lookup chain. The store wraps the
-	// raw target through profile.NormalizeGitHubRepoInput when the
-	// canonical-form lookup misses, so the read path matches the
-	// ingest path's normalization. Pass through unmodified here.
-	return target
+	return resolved.CanonicalURI
 }
 
 // parseSeverities converts CLI --severity strings into the typed

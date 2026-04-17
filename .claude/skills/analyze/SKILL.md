@@ -100,32 +100,40 @@ echo "Session: $SESSION_ID"
 ```
 
 Generate both handoff prompts and deposit them in the session.
-`signatory handoff` handles target resolution, language/ecosystem
-detection, and shallow-cloning — you do NOT need to call `gh api`
-or `git clone` yourself.
+`signatory handoff` handles target resolution (accepts every form
+`signatory analyze` accepts: owner/repo shorthand, github.com URL,
+https:// URL, `repo:` canonical URI), language/ecosystem detection,
+and shallow-cloning — you do NOT need to call `gh api` or `git clone`
+yourself.
+
+Use `--json` on the handoff emission so its output is already a
+JSON-escaped string; the outer POST body can interpolate it
+directly without piping through `jq -Rs`. This avoids the
+control-character pitfalls when the handoff body includes stored
+analysis text with literal newlines (synthesis handoffs especially).
 
 ```bash
 # Security handoff — clones the repo into filestore/clones/.
-SECURITY_HANDOFF=$(signatory handoff security "$TARGET" \
-  --network-precheck --clone-dir filestore/clones/ 2>/dev/null)
+SECURITY_HANDOFF_JSON=$(signatory handoff security "$TARGET" \
+  --network-precheck --clone-dir filestore/clones/ --json 2>/dev/null)
 
-# Deposit in the pipeline service.
+# Deposit in the pipeline service. $SECURITY_HANDOFF_JSON is
+# already a JSON string (including surrounding quotes), so
+# interpolating directly into the outer object is safe.
 curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
-  --data-binary @- <<ENDJSON
-{"role":"security","msg_type":"handoff","content":$(echo "$SECURITY_HANDOFF" | jq -Rs .)}
-ENDJSON
+  --data-binary "{\"role\":\"security\",\"msg_type\":\"handoff\",\"content\":$SECURITY_HANDOFF_JSON}"
 
-# Provenance handoff — reuses the same clone.
+# Provenance handoff — reuses the same clone. basename on the
+# target gives the short name the clone-dir step wrote to, for
+# every accepted target form (owner/repo, URL, canonical URI).
 TARGET_NAME=$(basename "$TARGET" .git)
-PROVENANCE_HANDOFF=$(signatory handoff provenance "$TARGET" \
-  --network-precheck --path "filestore/clones/$TARGET_NAME" 2>/dev/null)
+PROVENANCE_HANDOFF_JSON=$(signatory handoff provenance "$TARGET" \
+  --network-precheck --path "filestore/clones/$TARGET_NAME" --json 2>/dev/null)
 
 curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
-  --data-binary @- <<ENDJSON
-{"role":"provenance","msg_type":"handoff","content":$(echo "$PROVENANCE_HANDOFF" | jq -Rs .)}
-ENDJSON
+  --data-binary "{\"role\":\"provenance\",\"msg_type\":\"handoff\",\"content\":$PROVENANCE_HANDOFF_JSON}"
 ```
 
 If a handoff command fails, remove `2>/dev/null` and check stderr.
@@ -242,13 +250,16 @@ Generate the synthesis handoff, deposit it in the session, and
 dispatch a synthesist agent that retrieves it via WebFetch.
 
 ```bash
-SYNTHESIS_HANDOFF=$(signatory handoff synthesist "$TARGET" 2>/dev/null)
+# --json is especially important here: the synthesis handoff
+# embeds stored analysis text (verdicts, rationales) which
+# contains literal newlines. Without --json the raw emission
+# would trip downstream jq -Rs on "control characters must be
+# escaped."
+SYNTHESIS_HANDOFF_JSON=$(signatory handoff synthesist "$TARGET" --json 2>/dev/null)
 
 curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
-  --data-binary @- <<ENDJSON
-{"role":"synthesist","msg_type":"handoff","content":$(echo "$SYNTHESIS_HANDOFF" | jq -Rs .)}
-ENDJSON
+  --data-binary "{\"role\":\"synthesist\",\"msg_type\":\"handoff\",\"content\":$SYNTHESIS_HANDOFF_JSON}"
 ```
 
 ```

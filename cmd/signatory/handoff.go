@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -76,6 +77,7 @@ type HandoffCmd struct {
 	Output string `short:"o" help:"Write rendered handoff to this file instead of stdout."`
 	Force  bool   `help:"Overwrite --output if it exists."`
 	Quiet  bool   `help:"Suppress the stderr report (template source, unfilled placeholders)." short:"q"`
+	JSON   bool   `name:"json" help:"Emit the rendered handoff as a JSON-escaped string (with surrounding quotes) instead of raw text. Use when piping into another tool that embeds the handoff as a JSON value — removes the need for downstream 'jq -Rs' wrapping and avoids control-character errors when the handoff body contains stored analysis text with newlines."`
 
 	// PrecheckSource overrides the GitHub-backed ecosystem.Source used
 	// by --network-precheck. nil → fall through to
@@ -100,6 +102,39 @@ type HandoffCmd struct {
 // (template source, unfilled placeholders, embedded-fallback notice)
 // is informational and goes out independently of Success/failure.
 func (cmd *HandoffCmd) Run(globals *Globals) error {
+	// Resolve the target to canonical form. For any input that
+	// ResolveTarget understands (GitHub shorthand, github.com URL,
+	// `repo:` canonical URI, etc.) pre-populate --name and --url
+	// from the resolved metadata, and rewrite cmd.Target itself to
+	// the HTTPS clone URL so downstream classifier-driven code
+	// (HandoffSubstitutions, applyClone) sees a form it handles
+	// natively.
+	//
+	// Non-URI / non-shorthand inputs — local filesystem paths like
+	// ~/code/thefuck, /Users/me/code/proj, ./relative — cleanly
+	// fail ResolveTarget; the rest of Run() then handles them via
+	// TargetPath as before. ResolveTarget failure is not a CLI
+	// error here; it's a signal that the target isn't a
+	// remote-repo form.
+	if resolved, err := profile.ResolveTarget(cmd.Target); err == nil {
+		if cmd.Name == "" {
+			cmd.Name = resolved.ShortName
+		}
+		if resolved.CloneURL != "" {
+			if cmd.URL == "" {
+				cmd.URL = resolved.CloneURL
+			}
+			// Feed the HTTPS URL form to downstream steps. This
+			// turns every accepted form — owner/repo,
+			// github.com/owner/repo, repo:github/owner/name — into
+			// the same effective target for TARGET_URL population
+			// and --clone-dir processing, closing the
+			// "--clone-dir requires a URL target" gap surfaced
+			// during the v0.1 dogfood.
+			cmd.Target = resolved.CloneURL
+		}
+	}
+
 	// Network precheck runs early: it may fill --language and
 	// --ecosystem, which both influence later steps (template name
 	// inference, provenance-role validation).
@@ -180,7 +215,23 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 
 	rendered, unfilled := config.RenderTemplate(raw, subs)
 
-	if err := writeHandoff(cmd.Output, cmd.Force, rendered); err != nil {
+	// --json wraps the rendered bytes as a JSON string literal
+	// (with surrounding quotes and all control chars escaped).
+	// Downstream shell pipelines that embed the handoff into a
+	// larger JSON payload can then use $(signatory handoff
+	// --json ...) directly instead of piping through `jq -Rs`.
+	// Raw bytes contain literal newlines + other control chars
+	// from stored analysis text, so the escape is load-bearing.
+	emitted := rendered
+	if cmd.JSON {
+		encoded, err := json.Marshal(string(rendered))
+		if err != nil {
+			return fmt.Errorf("json-encode handoff body: %w", err)
+		}
+		emitted = encoded
+	}
+
+	if err := writeHandoff(cmd.Output, cmd.Force, emitted); err != nil {
 		return err
 	}
 
