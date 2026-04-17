@@ -39,6 +39,7 @@ design/NEXT.md
 # Editor/IDE
 # .idea/
 # .vscode/
+.DS_Store
 
 # Filestore — analysis output, clones, and ingested data.
 # This directory is project-local working state, not source.
