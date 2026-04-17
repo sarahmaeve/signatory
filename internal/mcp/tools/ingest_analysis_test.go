@@ -248,3 +248,73 @@ func mcpSchemaViolationCode() errorCode {
 }
 
 type errorCode string
+
+// ---- metadata sanity tests ----
+
+// TestIngestAnalysisTool_MetadataShape asserts the tool's static
+// metadata is intact: non-empty Name/Description, well-formed
+// InputSchema that actually enforces required fields, and the
+// description mentions enough context for an LLM caller to route
+// to it (the word "ingest" or a reference to analyst outputs).
+//
+// This catches typos and silent-breakage regressions — an empty
+// Description or a malformed schema would slip past every
+// handler-level test because they directly construct the input
+// rather than parsing the schema.
+func TestIngestAnalysisTool_MetadataShape(t *testing.T) {
+	t.Parallel()
+	tool := &IngestAnalysisTool{}
+
+	// Name: exact string for downstream tooling / skill allowlist
+	// references. A rename is a breaking change.
+	assert.Equal(t, "signatory_ingest_analysis", tool.Name())
+
+	// Description: non-empty and points the caller at the tool's
+	// purpose. LLM routing depends on description quality; we don't
+	// test for specific wording but do check it's substantive and
+	// names the role.
+	desc := tool.Description()
+	assert.NotEmpty(t, desc)
+	assert.Greater(t, len(desc), 100,
+		"description should be substantive enough to guide LLM routing, got %d chars", len(desc))
+	assert.Contains(t, desc, "AnalystOutput",
+		"description should name the payload type so the LLM can match on it")
+
+	// InputSchema: must parse as JSON and describe the expected shape.
+	// DisallowUnknownFields in the handler relies on "additionalProperties":
+	// false, so the validator-shim's strict-reject behavior works.
+	schemaBytes := tool.InputSchema()
+	require.NotEmpty(t, schemaBytes)
+
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(schemaBytes, &schema),
+		"InputSchema must be valid JSON")
+
+	assert.Equal(t, "object", schema["type"], "top-level schema type should be object")
+
+	required, ok := schema["required"].([]any)
+	require.True(t, ok, "schema should declare a required[] array")
+	requiredSet := map[string]bool{}
+	for _, f := range required {
+		if s, ok := f.(string); ok {
+			requiredSet[s] = true
+		}
+	}
+	assert.True(t, requiredSet["analyst_output"],
+		"analyst_output must be in required[] so missing-field validation fires")
+
+	// additionalProperties: false makes the validator reject unknown
+	// top-level keys. Without this, a typo in the caller's envelope
+	// (e.g., "analystt_output") would silently succeed as an empty
+	// ingest.
+	assert.Equal(t, false, schema["additionalProperties"],
+		"additionalProperties must be false to enable strict-reject of typos")
+
+	// Properties must at least include analyst_output.
+	props, ok := schema["properties"].(map[string]any)
+	require.True(t, ok, "schema should declare a properties map")
+	assert.Contains(t, props, "analyst_output",
+		"analyst_output must appear under properties")
+	assert.Contains(t, props, "source",
+		"source must appear under properties (optional but schema-known)")
+}
