@@ -104,12 +104,18 @@ A bus-factor concern is `low` for a single-user adoption,
 `medium` for a CI runner that would re-fetch on every build.
 Use the `severity.by_context` map.
 
-## Output format — structured markdown
+## Output format — v1-schema JSON via MCP ingest
 
-Write your output as **structured markdown**, not JSON. The pipeline
-orchestrator will convert your text to v1-schema JSON using
-`signatory build-output`. Your job is analysis; the binary handles
-serialization.
+When your analysis is complete, call the **signatory_ingest_analysis**
+MCP tool with the `analyst_output` argument set to a JSON object
+conforming to the v1 schema. The tool lands your output directly in
+the store — no markdown intermediate, no scratch files, no post-hoc
+conversion by the orchestrator.
+
+The field-level guidance below describes the SHAPE of your analysis
+(required fields, valid values, citation discipline). At emission
+time, translate that shape into a v1 JSON envelope — see the
+example and translation rules at the end of this section.
 
 ### Header fields
 
@@ -189,13 +195,100 @@ require git CLI access (deferred to v0.2). Conclusions about
 signing are based on GitHub API verification flags only.
 ```
 
+### Ingesting via signatory_ingest_analysis
+
+At the end of your analysis, call the MCP tool exactly once with a
+v1 JSON envelope. Shape:
+
+```json
+{
+  "attribution": {
+    "analyst_id": "signatory-provenance",
+    "model": "<your model>",
+    "invoked_at": "<RFC3339 timestamp>",
+    "round": 1
+  },
+  "target": "<canonical URI or URL from the handoff>",
+  "target_commit": "<HEAD SHA you analyzed>",
+  "conclusions": [
+    {
+      "id": "F001",
+      "verdict": "<one sentence>",
+      "rationale": "<markdown-bodied justification>",
+      "severity": {"default": "medium"},
+      "category": "<slug>",
+      "signal_type": "<optional signal-type slug from the registry>",
+      "design_intent": false,
+      "citations": [
+        {"path": ".github/workflows/release.yml", "line_start": 12,
+         "line_end": 18,
+         "quoted": "uses: actions/checkout@v4"}
+      ]
+    }
+  ],
+  "positive_absences": [
+    {
+      "pattern_checked": "<what you looked for>",
+      "confidence": "exhaustive",
+      "description": "<what you found>",
+      "citations": [
+        {"path": ".github/", "scope": {"kind": "tree", "path": ".github/"}}
+      ]
+    }
+  ],
+  "observations": [
+    {"id": "O001", "title": "<one-line>", "body": "<markdown>",
+     "category": "<slug>"}
+  ],
+  "methodology_trace": {
+    "patterns": []
+  },
+  "round_notes": "<short summary of this round>"
+}
+```
+
+Translating the shape-level guidance above into JSON:
+
+- `Severity: medium` → `"severity": {"default": "medium"}`
+- `Citation: path:12-18 "quote"` →
+  `{"path": "...", "line_start": 12, "line_end": 18, "quoted": "quote"}`
+- `Citation: path` (whole file) →
+  `{"path": "...", "scope": {"kind": "file", "path": "..."}}`
+- `Citation: dir/` (tree scope) →
+  `{"path": "dir/", "scope": {"kind": "tree", "path": "dir/"}}`
+- `Signal-type: commit_signing` → `"signal_type": "commit_signing"`
+  (match a registered type in `internal/signal/types.go`; the
+  validator does not enforce this, but downstream filters do)
+- `Confidence: exhaustive` → `"confidence": "exhaustive"`
+
+Call shape:
+
+```
+signatory_ingest_analysis:
+  analyst_output: <the JSON envelope above>
+  source:         "mcp:provenance-analyst"   (optional; defaults to "mcp")
+```
+
+The validator runs before the write. On validation failure the
+response names the first offending field — fix the JSON and retry
+in the same turn. Do NOT drop fields to silence the validator;
+every field exists for a reason.
+
+Idempotent on content: re-ingesting an identical payload returns
+`idempotent: true` with the existing output_id. Call once per
+analysis at the end of your turn; do not retry beyond
+fix-and-resubmit on validation error.
+
 ### What NOT to do
 
-- Do NOT write JSON. The orchestrator converts your markdown.
-- Do NOT run `signatory format-check`. You don't have Bash access.
-- Do NOT worry about JSON field names, nesting, or escaping.
+- Do NOT write files. Your output lives in the store, not in
+  `filestore/analysis/`.
+- Do NOT run `signatory` commands — you have no Bash.
+- Do NOT emit markdown as your final output. Markdown was the
+  previous transport; signatory_ingest_analysis replaces it.
 - Focus entirely on analysis quality — citation discipline,
-  severity calibration, verdict-then-rationale shape.
+  severity calibration, signal-type grounding. The JSON shape is
+  mechanical; your judgment is the scarce resource.
 
 ### `Citation` for provenance
 

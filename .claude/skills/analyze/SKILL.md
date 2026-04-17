@@ -135,16 +135,25 @@ expected and acceptable. Do NOT stop to fill them. Proceed.
 
 ## Step 2 — Dispatch analyst agents IN PARALLEL
 
-Spawn two agents in a single message. Agent prompts are small —
-just a WebFetch URL to retrieve their instructions and a Write
-path for their output.
+Spawn two agents in a single message. Each agent:
+
+1. Retrieves its handoff via WebFetch from the pipeline service.
+2. Performs its analysis using Read / Glob / Grep on the local
+   clone, and WebFetch for registry / API lookups.
+3. Serializes its final output as v1-schema JSON and calls the
+   **signatory_ingest_analysis** MCP tool with it. The MCP tool
+   lands the analysis directly in the store — no markdown
+   intermediate, no `filestore/analysis/` scratch files, no
+   post-hoc conversion by the orchestrator.
 
 **IMPORTANT**: send BOTH Agent calls in ONE message so they run
 concurrently.
 
-**IMPORTANT**: analyst agents do NOT have Bash. They use Read, Glob,
-Grep to analyze the local clone, and WebFetch for registry/GitHub
-API calls and to retrieve their handoff. Do NOT give them Bash.
+**IMPORTANT**: analyst agents do NOT have Bash. They use Read,
+Glob, Grep on the local clone, WebFetch for the handoff and
+external lookups, and the `mcp__signatory__signatory_ingest_analysis`
+tool to land their output. They do NOT need Write (nothing to
+write to disk).
 
 The URL pattern for retrieving handoffs is:
 ```
@@ -158,66 +167,74 @@ what the agent needs.
 Agent(security-analyst):
   prompt: |
     You are a security analyst for signatory's trust analysis pipeline.
-    
+
     FIRST: Retrieve your full handoff instructions using WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
-    
+
     Follow those instructions exactly.
-    
-    IMPORTANT OUTPUT INSTRUCTIONS:
-    - Write your output as STRUCTURED MARKDOWN (not JSON).
-    - Write it to: filestore/analysis/{target-name}-security-structured.md
-    - The orchestrator converts your markdown to v1-schema JSON.
-    - Do NOT write JSON. Do NOT run signatory commands.
-    - You do NOT have Bash.
-  allowed-tools: Read Write Glob Grep WebFetch
+
+    OUTPUT INSTRUCTIONS:
+    - Produce your output as v1-schema JSON (see internal/exchange/types.go
+      for the shape; the handoff's "Output format" section carries an
+      example envelope).
+    - Land your output by calling the signatory_ingest_analysis MCP tool:
+        analyst_output: <your v1 JSON object>
+        source:         "mcp:security-analyst"
+    - The tool validates your payload. If validation fails, the error
+      names the first offending field — fix the JSON and retry in the
+      same turn. Do NOT drop fields to get past validation.
+    - Do NOT write files. Do NOT produce markdown as output. Do NOT run
+      signatory commands (you have no Bash). The MCP tool is the sole
+      transport for your output.
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 
 Agent(provenance-analyst):
   prompt: |
     You are a provenance analyst for signatory's trust analysis pipeline.
-    
+
     FIRST: Retrieve your full handoff instructions using WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
-    
+
     Follow those instructions exactly.
-    
-    IMPORTANT OUTPUT INSTRUCTIONS:
-    - Write your output as STRUCTURED MARKDOWN (not JSON).
-    - Write it to: filestore/analysis/{target-name}-provenance-structured.md
-    - Do NOT write JSON. Do NOT run signatory commands.
-    - You do NOT have Bash.
-  allowed-tools: Read Write Glob Grep WebFetch
+
+    OUTPUT INSTRUCTIONS:
+    - Produce your output as v1-schema JSON (see internal/exchange/types.go
+      for the shape; the handoff's "Output format" section carries an
+      example envelope).
+    - Land your output by calling the signatory_ingest_analysis MCP tool:
+        analyst_output: <your v1 JSON object>
+        source:         "mcp:provenance-analyst"
+    - The tool validates your payload. If validation fails, the error
+      names the first offending field — fix the JSON and retry in the
+      same turn. Do NOT drop fields to get past validation.
+    - Do NOT write files. Do NOT produce markdown as output. Do NOT run
+      signatory commands (you have no Bash). The MCP tool is the sole
+      transport for your output.
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
 Wait for BOTH agents to complete before proceeding.
 
-## Step 3 — Convert + validate + ingest
+## Step 3 — Verify both analysts landed their output
 
-The orchestrator (you) converts structured markdown to v1 JSON,
-validates, and ingests. The agents never touch JSON.
+The agents ingested directly via the MCP tool, so the orchestrator
+has nothing to convert or ingest — just confirm that both analyses
+are present in the store before moving to synthesis.
 
 ```bash
-# Convert structured text → v1 JSON
-signatory build-output filestore/analysis/{target-name}-security-structured.md \
-  --target "$CANONICAL_URI" --force \
-  -o filestore/analysis/{target-name}-security-v1.json
-
-signatory build-output filestore/analysis/{target-name}-provenance-structured.md \
-  --target "$CANONICAL_URI" --force \
-  -o filestore/analysis/{target-name}-provenance-v1.json
-
-# Ingest into the store
-signatory ingest filestore/analysis/{target-name}-security-v1.json
-signatory ingest filestore/analysis/{target-name}-provenance-v1.json
-
-# Verify
 signatory show-analyses "$CANONICAL_URI"
 ```
 
-If `build-output` fails, it names the specific conclusion and the
-missing field. Read the error, check the agent's markdown output,
-and either fix the markdown or re-dispatch the agent with guidance.
-Do NOT try to fix JSON — the JSON doesn't exist yet at this stage.
+Expected: two rows, one per analyst role. If only one row shows
+up, the missing analyst either failed silently or skipped the
+ingest call. Re-dispatch the missing role with explicit guidance
+to call signatory_ingest_analysis at the end of its turn.
+
+If an agent's own report indicates a v1 schema-validation error
+from signatory_ingest_analysis and the agent couldn't fix it in
+its turn, the agent's transcript contains the error message —
+surface it to the user so they can decide whether to re-dispatch
+(with extra schema guidance) or accept a gap.
 
 ## Step 4 — Dispatch synthesist agent
 
@@ -286,8 +303,11 @@ non-dependency targets.
   focus areas, different methodologies, and different blind spots.
   Merging them produces a generalist that's weaker at both.
 
-- **Do not skip format-check.** Invalid JSON silently fails at ingest.
-  The analyst agents MUST validate before reporting success.
+- **Trust the ingest-tool validator.** signatory_ingest_analysis
+  runs the v1 schema validator before writing; an invalid payload
+  returns CodeSchemaViolation naming the offending field. Agents
+  should fix the JSON and retry in the same turn rather than
+  dropping fields or writing markdown to a file.
 
 - **Do not skip synthesis.** Raw conclusions without synthesis are
   data without interpretation. The synthesis is what makes the

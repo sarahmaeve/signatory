@@ -32,18 +32,21 @@ prior-conversation context.
 
 ## How a template gets used
 
-1. Copy or read the template into the prompt context.
+1. Copy or read the template into the prompt context (the pipeline
+   service also delivers it via WebFetch for fresh-agent runs).
 2. Substitute the `{TARGET_*}` placeholders for the engagement's
    specific target (name, repo URL, local path, intake question).
 3. Optionally: substitute or swap the language-specific pattern
    catalog if the target isn't Python.
-4. Hand to a fresh agent. The agent emits JSON conforming to the
-   v1 schema in `internal/exchange/`.
-5. Run `signatory format-check <output>` to confirm the emission
-   parses and validates.
-6. (When both analysts have run) synthesize, persist verbatim
-   outputs to `filestore/analysis/`, write the synthesis narrative
-   document to `design/analysis/`.
+4. Hand to a fresh agent. The agent analyzes, serializes its output
+   as a v1-schema JSON envelope, and calls the
+   **signatory_ingest_analysis** MCP tool to land the analysis in
+   the store. The tool validates the v1 schema on the way in; an
+   invalid payload returns a named-field error the agent can fix
+   and re-submit in the same turn.
+5. (When both analysts have run) dispatch the synthesist. The
+   synthesist reads both stored analyses via signatory_show_*
+   tools and emits the human-readable narrative.
 
 ## Versioning
 
