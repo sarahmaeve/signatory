@@ -75,15 +75,19 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 	srv.RegisterResource(&resources.UnexaminedResource{Store: s})
 	srv.RegisterResource(&resources.AnalysesResource{Store: s})
 
-	// Register read-only tools (Phase 1). Tools that mutate state (burn,
-	// posture, ingest, survey-with-write) land in a later phase after
-	// the confirmation-metadata path and audit logging are wired in.
+	// Register tools. Read-only surface plus the first mutating tool
+	// (signatory_ingest_analysis) — see
+	// design/v0.1-invariants.md §"Invariant 3" for why ingest is
+	// intentionally the first write path and why audit-logging /
+	// confirmation-metadata for other mutating tools (burn, posture)
+	// still defers to a later phase.
 	srv.Register(&tools.AnalyzeTool{Store: s})
 	srv.Register(&tools.DetailTool{Store: s})
 	srv.Register(&tools.SignalsTool{Store: s})
 	srv.Register(&tools.ShowAnalysesTool{Store: s})
 	srv.Register(&tools.ShowConclusionsTool{Store: s})
 	srv.Register(&tools.ShowMethodologyTool{Store: s})
+	srv.Register(&tools.IngestAnalysisTool{Store: s})
 	// SurveyTool is a pure read-only dispatcher in Phase 1: it wraps
 	// AnalyzeTool across a project's dep tree. No store field required.
 	srv.Register(&tools.SurveyTool{})
