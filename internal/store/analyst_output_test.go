@@ -26,15 +26,6 @@ func loadFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
 	return &out
 }
 
-func loadAnalysisFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "filestore", "analysis", relPath))
-	require.NoError(t, err)
-	var out exchange.AnalystOutput
-	require.NoError(t, json.Unmarshal(raw, &out))
-	return &out
-}
-
 func TestIngest_AtuinTrialFixture(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
@@ -91,7 +82,7 @@ func TestIngest_AllShipped_v1Fixtures(t *testing.T) {
 	}
 	for _, f := range files {
 		t.Run(f, func(t *testing.T) {
-			out := loadAnalysisFixture(t, f)
+			out := loadFixture(t, f)
 			result, err := s.IngestAnalystOutput(ctx, out, f)
 			require.NoError(t, err, "ingest of %s", f)
 			assert.NotEmpty(t, result.OutputID)
@@ -139,7 +130,7 @@ func TestIngest_HTTPSTarget_NormalizedToCanonicalURI(t *testing.T) {
 	// URL field so the surface form isn't lost.
 	s := newTestDB(t)
 	ctx := context.Background()
-	out := loadAnalysisFixture(t, "thefuck-security-v1.json")
+	out := loadFixture(t, "thefuck-security-v1.json")
 
 	_, err := s.IngestAnalystOutput(ctx, out, "")
 	require.NoError(t, err)

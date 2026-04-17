@@ -6,7 +6,7 @@
 // observations, an optional methodology catalog, and supersession /
 // cross-analyst reference metadata. The shape was validated against
 // a three-round analysis of atuin (see
-// filestore/analysis/atuin-schema-trial-response.json and
+// design/analysis/atuin-schema-trial-response.json and
 // design/analysis/atuin-schema-trial-feedback.md); the v1 shape
 // incorporates every analyst-flagged gap from that trial.
 //

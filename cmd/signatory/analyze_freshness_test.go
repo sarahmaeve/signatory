@@ -26,15 +26,6 @@ func loadAnalystFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
 	return &out
 }
 
-func loadAnalystAnalysisFixture(t *testing.T, relPath string) *exchange.AnalystOutput {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "filestore", "analysis", relPath))
-	require.NoError(t, err)
-	var out exchange.AnalystOutput
-	require.NoError(t, json.Unmarshal(raw, &out))
-	return &out
-}
-
 // TestAnalyze_FreshnessCheck_SurfacesIngestedOutputs is the
 // load-bearing freshness check: an `analyze` call after ingestion
 // returns the cached analyst outputs without --refresh, so an
@@ -51,7 +42,7 @@ func TestAnalyze_FreshnessCheck_SurfacesIngestedOutputs(t *testing.T) {
 		"thefuck-security-v1.json",
 		"thefuck-provenance-v1.json",
 	} {
-		out := loadAnalystAnalysisFixture(t, fixturePath)
+		out := loadAnalystFixture(t, fixturePath)
 		_, err := s.IngestAnalystOutput(ctx, out, fixturePath)
 		require.NoError(t, err)
 	}
@@ -129,7 +120,7 @@ func TestAnalyze_FreshnessCheck_AnalysisDisplay_JSONShape(t *testing.T) {
 	// The AnalysisDisplay wrapper must round-trip cleanly through
 	// json.Marshal so the --json output carries analyst_outputs as
 	// a top-level field alongside the embedded Profile fields.
-	out := loadAnalystAnalysisFixture(t, "thefuck-security-v1.json")
+	out := loadAnalystFixture(t, "thefuck-security-v1.json")
 	globals := testGlobals(t)
 	s, err := globals.OpenStore(t.Context())
 	require.NoError(t, err)

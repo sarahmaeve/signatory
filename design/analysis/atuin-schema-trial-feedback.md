@@ -7,7 +7,9 @@
 - **Prompt:** `/tmp/atuin-schema-trial.md` (not checked into repo —
   ephemeral handoff document).
 - **Emission fixture:**
-  [`atuin-schema-trial-response.json`](../../filestore/analysis/atuin-schema-trial-response.json)
+  [`atuin-schema-trial-response.json`](./atuin-schema-trial-response.json)
+  (partially-migrated form; the pre-schema-revision original is at
+  [`atuin-schema-trial-response-preschema.json`](./atuin-schema-trial-response-preschema.json))
 - **Directed by:** Sarah
 - **Received by signatory:** 2026-04-14
 - **Purpose:** Validate the proposed schema for `internal/exchange/`

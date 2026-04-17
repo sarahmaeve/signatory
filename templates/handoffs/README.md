@@ -28,7 +28,7 @@ prior-conversation context.
 |------|------|--------|
 | [security-review-v1.md](security-review-v1.md) | Security analyst (code-grounded threat modeling) — Python flavor | First validated end-to-end on the thefuck engagement (2026-04-14) — see `design/analysis/thefuck.md`. The pattern catalog is Python-specific; non-Python targets should fork. |
 | [security-review-go-v1.md](security-review-go-v1.md) | Security analyst (code-grounded threat modeling) — Go flavor | Forked from the Python variant for the signatory dogfood engagement. Replaces the Python pattern catalog with Go-shaped patterns: unsafe/cgo, exec.Command shell-injection shape, file-permission hygiene, TLS config, SQL injection, deserialization, init() side effects, build-tag divergence, env-var escape hatches. Language-agnostic scaffolding (schema, calibration, output format) is identical to the Python variant. |
-| [provenance-review-v1.md](provenance-review-v1.md) | Provenance analyst (metadata, git history, signing posture, identity graph) | Validated end-to-end on the signatory dogfood engagement (2026-04-14, output at `filestore/analysis/signatory-provenance-v1.json`). Initially extracted from the in-session provenance run on thefuck. The ecosystem-specific section covers PyPI, crates.io, npm, and Go modules in one file. |
+| [provenance-review-v1.md](provenance-review-v1.md) | Provenance analyst (metadata, git history, signing posture, identity graph) | Validated end-to-end on the signatory dogfood engagement (2026-04-14, output at `design/analysis/signatory-provenance-v1.json`). Initially extracted from the in-session provenance run on thefuck. The ecosystem-specific section covers PyPI, crates.io, npm, and Go modules in one file. |
 
 ## How a template gets used
 

@@ -24,10 +24,10 @@ func ingestAll(t *testing.T) *SQLite {
 	}{
 		{path: "../exchange/testdata/atuin-schema-trial.json",
 			out: loadFixture(t, "atuin-schema-trial.json")},
-		{path: "../../filestore/analysis/thefuck-security-v1.json",
-			out: loadAnalysisFixture(t, "thefuck-security-v1.json")},
-		{path: "../../filestore/analysis/thefuck-provenance-v1.json",
-			out: loadAnalysisFixture(t, "thefuck-provenance-v1.json")},
+		{path: "../exchange/testdata/thefuck-security-v1.json",
+			out: loadFixture(t, "thefuck-security-v1.json")},
+		{path: "../exchange/testdata/thefuck-provenance-v1.json",
+			out: loadFixture(t, "thefuck-provenance-v1.json")},
 	} {
 		_, err := s.IngestAnalystOutput(ctx, fix.out, fix.path)
 		require.NoError(t, err, "backfill %s", fix.path)

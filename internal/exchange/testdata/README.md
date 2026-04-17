@@ -5,7 +5,7 @@ Test fixtures for the exchange package.
 ## `atuin-schema-trial.json`
 
 A migration of the primary-source analyst emission at
-`filestore/analysis/atuin-schema-trial-response.json` into the v1 schema
+`design/analysis/atuin-schema-trial-response.json` into the v1 schema
 shape. The original was the first real test of the schema; it used
 the pre-revision shapes for three fields that the analyst's
 meta-feedback (preserved at
@@ -64,8 +64,11 @@ resolution to be precise.
 ### Why migrate rather than round-trip the original?
 
 The exchange package implements the post-revision v1 schema. The
-original fixture at `filestore/analysis/atuin-schema-trial-response.json`
-is preserved verbatim as the historical record of what the analyst
+partially-migrated fixture at
+`design/analysis/atuin-schema-trial-response.json` (and its
+pre-schema-revision original at
+`design/analysis/atuin-schema-trial-response-preschema.json`) is
+preserved verbatim as the historical record of what the analyst
 emitted — the "what shape did we actually produce on day 1" document.
 This testdata file is the "what shape would we produce now, given
 that schema iteration" artifact, used as the round-trip reference
@@ -74,3 +77,25 @@ for Go tests.
 If the two ever diverge semantically (beyond the shape migrations
 documented above), that's a bug in the migration and should be
 reconciled.
+
+## `thefuck-security-v1.json` and `thefuck-provenance-v1.json`
+
+Real v1-schema analyst outputs produced against
+`github.com/nvbn/thefuck` during a dogfooding engagement. Both target
+the same entity (so ingest tests can assert entity-sharing behavior)
+but were produced by different analyst roles — one security, one
+provenance — with different conclusion sets.
+
+Used by:
+- `internal/store/analyst_output_test.go` — ingest round-trip, entity
+  de-duplication, HTTPS→canonical-URI normalization.
+- `internal/store/analyst_output_query_test.go` — filter behavior
+  across a multi-output corpus (severity, design_intent, signal_type).
+- `cmd/signatory/analyze_freshness_test.go` — freshness check and
+  AnalysisDisplay JSON shape.
+
+These fixtures were originally stored under `filestore/analysis/` in
+an early iteration that mixed runtime scratch output with checked-in
+test data. They were relocated here as part of the v0.1 invariants
+work (see `design/v0.1-invariants.md` §"Invariant 3") so that tests
+don't depend on the state of a scratch-pad directory.
