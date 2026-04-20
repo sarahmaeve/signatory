@@ -1177,6 +1177,166 @@ func TestHTTP_GetSessionNotFoundVsDeleteNotFound(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestHTTP_ResponseBodiesAreJSONSafe asserts that both the deposit
+// response body AND the subsequent list response body are always
+// valid JSON documents with NO raw ASCII control characters
+// (U+0000–U+001F) outside of the tolerated whitespace set (\t \n \r)
+// anywhere in the string — including inside string-typed fields.
+//
+// Why this invariant is load-bearing: bash orchestrators pipe
+// server responses through `jq` to extract fields like `.id`.
+// jq rejects any JSON string whose content has unescaped control
+// characters (per RFC 8259 §7). If the server ever emits raw
+// newlines or tabs inside a JSON string field — e.g., by string-
+// concatenating response bodies instead of using encoding/json —
+// downstream `jq` pipelines break and the orchestrator has to
+// retry via python3 or manual parsing. The /analyze skill's
+// pipeline deposit flow relies on this invariant.
+//
+// Payload shape: handoff-like content packed with every character
+// class that has historically caused problems for shell + JSON
+// pipelines — newlines, tabs, carriage returns, backticks,
+// backslashes, double quotes, dollar signs, unicode non-ASCII,
+// and every control-char byte in the U+0000–U+001F range
+// (the ones JSON requires escaping for).
+func TestHTTP_ResponseBodiesAreJSONSafe(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.Client()
+
+	// Create session.
+	resp, err := doPost(t, client, ts.URL+"/api/sessions",
+		strings.NewReader(`{"target":"repo:github/json/probe"}`))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var sess pipeline.Session
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&sess))
+	resp.Body.Close()
+
+	// Build content that historically stressed downstream JSON
+	// consumers. Each character class maps to a real shell-pipeline
+	// failure we've seen:
+	//
+	//   - "\n" literal in a handoff body: jq parse error at line N
+	//   - backticks / $ in a handoff body: shell re-expansion bugs
+	//   - backslash + quote: double-escape confusion
+	//   - ASCII control chars 0x00-0x1F: RFC 8259 §7 violation
+	//     when unescaped inside a string
+	var controlChars strings.Builder
+	for b := byte(0x00); b <= 0x1f; b++ {
+		controlChars.WriteByte(b)
+	}
+	content := strings.Join([]string{
+		"# Handoff with every annoying character class",
+		"line with `backticks` and $VAR and \"quotes\"",
+		"tabbed\tcontent\there",
+		"line\r\nwith CRLF",
+		"backslash\\escape\\path",
+		"unicode: résumé, Ω, 日本語, 🦀",
+		"control chars below:",
+		controlChars.String(),
+	}, "\n")
+
+	// Deposit via HTTP — json.Marshal gets the outbound escape right.
+	reqBody, err := json.Marshal(map[string]string{
+		"role":     "security",
+		"msg_type": "handoff",
+		"content":  content,
+	})
+	require.NoError(t, err)
+
+	depositResp, err := doPost(t, client,
+		ts.URL+"/api/sessions/"+sess.ID+"/messages",
+		strings.NewReader(string(reqBody)))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, depositResp.StatusCode)
+	depositBody, err := io.ReadAll(depositResp.Body)
+	require.NoError(t, err)
+	depositResp.Body.Close()
+
+	// Invariant 1: the deposit response body must be valid JSON.
+	// If encoding/json.NewEncoder is being used server-side (correct),
+	// this always holds. If someone switches to Fprintf-with-raw-string
+	// formatting, this will start failing.
+	assertResponseBodyJSONSafe(t, "deposit response", depositBody)
+
+	// Spot-check the roundtrip: decode the deposit body and confirm
+	// Content survived verbatim — including every annoying byte.
+	var depositMsg pipeline.Message
+	require.NoError(t, json.Unmarshal(depositBody, &depositMsg))
+	assert.Equal(t, content, depositMsg.Content,
+		"deposit response .content must round-trip every input byte")
+
+	// Invariant 2: the list response body must also be valid JSON,
+	// same control-char rule. Deposits go through the store, so
+	// this is a second chance for a bad serializer to slip in.
+	listResp, err := doGet(t, client, ts.URL+"/api/sessions/"+sess.ID+"/messages")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, listResp.StatusCode)
+	listBody, err := io.ReadAll(listResp.Body)
+	require.NoError(t, err)
+	listResp.Body.Close()
+
+	assertResponseBodyJSONSafe(t, "list response", listBody)
+
+	// Roundtrip through the list response too — same content,
+	// same bytes.
+	var listed []pipeline.Message
+	require.NoError(t, json.Unmarshal(listBody, &listed))
+	require.Len(t, listed, 1, "list should return the one deposit")
+	assert.Equal(t, content, listed[0].Content,
+		"list response message.content must round-trip every input byte")
+
+	// Invariant 3: raw-format access (used by analyst WebFetch
+	// retrievals) returns the CONTENT verbatim — not a JSON
+	// document. The content bytes may contain control chars
+	// (that's the point of raw format), but the response body
+	// itself isn't required to be JSON.
+	rawResp, err := doGet(t, client,
+		ts.URL+"/api/sessions/"+sess.ID+"/messages?role=security&type=handoff&format=raw")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rawResp.StatusCode)
+	rawBody, err := io.ReadAll(rawResp.Body)
+	require.NoError(t, err)
+	rawResp.Body.Close()
+
+	assert.Equal(t, content, string(rawBody),
+		"raw format must return content bytes verbatim without JSON wrapping")
+}
+
+// assertResponseBodyJSONSafe asserts that body is valid JSON with
+// no raw ASCII control characters outside the tolerated whitespace
+// set (\t \n \r) at the top level. Whitespace between tokens is
+// allowed per RFC 8259; only characters INSIDE JSON string fields
+// would be the real violation, and those are checked implicitly by
+// json.Unmarshal's strictness. Raw control chars in a string value
+// would fail the unmarshal.
+//
+// Helper kept local to this test since it's an assertion idiom
+// specific to the JSON-safety invariant rather than a general-
+// purpose check.
+func assertResponseBodyJSONSafe(t *testing.T, label string, body []byte) {
+	t.Helper()
+
+	// Must parse — catches malformed envelopes and raw control
+	// chars embedded in string fields (encoding/json rejects the
+	// latter per RFC 8259 §7).
+	var any interface{}
+	require.NoError(t, json.Unmarshal(body, &any),
+		"%s must be valid JSON", label)
+
+	// Top-level bytes check — only \t \n \r tolerated outside
+	// strings. If anything else < 0x20 appears, the server is
+	// emitting something pre-JSON-encoding.
+	for i, b := range body {
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			t.Fatalf("%s: raw control byte 0x%02x at offset %d; server must emit JSON-escaped form",
+				label, b, i)
+		}
+	}
+}
+
 // TestHTTP_ContentTypeJSON verifies all JSON responses have correct Content-Type.
 func TestHTTP_ContentTypeJSON(t *testing.T) {
 	t.Parallel()

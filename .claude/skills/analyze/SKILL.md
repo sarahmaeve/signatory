@@ -86,14 +86,16 @@ pressure. Agents retrieve their instructions via WebFetch from a
 localhost URL instead of having 500 lines inlined in their prompt.
 
 ```bash
-# Start the pipeline service (if not already running).
-# Check first — if port 21517 is already listening, skip this.
-signatory serve --port 21517 &
-SERVE_PID=$!
-sleep 1  # wait for server startup
+# Ensure the pipeline service is running. `signatory serve status`
+# exits 0 if a managed instance is up (pidfile + live PID + port
+# listening), 1 otherwise. `signatory serve start` is idempotent-
+# friendly: it refuses to clobber an already-running instance and
+# writes a pidfile + log file so subsequent runs can Stop / Restart
+# cleanly. Prefer these over `pgrep` / `lsof` / `nohup & disown`.
+signatory serve status >/dev/null 2>&1 || signatory serve start
 
 # Create a session for this pipeline run.
-SESSION_ID=$(curl -s -X POST https://127.0.0.1:21517/api/sessions \
+SESSION_ID=$(curl -sk -X POST https://127.0.0.1:21517/api/sessions \
   -H "Content-Type: application/json" \
   -d "{\"target\":\"$TARGET\"}" | jq -r .id)
 echo "Session: $SESSION_ID"
