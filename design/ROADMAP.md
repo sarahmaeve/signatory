@@ -12,34 +12,24 @@ These items are required before v0.1 ships. No exceptions.
    unexamined dependencies. This is the "show me my dependency tree's
    trust posture" workflow — the dashboard entry point.
 
-2. **Entity ID normalization (#53)**
-   `alecthomas/kong` and `https://github.com/alecthomas/kong` must
-   resolve to the same entity. Without this, posture decisions and
-   signals fragment silently across duplicate entities.
-
-3. **npm ecosystem provider**
+2. **npm ecosystem provider**
    Parse `package.json` and `package-lock.json`. Resolve npm packages
    to source repos. Collect npm-specific signals: publish metadata,
    install scripts, download counts, maintainer info. npm is the
    highest-risk ecosystem (axios case study).
 
-4. **PyPI ecosystem provider**
+3. **PyPI ecosystem provider**
    Parse `requirements.txt`, `setup.py`, `pyproject.toml`. Resolve
    PyPI packages to source repos (via `project_urls`). Collect
    PyPI-specific signals. PyPI is the second-highest-risk ecosystem.
 
-5. **MCP server**
+4. **MCP server**
    Implement the MCP interface from `design/mcp-interface.md`:
    6 tools (`signatory_analyze`, `signatory_survey`, `signatory_set_posture`,
    `signatory_burn`, `signatory_refresh`, `signatory_detail`) and 4
    resources (`posture`, `burns`, `profile`, `unexamined`). This is
    how LLMs interact with signatory in coding workflows — a primary
    interface, not a nice-to-have.
-
-### Housekeeping
-
-6. **LICENSE file (#22)**
-   Choose and add a license. Adoption blocker.
 
 ## V0.1 — Should-Do (if time permits)
 
