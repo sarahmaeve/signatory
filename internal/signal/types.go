@@ -119,6 +119,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"force-push can rewrite history and alter this value",
 		},
 	},
+	"last_publish": {
+		Type:              "last_publish",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Timestamp of the most recent publication of a package to its registry (npm, PyPI, crates.io, etc.).",
+		Caveats: []string{
+			"publication dates are set by the registry at receive time — they're harder to backdate than git commit timestamps, but a package published under an attacker's control still produces a publication event with a current timestamp",
+			"a recent last_publish is not positive evidence of active maintenance — a compromised-account publish looks identical to a legitimate one in this signal alone",
+			"a stale last_publish on a widely-depended-on package may indicate either fallow stability or abandonment; pair with maintainer activity to interpret",
+		},
+	},
 	"repo_age": {
 		Type:              "repo_age",
 		Group:             profile.SignalGroupVitality,

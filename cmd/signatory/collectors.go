@@ -14,6 +14,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
+	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 )
 
 // CollectOpts carries per-invocation options from AnalyzeCmd's
@@ -52,32 +53,66 @@ var (
 // applying runtime options like --path / --clone for local-clone
 // based collectors.
 //
-// v0.1 contract:
+// v0.1 contract (per-entity dispatch):
 //
-//   - The github API collector is always included (github is the
-//     only hosting platform currently supported; other platforms
-//     land with GitLab adoption in a later version).
-//   - The git local-clone collector is always required. Either
-//     --path must point at an existing clone of the target, or
-//     --clone plus --path must request a fresh clone. The absence
-//     of both is a hard error — the caller's intent cannot be
-//     satisfied silently.
+//   - Git-hosted entities (resolves to a github clone URL): the
+//     github API collector AND the git local-clone collector run.
+//     --path or --clone+--path is REQUIRED; absence is a hard error.
+//     This is the legacy `signatory analyze <owner/repo>` flow.
+//   - Registry-package entities with no resolved repo URL
+//     (EntityPackage + empty URL): neither github nor git-local-clone
+//     apply — the entity has no git origin to examine. The ecosystem
+//     collector (npm, pypi, ...) is added separately by Phase A.4
+//     wiring; this function returns an empty slice for them today.
+//     --path/--clone are NOT required in this case; the sentinel
+//     ErrCloneRequired only fires for git-hosted entities.
 //
-// Returns an error (not a signal-level failure) when the operator's
-// intent cannot be satisfied, so the orchestrator surfaces a clean
-// one-line message and exits non-zero rather than producing a
-// half-complete analysis that looks successful.
+// The contract's generalization from "always [github, git]" to
+// "dispatch by entity shape" is the Phase A.2 refactor. Prior to it,
+// npm targets would spuriously trigger ErrCloneRequired because the
+// git-local-clone branch fired unconditionally.
 func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts) ([]signal.Collector, error) {
-	collectors := []signal.Collector{
-		ghcollector.NewCollector(),
+	var collectors []signal.Collector
+
+	// Ecosystem-specific registry collectors. npm is the only
+	// ecosystem wired through here at Phase A; PyPI and others land
+	// additively as each ecosystem's collector ships.
+	if entity != nil && entity.Ecosystem == "npm" {
+		collectors = append(collectors, npmcollector.NewCollector())
 	}
 
-	clonePath, err := resolveClonePath(ctx, entity, opts)
-	if err != nil {
-		return nil, err
+	// Git-hosted collectors. An entity qualifies when its URL is
+	// populated — either from a repo: scheme target at creation
+	// time, or from an npm package whose A.5 resolution found a
+	// github-hosted repository. Empty URL → no git origin → skip
+	// the github/git collector pair and do not require --path/--clone.
+	if isGitHostedEntity(entity) {
+		clonePath, err := resolveClonePath(ctx, entity, opts)
+		if err != nil {
+			return nil, err
+		}
+		collectors = append(collectors,
+			ghcollector.NewCollector(),
+			gitcollector.NewCollector(clonePath),
+		)
 	}
-	collectors = append(collectors, gitcollector.NewCollector(clonePath))
+
 	return collectors, nil
+}
+
+// isGitHostedEntity reports whether an entity has a git origin the
+// github + git-local-clone collectors can operate against.
+//
+// Non-empty URL is the gate: upstream code sets URL only after
+// validation — resolved.CloneURL for repo: entities is github-only
+// (other platforms yield an error before reaching this point); the
+// npm provider's github-allowlist check gates pkg: entities in A.5;
+// tests inject filesystem paths for local-clone-without-network
+// scenarios. An empty URL is the unambiguous "nothing to clone"
+// signal — unresolved npm packages, gitlab repos before the
+// collector lands, etc.
+func isGitHostedEntity(entity *profile.Entity) bool {
+	return entity != nil && entity.URL != ""
 }
 
 // resolveClonePath enforces the --path / --clone contract and

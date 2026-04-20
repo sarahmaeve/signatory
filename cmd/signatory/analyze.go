@@ -11,16 +11,18 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/identity"
 	"github.com/sarahmaeve/signatory/internal/profile"
+	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
 // AnalyzeCmd retrieves or collects the trust profile for a target.
 //
 // Target resolution: the user-supplied target is parsed via
-// profile.NormalizeGitHubRepoInput so that e.g. "alecthomas/kong",
-// "github.com/alecthomas/kong", and "https://github.com/alecthomas/kong"
-// all collapse to the same canonical URI and therefore the same
-// entity. This prevents duplicate-entity fragmentation (#53).
+// profile.ResolveTarget so every accepted input form (GitHub
+// shorthand, https URL, SCP-form, or canonical URI) collapses to
+// the same entity. This prevents duplicate-entity fragmentation
+// (#53) and lets analyze accept package-scheme URIs like
+// pkg:npm/express uniformly with repo-scheme URIs.
 type AnalyzeCmd struct {
 	Target  string        `arg:"" help:"Package name, repo URL, or identity to analyze."`
 	Refresh bool          `help:"Collect fresh signals from network sources." default:"false"`
@@ -67,10 +69,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("resolve team identity: %w", err)
 	}
 
-	// Normalize user input to a canonical URI. This is the one place
-	// where free-form input crosses into stable internal identifiers —
-	// everything downstream uses the canonical URI as the lookup key.
-	canonicalURI, owner, repoName, err := profile.NormalizeGitHubRepoInput(cmd.Target)
+	// Normalize user input to a canonical URI via the single
+	// CLI-wide target parser. This is the one place where free-form
+	// input crosses into stable internal identifiers — everything
+	// downstream uses resolved.CanonicalURI as the lookup key.
+	resolved, err := profile.ResolveTarget(cmd.Target)
 	if err != nil {
 		return fmt.Errorf("parse target %q: %w", cmd.Target, err)
 	}
@@ -78,7 +81,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// Look up an existing entity by canonical URI. A matching entity
 	// means the user has analyzed this target before — we reuse its
 	// UUID ID so FK references stay stable.
-	entity, err := s.FindEntityByURI(ctx, canonicalURI)
+	entity, err := s.FindEntityByURI(ctx, resolved.CanonicalURI)
 	if errors.Is(err, store.ErrNotFound) {
 		entity = nil
 	} else if err != nil {
@@ -89,7 +92,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	if !cmd.Refresh {
 		if entity == nil {
 			fmt.Printf("No cached data for: %s\n", cmd.Target)
-			fmt.Printf("Resolved to: %s\n", canonicalURI)
+			fmt.Printf("Resolved to: %s\n", resolved.CanonicalURI)
 			fmt.Println("Run with --refresh to collect signals from GitHub.")
 			return nil
 		}
@@ -116,23 +119,59 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 
 	// --- Refresh path: collect fresh signals. ---
 
-	// Create the entity if it doesn't exist yet. UUID ID, canonical URI,
-	// short_name and URL derived from the parsed input.
+	// Create the entity if it doesn't exist yet. Type, ShortName,
+	// URL, and Ecosystem are derived from the resolved target's
+	// scheme — repo: entities are github-hosted projects today;
+	// pkg: entities are registry packages whose repo URL may be
+	// resolved asynchronously by the provider (A.5 will add that
+	// step for npm; leaving URL empty is benign for Phase A).
 	created := false
 	if entity == nil {
 		entity = &profile.Entity{
 			ID:           profile.NewEntityID(),
-			CanonicalURI: canonicalURI,
-			Type:         profile.EntityProject,
-			ShortName:    owner + "/" + repoName,
-			URL:          "https://github.com/" + owner + "/" + repoName,
+			CanonicalURI: resolved.CanonicalURI,
 			CreatedAt:    time.Now().UTC(),
 			UpdatedAt:    time.Now().UTC(),
+		}
+		switch resolved.Scheme {
+		case "repo":
+			entity.Type = profile.EntityProject
+			entity.ShortName = resolved.Owner + "/" + resolved.ShortName
+			entity.URL = resolved.CloneURL
+		case "pkg":
+			entity.Type = profile.EntityPackage
+			entity.Ecosystem = resolved.Ecosystem
+			// ShortName is the full package name (scope-preserving
+			// for npm), not the last path segment — "@types/node",
+			// not "node". ResolvedTarget.ShortName drops the scope
+			// for its own reasons; reconstruct here.
+			entity.ShortName = strings.TrimPrefix(
+				resolved.CanonicalURI, "pkg:"+resolved.Ecosystem+"/")
+		default:
+			return fmt.Errorf("analyze does not yet support %q-scheme targets (got %q)",
+				resolved.Scheme, resolved.CanonicalURI)
 		}
 		if err := s.PutEntity(ctx, entity); err != nil {
 			return fmt.Errorf("create entity: %w", err)
 		}
 		created = true
+	}
+
+	// Resolve the entity's upstream repo URL when it's an npm
+	// package that hasn't been resolved yet (A.5 in design/npm-plan.
+	// txt). The registry tells us where the package's source lives;
+	// the orchestrator stamps it on the entity so downstream
+	// collectors (github, git-local-clone) pick it up via entity.URL.
+	//
+	// Failure here is non-fatal: the npm collector still runs and
+	// emits registry signals; only the github-side collectors get
+	// skipped (because isGitHostedEntity stays false). A warning to
+	// stderr gives the operator a trail.
+	if entity.Type == profile.EntityPackage && entity.Ecosystem == "npm" && entity.URL == "" {
+		if err := resolveNpmRepo(ctx, s, entity, globals); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: npm repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, err)
+		}
 	}
 
 	fmt.Printf("Collecting signals for: %s\n", entity.CanonicalURI)
@@ -435,4 +474,47 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// resolveNpmRepo asks the npm registry for the package's declared
+// repository URL, normalizes it to a github clone URL (empty if the
+// package doesn't declare one or declares a non-github host), and
+// stamps the result on the entity. Persists the entity update so
+// subsequent reads see the resolved URL.
+//
+// Lives in analyze.go rather than inside the npm collector per
+// decision (a) in design/npm-plan.txt: the provider answers the
+// "where is this package's source?" question, the orchestrator
+// records it, and downstream collectors work against the resolved
+// entity. Keeping the provider out of the collector prevents the
+// collector's tight loop (1 call per signal it emits) from bleeding
+// into orchestration (1 call per analyze invocation).
+func resolveNpmRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	packageName := strings.TrimPrefix(entity.CanonicalURI, "pkg:npm/")
+	if packageName == "" || packageName == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not an npm package URI", entity.CanonicalURI)
+	}
+
+	client := npmregistry.NewClient()
+	if globals != nil && globals.NpmRegistryURL != "" {
+		client = npmregistry.NewClientWithBaseURL(globals.NpmRegistryURL)
+	}
+
+	repoURL, err := client.ResolveRepoURL(ctx, packageName)
+	if err != nil {
+		return fmt.Errorf("query npm registry: %w", err)
+	}
+	if repoURL == "" {
+		// Package doesn't declare a github-hosted repository. Nothing
+		// to stamp; stay silent. Downstream dispatch will skip the
+		// github + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
 }

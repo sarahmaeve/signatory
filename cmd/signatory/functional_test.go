@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -501,4 +504,217 @@ func TestFunctional_ResolvePath_Absolute(t *testing.T) {
 	path, err := store.ResolvePath("/tmp/my.db")
 	require.NoError(t, err)
 	assert.Equal(t, "/tmp/my.db", path)
+}
+
+// TestFunctional_AnalyzeNpm_EndToEnd exercises the full Phase A
+// flow in one shot:
+//
+//  1. A target "pkg:npm/express" reaches AnalyzeCmd.Run.
+//  2. ResolveTarget classifies it as pkg-scheme + ecosystem=npm.
+//  3. Entity is created with EntityPackage, Ecosystem=npm, URL="".
+//  4. A.5's resolveNpmRepo hits the httptest npm registry, pulls
+//     repository.url, normalizes it, stamps the github URL on the
+//     entity.
+//  5. Both the real npm collector (talking to httptest) and a
+//     mock github-ish collector run; each emits signals into the
+//     store.
+//  6. Audit log records the analyze action.
+//
+// If ANY layer is broken, this test fails. This is the single
+// proof-of-coherence for Phase A — every intervening unit test
+// covers a slice; this one covers the whole stack.
+func TestFunctional_AnalyzeNpm_EndToEnd(t *testing.T) {
+	// Not t.Parallel: we're serializing to keep the httptest lifecycle
+	// tight; parallelism adds no value at this test's cost.
+
+	// npm registry mock — returns a realistic express-like response
+	// with a github repository.url and a last-publish time for the
+	// latest version.
+	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/express", r.URL.Path, "npm registry should be hit at /express")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+		  "name": "express",
+		  "dist-tags": {"latest": "4.18.2"},
+		  "time": {
+		    "created": "2010-12-29T19:38:25.450Z",
+		    "4.18.2": "2022-10-08T19:08:35.000Z"
+		  },
+		  "repository": {
+		    "type": "git",
+		    "url": "git+https://github.com/expressjs/express.git"
+		  }
+		}`)
+	}))
+	defer npmSrv.Close()
+
+	// Real npm collector, pointed at the httptest server via the
+	// dependency-injection entry NewCollectorWithClient.
+	realNpmCollector := npmregistry.NewCollectorWithClient(
+		npmregistry.NewClientWithBaseURL(npmSrv.URL))
+
+	// Mock github-ish collector emitting two canned signals —
+	// stands in for the real github + git collectors without HTTP or
+	// local clone plumbing. We're testing analyze orchestration, not
+	// github collection behavior (which has its own thorough tests).
+	mockGH := &mockCollector{
+		name: "github-mock",
+		signals: []profile.Signal{
+			{Type: "stars", Group: profile.SignalGroupCriticality, Source: "github-mock",
+				ForgeryResistance: profile.ForgeryMediumDeclining,
+				Value:             json.RawMessage(`{"count":63000}`),
+				CollectedAt:       time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)},
+			{Type: "last_commit", Group: profile.SignalGroupVitality, Source: "github-mock",
+				ForgeryResistance: profile.ForgeryMediumDeclining,
+				Value:             json.RawMessage(`{"days_ago":14}`),
+				CollectedAt:       time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)},
+		},
+	}
+
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:         filepath.Join(dir, "test.db"),
+		Collectors:     []signal.Collector{realNpmCollector, mockGH},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+
+	cmd := &AnalyzeCmd{Target: "pkg:npm/express", Refresh: true}
+	require.NoError(t, cmd.Run(globals))
+
+	// ---- Verify persisted state. ----
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	// Entity: correct URI, type, ecosystem, resolved URL.
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/express")
+	require.NoError(t, err)
+	assert.Equal(t, profile.EntityPackage, entity.Type,
+		"npm target must yield EntityPackage")
+	assert.Equal(t, "npm", entity.Ecosystem)
+	assert.Equal(t, "express", entity.ShortName)
+	assert.Equal(t, "https://github.com/expressjs/express", entity.URL,
+		"A.5 should stamp the normalized github URL on the entity")
+
+	// Signals: both npm and github-mock rows present.
+	signals, err := s.GetSignals(context.Background(), entity.ID)
+	require.NoError(t, err)
+
+	// Map to source → types for readable assertions.
+	bySource := map[string][]string{}
+	for _, sig := range signals {
+		bySource[sig.Source] = append(bySource[sig.Source], sig.Type)
+	}
+	assert.Contains(t, bySource, "npm-registry", "npm collector signals must be stored")
+	assert.Contains(t, bySource["npm-registry"], "last_publish",
+		"npm collector should emit last_publish")
+	assert.Contains(t, bySource, "github-mock", "github-mock signals must be stored")
+	assert.Contains(t, bySource["github-mock"], "stars")
+	assert.Contains(t, bySource["github-mock"], "last_commit")
+
+	// Audit log: analyze action recorded for the entity.
+	auditFile, err := os.ReadFile(globals.AuditFilePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(auditFile), `"action":"analyze"`)
+	assert.Contains(t, string(auditFile), entity.ID,
+		"audit log should carry the entity's UUID")
+}
+
+// TestFunctional_AnalyzeNpm_NoRepoDeclared exercises the
+// resolution-absence path: an npm package whose registry entry
+// doesn't declare a repository URL. The entity should be created
+// with empty URL, A.5 should silently return (empty is not an
+// error), and the npm collector still runs. The github-side
+// collectors stay skipped because isGitHostedEntity is false — but
+// since the test injects its own collector list, this test just
+// verifies the resolution didn't fail and the entity persisted
+// correctly.
+func TestFunctional_AnalyzeNpm_NoRepoDeclared(t *testing.T) {
+	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+		  "name": "orphan",
+		  "dist-tags": {"latest": "1.0.0"},
+		  "time": {"1.0.0": "2024-01-01T00:00:00Z"}
+		}`)
+	}))
+	defer npmSrv.Close()
+
+	npmCollector := npmregistry.NewCollectorWithClient(
+		npmregistry.NewClientWithBaseURL(npmSrv.URL))
+
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:         filepath.Join(dir, "test.db"),
+		Collectors:     []signal.Collector{npmCollector},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+
+	cmd := &AnalyzeCmd{Target: "pkg:npm/orphan", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"absent repository.url is not an error — just leaves URL empty")
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/orphan")
+	require.NoError(t, err)
+	assert.Empty(t, entity.URL,
+		"entity URL should stay empty when registry declares no github repo")
+
+	// npm signal still landed — A.5 failing or returning empty
+	// doesn't block collection.
+	signals, err := s.GetSignals(context.Background(), entity.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, signals)
+}
+
+// TestFunctional_AnalyzeNpm_ScopedPackage confirms a scoped package
+// name flows through ResolveTarget, entity creation, and the npm
+// collector without losing the @scope/ prefix. Canonical URI stays
+// pkg:npm/@types/node; ShortName is @types/node (not "node"); the
+// npm collector hits /@types/node on the registry.
+func TestFunctional_AnalyzeNpm_ScopedPackage(t *testing.T) {
+	var seenPath string
+	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+		  "name": "@types/node",
+		  "dist-tags": {"latest": "20.0.0"},
+		  "time": {"20.0.0": "2024-01-01T00:00:00Z"}
+		}`)
+	}))
+	defer npmSrv.Close()
+
+	npmCollector := npmregistry.NewCollectorWithClient(
+		npmregistry.NewClientWithBaseURL(npmSrv.URL))
+
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:         filepath.Join(dir, "test.db"),
+		Collectors:     []signal.Collector{npmCollector},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+
+	cmd := &AnalyzeCmd{Target: "pkg:npm/@types/node", Refresh: true}
+	require.NoError(t, cmd.Run(globals))
+
+	assert.Equal(t, "/@types/node", seenPath,
+		"scoped package request path must preserve the @scope/name form")
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/@types/node")
+	require.NoError(t, err)
+	assert.Equal(t, "@types/node", entity.ShortName,
+		"scope must be preserved on entity.ShortName — '@types/node', not 'node'")
+	assert.Equal(t, "npm", entity.Ecosystem)
 }

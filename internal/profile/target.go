@@ -49,6 +49,12 @@ type ResolvedTarget struct {
 	// schemes or platforms. Callers that need to `git clone`
 	// the target use this field without reconstructing the URL.
 	CloneURL string
+
+	// Ecosystem is populated for pkg: URIs ("npm", "pypi", "cargo",
+	// "golang", ...). Empty for other schemes. Downstream dispatch
+	// (ecosystem-specific collector routing, provider resolution)
+	// reads this field instead of re-parsing the URI.
+	Ecosystem string
 }
 
 // ResolveTarget normalizes a user-supplied target argument to its
@@ -198,10 +204,11 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 	case "pkg":
 		// pkg:<ecosystem>/<name...> where name may contain further
 		// slashes (npm scoped packages: pkg:npm/@types/node).
-		// ShortName is the final segment.
+		// ShortName is the final segment; Ecosystem is the first.
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("pkg URI %q: expected ecosystem/name, got %d segment(s)", uri, len(parts))
 		}
+		out.Ecosystem = parts[0]
 		out.ShortName = parts[len(parts)-1]
 
 	case "identity", "org":

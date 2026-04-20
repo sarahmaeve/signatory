@@ -81,6 +81,13 @@ type Globals struct {
 	// "use the default (~/.signatory/audit.log)". Tests set this to a
 	// temp path; production leaves it empty.
 	AuditFilePath string
+
+	// NpmRegistryURL overrides the base URL for npm registry calls
+	// made during analyze-orchestration repo resolution (A.5 in
+	// design/npm-plan.txt). Empty means the production registry
+	// (https://registry.npmjs.org). Tests point this at an httptest
+	// server so analyze runs don't hit the live npm registry.
+	NpmRegistryURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
