@@ -35,14 +35,24 @@ VERSION := $(shell git describe --tags --dirty 2>/dev/null || echo v0.1.0-dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-.PHONY: help install check test lint fmt-check smoke
+.PHONY: help install install-hooks check test lint fmt-check smoke
 
 help:  ## Show available targets.
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 install:  ## Install signatory to $GOBIN with a git-derived version stamp.
 	@echo "installing signatory $(VERSION) ($(COMMIT))"
 	go install -ldflags "$(LDFLAGS)" ./cmd/signatory
+
+# install-hooks wires the .githooks/ directory into this clone's git
+# config so the pre-commit hook (gofmt + vet + test -race) actually
+# runs on commit. The hook itself is tracked in the repo; what's not
+# tracked — and therefore not portable — is git's per-clone
+# core.hooksPath setting. Running this target once per fresh clone
+# activates it; it's idempotent to re-run.
+install-hooks:  ## Wire .githooks/ into this clone's core.hooksPath so pre-commit fires.
+	@git config core.hooksPath .githooks
+	@echo "git hooks: .githooks/ activated (pre-commit runs gofmt + vet + test -race)"
 
 check: fmt-check vet test smoke  ## Run the full pre-commit gauntlet (matches what CI enforces).
 

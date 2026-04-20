@@ -2,12 +2,20 @@
 set -euo pipefail
 
 echo "=== pre-commit: gofmt ==="
-UNFMT=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
-if [ -n "$UNFMT" ]; then
-    echo "ERROR: The following files are not formatted:"
-    echo "$UNFMT"
-    echo "Run: gofmt -w \$file"
-    exit 1
+# Scope to TRACKED .go files. git ls-files respects .gitignore
+# automatically, so gitignored directories like filestore/clones/
+# (analyze --clone output — external source we don't own) are
+# excluded without having to enumerate paths. A naive `find .` would
+# walk into them and falsely fail on external code.
+TRACKED_GO=$(git ls-files '*.go')
+if [ -n "$TRACKED_GO" ]; then
+    UNFMT=$(gofmt -l $TRACKED_GO)
+    if [ -n "$UNFMT" ]; then
+        echo "ERROR: The following files are not formatted:"
+        echo "$UNFMT"
+        echo "Run: gofmt -w \$file"
+        exit 1
+    fi
 fi
 echo "OK"
 

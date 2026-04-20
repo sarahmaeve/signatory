@@ -70,3 +70,13 @@ go install github.com/sarahmaeve/signatory/cmd/signatory@latest
 ```
 
 Requires Go 1.25+. One runtime dependency ([Kong](https://github.com/alecthomas/kong), zero transitive deps — [we vetted it](design/dogfood-dependency-decisions.md)).
+
+## Contributing
+
+After cloning, activate the pre-commit hooks (gofmt, vet, `go test -race`):
+
+```
+make install-hooks
+```
+
+This sets `core.hooksPath` to `.githooks/` for this clone. One-time per clone, idempotent to re-run. CI enforces the same checks; running the hook locally catches them before push.
