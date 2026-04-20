@@ -409,7 +409,30 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Caveats: []string{
 			"present-and-valid is a very high-quality provenance signal — the attestation cryptographically binds the published version to a source repo and commit SHA",
 			"absence is not automatically negative — older published versions predate trusted publishing, and the maintainer may have not opted in yet",
-			"absence on a package that previously used trusted publishing IS strongly negative — the axios attack pattern — but detecting the transition requires comparing across versions, which this v0.1 signal does not do",
+			"absence on a package that previously used trusted publishing IS strongly negative — the axios attack pattern — but detecting the transition requires comparing across versions; publish_origin_consistency is the cross-version complement to this snapshot signal",
+		},
+	},
+	"postinstall_introduced": {
+		Type:              "postinstall_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether a postinstall lifecycle script appeared in the latest version of a package that had previously published versions without one. Longitudinal complement to postinstall_present.",
+		Caveats: []string{
+			"transitions have legitimate causes — native-binary build adoption, platform bootstrap migration, tooling change — so a true positive is an anomaly flag, not a verdict",
+			"the axios 2026 supply-chain attack fit this pattern exactly: a postinstall was added to a package that had published without one for years",
+			"window is bounded (last N versions by publish time); a postinstall introduced farther back looks indistinguishable from one that was always there",
+		},
+	},
+	"publish_origin_consistency": {
+		Type:              "publish_origin_consistency",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Consistency of publish provenance across recent versions: presence-transitions on OIDC attestations plus count of distinct publisher accounts.",
+		Caveats: []string{
+			"a single publisher across many versions with consistent attestation presence is the healthy pattern — transitions are anomaly signals, not verdicts",
+			"legitimate reasons to transition include maintainer handoff, CI pipeline migration, or a first adoption of trusted publishing — these produce false positives worth investigating, not dismissing",
+			"the axios 2026 forensic specifically called out the broken attestation chain as the detection-relevant fingerprint — this signal captures that shape across versions",
+			"the _npmUser.name field is the registry's publisher stamp and cannot be rewritten post-publish; it's higher-forgery-resistance than maintainer lists which are self-declared",
 		},
 	},
 

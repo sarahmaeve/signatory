@@ -177,11 +177,25 @@ type Maintainer struct {
 }
 
 // PackageVersion is the per-version metadata block. Phase B reads
-// Scripts.Postinstall and Dist.Attestations; other fields are not
-// modelled.
+// Scripts.Postinstall and Dist.Attestations; Phase B.6's longitudinal
+// signals add NpmUser for cross-version publisher-continuity analysis.
+// Other fields on the wire are not modelled.
 type PackageVersion struct {
 	Scripts Scripts `json:"scripts"`
 	Dist    Dist    `json:"dist"`
+	NpmUser NpmUser `json:"_npmUser"`
+}
+
+// NpmUser identifies who ran `npm publish` for a given version.
+// The registry stamps this field at receive time — the maintainer
+// cannot rewrite it post-publish — so transitions in NpmUser.Name
+// across recent versions are a load-bearing publish-provenance
+// signal. Email is deliberately NOT emitted downstream (PII); we
+// parse it to avoid future-you being surprised by a strict-decode
+// failure if someone tightens the struct later.
+type NpmUser struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // Scripts holds lifecycle script declarations. postinstall is the

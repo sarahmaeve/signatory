@@ -4,12 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
+
+// crossVersionWindow bounds the number of recent versions consulted
+// for longitudinal signals. Ten is enough to establish a pattern
+// without paying for parsing hundreds of historical entries on
+// popular packages. Widening the window has diminishing returns —
+// older transitions are less actionable than recent ones — and
+// shrinking it risks missing signal on packages that publish many
+// pre-release versions in quick succession.
+const crossVersionWindow = 10
 
 // source is the collector's name, the value that lands in
 // profile.Signal.Source for every emission. Kept as a const so the
@@ -114,6 +124,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// call per analyze. Failure is recorded as absence so the other
 	// signals still land.
 	recordWeeklyDownloads(ctx, c.client, result, entity.ID, packageName, collectedAt)
+
+	// ----- postinstall_introduced + publish_origin_consistency -----
+	//
+	// Longitudinal signals. Same wire payload as the snapshot
+	// signals above — the full versions map is already in pkg —
+	// so the marginal cost is parsing, not network. This is where
+	// the axios-style "compromised publish breaks established
+	// patterns" shape gets caught.
+	recordCrossVersionSignals(result, entity.ID, pkg, collectedAt)
 
 	return result, nil
 }
@@ -260,6 +279,168 @@ func recordWeeklyDownloads(ctx context.Context, client *Client,
 		map[string]any{
 			"count":  count,
 			"window": "last-week",
+		})
+}
+
+// versionRecord is the per-version fact-set the longitudinal
+// signals operate over. Built once from pkg.Versions + pkg.Time
+// and iterated twice (once per emitted signal) rather than
+// re-walking the map.
+type versionRecord struct {
+	version        string
+	publishedAt    time.Time
+	postinstall    bool
+	hasAttestation bool
+	publisher      string
+}
+
+// recentVersionsByPublishTime returns up to n versions from pkg's
+// versions map, sorted newest-first by publish timestamp. Versions
+// without a corresponding entry in pkg.Time are skipped — ordering
+// them would require a fallback (semver? lexical?) whose mistakes
+// would silently corrupt the longitudinal signals. A version we
+// can't order is a version we don't emit signals about.
+func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
+	records := make([]versionRecord, 0, len(pkg.Versions))
+	for ver, pv := range pkg.Versions {
+		t, ok := pkg.Time[ver]
+		if !ok || t.IsZero() {
+			continue
+		}
+		records = append(records, versionRecord{
+			version:        ver,
+			publishedAt:    t,
+			postinstall:    pv.Scripts.Postinstall != "",
+			hasAttestation: len(pv.Dist.Attestations) > 0 && string(pv.Dist.Attestations) != "null",
+			publisher:      pv.NpmUser.Name,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].publishedAt.After(records[j].publishedAt)
+	})
+	if len(records) > n {
+		records = records[:n]
+	}
+	return records
+}
+
+// recordCrossVersionSignals emits the two longitudinal signals
+// (postinstall_introduced, publish_origin_consistency) from a
+// shared window of recent versions. Returning an empty window is
+// recorded as absence for both — a package with no orderable
+// versions produces no cross-version evidence either way.
+func recordCrossVersionSignals(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	recent := recentVersionsByPublishTime(pkg, crossVersionWindow)
+	if len(recent) == 0 {
+		reason := "no orderable versions in registry response (missing time entries)"
+		result.RecordAbsence(entityID, "postinstall_introduced", source,
+			reason, false, collectedAt)
+		result.RecordAbsence(entityID, "publish_origin_consistency", source,
+			reason, false, collectedAt)
+		return
+	}
+
+	recordPostinstallIntroduced(result, entityID, recent, collectedAt)
+	recordPublishOriginConsistency(result, entityID, recent, collectedAt)
+}
+
+// recordPostinstallIntroduced detects the axios-2026 shape: a
+// postinstall script present in the latest version where one or
+// more recent older versions published without one.
+//
+// We report the transition, not absolute state — postinstall_present
+// already covers the snapshot. A "consistent absence" (no postinstall
+// in the window) is the healthy case for packages like zod and
+// axios-pre-compromise. A "consistent presence" is typical for
+// native-binding packages and not anomalous.
+func recordPostinstallIntroduced(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	latestPresent := recent[0].postinstall
+
+	// Count how many older versions in the window lacked a
+	// postinstall. A non-zero count paired with latestPresent=true
+	// is the transition signal.
+	priorWithout := 0
+	for i := 1; i < len(recent); i++ {
+		if !recent[i].postinstall {
+			priorWithout++
+		}
+	}
+
+	introduced := latestPresent && priorWithout > 0
+
+	// When introduced, find the oldest version in the window that
+	// still has it — that's where the transition happened (the
+	// first version, walking oldest-to-newest, where postinstall
+	// flipped to true).
+	introducedAtVersion := ""
+	if introduced {
+		for i := len(recent) - 1; i >= 0; i-- {
+			if recent[i].postinstall {
+				introducedAtVersion = recent[i].version
+				break
+			}
+		}
+	}
+
+	result.RecordSignal(entityID, "postinstall_introduced", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present_in_latest":      latestPresent,
+			"introduced_recently":    introduced,
+			"introduced_at_version":  introducedAtVersion,
+			"prior_versions_without": priorWithout,
+			"versions_checked":       len(recent),
+		})
+}
+
+// recordPublishOriginConsistency captures two dimensions of
+// publish-provenance continuity: transitions in OIDC-attestation
+// presence, and the set of distinct _npmUser accounts that
+// published within the window.
+//
+// Stable patterns (all-attested + single-publisher, or
+// none-attested + single-publisher) are the healthy shapes.
+// Transitions are flags, not verdicts: a maintainer handoff or a
+// CI-pipeline migration will produce a transition that an honest
+// investigation would clear.
+func recordPublishOriginConsistency(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	// Count transitions in attestation-presence across adjacent
+	// versions (sorted newest-first). A "transition" is any flip
+	// — direction-agnostic. A lost attestation is the axios shape;
+	// a gained one is a maintainer adopting trusted publishing.
+	// Both deserve a look.
+	attestationTransitions := 0
+	for i := 1; i < len(recent); i++ {
+		if recent[i-1].hasAttestation != recent[i].hasAttestation {
+			attestationTransitions++
+		}
+	}
+
+	publishers := map[string]struct{}{}
+	for _, r := range recent {
+		if r.publisher != "" {
+			publishers[r.publisher] = struct{}{}
+		}
+	}
+	publisherList := make([]string, 0, len(publishers))
+	for p := range publishers {
+		publisherList = append(publisherList, p)
+	}
+	sort.Strings(publisherList)
+
+	result.RecordSignal(entityID, "publish_origin_consistency", source, collectedAt, defaultTTL,
+		map[string]any{
+			"versions_checked":        len(recent),
+			"latest_has_attestation":  recent[0].hasAttestation,
+			"attestation_transitions": attestationTransitions,
+			"unique_publishers":       len(publishers),
+			"publishers":              publisherList,
+			"latest_publisher":        recent[0].publisher,
 		})
 }
 
