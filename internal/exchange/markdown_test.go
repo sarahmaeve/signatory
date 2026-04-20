@@ -178,6 +178,34 @@ actual body content
 	assert.Contains(t, err.Error(), "round_notes appears in frontmatter")
 }
 
+// TestMarkdown_UnknownField_Rejected verifies that strict decoding
+// catches frontmatter keys that aren't present on AnalystOutput.
+// Two failure modes this prevents:
+//
+//  1. Schema drift: an analyst agent emits a renamed-but-unshipped
+//     field and the value is silently dropped, masking a bug.
+//  2. Tampering: a hand-edited or forged analyst output adds keys
+//     hoping for silent passthrough. Strict mode surfaces it.
+//
+// The action item originated from the vetted-frozen analysis of
+// gopkg.in/yaml.v3 (filestore/analysis/gopkg.in-yaml.v3-synthesis.md).
+func TestMarkdown_UnknownField_Rejected(t *testing.T) {
+	input := []byte(`---
+attribution:
+  analyst_id: x
+  model: y
+  invoked_at: "2026-01-01T00:00:00Z"
+target: "pkg:test/x"
+conclusions: []
+bogus_field_not_on_struct: "surprise"
+---
+`)
+	_, err := UnmarshalMarkdown(input)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bogus_field_not_on_struct",
+		"error should name the unknown field for debuggability")
+}
+
 func TestMarkdown_BOMHandling(t *testing.T) {
 	// Files edited on Windows sometimes have a UTF-8 BOM. The
 	// parser should tolerate it.

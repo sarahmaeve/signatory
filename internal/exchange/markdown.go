@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -89,8 +90,17 @@ func UnmarshalMarkdown(data []byte) (*AnalystOutput, error) {
 		return nil, err
 	}
 
+	// Strict decode: unknown fields in the frontmatter are an error
+	// rather than silently dropped. This surfaces schema drift (an
+	// analyst emits a field we haven't shipped yet) and rejects
+	// tampered/hand-forged outputs that rely on passthrough keys.
+	// An empty frontmatter (io.EOF from the decoder) is tolerated —
+	// downstream .Validate() will reject it with a more specific
+	// error if required fields are missing.
 	var out AnalystOutput
-	if err := yaml.Unmarshal(frontmatter, &out); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(frontmatter))
+	dec.KnownFields(true)
+	if err := dec.Decode(&out); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
 
