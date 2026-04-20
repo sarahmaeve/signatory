@@ -96,28 +96,24 @@
   Single commit, organized in 7 phases. Each phase has its own test discipline; phases land in order so the suite stays green at
    every checkpoint.
 
-  Phase 0 — Validator broadening (prerequisite, ~10 lines)
+  Phase 0 — Validator broadening (OBSOLETE as of 2026-04-20)
 
-  The smallest, most isolated change. Lands first so subsequent phases can use scoped package URIs.
+  STATUS: Already done. No code change needed.
 
-  Files:
-  - internal/profile/uri.go — broaden validURIBody regex from [A-Za-z0-9._/-] to [A-Za-z0-9._/@-]. The @ goes at the end of the
-  char class so it's a literal.
-  - internal/profile/uri_test.go — add positive cases (pkg:npm/@types/node, pkg:npm/@nestjs/core) and negative cases that
-  confirm @ doesn't break the other rules (no double @, can't start with @, etc. — actually need to think about whether scoped
-  names like @types/node should be allowed to start with @... yes, that's literally the format).
+  This plan was drafted when ValidateCanonicalURI still used a regex-based
+  body validator ([A-Za-z0-9._/-]) that forbade `@`. The #78 hardening
+  refactor replaced that regex with printable-ASCII byte-range checking
+  (internal/profile/uri.go:114-122), which admits `@` as a side effect.
+  The doc comment on ValidateCanonicalURI even calls this out:
+  "mixing [per-scheme rules] would over-restrict legitimate inputs
+  (e.g., scoped npm packages)."
 
-  Wait — re-checking. pkg:npm/@types/node: the body after pkg:npm/ is @types/node, which starts with @. The current regex
-  requires the FIRST character to be alphanumeric (per the canonical URI body shape). I need to verify whether the existing
-  regex has a "first char must be alphanum" constraint or whether it just allows the char class anywhere.
+  Pinned with tests in TestValidateCanonicalURI_Accepts for:
+  - pkg:npm/@types/node
+  - pkg:npm/@nestjs/core
+  - pkg:npm/@angular/core
 
-  Looking at the validator from #78: the body regex is ^[A-Za-z0-9._/-]{1,128}$ — no first-char restriction, just length-bounded
-   char class. Good. Adding @ to the class is sufficient. Tests need to confirm @types/node body parses.
-
-  Note: this DOES NOT touch ValidateIdentity in internal/identity/team.go. Team identities don't need @ (they use + separator);
-  the validator regexes are deliberately per-domain.
-
-  TDD shape: extend the existing TestValidateCanonicalURI_Accepts and TestValidateCanonicalURI_Rejects test tables.
+  Skip to Phase 1.
 
   Phase 1 — npm Provider (Layer A, the manifest parser)
 

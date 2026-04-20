@@ -209,6 +209,16 @@ func TestValidateCanonicalURI_Accepts(t *testing.T) {
 		CanonicalPatchURI("github", "alecthomas", "kong", "593"),
 		// Real-world examples that should be accepted as-is.
 		"pkg:golang/github.com/alecthomas/kong",
+		// Scoped npm packages: the leading '@' is load-bearing for
+		// the scoped-package convention (@types/node, @angular/core).
+		// The byte-range validator admits them as a deliberate side
+		// effect of the #78 refactor — mixing per-scheme semantics
+		// into ValidateCanonicalURI would over-restrict legitimate
+		// input. Keep these cases so a future validator change can't
+		// silently regress scoped-package support.
+		"pkg:npm/@types/node",
+		"pkg:npm/@nestjs/core",
+		"pkg:npm/@angular/core",
 	}
 	for _, uri := range tests {
 		t.Run(uri, func(t *testing.T) {
