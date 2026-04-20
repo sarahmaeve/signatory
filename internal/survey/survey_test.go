@@ -310,6 +310,46 @@ func TestRun_UnrecognizedManifest(t *testing.T) {
 	assert.Contains(t, err.Error(), "go.mod")
 }
 
+// TestRun_NpmManifest_RoutesToNpmParser covers Phase C's survey
+// integration: a package.json manifest reaches the npm parser,
+// produces pkg:npm/ canonical URIs, and tiers resolve against the
+// store just like go.mod dependencies do.
+func TestRun_NpmManifest_RoutesToNpmParser(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+	  "name": "example-npm-project",
+	  "version": "1.0.0",
+	  "engines": {"node": ">=18.0.0"},
+	  "dependencies": {
+	    "express": "^4.18.2",
+	    "@types/node": "^20.0.0"
+	  }
+	}`), 0o600))
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	// Project info plumbed through from the parser.
+	assert.Equal(t, "example-npm-project", r.Project.Name)
+	assert.Equal(t, "npm", r.Project.Ecosystem)
+	assert.Equal(t, ">=18.0.0", r.Project.EcoVersion)
+
+	// Both deps should surface as direct, unexamined, and the
+	// scoped package must keep its scope in the canonical URI.
+	assert.Equal(t, 2, r.Summary.Total)
+	assert.Equal(t, 2, r.Summary.Direct)
+	assert.Equal(t, 2, r.Summary.ByTier[TierNotInStore])
+
+	assert.ElementsMatch(t,
+		[]string{"pkg:npm/express", "pkg:npm/@types/node"},
+		r.Summary.NeedsReview,
+		"both direct deps need review; scope preserved on @types/node")
+}
+
 func TestRun_EmptyManifestPath(t *testing.T) {
 	t.Parallel()
 

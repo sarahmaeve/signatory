@@ -1,0 +1,9 @@
+{
+  "name": "no-lockfile-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.2",
+    "local-fork": "file:../local-fork",
+    "private-alias": "npm:lodash@^4.17.0"
+  }
+}

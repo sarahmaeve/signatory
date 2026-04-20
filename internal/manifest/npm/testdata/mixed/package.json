@@ -1,0 +1,17 @@
+{
+  "name": "mixed-deps",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.0.0"
+  }
+}

@@ -35,6 +35,7 @@ func Detect(dir string) (path, ecosystem string, err error) {
 		ecosystem string
 	}{
 		{"go.mod", "go"},
+		{"package.json", "npm"},
 	}
 
 	for _, c := range candidates {

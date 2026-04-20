@@ -36,6 +36,39 @@ func TestDetect_NoManifest(t *testing.T) {
 	assert.Contains(t, err.Error(), "no recognized manifest")
 	assert.Contains(t, err.Error(), "go.mod",
 		"error should list candidate filenames so users know what to add")
+	assert.Contains(t, err.Error(), "package.json",
+		"error should mention npm alongside go now that Detect supports both")
+}
+
+func TestDetect_FindsPackageJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pkgJSONPath := filepath.Join(dir, "package.json")
+	require.NoError(t, os.WriteFile(pkgJSONPath, []byte(`{"name":"x"}`), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "npm", ecosystem)
+	assert.Equal(t, "package.json", filepath.Base(path))
+}
+
+// TestDetect_GoModWinsInPolyglotRoot documents the first-match-wins
+// behavior for projects that contain BOTH manifests in the root.
+// v0.1 treats that as a rare-enough edge case to handle implicitly
+// via the candidates-list order (go.mod first); callers with real
+// polyglot projects can pass --manifest explicitly.
+func TestDetect_GoModWinsInPolyglotRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o600))
+
+	_, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "go", ecosystem,
+		"go.mod is earlier in the candidates list and wins over package.json in polyglot roots")
 }
 
 func TestDetect_DirInsteadOfFile(t *testing.T) {

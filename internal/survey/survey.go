@@ -8,6 +8,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
+	npmmanifest "github.com/sarahmaeve/signatory/internal/manifest/npm"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -65,8 +66,9 @@ func Run(ctx context.Context, s store.Store, manifestPath string) (Result, error
 }
 
 // parseManifest dispatches to the correct parser based on the
-// manifest's filename. v0.1 is Go-only; additional ecosystems
-// extend the switch as their parsers land.
+// manifest's filename. v0.1 supports Go (go.mod) and npm
+// (package.json); additional ecosystems extend the switch as
+// their parsers land.
 //
 // Returns error on unrecognized manifest — callers should either
 // auto-detect via manifest.Detect (which already filters to known
@@ -79,8 +81,10 @@ func parseManifest(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	switch base := filepath.Base(path); base {
 	case "go.mod":
 		return gomod.Parse(path)
+	case "package.json":
+		return npmmanifest.Parse(path)
 	default:
-		return manifest.ProjectInfo{}, nil, fmt.Errorf("unrecognized manifest filename %q (supported in v0.1: go.mod)", base)
+		return manifest.ProjectInfo{}, nil, fmt.Errorf("unrecognized manifest filename %q (supported in v0.1: go.mod, package.json)", base)
 	}
 }
 
