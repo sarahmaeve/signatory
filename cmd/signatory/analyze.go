@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"slices"
@@ -41,6 +42,15 @@ type AnalyzeCmd struct {
 	// shallow clones silently degrade historical signals. Refuses to
 	// run if --path is non-empty.
 	Clone bool `name:"clone" help:"Create a new clone at --path by fetching from the target's origin. Fails loudly if --path is non-empty."`
+
+	// Stdout and Stderr let tests inject buffers. Production paths
+	// leave them nil; Run defaults them to os.Stdout / os.Stderr.
+	// stdout/stderr discipline: progress, warnings, and status
+	// lines go to stderr so that stdout carries ONLY the final
+	// rendered output (JSON payload or human-readable profile).
+	// This unblocks `signatory analyze --json … | jq` pipelines.
+	Stdout io.Writer `kong:"-"`
+	Stderr io.Writer `kong:"-"`
 }
 
 // AnalysisDisplay wraps the runtime profile with any ingested
@@ -58,7 +68,27 @@ type AnalysisDisplay struct {
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	// Writer defaults: tests inject cmd.Stdout / cmd.Stderr; prod
+	// paths fall through to os.Stdout / os.Stderr.
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := cmd.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	// Root context. globals.Context, when set, carries the SIGINT-
+	// cancellation wiring from main(); Ctrl-C at the CLI propagates
+	// through the HTTP client and cancels in-flight network work.
+	// Tests or library callers that don't set it get a fresh
+	// background context.
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -93,9 +123,14 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// Decide what to do based on cache state and --refresh.
 	if !cmd.Refresh {
 		if entity == nil {
-			fmt.Printf("No cached data for: %s\n", cmd.Target)
-			fmt.Printf("Resolved to: %s\n", resolved.CanonicalURI)
-			fmt.Println("Run with --refresh to collect signals from GitHub.")
+			// "Nothing to report" messages go to stderr — stdout is
+			// reserved for the rendered output, and in this branch
+			// there's no output to render. A scripted consumer sees
+			// an empty stdout and a zero exit code; diagnostics
+			// explaining why are on stderr.
+			fmt.Fprintf(stderr, "No cached data for: %s\n", cmd.Target)
+			fmt.Fprintf(stderr, "Resolved to: %s\n", resolved.CanonicalURI)
+			fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub.")
 			return nil
 		}
 		existingSignals, err := s.GetLatestSignals(ctx, entity.ID)
@@ -111,12 +146,12 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		// target." Emptiness in both is the only "go run --refresh"
 		// case.
 		if len(existingSignals) == 0 && len(analystOutputs) == 0 {
-			fmt.Printf("No cached signals or analyst outputs for: %s\n", cmd.Target)
-			fmt.Println("Run with --refresh to collect signals from GitHub,")
-			fmt.Println("or run `signatory ingest <file>` to load an analyst output.")
+			fmt.Fprintf(stderr, "No cached signals or analyst outputs for: %s\n", cmd.Target)
+			fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub,")
+			fmt.Fprintln(stderr, "or run `signatory ingest <file>` to load an analyst output.")
 			return nil
 		}
-		return cmd.displayProfile(ctx, s, entity, analystOutputs)
+		return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
 	}
 
 	// --- Refresh path: collect fresh signals. ---
@@ -171,12 +206,12 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// stderr gives the operator a trail.
 	if entity.Type == profile.EntityPackage && entity.Ecosystem == "npm" && entity.URL == "" {
 		if err := resolveNpmRepo(ctx, s, entity, globals); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: npm repo resolution for %s failed: %v\n",
+			fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, err)
 		}
 	}
 
-	fmt.Printf("Collecting signals for: %s\n", entity.CanonicalURI)
+	fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
 
 	// Decide which collectors to run. Tests inject mocks via
 	// globals.Collectors (see functional_test.go); in production that
@@ -198,7 +233,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
 		}
 		allSignals = append(allSignals, result.Signals()...)
-		fmt.Printf("[%s] %s\n", collector.Name(), result.Summary())
+		fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
 	}
 
 	if err := s.AppendSignals(ctx, allSignals); err != nil {
@@ -220,7 +255,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		"created_entity":    created,
 	})
 	if err := auditLog.LogAction(ctx, actor, "analyze", entity.ID, string(detail)); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
+		fmt.Fprintf(stderr, "warning: audit log write failed: %v\n", err)
 	}
 
 	// Even on a refresh path, surface any cached analyst outputs —
@@ -233,8 +268,12 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("read analyst outputs (post-refresh): %w", err)
 	}
 
-	fmt.Println()
-	return cmd.displayProfile(ctx, s, entity, analystOutputs)
+	// Blank separator between the progress stream (stderr) and the
+	// upcoming rendered output (stdout). On a terminal that
+	// interleaves both, this separates the diagnostic chatter from
+	// the data; on a pipe (--json | jq), stdout stays clean JSON.
+	fmt.Fprintln(stderr)
+	return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
 }
 
 // fetchAnalystOutputs returns the AnalystOutput summaries for an
@@ -256,16 +295,23 @@ func (cmd *AnalyzeCmd) fetchAnalystOutputs(
 }
 
 // displayProfile reads the current-state view for an entity and
-// renders it to stdout. Uses GetLatestSignals so superseded signals
-// are filtered out; uses GetPostures to show the latest posture plus
-// a hint when multiple versions have recorded decisions.
+// renders it to w (typically stdout). Uses GetLatestSignals so
+// superseded signals are filtered out; uses GetPostures to show the
+// latest posture plus a hint when multiple versions have recorded
+// decisions.
 //
 // analystOutputs (typically from fetchAnalystOutputs) is woven into
 // both the JSON and human-readable presentations. Pass nil if no
 // outputs should be surfaced (e.g., for a profile-only display).
+//
+// The writer parameter is load-bearing: `--json` writes nothing but
+// the JSON payload to w, so a caller piping to jq gets a clean
+// parseable document. Diagnostic output from AnalyzeCmd.Run lands on
+// the separate stderr stream before displayProfile is invoked.
 func (cmd *AnalyzeCmd) displayProfile(
 	ctx context.Context, s store.Store, entity *profile.Entity,
 	analystOutputs []store.AnalystOutputSummary,
+	w io.Writer,
 ) error {
 	signals, err := s.GetLatestSignals(ctx, entity.ID)
 	if err != nil {
@@ -305,29 +351,33 @@ func (cmd *AnalyzeCmd) displayProfile(
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(data))
+		fmt.Fprintln(w, string(data))
 		return nil
 	}
 
-	return displayHuman(display, cmd.MaxAge)
+	return displayHuman(w, display, cmd.MaxAge)
 }
 
-// displayHuman prints a human-readable entity profile, including
-// any analyst outputs surfaced by the freshness check. maxAge is
-// passed in only for display ("Cached analyses (last %s):") — the
-// filtering itself happened at fetch time.
-func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
+// displayHuman writes a human-readable entity profile to w,
+// including any analyst outputs surfaced by the freshness check.
+// maxAge is passed in only for display ("Cached analyses (last %s):")
+// — the filtering itself happened at fetch time.
+//
+// All output goes through the writer — no global os.Stdout
+// references — so tests can inject per-call buffers and parallel
+// tests stay race-free.
+func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 	p := d.Profile
-	fmt.Printf("Entity:    %s\n", p.Entity.ShortName)
-	fmt.Printf("URI:       %s\n", p.Entity.CanonicalURI)
-	fmt.Printf("Type:      %s\n", p.Entity.Type)
+	fmt.Fprintf(w, "Entity:    %s\n", p.Entity.ShortName)
+	fmt.Fprintf(w, "URI:       %s\n", p.Entity.CanonicalURI)
+	fmt.Fprintf(w, "Type:      %s\n", p.Entity.Type)
 	if p.Entity.Description != "" {
-		fmt.Printf("Note:      %s\n", p.Entity.Description)
+		fmt.Fprintf(w, "Note:      %s\n", p.Entity.Description)
 	}
 	if p.Entity.Ecosystem != "" {
-		fmt.Printf("Ecosystem: %s\n", p.Entity.Ecosystem)
+		fmt.Fprintf(w, "Ecosystem: %s\n", p.Entity.Ecosystem)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	// Surface ingested analyst outputs before signals — they're
 	// usually the higher-information-density artifact a human or
@@ -338,46 +388,46 @@ func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
 		if maxAge > 0 {
 			header = fmt.Sprintf("=== Cached analyses (last %s) ===", maxAge)
 		}
-		fmt.Println(header)
+		fmt.Fprintln(w, header)
 		for _, ao := range d.AnalystOutputs {
 			ageStr := analystOutputAge(ao.IngestedAt)
-			fmt.Printf("  %s  %s round=%d  %s\n",
+			fmt.Fprintf(w, "  %s  %s round=%d  %s\n",
 				ao.OutputID[:8], ao.AnalystID, ao.Round, ageStr)
-			fmt.Printf("    model=%s  ingested=%s\n",
+			fmt.Fprintf(w, "    model=%s  ingested=%s\n",
 				ao.Model, ao.IngestedAt)
-			fmt.Printf("    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+			fmt.Fprintf(w, "    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
 				ao.ConclusionsCount, ao.PositiveAbsenceCount,
 				ao.ObservationCount, ao.PatternCount)
 			if ao.SourcePath != "" {
-				fmt.Printf("    source: %s\n", ao.SourcePath)
+				fmt.Fprintf(w, "    source: %s\n", ao.SourcePath)
 			}
 		}
-		fmt.Printf("Use `signatory show-conclusions --target %s` for cross-output conclusion queries.\n",
+		fmt.Fprintf(w, "Use `signatory show-conclusions --target %s` for cross-output conclusion queries.\n",
 			p.Entity.CanonicalURI)
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// Posture: show latest + hint about other versions.
 	if len(p.Postures) > 0 {
 		latest := p.Postures[0]
 		if latest.Version != "" {
-			fmt.Printf("Posture:   %s (version %s)\n", latest.Tier, latest.Version)
+			fmt.Fprintf(w, "Posture:   %s (version %s)\n", latest.Tier, latest.Version)
 		} else {
-			fmt.Printf("Posture:   %s\n", latest.Tier)
+			fmt.Fprintf(w, "Posture:   %s\n", latest.Tier)
 		}
-		fmt.Printf("Rationale: %s\n", latest.Rationale)
-		fmt.Printf("Set by:    %s\n", latest.SetBy)
+		fmt.Fprintf(w, "Rationale: %s\n", latest.Rationale)
+		fmt.Fprintf(w, "Set by:    %s\n", latest.SetBy)
 		if len(p.Postures) > 1 {
-			fmt.Printf("           (%d other version%s recorded — `signatory posture get %s --all` to see all)\n",
+			fmt.Fprintf(w, "           (%d other version%s recorded — `signatory posture get %s --all` to see all)\n",
 				len(p.Postures)-1, pluralS(len(p.Postures)-1), p.Entity.CanonicalURI)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	if p.Burn != nil {
-		fmt.Printf("*** BURNED: %s (by %s, %s) ***\n",
+		fmt.Fprintf(w, "*** BURNED: %s (by %s, %s) ***\n",
 			p.Burn.Reason, p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// Group signals for display.
@@ -404,7 +454,7 @@ func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
 		if !ok {
 			continue
 		}
-		fmt.Printf("=== %s ===\n", g.label)
+		fmt.Fprintf(w, "=== %s ===\n", g.label)
 		for _, s := range sigs {
 			var val map[string]any
 			_ = json.Unmarshal(s.Value, &val)
@@ -419,18 +469,18 @@ func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
 				if r, ok := val["reason"].(string); ok {
 					reason = r
 				}
-				fmt.Printf("  %-20s [ABSENT]  %s%s\n",
+				fmt.Fprintf(w, "  %-20s [ABSENT]  %s%s\n",
 					strings.TrimPrefix(s.Type, "absence:"), reason, retryable)
 			} else {
-				fmt.Printf("  %-20s [%s]  ", s.Type, s.ForgeryResistance)
-				printCompactValue(val)
-				fmt.Println()
+				fmt.Fprintf(w, "  %-20s [%s]  ", s.Type, s.ForgeryResistance)
+				printCompactValue(w, val)
+				fmt.Fprintln(w)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
-	fmt.Printf("Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
+	fmt.Fprintf(w, "Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
 	return nil
 }
 
@@ -460,17 +510,17 @@ func analystOutputAge(ingestedAt string) string {
 	}
 }
 
-// printCompactValue renders a signal's value map as compact
-// key=value pairs. Keys are sorted so the same signal renders
+// printCompactValue writes a signal's value map as compact
+// key=value pairs to w. Keys are sorted so the same signal renders
 // identically across runs — Go map iteration is randomized, and
 // nondeterministic order bites anyone diffing captured output or
 // eyeballing analyze runs for drift.
-func printCompactValue(val map[string]any) {
+func printCompactValue(w io.Writer, val map[string]any) {
 	for i, k := range slices.Sorted(maps.Keys(val)) {
 		if i > 0 {
-			fmt.Print(", ")
+			fmt.Fprint(w, ", ")
 		}
-		fmt.Printf("%s=%v", k, val[k])
+		fmt.Fprintf(w, "%s=%v", k, val[k])
 	}
 }
 

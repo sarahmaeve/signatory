@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -691,6 +692,72 @@ func TestFunctional_AnalyzeNpm_NoRepoDeclared(t *testing.T) {
 	signals, err := s.GetSignals(context.Background(), entity.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, signals)
+}
+
+// TestFunctional_Analyze_JSONStdoutIsPureJSON locks in the review's
+// highest-ROI CLI fix: in --json mode, stdout must contain ONLY the
+// JSON payload so a caller piping to `jq` parses cleanly. Progress
+// lines (collector summaries, "Collecting signals for…") go to
+// stderr; the payload alone lands on stdout. A regression that
+// routes progress to stdout breaks every machine consumer.
+func TestFunctional_Analyze_JSONStdoutIsPureJSON(t *testing.T) {
+	t.Parallel()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	globals := testGlobals(t, newMockCollector())
+
+	cmd := &AnalyzeCmd{
+		Target:  "owner/repo",
+		Refresh: true,
+		JSON:    true,
+		Stdout:  &stdoutBuf,
+		Stderr:  &stderrBuf,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	// Stdout must parse as JSON top-to-bottom — no preamble.
+	var parsed AnalysisDisplay
+	require.NoError(t, json.Unmarshal(stdoutBuf.Bytes(), &parsed),
+		"stdout in --json mode must be parseable JSON; got %q", stdoutBuf.String())
+	assert.Equal(t, "repo:github/owner/repo", parsed.Entity.CanonicalURI)
+
+	// Stderr must carry the progress chatter.
+	stderrStr := stderrBuf.String()
+	assert.Contains(t, stderrStr, "Collecting signals for:",
+		"progress line must be on stderr, not stdout")
+	assert.Contains(t, stderrStr, "[mock]",
+		"per-collector summary must be on stderr")
+
+	// Explicit negative: progress text must NOT appear on stdout.
+	assert.NotContains(t, stdoutBuf.String(), "Collecting signals for:",
+		"stdout in --json mode must stay pure JSON — no progress contamination")
+}
+
+// TestFunctional_Analyze_NoCacheMessagesOnStderr covers the cached-
+// miss branch: when analyze has nothing to report (no cache, no
+// --refresh), it exits 0 with the "try --refresh" instructions on
+// stderr and an EMPTY stdout. Scripts that expect `signatory analyze
+// foo --json` to either emit JSON or emit nothing get the right
+// behavior.
+func TestFunctional_Analyze_NoCacheMessagesOnStderr(t *testing.T) {
+	t.Parallel()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	globals := testGlobals(t, newMockCollector())
+
+	cmd := &AnalyzeCmd{
+		Target: "never-analyzed-org/never-analyzed-repo",
+		Stdout: &stdoutBuf,
+		Stderr: &stderrBuf,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	assert.Empty(t, stdoutBuf.String(),
+		"no cached data + no --refresh → nothing to report on stdout")
+	assert.Contains(t, stderrBuf.String(), "No cached data for:",
+		"diagnostic explaining why stdout is empty belongs on stderr")
+	assert.Contains(t, stderrBuf.String(), "Run with --refresh",
+		"instructional message belongs on stderr")
 }
 
 // TestFunctional_AnalyzeNpm_ScopedPackage confirms a scoped package

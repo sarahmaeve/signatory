@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/alecthomas/kong"
 	"github.com/sarahmaeve/signatory/internal/audit"
-	"github.com/sarahmaeve/signatory/internal/signal"
+	sig "github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -40,7 +43,7 @@ var (
 
 func main() {
 	cli := CLI{}
-	ctx := kong.Parse(&cli,
+	kctx := kong.Parse(&cli,
 		kong.Name("signatory"),
 		kong.Description("Supply chain trust analysis tool."),
 		kong.UsageOnError(),
@@ -49,9 +52,21 @@ func main() {
 			"commit":  commit,
 		},
 	)
-	err := ctx.Run(&Globals{
+
+	// Root context. signal.NotifyContext routes SIGINT (Ctrl-C)
+	// and SIGTERM to context cancellation, so every long-running
+	// command that threads globals.Context through network / DB
+	// calls aborts cleanly instead of leaving half-written state.
+	// A second signal while shutdown is in progress escalates to
+	// raw os.Exit via NotifyContext's default behavior (stop
+	// delivering, return to default handler).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err := kctx.Run(&Globals{
 		DBPath:  cli.DB,
 		Verbose: cli.Verbose,
+		Context: ctx,
 		// Globals.Collectors is intentionally left nil in
 		// production — AnalyzeCmd.Run builds the collector list
 		// per-target via collectorsFor(), which knows about
@@ -60,7 +75,27 @@ func main() {
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
+	}
+}
+
+// exitCodeFor maps an error to a Unix-style exit code. v0.1
+// distinguishes usage errors (64, EX_USAGE) from runtime errors
+// (1, generic). The usage class covers the --path/--clone sentinel
+// errors because they reflect operator-intent issues that scripts
+// may want to branch on specifically. Future ecosystem adoption
+// may add EX_UNAVAILABLE (69) for registry-unavailable failures
+// when those get sentinel types.
+func exitCodeFor(err error) int {
+	switch {
+	case errors.Is(err, ErrCloneRequired),
+		errors.Is(err, ErrPathMissing),
+		errors.Is(err, ErrPathNotEmpty),
+		errors.Is(err, ErrPathNotAClone),
+		errors.Is(err, ErrOriginMismatch):
+		return 64 // EX_USAGE
+	default:
+		return 1
 	}
 }
 
@@ -69,13 +104,22 @@ type Globals struct {
 	DBPath  string
 	Verbose bool
 
+	// Context is the root context for command execution. In
+	// production, main() populates it with signal.NotifyContext-
+	// wrapped cancellation so Ctrl-C and SIGTERM propagate through
+	// network/DB calls cleanly. Commands that thread globals.Context
+	// through (AnalyzeCmd does today) abort mid-operation rather
+	// than leaving partial state. Tests leave this nil; individual
+	// Run methods default to context.Background() when nil.
+	Context context.Context //nolint:containedctx // intentional CLI-root propagation
+
 	// Collectors overrides the per-target collector list produced
 	// by cmd/signatory/collectors.go's collectorsFor. Set by tests
 	// (see functional_test.go's testGlobals) to inject mock
 	// collectors without needing to stand up real git/github
 	// plumbing. Left nil in production; AnalyzeCmd.Run calls
 	// collectorsFor when this is empty.
-	Collectors []signal.Collector
+	Collectors []sig.Collector
 
 	// AuditFilePath overrides the audit log file path. Empty means
 	// "use the default (~/.signatory/audit.log)". Tests set this to a
