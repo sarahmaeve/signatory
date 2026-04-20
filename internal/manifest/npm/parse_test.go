@@ -3,6 +3,7 @@ package npm
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -286,6 +287,107 @@ func TestParse_UnsupportedLockfileVersion(t *testing.T) {
 	_, _, err := Parse(filepath.Join(tmp, "package.json"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "lockfileVersion 1")
+}
+
+// TestParse_MalformedLockfileName_NoCanonicalURIStamped verifies
+// the Security L7 fix: a lockfile packages-map key whose trimmed
+// form isn't a valid npm package name (e.g., from a hostile or
+// malformed lockfile) must NOT result in a bad canonical URI
+// being stamped and later persisted. The dep should still appear
+// in the output — operators seeing garbage in their lockfile is
+// useful — but no pkg:npm/... URI should be associated with it.
+func TestParse_MalformedLockfileName_NoCanonicalURIStamped(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	require.NoError(t, writeFile(filepath.Join(tmp, "package.json"),
+		`{"name":"x","dependencies":{"express":"^4"}}`))
+	// The lockfile key "node_modules/../../etc" parses as root-
+	// level (exactly one "node_modules/" occurrence) and
+	// TrimPrefix yields "../../etc" — a name no npm registry
+	// would accept. The parser must refuse to stamp a URI for it.
+	require.NoError(t, writeFile(filepath.Join(tmp, "package-lock.json"), `{
+	  "name": "x",
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "": {"name": "x"},
+	    "node_modules/express": {"version": "4.18.2"},
+	    "node_modules/../../etc": {"version": "1.0.0"}
+	  }
+	}`))
+
+	_, deps, err := Parse(filepath.Join(tmp, "package.json"))
+	require.NoError(t, err)
+
+	byName := indexByName(deps)
+
+	// express: normal, gets a canonical URI.
+	assert.Equal(t, "pkg:npm/express", byName["express"].CanonicalURI)
+
+	// Malformed name: still present in the dep list (operators
+	// should see the garbage), but WITHOUT a canonical URI. No
+	// pkg:npm/../../etc lands anywhere downstream.
+	malformed := byName["../../etc"]
+	require.NotEmpty(t, malformed.Name,
+		"malformed dep should still appear in the output for operator visibility")
+	assert.Empty(t, malformed.CanonicalURI,
+		"malformed name must not get a CanonicalURI stamped — prevents persisting pkg:npm/../../etc into the store")
+	assert.Equal(t, "npm", malformed.Ecosystem)
+}
+
+// TestIsValidPackageName_Accepts locks in the grammar npm accepts
+// for published names. The fixture set deliberately overlaps with
+// the validator in internal/signal/registry/npm/client_test.go;
+// drift between the two validators would mean the manifest parser
+// could stamp URIs the registry collector would refuse, breaking
+// the analyze path silently.
+func TestIsValidPackageName_Accepts(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"express",
+		"lodash",
+		"a",
+		"vitest",
+		"camelCase",
+		"kebab-case",
+		"snake_case",
+		"dot.name",
+		"@types/node",
+		"@nestjs/core",
+		"@angular/core",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.True(t, isValidPackageName(name), "%q should be accepted", name)
+		})
+	}
+}
+
+func TestIsValidPackageName_Rejects(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pkg  string
+	}{
+		{"empty", ""},
+		{"starts with dot", ".hidden"},
+		{"starts with hyphen", "-leading"},
+		{"contains slash unscoped", "foo/bar"},
+		{"path traversal", "../../etc"},
+		{"contains space", "foo bar"},
+		{"contains null", "foo\x00bar"},
+		{"scope missing name", "@scope/"},
+		{"scope with no slash", "@scope"},
+		{"too long", strings.Repeat("a", 215)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.False(t, isValidPackageName(tc.pkg), "%q should be rejected", tc.pkg)
+		})
+	}
 }
 
 // TestParse_NestedLockfileEntriesSkipped verifies that deeply-nested

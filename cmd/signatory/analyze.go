@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -458,14 +459,22 @@ func analystOutputAge(ingestedAt string) string {
 	}
 }
 
+// printCompactValue renders a signal's value map as compact
+// key=value pairs. Keys are sorted so the same signal renders
+// identically across runs — Go map iteration is randomized, and
+// nondeterministic order bites anyone diffing captured output or
+// eyeballing analyze runs for drift.
 func printCompactValue(val map[string]interface{}) {
-	first := true
-	for k, v := range val {
-		if !first {
+	keys := make([]string, 0, len(val))
+	for k := range val {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		if i > 0 {
 			fmt.Print(", ")
 		}
-		fmt.Printf("%s=%v", k, v)
-		first = false
+		fmt.Printf("%s=%v", k, val[k])
 	}
 }
 

@@ -315,7 +315,26 @@ func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
 			publisher:      pv.NpmUser.Name,
 		})
 	}
-	sort.Slice(records, func(i, j int) bool {
+	// sort.SliceStable + an explicit tiebreaker: two versions with
+	// identical registry timestamps would otherwise produce
+	// nondeterministic ordering of recent[0], which drives
+	// latest_publisher, latest_has_attestation, and
+	// introduced_at_version. Timestamp collisions at second
+	// granularity are plausible (the npm registry records time to
+	// millisecond but storage round-trips through RFC3339 truncate
+	// to second precision for many fixtures), so the tiebreaker
+	// makes signal output reproducible across runs.
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].publishedAt.Equal(records[j].publishedAt) {
+			// Lexically-greater version sorts first within a time
+			// tie. For the common case (semver-shaped version
+			// strings, matching-length components), this aligns
+			// lexical and semver order; for pathological cases
+			// (10.0.0 vs 2.0.0) lexical picks wrong but still picks
+			// deterministically — and any deterministic choice
+			// satisfies the tiebreaker's job.
+			return records[i].version > records[j].version
+		}
 		return records[i].publishedAt.After(records[j].publishedAt)
 	})
 	if len(records) > n {

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -199,7 +200,11 @@ func isRootLevelLockPath(path string) bool {
 
 // buildDep constructs a Dep for an npm dependency, classifying
 // registry vs non-registry specs and setting the canonical URI
-// accordingly.
+// accordingly. Package names that don't match npm's name grammar
+// (e.g., a lockfile key parsed to "../../etc" by a malicious or
+// malformed lockfile) get the "npm" ecosystem slug but NO canonical
+// URI — the name is still surfaced to the operator but no bad URI
+// is stamped into the store or downstream lookups.
 func buildDep(name, spec string, direct bool) manifest.Dep {
 	d := manifest.Dep{
 		Name:    name,
@@ -212,8 +217,40 @@ func buildDep(name, spec string, direct bool) manifest.Dep {
 		return d
 	}
 	d.Ecosystem = "npm"
-	d.CanonicalURI = "pkg:npm/" + name
+	if isValidPackageName(name) {
+		d.CanonicalURI = "pkg:npm/" + name
+	}
+	// Invalid names leave CanonicalURI empty — prevents stamping
+	// pkg:npm/../../etc (or similar lockfile-traversal-names) into
+	// persisted state. The Dep still lands so surveys see the
+	// malformed entry.
 	return d
+}
+
+// Package-name grammar, per the npm spec's practical subset. Kept
+// deliberately identical to the validator in
+// internal/signal/registry/npm/client.go — a mismatch between the
+// two would let the manifest parser produce URIs the registry
+// collector would refuse. Drift detection: the validator sets
+// exercised by both packages assert overlapping accepts and rejects.
+var (
+	npmUnscopedName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	npmScopedName   = regexp.MustCompile(`^@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
+
+const maxNpmNameLength = 214
+
+// isValidPackageName returns true when name conforms to the npm
+// published name grammar. Matches the validator in
+// internal/signal/registry/npm — see note above.
+func isValidPackageName(name string) bool {
+	if name == "" || len(name) > maxNpmNameLength {
+		return false
+	}
+	if strings.HasPrefix(name, "@") {
+		return npmScopedName.MatchString(name)
+	}
+	return npmUnscopedName.MatchString(name)
 }
 
 // isNonRegistrySpec returns true when spec points somewhere other

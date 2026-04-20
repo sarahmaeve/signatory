@@ -94,6 +94,17 @@ type anySignals interface {
 	Signals() []profile.Signal
 }
 
+// mapKeys returns the keys of m as a sorted slice, for use in
+// exact-key-set assertions where the order of emission doesn't
+// matter but the SET of keys is contractual.
+func mapKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // ----- happy path: all five signals land -----
 
 func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
@@ -378,6 +389,22 @@ func TestCollector_Collect_Postinstall_Present(t *testing.T) {
 	pi := getSignalValue(t, result, "postinstall_present")
 	assert.Equal(t, true, pi["present"])
 	assert.Equal(t, "1.0.0", pi["version_checked"])
+
+	// Payload-hygiene lock-in: the signal MUST NOT emit the
+	// postinstall script content. Scripts are often multi-line
+	// shell or JS, can contain sensitive paths, and are not a
+	// mechanical signal — their analysis is an analyst-level task.
+	// A regression that added "postinstall_script" (or any other
+	// script-content key) to the signal value would bloat the
+	// payload and leak information not in our threat model's
+	// emission contract.
+	assert.NotContains(t, pi, "postinstall_script",
+		"postinstall script content must never appear in the signal payload")
+	assert.NotContains(t, pi, "script")
+	assert.ElementsMatch(t,
+		[]string{"present", "version_checked"},
+		mapKeys(pi),
+		"postinstall_present signal value should have exactly these two keys")
 }
 
 // ----- maintainer_count: empty maintainers list -----
@@ -783,6 +810,58 @@ func TestCollector_Collect_CrossVersion_WindowCap(t *testing.T) {
 	assert.Equal(t, false, pi["introduced_recently"],
 		"postinstall older than the window must not fire a transition")
 	assert.Equal(t, false, pi["present_in_latest"])
+}
+
+// TestCollector_Collect_CrossVersion_TiebreakDeterministic pins
+// sort-stability under timestamp collisions. The npm registry
+// records time to millisecond precision but many fixtures (and some
+// older publish records) truncate to the second. When two versions
+// share an exact publish timestamp, recent[0] — which drives
+// latest_publisher, latest_has_attestation, and introduced_at_version
+// — must not flip between runs.
+//
+// Fixture: two versions with identical timestamps but different
+// publisher names. The version string tiebreaker resolves to the
+// lexically-greater "2.0.0" ahead of "1.9.0" after we reverse by
+// time, so latest_publisher is the publisher of 2.0.0.
+func TestCollector_Collect_CrossVersion_TiebreakDeterministic(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "tiebreak",
+	  "dist-tags": {"latest": "2.0.0"},
+	  "time": {
+	    "1.9.0": "2026-01-01T00:00:00Z",
+	    "2.0.0": "2026-01-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.9.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "old-publisher"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "new-publisher"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"tiebreak"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	// Run twice; the latest_publisher must be the same both times.
+	// Without the stable-sort-plus-tiebreaker, this assertion flakes
+	// because Go's map iteration and sort.Slice are both randomized.
+	const runs = 5
+	seen := make(map[string]struct{})
+	for i := 0; i < runs; i++ {
+		result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("tiebreak"))
+		require.NoError(t, err)
+		poc := getSignalValue(t, result, "publish_origin_consistency")
+		seen[poc["latest_publisher"].(string)] = struct{}{}
+	}
+	assert.Len(t, seen, 1,
+		"latest_publisher must be stable across runs; got variants: %v", seen)
+	// Lexical tiebreak: "2.0.0" > "1.9.0", so newer version wins.
+	for pub := range seen {
+		assert.Equal(t, "new-publisher", pub,
+			"lexical tiebreaker should resolve to the alphabetically-greater version")
+	}
 }
 
 // TestCollector_Collect_CrossVersion_NoOrderableVersions — versions

@@ -3,7 +3,6 @@ package npm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,9 +351,14 @@ func TestClient_GetPackage_ContextCancellation(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		assert.True(t,
-			errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context"),
-			"context cancellation must surface in the error: got %v", err)
+		// Strict assertion: the error chain must contain
+		// context.Canceled. A permissive `|| strings.Contains("context")`
+		// fallback would let any wrapped error whose format string
+		// happens to include the word "context" pass — including
+		// implementation errors that DON'T actually propagate
+		// cancellation. The whole point of this test is to verify
+		// propagation, so the assertion must be strict.
+		assert.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetPackage did not return after context cancellation")
 	}

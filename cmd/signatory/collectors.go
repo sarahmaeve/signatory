@@ -147,7 +147,19 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 		return absPath, nil
 	}
 
-	if err := validateExistingClone(ctx, absPath, entity.CanonicalURI); err != nil {
+	// validateExistingClone compares the clone's origin against a
+	// repo:github/... URI. For repo-scheme entities the entity's
+	// CanonicalURI is already that form. For pkg-scheme entities
+	// (npm packages whose source has been resolved to a github
+	// repo in A.5), CanonicalURI is pkg:npm/<name>, which would
+	// never match the clone's resolved origin URI. Derive the
+	// expected URI from entity.URL instead — that's the declared
+	// github source regardless of entity type.
+	expectedURI, _, _, err := profile.NormalizeGitHubRepoInput(entity.URL)
+	if err != nil {
+		return "", fmt.Errorf("entity URL %q not parseable as a github target: %w", entity.URL, err)
+	}
+	if err := validateExistingClone(ctx, absPath, expectedURI); err != nil {
 		return "", err
 	}
 	return absPath, nil

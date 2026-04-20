@@ -243,3 +243,85 @@ func TestCollectorsFor_SentinelErrors(t *testing.T) {
 	assert.True(t, errors.Is(ErrPathNotAClone, ErrPathNotAClone))
 	assert.True(t, errors.Is(ErrOriginMismatch, ErrOriginMismatch))
 }
+
+// TestCollectorsFor_NpmEntityWithoutURL_ReturnsOnlyNpm locks in the
+// Phase A.2 contract: an npm EntityPackage with no resolved repo
+// URL gets the npm collector and nothing else. In particular, the
+// git-local-clone collector's --path/--clone requirement MUST NOT
+// fire — a regression that flipped isGitHostedEntity's polarity
+// (or dropped the empty-URL short-circuit) would spuriously demand
+// a clone path for a package that has no github repo at all.
+//
+// This test intentionally exercises collectorsFor directly rather
+// than going through AnalyzeCmd.Run — the functional path injects
+// Globals.Collectors to bypass real collector construction, which
+// happens BEFORE this function is called. Unit-testing the
+// dispatcher is the only way to pin the actual contract.
+func TestCollectorsFor_NpmEntityWithoutURL_ReturnsOnlyNpm(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:npm/orphan-package",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "npm",
+		URL:          "", // no resolved repo — A.5 couldn't find one
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.NoError(t, err,
+		"empty-URL npm entity must not require --path/--clone")
+	require.Len(t, collectors, 1)
+	assert.Equal(t, "npm-registry", collectors[0].Name(),
+		"only the npm registry collector should fire for an unresolved npm package")
+}
+
+// TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll verifies
+// the other side of the contract: once A.5 has stamped a github URL
+// on an npm entity, all three collectors dispatch and the clone
+// path contract applies. Tests the "post-resolution" branch from
+// the npm-plan.
+func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/expressjs/express")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:npm/express",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "npm",
+		URL:          "https://github.com/expressjs/express",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, c := range collectors {
+		names[c.Name()] = true
+	}
+	assert.True(t, names["npm-registry"], "npm collector should be present")
+	assert.True(t, names["github"], "github collector should be present after URL resolution")
+	assert.True(t, names["git"], "git collector should be present after URL resolution")
+}
+
+// TestCollectorsFor_NonNpmPackage_NoCollectors covers a defensive
+// edge case: a package-scheme entity for an ecosystem signatory
+// doesn't yet collect (pypi, cargo, ...) with no URL gets zero
+// collectors. Not a hard error — the surface for other ecosystems
+// lands when each ecosystem's collector ships — but the function
+// must not panic or return a surprise sentinel error.
+func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:pypi/requests",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		URL:          "",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.NoError(t, err)
+	assert.Empty(t, collectors,
+		"pypi entity without URL gets zero collectors — pypi isn't wired yet, and there's no github URL to clone")
+}

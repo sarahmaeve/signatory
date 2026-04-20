@@ -634,15 +634,18 @@ func TestFunctional_AnalyzeNpm_EndToEnd(t *testing.T) {
 		"audit log should carry the entity's UUID")
 }
 
-// TestFunctional_AnalyzeNpm_NoRepoDeclared exercises the
-// resolution-absence path: an npm package whose registry entry
+// TestFunctional_AnalyzeNpm_NoRepoDeclared exercises A.5's
+// graceful-degradation path: an npm package whose registry entry
 // doesn't declare a repository URL. The entity should be created
 // with empty URL, A.5 should silently return (empty is not an
-// error), and the npm collector still runs. The github-side
-// collectors stay skipped because isGitHostedEntity is false — but
-// since the test injects its own collector list, this test just
-// verifies the resolution didn't fail and the entity persisted
-// correctly.
+// error), the analyze invocation should succeed, and the npm
+// collector should still emit signals.
+//
+// NOT a test of collectorsFor's skip-github-when-URL-empty
+// contract: because globals.Collectors is injected, the production
+// collectorsFor never runs. That contract is pinned separately by
+// TestCollectorsFor_NpmEntityWithoutURL_ReturnsOnlyNpm in
+// collectors_test.go, which exercises collectorsFor directly.
 func TestFunctional_AnalyzeNpm_NoRepoDeclared(t *testing.T) {
 	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
