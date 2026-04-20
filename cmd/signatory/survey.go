@@ -77,7 +77,10 @@ func (cmd *SurveyCmd) Run(globals *Globals) error {
 	}
 
 	if cmd.Refresh {
-		fmt.Fprintln(stderr, "# --refresh is not implemented in survey v0.1; use `signatory analyze <target> --refresh` for individual deps")
+		// Stderr diagnostic; deliberate discard. See stickyWriter's
+		// doc in analyze.go for the asymmetry between contract
+		// output (propagates) and progress/warning text (discards).
+		_, _ = fmt.Fprintln(stderr, "# --refresh is not implemented in survey v0.1; use `signatory analyze <target> --refresh` for individual deps")
 	}
 
 	s, err := globals.OpenStore(ctx)
@@ -123,21 +126,23 @@ func printSurveyJSON(w io.Writer, r survey.Result) error {
 // references — so tests can inject a bytes.Buffer and run
 // with t.Parallel() safely.
 func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error {
+	sw := &stickyWriter{w: w}
+
 	// ---- Project header ----
-	fmt.Fprintf(w, "Surveying %s\n", filepath.Base(r.Project.ManifestPath))
+	sw.Writef("Surveying %s\n", filepath.Base(r.Project.ManifestPath))
 	if r.Project.Name != "" {
 		ecoVer := r.Project.EcoVersion
 		if ecoVer == "" {
 			ecoVer = "(unspecified)"
 		}
-		fmt.Fprintf(w, "  project:  %s (%s %s)\n", r.Project.Name, r.Project.Ecosystem, ecoVer)
+		sw.Writef("  project:  %s (%s %s)\n", r.Project.Name, r.Project.Ecosystem, ecoVer)
 	}
-	fmt.Fprintf(w, "  manifest: %s\n", r.Project.ManifestPath)
-	fmt.Fprintln(w)
+	sw.Writef("  manifest: %s\n", r.Project.ManifestPath)
+	sw.Writeln()
 
 	// ---- Summary ----
-	fmt.Fprintln(w, "Summary")
-	fmt.Fprintf(w, "  %d dependencies   (%d direct · %d indirect)\n",
+	sw.Writeln("Summary")
+	sw.Writef("  %d dependencies   (%d direct · %d indirect)\n",
 		r.Summary.Total, r.Summary.Direct, r.Summary.Indirect)
 	// Ordered tier output — stable across runs and matches the
 	// design/trust-policy-v1.md ordering (strongest-endorsement
@@ -155,69 +160,74 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 	for _, tier := range tierOrder {
 		count := r.Summary.ByTier[tier]
 		if count > 0 {
-			fmt.Fprintf(w, "  %-5d %s\n", count, tier)
+			sw.Writef("  %-5d %s\n", count, tier)
 		}
 	}
-	fmt.Fprintln(w)
+	sw.Writeln()
 
 	// ---- Direct deps table ----
 	direct := filterDirectDeps(r.Deps)
 	if len(direct) > 0 {
-		fmt.Fprintf(w, "Direct dependencies (%d)\n", len(direct))
+		sw.Writef("Direct dependencies (%d)\n", len(direct))
 		for _, d := range direct {
-			renderDep(w, d)
+			renderDep(sw, d)
 		}
-		fmt.Fprintln(w)
+		sw.Writeln()
 	}
 
 	// ---- Indirect deps (count by default, full list with --all) ----
 	indirect := filterIndirectDeps(r.Deps)
 	if len(indirect) > 0 {
 		if includeIndirect {
-			fmt.Fprintf(w, "Indirect dependencies (%d)\n", len(indirect))
+			sw.Writef("Indirect dependencies (%d)\n", len(indirect))
 			for _, d := range indirect {
-				renderDep(w, d)
+				renderDep(sw, d)
 			}
-			fmt.Fprintln(w)
+			sw.Writeln()
 		} else {
 			byTier := map[survey.Tier]int{}
 			for _, d := range indirect {
 				byTier[d.Tier]++
 			}
 			summary := formatIndirectSummary(byTier)
-			fmt.Fprintf(w, "Indirect dependencies: %d — %s\n", len(indirect), summary)
-			fmt.Fprintln(w, "  (use --all to list)")
-			fmt.Fprintln(w)
+			sw.Writef("Indirect dependencies: %d — %s\n", len(indirect), summary)
+			sw.Writeln("  (use --all to list)")
+			sw.Writeln()
 		}
 	}
 
 	// ---- Action items ----
 	if len(r.Summary.NeedsReview) > 0 {
-		fmt.Fprintln(w, "Action items")
-		fmt.Fprintf(w, "  %d direct dependencies to analyze:\n", len(r.Summary.NeedsReview))
+		sw.Writeln("Action items")
+		sw.Writef("  %d direct dependencies to analyze:\n", len(r.Summary.NeedsReview))
 		for _, uri := range r.Summary.NeedsReview {
 			cloneName := cloneDirNameForURI(uri)
-			fmt.Fprintf(w, "    signatory analyze %s --refresh --clone --path filestore/clones/%s\n",
+			sw.Writef("    signatory analyze %s --refresh --clone --path filestore/clones/%s\n",
 				analyzableForm(uri), cloneName)
 		}
-		fmt.Fprintln(w)
+		sw.Writeln()
 	} else if len(direct) > 0 {
 		// All direct deps have resolved tiers. Celebrate briefly.
-		fmt.Fprintln(w, "No outstanding action items — every direct dep has a resolved tier.")
-		fmt.Fprintln(w)
+		sw.Writeln("No outstanding action items — every direct dep has a resolved tier.")
+		sw.Writeln()
 	}
 
-	return nil
+	return sw.Err()
 }
 
-// renderDep prints one line for a DepResult to w. Format:
+// renderDep prints one line for a DepResult via sw. Format:
 //
 //	[icon] <name><pad> <version><pad> <tier>  <suffix>
 //
 // The icon is a two-character visual cue. suffix carries context
 // like "burn: <reason>" or "other-versions" or the posture
 // rationale (truncated).
-func renderDep(w io.Writer, d survey.DepResult) {
+//
+// Takes a *stickyWriter so it participates in printSurveyHuman's
+// error chain: if the caller has already hit a broken pipe, the
+// format calls here become no-ops instead of racing to write to
+// a closed stream.
+func renderDep(sw *stickyWriter, d survey.DepResult) {
 	icon := tierIcon(d.Tier)
 	name := d.Dep.Name
 	version := d.Dep.Version
@@ -244,9 +254,9 @@ func renderDep(w io.Writer, d survey.DepResult) {
 	}
 
 	if suffix != "" {
-		fmt.Fprintf(w, "  %s %s %s %-20s %s\n", icon, paddedName, paddedVersion, d.Tier, suffix)
+		sw.Writef("  %s %s %s %-20s %s\n", icon, paddedName, paddedVersion, d.Tier, suffix)
 	} else {
-		fmt.Fprintf(w, "  %s %s %s %s\n", icon, paddedName, paddedVersion, d.Tier)
+		sw.Writef("  %s %s %s %s\n", icon, paddedName, paddedVersion, d.Tier)
 	}
 }
 

@@ -128,9 +128,14 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			// there's no output to render. A scripted consumer sees
 			// an empty stdout and a zero exit code; diagnostics
 			// explaining why are on stderr.
-			fmt.Fprintf(stderr, "No cached data for: %s\n", cmd.Target)
-			fmt.Fprintf(stderr, "Resolved to: %s\n", resolved.CanonicalURI)
-			fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub.")
+			// Write-error suppression (`_, _ =`) on the last statement
+			// before a clean return: the write target is stderr and
+			// there's no propagation opportunity. errcheck flags
+			// these specifically because they're terminal; the
+			// explicit discard matches the intent.
+			_, _ = fmt.Fprintf(stderr, "No cached data for: %s\n", cmd.Target)
+			_, _ = fmt.Fprintf(stderr, "Resolved to: %s\n", resolved.CanonicalURI)
+			_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub.")
 			return nil
 		}
 		existingSignals, err := s.GetLatestSignals(ctx, entity.ID)
@@ -146,9 +151,9 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		// target." Emptiness in both is the only "go run --refresh"
 		// case.
 		if len(existingSignals) == 0 && len(analystOutputs) == 0 {
-			fmt.Fprintf(stderr, "No cached signals or analyst outputs for: %s\n", cmd.Target)
-			fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub,")
-			fmt.Fprintln(stderr, "or run `signatory ingest <file>` to load an analyst output.")
+			_, _ = fmt.Fprintf(stderr, "No cached signals or analyst outputs for: %s\n", cmd.Target)
+			_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub,")
+			_, _ = fmt.Fprintln(stderr, "or run `signatory ingest <file>` to load an analyst output.")
 			return nil
 		}
 		return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
@@ -206,12 +211,21 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// stderr gives the operator a trail.
 	if entity.Type == profile.EntityPackage && entity.Ecosystem == "npm" && entity.URL == "" {
 		if err := resolveNpmRepo(ctx, s, entity, globals); err != nil {
-			fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
+			// Deliberate `_, _ =` on stderr writes throughout Run():
+			// these are diagnostic progress/warning lines, not the
+			// command's contract output. A failure to write them
+			// (stderr closed, broken pipe to an unusual pipeline
+			// configuration) doesn't change what the analysis
+			// should report on stdout. The rendered-output path
+			// (displayProfile → displayHuman / JSON write) DOES
+			// propagate write errors via stickyWriter; this
+			// asymmetry is intentional.
+			_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, err)
 		}
 	}
 
-	fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
+	_, _ = fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
 
 	// Decide which collectors to run. Tests inject mocks via
 	// globals.Collectors (see functional_test.go); in production that
@@ -233,7 +247,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
 		}
 		allSignals = append(allSignals, result.Signals()...)
-		fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
+		_, _ = fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
 	}
 
 	if err := s.AppendSignals(ctx, allSignals); err != nil {
@@ -255,7 +269,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		"created_entity":    created,
 	})
 	if err := auditLog.LogAction(ctx, actor, "analyze", entity.ID, string(detail)); err != nil {
-		fmt.Fprintf(stderr, "warning: audit log write failed: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "warning: audit log write failed: %v\n", err)
 	}
 
 	// Even on a refresh path, surface any cached analyst outputs —
@@ -272,7 +286,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// upcoming rendered output (stdout). On a terminal that
 	// interleaves both, this separates the diagnostic chatter from
 	// the data; on a pipe (--json | jq), stdout stays clean JSON.
-	fmt.Fprintln(stderr)
+	_, _ = fmt.Fprintln(stderr)
 	return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
 }
 
@@ -351,7 +365,14 @@ func (cmd *AnalyzeCmd) displayProfile(
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(w, string(data))
+		// Single final write: explicit error check instead of a
+		// stickyWriter (which earns its keep on multi-write paths
+		// like displayHuman). Broken-pipe on the JSON payload —
+		// caller did `analyze --json … | head -c 100` — propagates
+		// up so the shell sees exit != 0 and scripts can react.
+		if _, err := fmt.Fprintln(w, string(data)); err != nil {
+			return fmt.Errorf("write json output: %w", err)
+		}
 		return nil
 	}
 
@@ -366,18 +387,28 @@ func (cmd *AnalyzeCmd) displayProfile(
 // All output goes through the writer — no global os.Stdout
 // references — so tests can inject per-call buffers and parallel
 // tests stay race-free.
+//
+// Write errors propagate: once any individual Writef/Writeln fails
+// (broken pipe is the realistic case — `analyze … | head -5`), the
+// stickyWriter short-circuits the remaining calls and the first
+// error surfaces via the function's return. That's the whole reason
+// for the sticky wrapper: without it, a broken pipe mid-render
+// would silently waste CPU on ~30 more format calls that go
+// nowhere.
 func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 	p := d.Profile
-	fmt.Fprintf(w, "Entity:    %s\n", p.Entity.ShortName)
-	fmt.Fprintf(w, "URI:       %s\n", p.Entity.CanonicalURI)
-	fmt.Fprintf(w, "Type:      %s\n", p.Entity.Type)
+	sw := &stickyWriter{w: w}
+
+	sw.Writef("Entity:    %s\n", p.Entity.ShortName)
+	sw.Writef("URI:       %s\n", p.Entity.CanonicalURI)
+	sw.Writef("Type:      %s\n", p.Entity.Type)
 	if p.Entity.Description != "" {
-		fmt.Fprintf(w, "Note:      %s\n", p.Entity.Description)
+		sw.Writef("Note:      %s\n", p.Entity.Description)
 	}
 	if p.Entity.Ecosystem != "" {
-		fmt.Fprintf(w, "Ecosystem: %s\n", p.Entity.Ecosystem)
+		sw.Writef("Ecosystem: %s\n", p.Entity.Ecosystem)
 	}
-	fmt.Fprintln(w)
+	sw.Writeln()
 
 	// Surface ingested analyst outputs before signals — they're
 	// usually the higher-information-density artifact a human or
@@ -388,46 +419,46 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 		if maxAge > 0 {
 			header = fmt.Sprintf("=== Cached analyses (last %s) ===", maxAge)
 		}
-		fmt.Fprintln(w, header)
+		sw.Writeln(header)
 		for _, ao := range d.AnalystOutputs {
 			ageStr := analystOutputAge(ao.IngestedAt)
-			fmt.Fprintf(w, "  %s  %s round=%d  %s\n",
+			sw.Writef("  %s  %s round=%d  %s\n",
 				ao.OutputID[:8], ao.AnalystID, ao.Round, ageStr)
-			fmt.Fprintf(w, "    model=%s  ingested=%s\n",
+			sw.Writef("    model=%s  ingested=%s\n",
 				ao.Model, ao.IngestedAt)
-			fmt.Fprintf(w, "    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
+			sw.Writef("    %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
 				ao.ConclusionsCount, ao.PositiveAbsenceCount,
 				ao.ObservationCount, ao.PatternCount)
 			if ao.SourcePath != "" {
-				fmt.Fprintf(w, "    source: %s\n", ao.SourcePath)
+				sw.Writef("    source: %s\n", ao.SourcePath)
 			}
 		}
-		fmt.Fprintf(w, "Use `signatory show-conclusions --target %s` for cross-output conclusion queries.\n",
+		sw.Writef("Use `signatory show-conclusions --target %s` for cross-output conclusion queries.\n",
 			p.Entity.CanonicalURI)
-		fmt.Fprintln(w)
+		sw.Writeln()
 	}
 
 	// Posture: show latest + hint about other versions.
 	if len(p.Postures) > 0 {
 		latest := p.Postures[0]
 		if latest.Version != "" {
-			fmt.Fprintf(w, "Posture:   %s (version %s)\n", latest.Tier, latest.Version)
+			sw.Writef("Posture:   %s (version %s)\n", latest.Tier, latest.Version)
 		} else {
-			fmt.Fprintf(w, "Posture:   %s\n", latest.Tier)
+			sw.Writef("Posture:   %s\n", latest.Tier)
 		}
-		fmt.Fprintf(w, "Rationale: %s\n", latest.Rationale)
-		fmt.Fprintf(w, "Set by:    %s\n", latest.SetBy)
+		sw.Writef("Rationale: %s\n", latest.Rationale)
+		sw.Writef("Set by:    %s\n", latest.SetBy)
 		if len(p.Postures) > 1 {
-			fmt.Fprintf(w, "           (%d other version%s recorded — `signatory posture get %s --all` to see all)\n",
+			sw.Writef("           (%d other version%s recorded — `signatory posture get %s --all` to see all)\n",
 				len(p.Postures)-1, pluralS(len(p.Postures)-1), p.Entity.CanonicalURI)
 		}
-		fmt.Fprintln(w)
+		sw.Writeln()
 	}
 
 	if p.Burn != nil {
-		fmt.Fprintf(w, "*** BURNED: %s (by %s, %s) ***\n",
+		sw.Writef("*** BURNED: %s (by %s, %s) ***\n",
 			p.Burn.Reason, p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
-		fmt.Fprintln(w)
+		sw.Writeln()
 	}
 
 	// Group signals for display.
@@ -454,10 +485,16 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(w, "=== %s ===\n", g.label)
+		sw.Writef("=== %s ===\n", g.label)
 		for _, s := range sigs {
+			// Render-path unmarshal: a corrupt Signal.Value should not
+			// abort the whole display. On decode failure val stays nil
+			// and the downstream type-assertion guards (`if r, ok := …`)
+			// render an empty row rather than crashing. The store is
+			// the canonical source for the raw bytes; rendering
+			// degrades gracefully.
 			var val map[string]any
-			_ = json.Unmarshal(s.Value, &val)
+			_ = json.Unmarshal(s.Value, &val) //nolint:errcheck // see comment above: nil-safe render on decode failure
 
 			if strings.HasPrefix(s.Type, "absence:") {
 				absenceCount++
@@ -469,19 +506,19 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 				if r, ok := val["reason"].(string); ok {
 					reason = r
 				}
-				fmt.Fprintf(w, "  %-20s [ABSENT]  %s%s\n",
+				sw.Writef("  %-20s [ABSENT]  %s%s\n",
 					strings.TrimPrefix(s.Type, "absence:"), reason, retryable)
 			} else {
-				fmt.Fprintf(w, "  %-20s [%s]  ", s.Type, s.ForgeryResistance)
-				printCompactValue(w, val)
-				fmt.Fprintln(w)
+				sw.Writef("  %-20s [%s]  ", s.Type, s.ForgeryResistance)
+				printCompactValue(sw, val)
+				sw.Writeln()
 			}
 		}
-		fmt.Fprintln(w)
+		sw.Writeln()
 	}
 
-	fmt.Fprintf(w, "Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
-	return nil
+	sw.Writef("Total signals: %d (%d absent)\n", len(p.Signals), absenceCount)
+	return sw.Err()
 }
 
 // analystOutputAge produces a human-friendly relative-age string
@@ -511,16 +548,21 @@ func analystOutputAge(ingestedAt string) string {
 }
 
 // printCompactValue writes a signal's value map as compact
-// key=value pairs to w. Keys are sorted so the same signal renders
+// key=value pairs to sw. Keys are sorted so the same signal renders
 // identically across runs — Go map iteration is randomized, and
 // nondeterministic order bites anyone diffing captured output or
 // eyeballing analyze runs for drift.
-func printCompactValue(w io.Writer, val map[string]any) {
+//
+// Takes a *stickyWriter so it participates in the displayHuman
+// error chain: if a prior write in the enclosing render errored,
+// the format calls here become no-ops instead of racing to append
+// garbage to a closed stream.
+func printCompactValue(sw *stickyWriter, val map[string]any) {
 	for i, k := range slices.Sorted(maps.Keys(val)) {
 		if i > 0 {
-			fmt.Fprint(w, ", ")
+			sw.Writef(", ")
 		}
-		fmt.Fprintf(w, "%s=%v", k, val[k])
+		sw.Writef("%s=%v", k, val[k])
 	}
 }
 
@@ -529,6 +571,54 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// stickyWriter is a sticky-error wrapper around an io.Writer, used
+// by the display functions so a broken-pipe failure partway through
+// rendering short-circuits the remaining writes instead of wasting
+// work on a closed file descriptor.
+//
+// The concrete scenario: a user runs `signatory analyze foo | head
+// -5`. After `head` closes its end of the pipe, every subsequent
+// write to stdout returns a broken-pipe error. Without this wrapper,
+// we'd silently continue formatting ~30 lines of irrelevant output;
+// with it, the first error marks the writer failed, all later
+// Writef/Writeln calls no-op, and the caller returns the error.
+//
+// Modeled on bufio.Writer's sticky-error internal behavior (see
+// Go src/bufio/bufio.go): once an error is captured, subsequent
+// writes are no-ops and the error is preserved until Flush/check.
+//
+// Design note: this wrapper exists in lieu of per-call-site
+// `if _, err := fmt.Fprintf(w, ...); err != nil { return err }`
+// boilerplate, which would triple the LOC in displayHuman and
+// bury the formatting intent.
+type stickyWriter struct {
+	w   io.Writer
+	err error
+}
+
+// Writef formats and writes to the underlying writer. If a previous
+// call errored, this is a no-op and the stored error is preserved.
+func (s *stickyWriter) Writef(format string, args ...any) {
+	if s.err != nil {
+		return
+	}
+	_, s.err = fmt.Fprintf(s.w, format, args...)
+}
+
+// Writeln formats and writes (with trailing newline). If a previous
+// call errored, this is a no-op and the stored error is preserved.
+func (s *stickyWriter) Writeln(args ...any) {
+	if s.err != nil {
+		return
+	}
+	_, s.err = fmt.Fprintln(s.w, args...)
+}
+
+// Err returns the first error encountered, or nil.
+func (s *stickyWriter) Err() error {
+	return s.err
 }
 
 // resolveNpmRepo asks the npm registry for the package's declared
