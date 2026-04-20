@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os/exec"
 	"testing"
 	"time"
@@ -271,5 +270,4 @@ func TestCommitSigningFormat_ContainsRequiredSeparators(t *testing.T) {
 	assert.Equal(t, 5, fieldSepCount, "expected 5 %%x1f tokens between 6 field placeholders")
 	recordTermCount := bytes.Count([]byte(commitSigningFormat), []byte("%x1e"))
 	assert.Equal(t, 1, recordTermCount, "expected exactly one %%x1e record terminator")
-	_ = fmt.Sprintf // keep fmt import tied to the file if later assertions need it
 }

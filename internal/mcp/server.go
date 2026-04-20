@@ -130,6 +130,19 @@ func (s *Server) ClientInfo() clientInfo {
 //
 // Serve returns nil on clean EOF, ctx.Err() on cancellation, and an
 // I/O error on unrecoverable transport failure.
+// Write-error discard policy (applies to every writeError / writeResult
+// call inside Serve):
+//
+// Response writes go out on the same stdio transport the read loop is
+// reading from. If a write fails, it means the client has hung up (pipe
+// closed, stream reset) — the connection is dead and no recovery is
+// possible from the JSON-RPC layer. The read loop will observe the same
+// condition on its next readRequest() call and return io.EOF via the
+// clean-shutdown branch, or surface the transport error if it is not
+// EOF. Logging from here is counterproductive: stderr is a protocol-
+// parallel stream whose semantics MCP clients don't standardize, and
+// the host process (cmd/signatory/mcp.go) is the correct place to
+// observe Serve's return value. The discards are deliberate.
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	c := newCodec(r, w)
 
@@ -154,7 +167,7 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			var rpcErr *rpcError
 			if errors.As(err, &rpcErr) {
 				s.writeMu.Lock()
-				_ = c.writeError(json.RawMessage("null"), rpcErr.Code, rpcErr.Message, nil)
+				_ = c.writeError(json.RawMessage("null"), rpcErr.Code, rpcErr.Message, nil) //nolint:errcheck // write failure means client hung up; see Serve doc for discard policy
 				s.writeMu.Unlock()
 				continue
 			}
@@ -164,8 +177,13 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 
 		// Notifications: dispatch synchronously (no response) and continue.
+		// JSON-RPC 2.0 § 4.1: notifications MUST NOT be responded to — any
+		// rpcError returned by dispatch for a notification (e.g. unknown
+		// method on a typo'd notification name) is discarded here because
+		// sending a response is a protocol violation. `result` is always
+		// nil for notifications by dispatch's contract.
 		if req.isNotification() {
-			_, _ = s.dispatch(ctx, req)
+			_, _ = s.dispatch(ctx, req) //nolint:errcheck // per JSON-RPC 2.0, notifications get no response
 			continue
 		}
 
@@ -184,9 +202,9 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			result, rpcErr := s.dispatch(ctx, req)
 			s.writeMu.Lock()
 			if rpcErr != nil {
-				_ = c.writeError(req.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
+				_ = c.writeError(req.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data) //nolint:errcheck // write failure means client hung up; see Serve doc for discard policy
 			} else if result != nil {
-				_ = c.writeResult(req.ID, result)
+				_ = c.writeResult(req.ID, result) //nolint:errcheck // write failure means client hung up; see Serve doc for discard policy
 			}
 			s.writeMu.Unlock()
 			continue
@@ -204,11 +222,11 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			defer s.writeMu.Unlock()
 
 			if rpcErr != nil {
-				_ = c.writeError(req.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
+				_ = c.writeError(req.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data) //nolint:errcheck // write failure means client hung up; see Serve doc for discard policy
 				return
 			}
 			if result != nil {
-				_ = c.writeResult(req.ID, result)
+				_ = c.writeResult(req.ID, result) //nolint:errcheck // write failure means client hung up; see Serve doc for discard policy
 			}
 			// result == nil AND rpcErr == nil → no response (notification
 			// handled as a request? shouldn't happen, but safe to skip).

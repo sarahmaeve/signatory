@@ -185,16 +185,20 @@ Key distinctions:
 Read signatory://help for the full tool-selection guide and concept map.`
 
 // handleInitializedNotification processes the notifications/initialized
-// notification. Transitions state to operational. Safe to call only
-// when in stateInitialized.
-func (h *handshake) handleInitializedNotification() error {
+// notification and transitions state to operational.
+//
+// The MCP lifecycle (2025-11-25) says clients send this notification
+// exactly once after a successful initialize response. If it arrives
+// outside that window (e.g. before initialize, or a duplicate after
+// already-operational), the spec is explicit: the server ignores it.
+// No error return — there is nothing the caller could do that the spec
+// doesn't already prescribe, and silently ignoring matches the spec's
+// "strict outputs, liberal inputs" posture for notifications.
+func (h *handshake) handleInitializedNotification() {
 	if h.state != stateInitialized {
-		// Spec says ignore notifications before/after the expected
-		// window, but log it for observability. Not a fatal error.
-		return nil
+		return
 	}
 	h.state = stateOperational
-	return nil
 }
 
 // isOperational reports whether the lifecycle is past the handshake

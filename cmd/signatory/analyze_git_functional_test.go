@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"os/exec"
 	"testing"
@@ -228,5 +227,4 @@ func runGitInFunctional(t *testing.T, repo string, args ...string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git %v in %s: %v: %s", args, repo, err, stderr.String())
 	}
-	_ = context.Background()
 }

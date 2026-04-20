@@ -169,8 +169,14 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 func buildSignalsSummary(signals []profile.Signal) signalsSummary {
 	s := signalsSummary{}
 	for _, sig := range signals {
+		// Summary-path unmarshal: a corrupt Signal.Value for one
+		// signal should not drop the whole summary. On decode failure
+		// val stays nil and the explicit nil-guard below substitutes
+		// an empty map, which is the documented shape for an unknown
+		// or unreadable value. The raw bytes remain in the store for
+		// debugging via signatory_signals.
 		var val map[string]interface{}
-		_ = json.Unmarshal(sig.Value, &val)
+		_ = json.Unmarshal(sig.Value, &val) //nolint:errcheck // see comment above: nil-safe summary on decode failure
 		if val == nil {
 			val = map[string]interface{}{}
 		}

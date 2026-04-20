@@ -190,7 +190,10 @@ func (s *Store) GetLatestMessage(ctx context.Context, f MessageFilter) (*Message
 		}
 		return nil, fmt.Errorf("get latest message: %w", err)
 	}
-	msg.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	msg.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("get latest message: parse created_at %q: %w", createdStr, err)
+	}
 	if metadata.Valid {
 		msg.Metadata = metadata.String
 	}
@@ -216,7 +219,11 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 		if err := rows.Scan(&sess.ID, &sess.Target, &sess.Status, &createdStr, &metadata); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
-		sess.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+		var err error
+		sess.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
+		if err != nil {
+			return nil, fmt.Errorf("list sessions: parse created_at %q: %w", createdStr, err)
+		}
 		if metadata.Valid {
 			sess.Metadata = metadata.String
 		}
@@ -254,7 +261,11 @@ func scanSession(row *sql.Row) (*Session, error) {
 		}
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
-	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	var err error
+	sess.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("scan session: parse created_at %q: %w", createdStr, err)
+	}
 	if metadata.Valid {
 		sess.Metadata = metadata.String
 	}
@@ -273,7 +284,11 @@ func scanMessageRow(row scannable) (Message, error) {
 		&msg.Content, &createdStr, &metadata); err != nil {
 		return msg, fmt.Errorf("scan message: %w", err)
 	}
-	msg.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	var err error
+	msg.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
+	if err != nil {
+		return msg, fmt.Errorf("scan message: parse created_at %q: %w", createdStr, err)
+	}
 	if metadata.Valid {
 		msg.Metadata = metadata.String
 	}

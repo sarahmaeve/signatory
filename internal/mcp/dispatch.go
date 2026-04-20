@@ -100,7 +100,7 @@ func (s *Server) dispatch(ctx context.Context, req *rpcRequest) (result any, rpc
 
 	case "notifications/initialized":
 		// Notification — no response. Advance lifecycle state.
-		_ = s.shake.handleInitializedNotification()
+		s.shake.handleInitializedNotification()
 		return nil, nil
 
 	case "tools/list":

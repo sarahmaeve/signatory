@@ -50,8 +50,10 @@ func TestLogger_WritesToStoreAndFile(t *testing.T) {
 	assert.NotEmpty(t, entry.ID, "logger should auto-assign an ID")
 	assert.False(t, entry.Timestamp.IsZero(), "logger should auto-assign a timestamp")
 
-	// File received the same entry as JSON lines.
-	content, err := os.ReadFile(filePath)
+	// File received the same entry as JSON lines. Confirm the file is
+	// readable (catches permission / path regressions early) before the
+	// scanner path re-opens it for line-by-line assertions.
+	_, err = os.ReadFile(filePath)
 	require.NoError(t, err)
 
 	scanner := bufio.NewScanner(file(t, filePath))
@@ -70,8 +72,6 @@ func TestLogger_WritesToStoreAndFile(t *testing.T) {
 		assert.Equal(t, "vetted-frozen", detail["tier"])
 	}
 	assert.Equal(t, 1, lines)
-
-	_ = content
 }
 
 // file is a test helper that opens the audit log for reading.

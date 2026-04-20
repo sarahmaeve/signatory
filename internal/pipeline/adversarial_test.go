@@ -500,12 +500,12 @@ func TestStore_Message_EmptyMetadata(t *testing.T) {
 		// Metadata deliberately empty
 	})
 	require.NoError(t, err)
+	assert.Empty(t, msg.Metadata, "returned message preserves empty metadata")
 
 	msgs, err := s.GetMessages(ctx, pipeline.MessageFilter{SessionID: sess.ID})
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
-	assert.Empty(t, msgs[0].Metadata)
-	_ = msg
+	assert.Empty(t, msgs[0].Metadata, "round-tripped message preserves empty metadata")
 }
 
 // ---------------------------------------------------------------------------
