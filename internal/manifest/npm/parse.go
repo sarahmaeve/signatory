@@ -1,13 +1,14 @@
 package npm
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
@@ -94,8 +95,8 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	// Stable iteration order. Map iteration in Go is randomized;
 	// without a sort, repeated runs produce differently-ordered
 	// Dep slices and make tests (and diff-style comparisons) noisy.
-	sort.SliceStable(deps, func(i, j int) bool {
-		return deps[i].Name < deps[j].Name
+	slices.SortStableFunc(deps, func(a, b manifest.Dep) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return info, deps, nil

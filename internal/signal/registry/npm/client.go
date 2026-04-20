@@ -1,6 +1,7 @@
 package npm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -371,7 +372,7 @@ func (c *Client) GetWeeklyDownloads(ctx context.Context, name string) (int, erro
 	// Strict decode: downloads schema is stable and narrow. Unknown
 	// fields here signal real drift we want to notice — unlike the
 	// main registry response where drift is normal traffic.
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	var dl downloadsResponse
 	if err := dec.Decode(&dl); err != nil {

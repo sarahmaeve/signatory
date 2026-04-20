@@ -190,4 +190,3 @@ func postureTierToSurveyTier(p profile.PostureTier) Tier {
 		return TierUnexamined
 	}
 }
-

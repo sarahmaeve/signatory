@@ -80,15 +80,15 @@ func NormalizeDeclaredRepoURL(raw string) string {
 	}
 
 	// Drop URL fragments (e.g., "#main" for a pinned branch).
-	if hashIdx := strings.Index(s, "#"); hashIdx >= 0 {
-		s = s[:hashIdx]
+	if before, _, ok := strings.Cut(s, "#"); ok {
+		s = before
 	}
 
 	// Drop ssh:// if present and not git@-form — npm does emit
 	// "ssh://git@github.com/owner/repo.git" rarely; convert to the
 	// https form since we only clone over https.
-	if strings.HasPrefix(s, "ssh://git@github.com") {
-		s = "https://github.com" + strings.TrimPrefix(s, "ssh://git@github.com")
+	if rest, ok := strings.CutPrefix(s, "ssh://git@github.com"); ok {
+		s = "https://github.com" + rest
 	}
 
 	// Delegate to ResolveTarget for the actual github-URL grammar

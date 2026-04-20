@@ -26,7 +26,8 @@
 package signal
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
@@ -84,8 +85,8 @@ func SignalTypes() []SignalTypeInfo {
 	for _, info := range signalTypeRegistry {
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Type < out[j].Type
+	slices.SortFunc(out, func(a, b SignalTypeInfo) int {
+		return cmp.Compare(a.Type, b.Type)
 	})
 	return out
 }

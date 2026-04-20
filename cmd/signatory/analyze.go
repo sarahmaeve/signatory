@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -212,7 +213,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// Audit the analysis. Failure is non-fatal — the signals are
 	// already in the store; a missing audit line is a secondary
 	// observability concern, not a correctness failure.
-	detail, _ := json.Marshal(map[string]interface{}{
+	detail, _ := json.Marshal(map[string]any{
 		"target":            cmd.Target,
 		"canonical_uri":     entity.CanonicalURI,
 		"signals_collected": len(allSignals),
@@ -405,7 +406,7 @@ func displayHuman(d *AnalysisDisplay, maxAge time.Duration) error {
 		}
 		fmt.Printf("=== %s ===\n", g.label)
 		for _, s := range sigs {
-			var val map[string]interface{}
+			var val map[string]any
 			_ = json.Unmarshal(s.Value, &val)
 
 			if strings.HasPrefix(s.Type, "absence:") {
@@ -464,13 +465,8 @@ func analystOutputAge(ingestedAt string) string {
 // identically across runs — Go map iteration is randomized, and
 // nondeterministic order bites anyone diffing captured output or
 // eyeballing analyze runs for drift.
-func printCompactValue(val map[string]interface{}) {
-	keys := make([]string, 0, len(val))
-	for k := range val {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for i, k := range keys {
+func printCompactValue(val map[string]any) {
+	for i, k := range slices.Sorted(maps.Keys(val)) {
 		if i > 0 {
 			fmt.Print(", ")
 		}

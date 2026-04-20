@@ -1,10 +1,12 @@
 package npm
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -315,7 +317,7 @@ func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
 			publisher:      pv.NpmUser.Name,
 		})
 	}
-	// sort.SliceStable + an explicit tiebreaker: two versions with
+	// Stable sort + explicit tiebreaker: two versions with
 	// identical registry timestamps would otherwise produce
 	// nondeterministic ordering of recent[0], which drives
 	// latest_publisher, latest_has_attestation, and
@@ -324,18 +326,18 @@ func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
 	// millisecond but storage round-trips through RFC3339 truncate
 	// to second precision for many fixtures), so the tiebreaker
 	// makes signal output reproducible across runs.
-	sort.SliceStable(records, func(i, j int) bool {
-		if records[i].publishedAt.Equal(records[j].publishedAt) {
-			// Lexically-greater version sorts first within a time
-			// tie. For the common case (semver-shaped version
-			// strings, matching-length components), this aligns
-			// lexical and semver order; for pathological cases
-			// (10.0.0 vs 2.0.0) lexical picks wrong but still picks
-			// deterministically — and any deterministic choice
-			// satisfies the tiebreaker's job.
-			return records[i].version > records[j].version
+	//
+	// Lexically-greater version string sorts first within a time
+	// tie. For the common case (semver-shaped, matching-length
+	// components), this aligns lexical and semver order; for
+	// pathological cases (10.0.0 vs 2.0.0) lexical picks wrong but
+	// still picks deterministically — any consistent choice
+	// satisfies the tiebreaker's job.
+	slices.SortStableFunc(records, func(a, b versionRecord) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
 		}
-		return records[i].publishedAt.After(records[j].publishedAt)
+		return b.publishedAt.Compare(a.publishedAt)
 	})
 	if len(records) > n {
 		records = records[:n]
@@ -446,11 +448,7 @@ func recordPublishOriginConsistency(result *signal.CollectionResult, entityID st
 			publishers[r.publisher] = struct{}{}
 		}
 	}
-	publisherList := make([]string, 0, len(publishers))
-	for p := range publishers {
-		publisherList = append(publisherList, p)
-	}
-	sort.Strings(publisherList)
+	publisherList := slices.Sorted(maps.Keys(publishers))
 
 	result.RecordSignal(entityID, "publish_origin_consistency", source, collectedAt, defaultTTL,
 		map[string]any{
