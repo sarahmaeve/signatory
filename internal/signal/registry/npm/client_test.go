@@ -478,3 +478,106 @@ func TestClient_GetPackage_RegistryPackageCanRoundTrip(t *testing.T) {
 	assert.Equal(t, pkg.Name, pkg2.Name)
 	assert.Equal(t, pkg.DistTags.Latest, pkg2.DistTags.Latest)
 }
+
+// ----- GetWeeklyDownloads -----
+
+func TestClient_GetWeeklyDownloads_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/downloads/point/last-week/express", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"downloads":28500000,"start":"2026-04-13","end":"2026-04-20","package":"express"}`)
+	}))
+	defer srv.Close()
+
+	count, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "express")
+	require.NoError(t, err)
+	assert.Equal(t, 28_500_000, count)
+}
+
+func TestClient_GetWeeklyDownloads_NotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "new-package")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound,
+		"404 on downloads endpoint also surfaces as ErrNotFound so callers branch uniformly")
+}
+
+func TestClient_GetWeeklyDownloads_ErrorBodyNotLeaked(t *testing.T) {
+	t.Parallel()
+
+	const sensitive = "internal-proxy-debug SECRET_xyz trace=12345"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, sensitive)
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "express")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), sensitive,
+		"downloads endpoint must apply the same #93 body-sanitization discipline as GetPackage")
+	assert.Contains(t, err.Error(), "503")
+}
+
+func TestClient_GetWeeklyDownloads_MalformedName_NoHTTPCall(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		calls++
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "../etc/passwd")
+	require.Error(t, err)
+	assert.Equal(t, 0, calls,
+		"malformed name must be rejected pre-HTTP on downloads path too")
+}
+
+func TestClient_GetWeeklyDownloads_ScopedPackage_PathEscaped(t *testing.T) {
+	t.Parallel()
+
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"downloads":1,"start":"x","end":"y","package":"@types/node"}`)
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "@types/node")
+	require.NoError(t, err)
+	assert.Equal(t, "/downloads/point/last-week/@types/node", seen)
+}
+
+// TestClient_GetWeeklyDownloads_StrictDecode verifies that the
+// downloads endpoint decoder uses DisallowUnknownFields — schema
+// drift on this narrow, stable endpoint should surface as an error
+// rather than silently decode as a zero-value count. This is the
+// conscious inverse of the main registry's lenient decode: we
+// control less of the downloads schema but it's much narrower, so
+// strict mode has a signal-to-noise profile where strict works.
+func TestClient_GetWeeklyDownloads_StrictDecode(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Extra field "bonus_metric" isn't in the schema. Strict
+		// mode should reject the response.
+		fmt.Fprint(w, `{"downloads":1,"start":"x","end":"y","package":"x","bonus_metric":42}`)
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetWeeklyDownloads(context.Background(), "x")
+	require.Error(t, err,
+		"strict decode should reject unknown field — signals drift we want to notice on this schema")
+	assert.Contains(t, err.Error(), "bonus_metric")
+}

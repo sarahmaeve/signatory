@@ -298,6 +298,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"projects without .mailmap produce no signal in either direction",
 		},
 	},
+	"maintainer_count": {
+		Type:              "maintainer_count",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Count and names of maintainers with publish rights on a package registry (npm, PyPI, etc.).",
+		Caveats: []string{
+			"maintainer accounts can be compromised independently of each other — a high count raises the cost of a full-takeover but doesn't prevent single-account credential theft",
+			"npm's maintainers list is self-declared by the package owner; a packaged org can rotate maintainers without notice",
+			"low count (bus-factor 1) is a governance concern independent of the individual maintainer's trustworthiness",
+		},
+	},
 	"analyst_self_correction": {
 		Type:              "analyst_self_correction",
 		Group:             profile.SignalGroupGovernance,
@@ -377,6 +388,28 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Description:       "Whether crates.io trusted-publishing (OIDC) is configured for the crate.",
 		Caveats: []string{
 			"status is visible only after a first publish that used it — absence on a new crate is not automatically negative",
+		},
+	},
+	"postinstall_present": {
+		Type:              "postinstall_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published package version declares a postinstall lifecycle script that executes on every install.",
+		Caveats: []string{
+			"presence alone is not negative — legitimate uses include native-binary builds and platform bootstrap",
+			"the axios-case-study attack vector was modifying a package.json to add a postinstall pointing at malicious code; presence raises the bar for reviewing what the script does",
+			"signal reports presence only; reviewing the script content is an analyst task, not a mechanical signal",
+		},
+	},
+	"trusted_publishing": {
+		Type:              "trusted_publishing",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Presence of an OIDC trusted-publishing attestation on the latest published package version (npm's dist.attestations).",
+		Caveats: []string{
+			"present-and-valid is a very high-quality provenance signal — the attestation cryptographically binds the published version to a source repo and commit SHA",
+			"absence is not automatically negative — older published versions predate trusted publishing, and the maintainer may have not opted in yet",
+			"absence on a package that previously used trusted publishing IS strongly negative — the axios attack pattern — but detecting the transition requires comparing across versions, which this v0.1 signal does not do",
 		},
 	},
 
@@ -513,6 +546,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Description:       "Ratio of go.mod references to stars, indicating direct-vs-transitive adoption shape.",
 		Caveats: []string{
 			"the GitHub search API count is an approximation — it excludes private repos and is subject to indexing lag",
+		},
+	},
+	"weekly_downloads": {
+		Type:              "weekly_downloads",
+		Group:             profile.SignalGroupCriticality,
+		ForgeryResistance: profile.ForgeryLowDeclining,
+		Description:       "Download count for a package over the last week, as reported by its registry's stats endpoint.",
+		Caveats: []string{
+			"counts are trivially gameable by botting downloads; treat as a floor, never a ceiling",
+			"CI mirrors, proxy caches, and container image bases inflate counts without corresponding human users",
+			"low download count on a new package is not automatically negative — legitimate projects start small",
+			"use as one input to a criticality picture, never as a sole basis for a trust decision",
 		},
 	},
 }

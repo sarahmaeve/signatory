@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -527,18 +528,29 @@ func TestFunctional_AnalyzeNpm_EndToEnd(t *testing.T) {
 	// Not t.Parallel: we're serializing to keep the httptest lifecycle
 	// tight; parallelism adds no value at this test's cost.
 
-	// npm registry mock — returns a realistic express-like response
-	// with a github repository.url and a last-publish time for the
-	// latest version.
+	// npm mock — multiplexes the registry endpoint (/<name>) and
+	// the downloads endpoint (/downloads/point/last-week/<name>)
+	// on the same server. Real npm splits these across two hosts
+	// (registry.npmjs.org + api.npmjs.org); our test client is
+	// configured with a single base URL that covers both.
 	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/express", r.URL.Path, "npm registry should be hit at /express")
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/downloads/") {
+			fmt.Fprint(w, `{"downloads":28500000,"start":"2026-04-13","end":"2026-04-20","package":"express"}`)
+			return
+		}
 		fmt.Fprint(w, `{
 		  "name": "express",
 		  "dist-tags": {"latest": "4.18.2"},
 		  "time": {
 		    "created": "2010-12-29T19:38:25.450Z",
 		    "4.18.2": "2022-10-08T19:08:35.000Z"
+		  },
+		  "maintainers": [
+		    {"name": "dougwilson", "email": "doug@somethingdoug.com"}
+		  ],
+		  "versions": {
+		    "4.18.2": {"scripts": {}, "dist": {"attestations": null}}
 		  },
 		  "repository": {
 		    "type": "git",
@@ -632,12 +644,17 @@ func TestFunctional_AnalyzeNpm_EndToEnd(t *testing.T) {
 // verifies the resolution didn't fail and the entity persisted
 // correctly.
 func TestFunctional_AnalyzeNpm_NoRepoDeclared(t *testing.T) {
-	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/downloads/") {
+			fmt.Fprint(w, `{"downloads":1,"start":"a","end":"b","package":"orphan"}`)
+			return
+		}
 		fmt.Fprint(w, `{
 		  "name": "orphan",
 		  "dist-tags": {"latest": "1.0.0"},
-		  "time": {"1.0.0": "2024-01-01T00:00:00Z"}
+		  "time": {"1.0.0": "2024-01-01T00:00:00Z"},
+		  "versions": {"1.0.0": {"scripts": {}, "dist": {}}}
 		}`)
 	}))
 	defer npmSrv.Close()
@@ -679,14 +696,19 @@ func TestFunctional_AnalyzeNpm_NoRepoDeclared(t *testing.T) {
 // pkg:npm/@types/node; ShortName is @types/node (not "node"); the
 // npm collector hits /@types/node on the registry.
 func TestFunctional_AnalyzeNpm_ScopedPackage(t *testing.T) {
-	var seenPath string
+	var seenRegistryPath string
 	npmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/downloads/") {
+			fmt.Fprint(w, `{"downloads":1,"start":"a","end":"b","package":"@types/node"}`)
+			return
+		}
+		seenRegistryPath = r.URL.Path
 		fmt.Fprint(w, `{
 		  "name": "@types/node",
 		  "dist-tags": {"latest": "20.0.0"},
-		  "time": {"20.0.0": "2024-01-01T00:00:00Z"}
+		  "time": {"20.0.0": "2024-01-01T00:00:00Z"},
+		  "versions": {"20.0.0": {"scripts": {}, "dist": {}}}
 		}`)
 	}))
 	defer npmSrv.Close()
@@ -705,7 +727,7 @@ func TestFunctional_AnalyzeNpm_ScopedPackage(t *testing.T) {
 	cmd := &AnalyzeCmd{Target: "pkg:npm/@types/node", Refresh: true}
 	require.NoError(t, cmd.Run(globals))
 
-	assert.Equal(t, "/@types/node", seenPath,
+	assert.Equal(t, "/@types/node", seenRegistryPath,
 		"scoped package request path must preserve the @scope/name form")
 
 	s, err := store.OpenSQLite(t.Context(), globals.DBPath)

@@ -75,12 +75,18 @@ func ValidatePackageName(name string) error {
 // methods Phase A+B collectors need; extending the surface requires
 // modelling additional response structures plus adding validation
 // and size-bound tests for each new call.
+//
+// Two base URLs because npm's API is split across two hosts:
+// registry.npmjs.org serves package metadata; api.npmjs.org serves
+// download statistics. Tests point both at a single httptest server
+// that multiplexes on path; production separates them.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient   *http.Client
+	registryURL  string
+	downloadsURL string
 }
 
-// NewClient returns a Client bound to the public npm registry.
+// NewClient returns a Client bound to the public npm endpoints.
 // The 60s per-request timeout matches the github client — the
 // registry can be slow under load, and a shorter deadline would
 // collapse the collection run into a blanket absence.
@@ -90,23 +96,24 @@ func NewClient() *Client {
 			Timeout:       60 * time.Second,
 			CheckRedirect: checkRedirect,
 		},
-		baseURL: "https://registry.npmjs.org",
+		registryURL:  "https://registry.npmjs.org",
+		downloadsURL: "https://api.npmjs.org",
 	}
 }
 
-// NewClientWithBaseURL returns a Client whose registry base URL is
-// configurable. Primary use case: test harnesses pointing the
-// client at an httptest server. Production code should call
-// NewClient, which bakes in the canonical registry.npmjs.org host.
-// Exported (rather than kept as a test-only helper) so the cmd/
-// layer's functional tests can construct a client for injection.
+// NewClientWithBaseURL returns a Client whose endpoints both point
+// at the supplied base. Primary use case: test harnesses pointing
+// the client at an httptest server that multiplexes registry and
+// downloads requests by URL path. Production code should call
+// NewClient, which separates the two hosts as npm does.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout:       60 * time.Second,
 			CheckRedirect: checkRedirect,
 		},
-		baseURL: base,
+		registryURL:  base,
+		downloadsURL: base,
 	}
 }
 
@@ -239,7 +246,7 @@ func (c *Client) GetPackage(ctx context.Context, name string) (*RegistryPackage,
 	escapedName := url.PathEscape(name)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/"+escapedName, nil)
+		c.registryURL+"/"+escapedName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %q: %w", name, err)
 	}
@@ -281,4 +288,80 @@ func (c *Client) GetPackage(ctx context.Context, name string) (*RegistryPackage,
 		return nil, fmt.Errorf("decode npm registry response for %q: %w", name, err)
 	}
 	return &pkg, nil
+}
+
+// downloadsResponse models the api.npmjs.org downloads endpoint.
+// Schema is narrow and stable, so DisallowUnknownFields is
+// applicable here (unlike the main registry response where we
+// deliberately accept drift on fields we don't read).
+type downloadsResponse struct {
+	Downloads int    `json:"downloads"`
+	Start     string `json:"start"`
+	End       string `json:"end"`
+	Package   string `json:"package"`
+}
+
+// GetWeeklyDownloads fetches the last-week download count for a
+// package from api.npmjs.org/downloads. Returns ErrNotFound
+// (wrapped) on 404 — which happens for packages the downloads
+// service doesn't have stats for, or newly-published packages
+// before their first reporting window.
+//
+// Counts are self-reported by the registry and gameable; the
+// weekly_downloads signal's ForgeryResistance reflects that. Use
+// as one input to a criticality picture, never as a sole basis for
+// a trust decision.
+func (c *Client) GetWeeklyDownloads(ctx context.Context, name string) (int, error) {
+	if err := ValidatePackageName(name); err != nil {
+		return 0, fmt.Errorf("get weekly downloads: %w", err)
+	}
+
+	escapedName := url.PathEscape(name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.downloadsURL+"/downloads/point/last-week/"+escapedName, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build downloads request for %q: %w", name, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "signatory/0.1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("npm downloads request for %q failed: %w", name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
+
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, fmt.Errorf("%w: %s (no download stats)", ErrNotFound, name)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
+		return 0, fmt.Errorf("npm downloads returned status %d for %q",
+			resp.StatusCode, name)
+	}
+
+	// Downloads responses are tiny (one small JSON object), so a
+	// much smaller cap here is both adequate and a tighter bound on
+	// OOM-style abuse than the registry cap.
+	const downloadsMaxSize = 64 * 1024
+	limited := io.LimitReader(resp.Body, downloadsMaxSize+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return 0, fmt.Errorf("read npm downloads response for %q: %w", name, err)
+	}
+	if int64(len(body)) > downloadsMaxSize {
+		return 0, fmt.Errorf("npm downloads response for %q exceeds %d-byte cap",
+			name, downloadsMaxSize)
+	}
+
+	// Strict decode: downloads schema is stable and narrow. Unknown
+	// fields here signal real drift we want to notice — unlike the
+	// main registry response where drift is normal traffic.
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	var dl downloadsResponse
+	if err := dec.Decode(&dl); err != nil {
+		return 0, fmt.Errorf("decode npm downloads response for %q: %w", name, err)
+	}
+	return dl.Downloads, nil
 }
