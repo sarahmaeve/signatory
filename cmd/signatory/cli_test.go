@@ -141,19 +141,6 @@ func TestSurveyCmd_WithFlags(t *testing.T) {
 	assert.True(t, cli.Survey.JSON)
 }
 
-// TestSurveyCmd_Run pins the not-implemented status of survey. When
-// survey is wired up (see design/ROADMAP.md v0.1 must-do #1), this test
-// gets replaced with a real run-and-verify test.
-func TestSurveyCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &SurveyCmd{Refresh: true}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
-	err := cmd.Run(globals)
-	require.Error(t, err, "survey stub must return non-zero so LLM agents detect it")
-	assert.Contains(t, err.Error(), "not implemented")
-}
-
 // --- Burn ---
 
 func TestBurnCmd_ValidArgs(t *testing.T) {
