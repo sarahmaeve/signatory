@@ -46,6 +46,71 @@ func TestResolveTarget_GitHubForms(t *testing.T) {
 	}
 }
 
+// TestResolveTarget_NpmjsURLs covers the copy-paste-from-browser
+// convenience: npmjs.com package URLs should resolve to pkg:npm/
+// canonical URIs. Tests the six accepted shapes (with/without www,
+// http/https, scoped, version page, query/fragment) and the
+// lookalike-host rejection.
+func TestResolveTarget_NpmjsURLs(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in      string
+		wantURI string
+	}{
+		{"https://www.npmjs.com/package/express", "pkg:npm/express"},
+		{"https://npmjs.com/package/express", "pkg:npm/express"},
+		{"http://www.npmjs.com/package/express", "pkg:npm/express"},
+		{"https://www.npmjs.com/package/msgpack-lite", "pkg:npm/msgpack-lite"},
+		{"https://www.npmjs.com/package/@types/node", "pkg:npm/@types/node"},
+		{"https://www.npmjs.com/package/@nestjs/core", "pkg:npm/@nestjs/core"},
+		// Version pages: the UI adds /v/<version>; strip to name.
+		{"https://www.npmjs.com/package/express/v/4.18.2", "pkg:npm/express"},
+		{"https://www.npmjs.com/package/@types/node/v/20.0.0", "pkg:npm/@types/node"},
+		// Query strings + fragments are UI state; strip.
+		{"https://www.npmjs.com/package/express?activeTab=versions", "pkg:npm/express"},
+		{"https://www.npmjs.com/package/express#readme", "pkg:npm/express"},
+		// Trailing slash on the name: drop.
+		{"https://www.npmjs.com/package/express/", "pkg:npm/express"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, "pkg", got.Scheme)
+		})
+	}
+
+	rejected := []struct {
+		name string
+		in   string
+	}{
+		// Lookalike host: must not be accepted as a "npmjs.com URL."
+		// Host-anchoring rejects because "npmjs.com.attacker.com/"
+		// doesn't match "npmjs.com/" exactly.
+		{"lookalike host", "https://www.npmjs.com.attacker.com/package/x"},
+		{"lookalike host no www", "https://npmjs.com.attacker.com/package/x"},
+		// Wrong path prefix (not /package/).
+		{"settings path", "https://www.npmjs.com/settings/profile"},
+		{"root", "https://www.npmjs.com/"},
+		// /package/ with no name.
+		{"package no name", "https://www.npmjs.com/package/"},
+		{"package empty scope", "https://www.npmjs.com/package/@/name"},
+		// Other hosts entirely.
+		{"pypi url", "https://pypi.org/project/requests/"},
+		{"crates url", "https://crates.io/crates/atuin"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+		})
+	}
+}
+
 func TestResolveTarget_PkgURI(t *testing.T) {
 	t.Parallel()
 
@@ -147,10 +212,14 @@ func TestResolveTarget_Rejects(t *testing.T) {
 		// from "https://gitlab.com/foo/bar" — wrong and invisible
 		// because no error fired. Now the URL-scheme form is gated
 		// behind an explicit github.com check.
-		{"gitlab https URL", "https://gitlab.com/foo/bar", "not a github.com URL"},
-		{"gitlab http URL", "http://gitlab.com/foo/bar", "not a github.com URL"},
-		{"bitbucket URL", "https://bitbucket.org/team/repo", "not a github.com URL"},
-		{"self-hosted URL", "https://git.example.com/foo/bar", "not a github.com URL"},
+		// Non-github, non-npmjs URLs are still rejected. The wording
+		// changed to mention both accepted hosts when npmjs.com
+		// support was added; test substring is narrowed to the
+		// invariant portion ("not yet supported").
+		{"gitlab https URL", "https://gitlab.com/foo/bar", "not yet supported"},
+		{"gitlab http URL", "http://gitlab.com/foo/bar", "not yet supported"},
+		{"bitbucket URL", "https://bitbucket.org/team/repo", "not yet supported"},
+		{"self-hosted URL", "https://git.example.com/foo/bar", "not yet supported"},
 		{"gitlab SCP form", "git@gitlab.com:foo/bar.git", "not a github.com host"},
 	}
 

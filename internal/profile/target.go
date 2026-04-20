@@ -97,6 +97,16 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		}
 	}
 
+	// npmjs.com package URLs: convenience form for the
+	// copy-paste-from-browser workflow. A user hitting
+	// https://www.npmjs.com/package/<name> and running
+	// `signatory analyze <url>` should not have to know about
+	// purl syntax. Recognize the npmjs.com form explicitly and
+	// convert to pkg:npm/<name>.
+	if npmName, ok := parseNpmjsURL(s); ok {
+		return resolveCanonicalURI("pkg:npm/" + npmName)
+	}
+
 	// Guard against non-github URLs sneaking through
 	// NormalizeGitHubRepoInput's prefix-strip pipeline.
 	//
@@ -105,12 +115,13 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// strip; `https://gitlab.com/foo/bar` would otherwise split to
 	// owner=`gitlab.com`, name=`foo` and produce the misleading
 	// canonical URI `repo:github/gitlab.com/foo`. Reject URL-scheme
-	// inputs that aren't github so callers with gitlab / bitbucket /
-	// self-hosted URLs get a clear "not yet supported" error instead
-	// of a silently-wrong canonical form.
+	// inputs that aren't github (or a known-ecosystem host handled
+	// above) so callers with gitlab / bitbucket / self-hosted URLs
+	// get a clear "not yet supported" error instead of a silently-
+	// wrong canonical form.
 	if strings.Contains(s, "://") && !isGitHubURL(s) {
 		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com or npmjs.com URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
@@ -139,6 +150,77 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		Owner:        owner,
 		CloneURL:     "https://github.com/" + owner + "/" + name,
 	}, nil
+}
+
+// parseNpmjsURL recognizes npmjs.com package URLs and extracts the
+// package name. Returns (name, true) on a match; (_, false) on
+// anything that isn't a well-formed npmjs.com/package/<name> URL.
+//
+// Accepted shapes:
+//
+//	https://www.npmjs.com/package/express
+//	https://npmjs.com/package/express
+//	http://www.npmjs.com/package/express
+//	https://www.npmjs.com/package/@types/node        (scoped)
+//	https://www.npmjs.com/package/express/v/4.18.2   (version page — strip /v/)
+//	https://www.npmjs.com/package/express?activeTab=versions (query — strip)
+//	https://www.npmjs.com/package/express#readme     (fragment — strip)
+//
+// Host-anchoring: the check rejects lookalike hosts like
+// `npmjs.com.attacker.com/package/x` by requiring an exact match on
+// "npmjs.com/" after the optional www./scheme strip. Same trick
+// isGitHubURL uses for github.com.
+//
+// Does NOT validate the extracted name against npm's grammar —
+// that's the caller's job via ValidateCanonicalURI (for URI shape)
+// and, downstream, the npm client's ValidatePackageName (for
+// HTTP-URL safety).
+func parseNpmjsURL(input string) (string, bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+
+	// Host anchoring: must be EXACTLY "npmjs.com/" at this point.
+	rest, ok := strings.CutPrefix(s, "npmjs.com/")
+	if !ok {
+		return "", false
+	}
+
+	// Path must start with "package/".
+	rest, ok = strings.CutPrefix(rest, "package/")
+	if !ok || rest == "" {
+		return "", false
+	}
+
+	// Drop fragment and query — the npmjs.com UI adds these for
+	// tabs, version pickers, etc., and they're not part of the
+	// package identifier.
+	if before, _, ok := strings.Cut(rest, "#"); ok {
+		rest = before
+	}
+	if before, _, ok := strings.Cut(rest, "?"); ok {
+		rest = before
+	}
+
+	// Scoped packages: "@scope/name" takes TWO path segments.
+	// Everything after is version-page or other subpath noise.
+	if strings.HasPrefix(rest, "@") {
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) < 2 || parts[0] == "@" || parts[1] == "" {
+			return "", false
+		}
+		return parts[0] + "/" + parts[1], true
+	}
+
+	// Unscoped: one path segment is the name; trailing slash or
+	// /v/<version> or /README etc. gets stripped.
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
 }
 
 // isGitHubURL returns true when input is an http(s) URL whose host
