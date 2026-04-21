@@ -17,6 +17,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
+	"github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 )
 
 // HandoffCmd renders a handoff prompt by loading a template from the
@@ -95,6 +96,15 @@ type HandoffCmd struct {
 	// with safeGitEnv). Same rationale as PrecheckSource: parallel-safe
 	// injection, visible dependency.
 	RunGitClone func(ctx context.Context, url, dest string) error `kong:"-"`
+
+	// ResolveNpmSource overrides the npm-registry lookup that
+	// --network-precheck performs for pkg:npm/<name> targets. nil →
+	// fall through to npm.NewClient().ResolveRepoURL at call time.
+	// Tests inject a stubbed resolver so they don't hit
+	// registry.npmjs.org. Same rationale as PrecheckSource /
+	// RunGitClone: parallel-safe injection, dependency visible from
+	// the struct definition.
+	ResolveNpmSource func(ctx context.Context, name string) (string, error) `kong:"-"`
 }
 
 // Run executes the handoff render. Errors from template resolution,
@@ -266,6 +276,48 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 //     takes effect. We'll extend this as we add more language
 //     variants of the security template.
 func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error) {
+	// npm-target pre-resolution: if the caller passed an npm package
+	// (pkg:npm/<name> URI or an npmjs.com URL that ResolveTarget
+	// already canonicalized), consult the registry to find its
+	// declared source repository. Precheck is GitHub-only; this
+	// bridge lets users paste the npm URL / purl without hand-
+	// translating to the source repo first.
+	//
+	// Security note: repository.url in npm metadata is self-
+	// reported, not verified. A malicious package could declare a
+	// famous GitHub URL as its "source." The precheck report below
+	// discloses the resolved URL so a human skimming the output
+	// can sanity-check it before trusting the downstream analysis.
+	var npmDisclosure string
+	if resolved, rerr := profile.ResolveTarget(cmd.Target); rerr == nil &&
+		resolved.Scheme == "pkg" && resolved.Ecosystem == "npm" {
+		// resolved.ShortName drops the scope for scoped packages
+		// ("@types/node" → "node"), which is wrong for the registry
+		// lookup. Strip the prefix directly to preserve the full name.
+		npmName := strings.TrimPrefix(resolved.CanonicalURI, "pkg:npm/")
+
+		repoURL, err := cmd.resolveNpmSource(ctx, npmName)
+		if err != nil {
+			return "", fmt.Errorf("resolving npm package %q source from registry: %w", npmName, err)
+		}
+		if repoURL == "" {
+			return "", fmt.Errorf("npm package %q declares no source repository in the registry; pass the source URL explicitly", npmName)
+		}
+		if !looksLikeGitHubURL(repoURL) {
+			return "", fmt.Errorf("npm package %q declares source %q; only github.com sources are supported by --network-precheck", npmName, repoURL)
+		}
+		npmDisclosure = fmt.Sprintf("# precheck: npm package %q declares source %s (self-reported in registry metadata, not cryptographically verified)\n", npmName, repoURL)
+
+		// Rewrite the target so downstream steps (substitution,
+		// clone, ecosystem detector) see the github URL. Mirror the
+		// Run-level pre-population: fill cmd.URL if empty so the
+		// TARGET_URL substitution picks up the resolved source.
+		cmd.Target = repoURL
+		if cmd.URL == "" {
+			cmd.URL = repoURL
+		}
+	}
+
 	// Reject non-GitHub URLs early. NormalizeGitHubRepoInput is
 	// lenient — it accepts any URL with 2+ path segments and
 	// would happily parse gitlab.com/foo/bar as owner="gitlab.com"
@@ -333,7 +385,18 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 		}
 	}
 
-	return formatPrecheckReport(owner, name, result, ecoApplied, langApplied) + langWarning, nil
+	return npmDisclosure + formatPrecheckReport(owner, name, result, ecoApplied, langApplied) + langWarning, nil
+}
+
+// resolveNpmSource dispatches to the injected test seam if set,
+// otherwise constructs a real npm client and calls ResolveRepoURL.
+// Matches the PrecheckSource/RunGitClone dispatch pattern — no
+// package-level mutation, nil field = use production client.
+func (cmd *HandoffCmd) resolveNpmSource(ctx context.Context, name string) (string, error) {
+	if cmd.ResolveNpmSource != nil {
+		return cmd.ResolveNpmSource(ctx, name)
+	}
+	return npm.NewClient().ResolveRepoURL(ctx, name)
 }
 
 // defaultGitClone is the production git-clone implementation that

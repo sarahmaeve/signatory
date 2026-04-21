@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -727,6 +728,208 @@ func TestHandoff_NetworkPrecheck_ReportsToStderr(t *testing.T) {
 	assert.Contains(t, stderr, "language=Rust")
 	assert.Contains(t, stderr, "# precheck applied:")
 	assert.Contains(t, stderr, "--ecosystem=crates")
+}
+
+// --- --network-precheck npm-source-resolution tests ---------------------
+//
+// Tests inject a stubbed resolver via HandoffCmd.ResolveNpmSource, so
+// none of them hit registry.npmjs.org. The default production path
+// (nil field → npm.NewClient().ResolveRepoURL) is exercised by the
+// live registry integration tests in internal/signal/registry/npm.
+
+// TestHandoff_NetworkPrecheck_NpmjsURL_ResolvesToGitHub verifies the
+// end-to-end flow: user passes an npmjs.com URL, precheck consults the
+// (stubbed) registry for the declared source, rewrites the target, and
+// proceeds with the normal GitHub-API-based ecosystem detection.
+func TestHandoff_NetworkPrecheck_NpmjsURL_ResolvesToGitHub(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	var resolvedName string
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://www.npmjs.com/package/express",
+		Path:            "/tmp/express",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, name string) (string, error) {
+			resolvedName = name
+			return "https://github.com/expressjs/express", nil
+		},
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"package.json"},
+			Language: "JavaScript",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "express", resolvedName,
+		"ResolveNpmSource must be called with the package name stripped of the pkg:npm/ prefix")
+	assert.Equal(t, "https://github.com/expressjs/express", cmd.Target,
+		"cmd.Target must be rewritten to the resolved GitHub URL so downstream steps see a clone-able target")
+	assert.Equal(t, "https://github.com/expressjs/express", cmd.URL,
+		"cmd.URL must be populated with the resolved GitHub URL when previously empty")
+}
+
+// TestHandoff_NetworkPrecheck_PkgNpmURI_ResolvesToGitHub covers the
+// canonical-URI input form. npmjs.com URLs are normalized to pkg:npm/
+// by ResolveTarget, so this is what applyNetworkPrecheck actually sees
+// in both shapes — the test locks that equivalence.
+func TestHandoff_NetworkPrecheck_PkgNpmURI_ResolvesToGitHub(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/express",
+		Path:            "/tmp/express",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			return "https://github.com/expressjs/express", nil
+		},
+		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/expressjs/express", cmd.Target)
+}
+
+// TestHandoff_NetworkPrecheck_ScopedPackage verifies that scoped
+// packages (e.g. @types/node) preserve the full name through
+// resolution — ShortName alone drops the scope, which would make the
+// registry lookup miss.
+func TestHandoff_NetworkPrecheck_ScopedPackage(t *testing.T) {
+	var resolvedName string
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/@types/node",
+		Path:            "/tmp/node",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, name string) (string, error) {
+			resolvedName = name
+			return "https://github.com/DefinitelyTyped/DefinitelyTyped", nil
+		},
+		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "@types/node", resolvedName,
+		"scoped package name must be passed to the resolver intact (scope + name)")
+}
+
+// TestHandoff_NetworkPrecheck_NpmNoDeclaredSource covers the case where
+// the registry has the package but its repository field is absent or
+// empty. The command must error with a message naming the package, so
+// the user knows what to pass explicitly as a replacement.
+func TestHandoff_NetworkPrecheck_NpmNoDeclaredSource(t *testing.T) {
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/orphan",
+		Path:            "/tmp/orphan",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			return "", nil // no declared repository
+		},
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"orphan"`)
+	assert.Contains(t, err.Error(), "no source repository")
+}
+
+// TestHandoff_NetworkPrecheck_NpmNonGitHubSource covers a package that
+// declares its source on a non-github host. We can't do GitHub-API
+// precheck on gitlab, so the command errors — but must surface the
+// declared URL verbatim so the user can inspect before re-running.
+func TestHandoff_NetworkPrecheck_NpmNonGitHubSource(t *testing.T) {
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/gitlabby",
+		Path:            "/tmp/gitlabby",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			return "https://gitlab.com/foo/bar", nil
+		},
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://gitlab.com/foo/bar",
+		"error must show the declared non-github URL so the user can investigate")
+	assert.Contains(t, err.Error(), "only github.com")
+}
+
+// TestHandoff_NetworkPrecheck_NpmResolverError covers transient
+// registry failures (network error, 404, etc.). The error wraps the
+// cause and names the package so the user sees both pieces at once.
+func TestHandoff_NetworkPrecheck_NpmResolverError(t *testing.T) {
+	sentinel := errors.New("registry unreachable")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/whatever",
+		Path:            "/tmp/whatever",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			return "", sentinel
+		},
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, sentinel, "resolver error must be wrapped, not replaced")
+	assert.Contains(t, err.Error(), `"whatever"`)
+}
+
+// TestHandoff_NetworkPrecheck_NpmDisclosureInReport verifies the
+// transparency contract: the stderr report names the npm package and
+// the declared source URL so a human can sanity-check that the chain
+// wasn't redirected to an unrelated "famous" GitHub repo.
+func TestHandoff_NetworkPrecheck_NpmDisclosureInReport(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/express",
+		Path:            "/tmp/express",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			return "https://github.com/expressjs/express", nil
+		},
+		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
+	}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+	assert.Contains(t, stderr, `npm package "express"`)
+	assert.Contains(t, stderr, "https://github.com/expressjs/express")
+	assert.Contains(t, stderr, "self-reported",
+		"disclosure must call out that the source URL is self-declared, not verified")
+}
+
+// TestHandoff_NetworkPrecheck_NpmDoesNotInvokeResolverForGitHubTarget
+// locks the narrow activation contract: the resolver only fires for
+// pkg:npm/ (or npmjs.com-URL) targets; a plain GitHub URL bypasses it
+// entirely. Prevents future regressions where the npm lookup becomes
+// a silent tax on every precheck call.
+func TestHandoff_NetworkPrecheck_NpmDoesNotInvokeResolverForGitHubTarget(t *testing.T) {
+	invoked := false
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://github.com/alecthomas/kong",
+		Path:            "/tmp/kong",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+			invoked = true
+			return "", nil
+		},
+		PrecheckSource: &fakePrecheckSource{Files: []string{"go.mod"}},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.False(t, invoked, "ResolveNpmSource must not be called for a non-npm target")
 }
 
 // --- --clone-dir tests -------------------------------------------------------
