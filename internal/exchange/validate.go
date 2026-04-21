@@ -6,19 +6,26 @@ import (
 	"strings"
 )
 
-// synthesistAnalystIDPrefix gates the SynthesisSupplement field.
+// SynthesistAnalystIDPrefix gates the SynthesisSupplement field.
 // Only outputs whose attribution.analyst_id starts with this prefix
 // may carry a supplement (and must carry one). Deliberately generous
 // — matches "signatory-synthesis-v1", "signatory-synthesis-v2",
 // "signatory-synthesis-experimental" etc. without the validator
 // having to know the current active version. See
 // design/m6-synthesis-contract.md §4.
-const synthesistAnalystIDPrefix = "signatory-synthesis"
+//
+// Exported because the M6b evidence assembler uses it to filter prior
+// synthesis outputs out of the evidence rollup — single source of
+// truth for the prefix across validator and assembler.
+const SynthesistAnalystIDPrefix = "signatory-synthesis"
 
-// isSynthesistRole returns true when analystID identifies a synthesist
-// role by prefix.
-func isSynthesistRole(analystID string) bool {
-	return strings.HasPrefix(analystID, synthesistAnalystIDPrefix)
+// IsSynthesistRole returns true when analystID identifies a synthesist
+// role by prefix. Used by the validator's trust-boundary gate (Option C
+// of m6-synthesis-contract) and by downstream consumers that need to
+// distinguish synthesis outputs from analyst outputs without parsing
+// the analyst_id themselves.
+func IsSynthesistRole(analystID string) bool {
+	return strings.HasPrefix(analystID, SynthesistAnalystIDPrefix)
 }
 
 // Validate checks structural invariants on an AnalystOutput and
@@ -88,11 +95,11 @@ func (o *AnalystOutput) Validate() error {
 	// without a supplement is an empty row). See
 	// design/m6-synthesis-contract.md §4.
 	switch {
-	case o.SynthesisSupplement != nil && !isSynthesistRole(o.Attribution.AnalystID):
+	case o.SynthesisSupplement != nil && !IsSynthesistRole(o.Attribution.AnalystID):
 		errs = append(errs, fmt.Errorf(
 			"synthesis_supplement only allowed for synthesist role; got analyst_id %q",
 			o.Attribution.AnalystID))
-	case o.SynthesisSupplement == nil && isSynthesistRole(o.Attribution.AnalystID):
+	case o.SynthesisSupplement == nil && IsSynthesistRole(o.Attribution.AnalystID):
 		errs = append(errs, errors.New("synthesist output requires synthesis_supplement"))
 	case o.SynthesisSupplement != nil:
 		errs = append(errs, o.SynthesisSupplement.validate("synthesis_supplement")...)
