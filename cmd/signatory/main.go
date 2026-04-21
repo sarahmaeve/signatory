@@ -88,7 +88,8 @@ func main() {
 // when those get sentinel types.
 func exitCodeFor(err error) int {
 	switch {
-	case errors.Is(err, ErrCloneRequired),
+	case errors.Is(err, ErrUsage),
+		errors.Is(err, ErrCloneRequired),
 		errors.Is(err, ErrPathMissing),
 		errors.Is(err, ErrPathNotEmpty),
 		errors.Is(err, ErrPathNotAClone),

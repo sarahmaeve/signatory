@@ -13,12 +13,15 @@ import (
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
-// BurnCmd manages entity burns. Burns are a one-per-entity decision
-// (not versioned like postures) because a compromised maintainer
-// compromises the entity's identity, not a specific version.
+// BurnCmd manages entity burns. A burn records that an identity is
+// compromised and its trust signals should be degraded. Burns target
+// the URI the caller supplied — `burn add pkg:npm/X@2.2.4` burns
+// only that version-identity, while `burn add pkg:npm/X` burns the
+// root. The two are independent rows.
 type BurnCmd struct {
-	Add  BurnAddCmd  `cmd:"" default:"withargs" help:"Burn an entity, degrading its trust signals."`
-	List BurnListCmd `cmd:"" help:"List all active burns."`
+	Add    BurnAddCmd    `cmd:"" default:"withargs" help:"Burn an entity, degrading its trust signals."`
+	Remove BurnRemoveCmd `cmd:"" help:"Withdraw (soft-delete) a previously-recorded burn. Use when a burn turns out to have been premature or mistaken."`
+	List   BurnListCmd   `cmd:"" help:"List all active burns."`
 }
 
 // BurnAddCmd records a burn against an entity.
@@ -30,6 +33,7 @@ type BurnAddCmd struct {
 	Target     string `arg:"" help:"Entity to burn."`
 	Reason     string `help:"Reason for the burn (one-line). For multi-line reasons use --reason-file."`
 	ReasonFile string `name:"reason-file" help:"Path to a file containing the burn reason (or '-' for stdin)."`
+	DryRun     bool   `name:"dry-run" help:"Print what would change without writing to the store."`
 }
 
 func (cmd *BurnAddCmd) Run(globals *Globals) error {
@@ -39,10 +43,10 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	// source fails before we open the store (§3.4).
 	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
 	if err != nil {
-		return err
+		return NewUsageError(err)
 	}
 	if reason == "" {
-		return fmt.Errorf("burn add: --reason or --reason-file is required (an empty reason isn't a burn)")
+		return NewUsageError(fmt.Errorf("burn add: --reason or --reason-file is required (an empty reason isn't a burn)"))
 	}
 	cmd.Reason = reason
 
@@ -56,6 +60,18 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	actor, err := identity.Current()
 	if err != nil {
 		return fmt.Errorf("resolve team identity: %w", err)
+	}
+
+	if cmd.DryRun {
+		// Resolve without touching the store so dry-run is
+		// side-effect-free.
+		resolved, rerr := profile.ResolveTarget(cmd.Target)
+		if rerr != nil {
+			return NewUsageError(rerr)
+		}
+		fmt.Printf("[dry-run] Would burn %s (%s)\n", resolved.ShortName, resolved.CanonicalURI)
+		fmt.Printf("[dry-run] Reason: %s\n", firstLine(cmd.Reason))
+		return nil
 	}
 
 	entity, err := ensureEntity(ctx, s, cmd.Target)
@@ -109,6 +125,76 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	fmt.Printf("Reason: %s\n", cmd.Reason)
 	fmt.Printf("By:     %s\n", burn.BurnedBy)
 	fmt.Printf("At:     %s\n", burn.BurnedAt.Format(time.RFC3339))
+	return nil
+}
+
+// BurnRemoveCmd withdraws a previously-recorded burn. The row stays
+// in the DB with withdrawal metadata; `burn list` and `GetBurn` both
+// filter out withdrawn rows. A subsequent `burn add` on the same
+// target reactivates the row with fresh metadata (§3.3 D5).
+//
+// Use when a burn turns out to have been premature or mistaken —
+// e.g., the compromise signal was a false positive, or the
+// maintainer recovered their account.
+type BurnRemoveCmd struct {
+	Target     string `arg:"" help:"Entity whose burn should be withdrawn."`
+	Reason     string `help:"Reason for withdrawing the burn (one-line). For multi-line reasons use --reason-file."`
+	ReasonFile string `name:"reason-file" help:"Path to a file containing the withdrawal reason (or '-' for stdin)."`
+	DryRun     bool   `name:"dry-run" help:"Print what would change without writing to the store."`
+}
+
+func (cmd *BurnRemoveCmd) Run(globals *Globals) error {
+	ctx := context.Background()
+
+	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
+	if err != nil {
+		return NewUsageError(err)
+	}
+
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+
+	auditLog := globals.NewAuditLogger(s)
+	actor, err := identity.Current()
+	if err != nil {
+		return fmt.Errorf("resolve team identity: %w", err)
+	}
+
+	entity, err := resolveEntity(ctx, s, cmd.Target)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no entity found for %q; nothing to withdraw", cmd.Target)
+	}
+	if err != nil {
+		return err
+	}
+
+	if cmd.DryRun {
+		fmt.Printf("[dry-run] Would withdraw burn for %s (%s)\n", entity.ShortName, entity.CanonicalURI)
+		if reason != "" {
+			fmt.Printf("[dry-run] Reason: %s\n", firstLine(reason))
+		}
+		return nil
+	}
+
+	if err := s.WithdrawBurn(ctx, entity.ID, actor, reason, time.Now().UTC()); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("no active burn to withdraw for %s; it may already have been withdrawn or never recorded", entity.ShortName)
+		}
+		return err
+	}
+
+	detail, _ := json.Marshal(map[string]interface{}{
+		"canonical_uri": entity.CanonicalURI,
+		"reason":        reason,
+	})
+	if err := auditLog.LogAction(ctx, actor, "remove_burn", entity.ID, string(detail)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
+	}
+
+	fmt.Printf("Burn withdrawn for %s\n", entity.ShortName)
 	return nil
 }
 

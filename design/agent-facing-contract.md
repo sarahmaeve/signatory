@@ -170,6 +170,7 @@ This is shape, not a commitment. Each milestone lands as its own PR with its own
 - `--dry-run` on every mutating verb.
 - Exit codes aligned with the contract.
 - ~250 LOC + ~350 LOC tests.
+- **Implementation status (2026-04-21):** `posture unset`, `burn remove`, `--dry-run`, and `EX_USAGE` exit code routing shipped. `ingest withdraw` deferred to a follow-up commit — `analyst_outputs` carries append-only triggers from v3, so the INGEST_ERROR status needs a sibling-table design meaningfully different from the posture/burn withdrawal shape. Tracked as a narrower commit on top of M4.
 
 **M5 — File-based free-text inputs.**
 - `--rationale-file` added to `posture set`; `--rationale` keeps one-line semantics.

@@ -400,6 +400,181 @@ func TestFunctional_BurnAdd_ReasonFromFile(t *testing.T) {
 	assert.Equal(t, reason, burn.Reason)
 }
 
+// TestFunctional_BurnAddRemoveCycle covers the M4 happy path:
+// add → remove → verify removed → add again → verify reactivated.
+// This exercises the soft-delete semantics and the upsert-clears-
+// withdrawal side-effect from SetBurn.
+func TestFunctional_BurnAddRemoveCycle(t *testing.T) {
+	globals := testGlobals(t)
+
+	// Burn v2.2.4 for one reason.
+	require.NoError(t, (&BurnAddCmd{
+		Target: "pkg:npm/invariant@2.2.4",
+		Reason: "orphaned tag",
+	}).Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/invariant@2.2.4")
+	require.NoError(t, err)
+
+	// GetBurn surfaces the active burn.
+	_, err = s.GetBurn(t.Context(), entity.ID)
+	require.NoError(t, err, "burn must be retrievable while active")
+
+	// Withdraw.
+	require.NoError(t, (&BurnRemoveCmd{
+		Target: "pkg:npm/invariant@2.2.4",
+		Reason: "false positive; tag was fine",
+	}).Run(globals))
+
+	// GetBurn now returns ErrNotFound — the row is still there but
+	// soft-deleted.
+	_, err = s.GetBurn(t.Context(), entity.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "withdrawn burn must not surface as an active burn")
+
+	// ListBurns excludes withdrawn rows.
+	burns, err := s.ListBurns(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, burns, "ListBurns must exclude withdrawn rows")
+
+	// Re-burn: SetBurn's upsert clears the withdrawal state.
+	require.NoError(t, (&BurnAddCmd{
+		Target: "pkg:npm/invariant@2.2.4",
+		Reason: "confirmed malicious after all",
+	}).Run(globals))
+	reburn, err := s.GetBurn(t.Context(), entity.ID)
+	require.NoError(t, err, "re-add must reactivate the burn")
+	assert.Equal(t, "confirmed malicious after all", reburn.Reason)
+}
+
+// TestFunctional_PostureUnset covers the posture undo path. Set a
+// posture, unset it, verify it's gone from both GetPosture and
+// GetPostures. Then set a new one and confirm the upsert clears
+// the withdrawal state.
+func TestFunctional_PostureUnset(t *testing.T) {
+	globals := testGlobals(t)
+
+	require.NoError(t, (&PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+	}).Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/lodash@4.17.21")
+	require.NoError(t, err)
+
+	// Active posture present.
+	_, err = s.GetPosture(t.Context(), entity.ID, "4.17.21")
+	require.NoError(t, err)
+
+	// Unset.
+	require.NoError(t, (&PostureUnsetCmd{
+		Target: "pkg:npm/lodash@4.17.21",
+		Reason: "reassessment pending after CVE disclosure",
+	}).Run(globals))
+
+	// GetPosture now returns ErrNotFound.
+	_, err = s.GetPosture(t.Context(), entity.ID, "4.17.21")
+	assert.ErrorIs(t, err, store.ErrNotFound, "withdrawn posture must not surface as active")
+
+	// GetPostures (active list) is empty.
+	postures, err := s.GetPostures(t.Context(), entity.ID)
+	require.NoError(t, err)
+	assert.Empty(t, postures)
+
+	// Re-set: SetPosture's upsert clears withdrawal.
+	require.NoError(t, (&PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "trusted-for-now",
+		Rationale: "re-evaluated; tier lowered pending review",
+	}).Run(globals))
+	p, err := s.GetPosture(t.Context(), entity.ID, "4.17.21")
+	require.NoError(t, err)
+	assert.Equal(t, profile.PostureTier("trusted-for-now"), p.Tier)
+}
+
+// TestFunctional_PostureUnset_NoExistingPosture verifies the error
+// when nothing exists to withdraw. Caller gets a specific message
+// rather than a silent no-op.
+func TestFunctional_PostureUnset_NoExistingPosture(t *testing.T) {
+	globals := testGlobals(t)
+
+	cmd := &PostureUnsetCmd{Target: "pkg:npm/never-set", Reason: "probing"}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nothing to unset")
+}
+
+// TestFunctional_BurnRemove_NoExistingBurn same as above for burns.
+func TestFunctional_BurnRemove_NoExistingBurn(t *testing.T) {
+	globals := testGlobals(t)
+
+	cmd := &BurnRemoveCmd{Target: "pkg:npm/never-burned", Reason: "probing"}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nothing to withdraw")
+}
+
+// TestFunctional_BurnAdd_DryRun verifies --dry-run writes nothing.
+func TestFunctional_BurnAdd_DryRun(t *testing.T) {
+	globals := testGlobals(t)
+
+	require.NoError(t, (&BurnAddCmd{
+		Target: "pkg:npm/test-dryrun",
+		Reason: "preview only",
+		DryRun: true,
+	}).Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+	_, err = s.FindEntityByURI(t.Context(), "pkg:npm/test-dryrun")
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"--dry-run must not create entity rows")
+}
+
+// TestFunctional_PostureSet_DryRun verifies --dry-run writes nothing.
+func TestFunctional_PostureSet_DryRun(t *testing.T) {
+	globals := testGlobals(t)
+
+	require.NoError(t, (&PostureSetCmd{
+		Target:    "pkg:npm/test-dryrun-posture@1.0",
+		Tier:      "vetted-frozen",
+		Rationale: "preview only",
+		DryRun:    true,
+	}).Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+	_, err = s.FindEntityByURI(t.Context(), "pkg:npm/test-dryrun-posture@1.0")
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"--dry-run must not create entity rows")
+}
+
+// TestExitCode_UsageError_PostureSet covers EX_USAGE (64) routing:
+// a conflict between --version and URI @V is a usage error, not a
+// runtime error.
+func TestExitCode_UsageError_PostureSet(t *testing.T) {
+	globals := testGlobals(t)
+
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+		Version:   "4.18.0", // disagrees
+	}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Equal(t, 64, exitCodeFor(err),
+		"--version/@V conflict must surface as EX_USAGE (64)")
+}
+
 // TestFunctional_PostureSet_VersionedURI_InheritsVersion verifies
 // the M1 inheritance path end-to-end: posture set on a @V URI
 // without --version produces a stored Posture with Version = @V.

@@ -20,8 +20,9 @@ import (
 // automatically "unexamined" until the user reviews it. This is the
 // core shift from v1 — vetting a version no longer leaks forward.
 type PostureCmd struct {
-	Get PostureGetCmd `cmd:"" default:"withargs" help:"View the posture for an entity."`
-	Set PostureSetCmd `cmd:"" help:"Set the posture tier for an entity."`
+	Get   PostureGetCmd   `cmd:"" default:"withargs" help:"View the posture for an entity."`
+	Set   PostureSetCmd   `cmd:"" help:"Set the posture tier for an entity."`
+	Unset PostureUnsetCmd `cmd:"" help:"Withdraw (soft-delete) a previously-set posture. Use when a recorded decision turns out to be wrong."`
 }
 
 // PostureGetCmd views the posture for an entity.
@@ -133,6 +134,7 @@ type PostureSetCmd struct {
 	Rationale     string `help:"Rationale for the posture decision (one-line). For multi-line rationales use --rationale-file."`
 	RationaleFile string `name:"rationale-file" help:"Path to a file containing the rationale (or '-' for stdin). Use this for multi-line synthesis output that would otherwise need heredoc gymnastics."`
 	Version       string `help:"Specific version being attested (strongly recommended; inherited from URI @version when target carries one)." optional:""`
+	DryRun        bool   `name:"dry-run" help:"Print what would change without writing to the store."`
 }
 
 func (cmd *PostureSetCmd) Run(globals *Globals) error {
@@ -158,7 +160,7 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 		case cmd.Version == "":
 			cmd.Version = resolved.Version
 		case cmd.Version != resolved.Version:
-			return fmt.Errorf("--version %q conflicts with target URI version %q; pass a single version or remove one of the two", cmd.Version, resolved.Version)
+			return NewUsageError(fmt.Errorf("--version %q conflicts with target URI version %q; pass a single version or remove one of the two", cmd.Version, resolved.Version))
 		}
 	}
 
@@ -168,12 +170,30 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	// satisfy it (§3.4, agent-facing-contract.md).
 	rationale, err := readFreeText("rationale", cmd.Rationale, cmd.RationaleFile)
 	if err != nil {
-		return err
+		return NewUsageError(err)
 	}
 	if rationale == "" {
-		return fmt.Errorf("posture set: --rationale or --rationale-file is required (an empty rationale isn't a decision)")
+		return NewUsageError(fmt.Errorf("posture set: --rationale or --rationale-file is required (an empty rationale isn't a decision)"))
 	}
 	cmd.Rationale = rationale
+
+	if cmd.DryRun {
+		// Resolve without touching the store so dry-run is
+		// side-effect-free: ensureEntity would otherwise INSERT a
+		// stub row before the dry-run message printed.
+		resolved, rerr := profile.ResolveTarget(cmd.Target)
+		if rerr != nil {
+			return NewUsageError(rerr)
+		}
+		fmt.Printf("[dry-run] Would set posture for %s", resolved.ShortName)
+		if cmd.Version != "" {
+			fmt.Printf(" @ %s", cmd.Version)
+		}
+		fmt.Printf(": %s\n", cmd.Tier)
+		fmt.Printf("[dry-run] URI:       %s\n", resolved.CanonicalURI)
+		fmt.Printf("[dry-run] Rationale: %s\n", firstLine(cmd.Rationale))
+		return nil
+	}
 
 	entity, err := ensureEntity(ctx, s, cmd.Target)
 	if err != nil {
@@ -319,4 +339,109 @@ func entityTypeForScheme(scheme string) profile.EntityType {
 		// surprising fallback (purl-style identifier).
 		return profile.EntityPackage
 	}
+}
+
+// PostureUnsetCmd withdraws a previously-set posture for an entity.
+// The row stays in the DB with withdrawal metadata filled in; reads
+// default-filter it out. A subsequent `posture set` on the same
+// (entity, version) reactivates the row.
+//
+// Like PostureSetCmd, accepts the URI-embedded @version form. If the
+// URI carries @V and --version is also set they must agree.
+//
+// A --reason is optional; supplying one is strongly encouraged so
+// future readers of the audit log understand why a decision was
+// withdrawn ("author compromised" vs "reassessment pending" are very
+// different narratives).
+type PostureUnsetCmd struct {
+	Target     string `arg:"" help:"Entity whose posture should be withdrawn."`
+	Version    string `help:"Specific version whose posture to withdraw (inherited from URI @V when target carries one)." optional:""`
+	Reason     string `help:"Reason for withdrawing the posture (one-line). For multi-line reasons use --reason-file."`
+	ReasonFile string `name:"reason-file" help:"Path to a file containing the withdrawal reason (or '-' for stdin)."`
+	DryRun     bool   `name:"dry-run" help:"Print what would change without writing to the store."`
+}
+
+func (cmd *PostureUnsetCmd) Run(globals *Globals) error {
+	ctx := context.Background()
+
+	if resolved, rerr := profile.ResolveTarget(cmd.Target); rerr == nil && resolved.Version != "" {
+		switch {
+		case cmd.Version == "":
+			cmd.Version = resolved.Version
+		case cmd.Version != resolved.Version:
+			return NewUsageError(fmt.Errorf("--version %q conflicts with target URI version %q", cmd.Version, resolved.Version))
+		}
+	}
+
+	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
+	if err != nil {
+		return NewUsageError(err)
+	}
+
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+
+	auditLog := globals.NewAuditLogger(s)
+	actor, err := identity.Current()
+	if err != nil {
+		return fmt.Errorf("resolve team identity: %w", err)
+	}
+
+	entity, err := resolveEntity(ctx, s, cmd.Target)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no entity found for %q; nothing to unset", cmd.Target)
+	}
+	if err != nil {
+		return err
+	}
+
+	if cmd.DryRun {
+		fmt.Printf("[dry-run] Would withdraw posture for %s", entity.ShortName)
+		if cmd.Version != "" {
+			fmt.Printf(" @ %s", cmd.Version)
+		}
+		if reason != "" {
+			fmt.Printf(" (reason: %s)", firstLine(reason))
+		}
+		fmt.Println()
+		return nil
+	}
+
+	now := time.Now().UTC()
+	if err := s.WithdrawPosture(ctx, entity.ID, cmd.Version, actor, reason, now); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("no active posture to withdraw for %s (version %q); it may already be withdrawn or never have been set", entity.ShortName, cmd.Version)
+		}
+		return err
+	}
+
+	detail, _ := json.Marshal(map[string]interface{}{
+		"canonical_uri": entity.CanonicalURI,
+		"version":       cmd.Version,
+		"reason":        reason,
+	})
+	if err := auditLog.LogAction(ctx, actor, "unset_posture", entity.ID, string(detail)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
+	}
+
+	if cmd.Version != "" {
+		fmt.Printf("Posture withdrawn for %s @ %s\n", entity.ShortName, cmd.Version)
+	} else {
+		fmt.Printf("Posture withdrawn for %s (unversioned)\n", entity.ShortName)
+	}
+	return nil
+}
+
+// firstLine returns the first line of s, for compact dry-run output
+// that doesn't blow up the terminal with a multi-line rationale.
+func firstLine(s string) string {
+	for i, r := range s {
+		if r == '\n' {
+			return s[:i] + "…"
+		}
+	}
+	return s
 }

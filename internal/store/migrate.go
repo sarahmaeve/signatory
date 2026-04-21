@@ -54,6 +54,12 @@ var migrations = []Migration{
 		Up:          migrationV5Up,
 		Down:        migrationV5Down,
 	},
+	{
+		Version:     6,
+		Description: "soft-delete columns for postures and burns (withdrawn_at / withdrawn_by / withdrawal_reason)",
+		Up:          migrationV6Up,
+		Down:        migrationV6Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -749,6 +755,47 @@ ALTER TABLE conclusion_severity_contexts RENAME TO finding_severity_contexts;
 
 ALTER TABLE conclusions RENAME COLUMN conclusion_local_id TO finding_local_id;
 ALTER TABLE conclusions RENAME TO findings;
+`
+
+// migrationV6Up adds soft-delete columns to postures and burns so the
+// M4 undo verbs (posture unset, burn remove) can mark a row withdrawn
+// without dropping it. Reads filter WHERE withdrawn_at IS NULL by
+// default. A re-set after unset clears these fields via the existing
+// SetPosture/SetBurn upsert paths (the UPDATE clause in ON CONFLICT
+// is extended to reset them).
+//
+// withdrawal_reason is optional context the caller can supply —
+// "author left the org", "reassessment pending", etc. The audit_log
+// remains the canonical event stream; these columns are for fast
+// "is this row active?" lookup at read time.
+//
+// ingest withdraw (the third undo verb from agent-facing-contract
+// M4) is NOT implemented by this migration. analyst_outputs carries
+// append-only triggers from v3; marking an output INGEST_ERROR needs
+// a sibling-table design that's meaningfully different from the
+// posture/burn shape and lands in its own commit.
+const migrationV6Up = `
+ALTER TABLE postures ADD COLUMN withdrawn_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE postures ADD COLUMN withdrawn_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE postures ADD COLUMN withdrawal_reason TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE burns ADD COLUMN withdrawn_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE burns ADD COLUMN withdrawn_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE burns ADD COLUMN withdrawal_reason TEXT NOT NULL DEFAULT '';
+`
+
+// migrationV6Down removes the soft-delete columns. Running it on a
+// database that has withdrawn rows drops that metadata — but the
+// audit_log retains the unset / remove events so the history isn't
+// wholly lost on rollback.
+const migrationV6Down = `
+ALTER TABLE postures DROP COLUMN withdrawal_reason;
+ALTER TABLE postures DROP COLUMN withdrawn_by;
+ALTER TABLE postures DROP COLUMN withdrawn_at;
+
+ALTER TABLE burns DROP COLUMN withdrawal_reason;
+ALTER TABLE burns DROP COLUMN withdrawn_by;
+ALTER TABLE burns DROP COLUMN withdrawn_at;
 `
 
 // migrate runs all pending migrations on the database. It:

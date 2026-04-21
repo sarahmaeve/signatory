@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -21,14 +22,20 @@ type Store interface {
 	AppendSignals(ctx context.Context, signals []profile.Signal) error
 	GetSignalsByGroup(ctx context.Context, entityID string, group profile.SignalGroup) ([]profile.Signal, error)
 
-	// Posture operations (versioned)
+	// Posture operations (versioned). WithdrawPosture is the soft-
+	// delete counterpart to SetPosture; reads filter out withdrawn
+	// rows by default.
 	GetPosture(ctx context.Context, entityID string, version string) (*profile.Posture, error)
 	GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error)
 	SetPosture(ctx context.Context, posture *profile.Posture) error
+	WithdrawPosture(ctx context.Context, entityID, version, withdrawnBy, reason string, at time.Time) error
 
-	// Burn operations
+	// Burn operations. WithdrawBurn is the soft-delete counterpart
+	// to SetBurn; GetBurn and ListBurns filter out withdrawn rows
+	// by default.
 	GetBurn(ctx context.Context, entityID string) (*profile.Burn, error)
 	SetBurn(ctx context.Context, burn *profile.Burn) error
+	WithdrawBurn(ctx context.Context, entityID, withdrawnBy, reason string, at time.Time) error
 	ListBurns(ctx context.Context) ([]profile.Burn, error)
 
 	// Dependency observations (append-only)

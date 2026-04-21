@@ -359,22 +359,23 @@ const postureColumns = `entity_id, version, tier, rationale, set_by, set_at`
 // GetPosture retrieves the posture for an entity at a specific version.
 // Use empty string for the "unversioned" posture (set without --version).
 // Returns ErrNotFound if no posture exists for the exact (entity_id,
-// version) pair. For "latest across all versions" semantics, call
-// GetPostures and pick the first result.
+// version) pair OR if the matching row has been withdrawn (soft-delete
+// via the M4 undo verbs). For "latest across all versions" semantics,
+// call GetPostures and pick the first result.
 func (s *SQLite) GetPosture(ctx context.Context, entityID string, version string) (*profile.Posture, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+postureColumns+` FROM postures
-		 WHERE entity_id = ? AND version = ?`, entityID, version)
+		 WHERE entity_id = ? AND version = ? AND withdrawn_at = ''`, entityID, version)
 	return scanPosture(row)
 }
 
-// GetPostures returns all postures for an entity, ordered newest-first
-// by set_at. The CLI uses this to implement "latest + hint about other
-// versions" display.
+// GetPostures returns all active (non-withdrawn) postures for an
+// entity, ordered newest-first by set_at. The CLI uses this to
+// implement "latest + hint about other versions" display.
 func (s *SQLite) GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+postureColumns+` FROM postures
-		 WHERE entity_id = ?
+		 WHERE entity_id = ? AND withdrawn_at = ''
 		 ORDER BY set_at DESC`, entityID)
 	if err != nil {
 		return nil, err
@@ -397,6 +398,11 @@ func (s *SQLite) GetPostures(ctx context.Context, entityID string) ([]profile.Po
 // posture's tier, rationale, set_by, and set_at — this is intentional:
 // revising a vetted decision with a new rationale is a normal edit,
 // not a conflict. The per-version PK means different versions coexist.
+//
+// If the existing row is withdrawn, the upsert clears withdrawal
+// state as a side effect — setting a new posture on a previously-
+// unset entity "reactivates" it with fresh metadata. The audit_log
+// preserves both the original set, the unset, and the re-set.
 func (s *SQLite) SetPosture(ctx context.Context, posture *profile.Posture) error {
 	if posture == nil {
 		return ErrNilInput
@@ -408,22 +414,56 @@ func (s *SQLite) SetPosture(ctx context.Context, posture *profile.Posture) error
 		`INSERT INTO postures (entity_id, version, tier, rationale, set_by, set_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(entity_id, version) DO UPDATE SET
-			tier      = excluded.tier,
-			rationale = excluded.rationale,
-			set_by    = excluded.set_by,
-			set_at    = excluded.set_at`,
+			tier               = excluded.tier,
+			rationale          = excluded.rationale,
+			set_by             = excluded.set_by,
+			set_at             = excluded.set_at,
+			withdrawn_at       = '',
+			withdrawn_by       = '',
+			withdrawal_reason  = ''`,
 		posture.EntityID, posture.Version, string(posture.Tier), posture.Rationale,
 		posture.SetBy, posture.SetAt.Format(time.RFC3339))
 	return err
 }
 
+// WithdrawPosture marks a posture row as withdrawn (soft delete). The
+// row stays in the table with the withdrawal metadata filled in;
+// reads default-filter it out. Returns ErrNotFound if no posture
+// exists for the (entity_id, version) pair, or if the row is already
+// withdrawn (idempotent "posture is already inactive" semantic is
+// the caller's choice — we report truthfully and let the caller
+// decide).
+//
+// reason is optional context ("author left the org", "reassessment
+// pending") the caller may supply; empty string is fine.
+func (s *SQLite) WithdrawPosture(ctx context.Context, entityID, version, withdrawnBy, reason string, at time.Time) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE postures
+		 SET withdrawn_at = ?, withdrawn_by = ?, withdrawal_reason = ?
+		 WHERE entity_id = ? AND version = ? AND withdrawn_at = ''`,
+		at.Format(time.RFC3339), withdrawnBy, reason, entityID, version)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- Burn operations ---
 
-// GetBurn retrieves the burn for an entity, or ErrNotFound if none.
+// GetBurn retrieves the active burn for an entity, or ErrNotFound if
+// none exists OR the burn has been withdrawn (soft-delete via the M4
+// undo verb burn remove).
 func (s *SQLite) GetBurn(ctx context.Context, entityID string) (*profile.Burn, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT entity_id, reason, source, source_org, burned_at, burned_by
-		 FROM burns WHERE entity_id = ?`, entityID)
+		 FROM burns WHERE entity_id = ? AND withdrawn_at = ''`, entityID)
 
 	var b profile.Burn
 	var burnedAt string
@@ -456,20 +496,47 @@ func (s *SQLite) SetBurn(ctx context.Context, burn *profile.Burn) error {
 		`INSERT INTO burns (entity_id, reason, source, source_org, burned_at, burned_by)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(entity_id) DO UPDATE SET
-			reason     = excluded.reason,
-			source     = excluded.source,
-			source_org = excluded.source_org,
-			burned_at  = excluded.burned_at,
-			burned_by  = excluded.burned_by`,
+			reason             = excluded.reason,
+			source             = excluded.source,
+			source_org         = excluded.source_org,
+			burned_at          = excluded.burned_at,
+			burned_by          = excluded.burned_by,
+			withdrawn_at       = '',
+			withdrawn_by       = '',
+			withdrawal_reason  = ''`,
 		burn.EntityID, burn.Reason, string(burn.Source), burn.SourceOrg,
 		burn.BurnedAt.Format(time.RFC3339), burn.BurnedBy)
 	return err
 }
 
-// ListBurns returns all recorded burns.
+// WithdrawBurn marks a burn row as withdrawn (soft delete). Returns
+// ErrNotFound if no active burn exists for the entity — includes the
+// already-withdrawn case; the caller decides whether that's an error
+// in their context.
+func (s *SQLite) WithdrawBurn(ctx context.Context, entityID, withdrawnBy, reason string, at time.Time) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE burns
+		 SET withdrawn_at = ?, withdrawn_by = ?, withdrawal_reason = ?
+		 WHERE entity_id = ? AND withdrawn_at = ''`,
+		at.Format(time.RFC3339), withdrawnBy, reason, entityID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListBurns returns all currently-active (non-withdrawn) burns.
 func (s *SQLite) ListBurns(ctx context.Context) ([]profile.Burn, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT entity_id, reason, source, source_org, burned_at, burned_by FROM burns`)
+		`SELECT entity_id, reason, source, source_org, burned_at, burned_by
+		 FROM burns WHERE withdrawn_at = ''`)
 	if err != nil {
 		return nil, err
 	}
