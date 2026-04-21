@@ -233,6 +233,106 @@ func TestFunctional_BurnCreatesEntity(t *testing.T) {
 	assert.Equal(t, "pkg:npm/compromised", entity.CanonicalURI)
 }
 
+// TestFunctional_PerVersionBurn_IsolatedFromRoot verifies the core
+// M1 contract: burning a versioned URI (pkg:npm/invariant@2.2.4)
+// creates a distinct entity row from the unversioned root
+// (pkg:npm/invariant). The kong v1.14.0 case — "this one tag is
+// bad, the package itself is fine" — depends on this isolation.
+func TestFunctional_PerVersionBurn_IsolatedFromRoot(t *testing.T) {
+	globals := testGlobals(t)
+
+	// Burn only the specific version.
+	burnVersion := &BurnAddCmd{
+		Target: "pkg:npm/invariant@2.2.4",
+		Reason: "orphaned tag; commit not reachable from master",
+	}
+	require.NoError(t, burnVersion.Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	// Two entities should exist... except only one does: the
+	// versioned URI. The unversioned root is untouched.
+	versionedEntity, err := s.FindEntityByURI(context.Background(), "pkg:npm/invariant@2.2.4")
+	require.NoError(t, err, "versioned entity must exist after per-version burn")
+	assert.Equal(t, "pkg:npm/invariant@2.2.4", versionedEntity.CanonicalURI)
+	assert.Equal(t, profile.EntityPackage, versionedEntity.Type)
+
+	// The unversioned root must NOT have been created as a side effect.
+	_, err = s.FindEntityByURI(context.Background(), "pkg:npm/invariant")
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"per-version burn must not touch the unversioned root entity")
+
+	// The burn record lives on the versioned entity.
+	burn, err := s.GetBurn(context.Background(), versionedEntity.ID)
+	require.NoError(t, err)
+	assert.Contains(t, burn.Reason, "orphaned tag")
+}
+
+// TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions verifies
+// that burning v2.2.4 leaves v2.2.3 unburned. The two versions are
+// independent identities; burning one must not propagate.
+func TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions(t *testing.T) {
+	globals := testGlobals(t)
+
+	// Create both versions by burning one and setting a posture
+	// on the other; either path creates an entity row.
+	require.NoError(t, (&BurnAddCmd{
+		Target: "pkg:npm/invariant@2.2.4",
+		Reason: "orphaned tag",
+	}).Run(globals))
+	require.NoError(t, (&PostureSetCmd{
+		Target:    "pkg:npm/invariant@2.2.3",
+		Tier:      "trusted-for-now",
+		Rationale: "prior release; no known issues",
+	}).Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	e24, err := s.FindEntityByURI(context.Background(), "pkg:npm/invariant@2.2.4")
+	require.NoError(t, err)
+	e23, err := s.FindEntityByURI(context.Background(), "pkg:npm/invariant@2.2.3")
+	require.NoError(t, err)
+	assert.NotEqual(t, e24.ID, e23.ID, "different versions must have different entity IDs")
+
+	// v2.2.4 is burned; v2.2.3 is not.
+	_, err = s.GetBurn(context.Background(), e24.ID)
+	require.NoError(t, err, "v2.2.4 burn must be retrievable")
+	_, err = s.GetBurn(context.Background(), e23.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"v2.2.3 must NOT be burned — per-version burns are non-propagating")
+}
+
+// TestFunctional_PostureSet_VersionedURI_InheritsVersion verifies
+// the M1 inheritance path end-to-end: posture set on a @V URI
+// without --version produces a stored Posture with Version = @V.
+func TestFunctional_PostureSet_VersionedURI_InheritsVersion(t *testing.T) {
+	globals := testGlobals(t)
+
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/lodash@4.17.21")
+	require.NoError(t, err)
+	postures, err := s.GetPostures(context.Background(), entity.ID)
+	require.NoError(t, err)
+	require.Len(t, postures, 1)
+	assert.Equal(t, "4.17.21", postures[0].Version,
+		"stored posture version must match the URI @V")
+	assert.Equal(t, profile.PostureTier("vetted-frozen"), postures[0].Tier)
+}
+
 func TestFunctional_BurnOverwriteExisting(t *testing.T) {
 	globals := testGlobals(t)
 

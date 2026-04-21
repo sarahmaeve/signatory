@@ -273,6 +273,74 @@ func TestPostureSetCmd_Run(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestPostureSetCmd_URIVersion_InheritedWhenFlagUnset covers the
+// happy-path M1 semantics: a versioned URI with no --version flag
+// inherits the version from the URI into the stored posture.
+func TestPostureSetCmd_URIVersion_InheritedWhenFlagUnset(t *testing.T) {
+	t.Parallel()
+
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+		// Version intentionally empty — must be inherited from URI.
+	}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	require.NoError(t, cmd.Run(globals))
+	assert.Equal(t, "4.17.21", cmd.Version,
+		"PostureSetCmd.Run must populate Version from URI @V when flag is unset")
+}
+
+// TestPostureSetCmd_URIVersion_AgreesWithFlag covers the redundant-
+// but-consistent case: URI and flag both carry the same version.
+// Accepted without complaint; the stored version is preserved.
+func TestPostureSetCmd_URIVersion_AgreesWithFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+		Version:   "4.17.21",
+	}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	require.NoError(t, cmd.Run(globals))
+	assert.Equal(t, "4.17.21", cmd.Version)
+}
+
+// TestPostureSetCmd_URIVersion_ConflictsWithFlag covers the
+// loud-failure case: URI says one version, flag says another.
+// Signatory refuses to guess which one the caller meant.
+func TestPostureSetCmd_URIVersion_ConflictsWithFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/lodash@4.17.21",
+		Tier:      "vetted-frozen",
+		Rationale: "audited",
+		Version:   "4.18.0", // disagrees with URI
+	}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts",
+		"error must name the conflict explicitly rather than silently preferring one source")
+	assert.Contains(t, err.Error(), "4.17.21")
+	assert.Contains(t, err.Error(), "4.18.0")
+}
+
 // --- Version ---
 
 func TestVersionCmd_ValidArgs(t *testing.T) {

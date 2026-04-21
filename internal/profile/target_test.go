@@ -64,9 +64,11 @@ func TestResolveTarget_NpmjsURLs(t *testing.T) {
 		{"https://www.npmjs.com/package/msgpack-lite", "pkg:npm/msgpack-lite"},
 		{"https://www.npmjs.com/package/@types/node", "pkg:npm/@types/node"},
 		{"https://www.npmjs.com/package/@nestjs/core", "pkg:npm/@nestjs/core"},
-		// Version pages: the UI adds /v/<version>; strip to name.
-		{"https://www.npmjs.com/package/express/v/4.18.2", "pkg:npm/express"},
-		{"https://www.npmjs.com/package/@types/node/v/20.0.0", "pkg:npm/@types/node"},
+		// Version pages: the UI adds /v/<version>; preserve as @V
+		// suffix on the canonical URI so versioned identities survive
+		// the copy-paste-from-browser workflow.
+		{"https://www.npmjs.com/package/express/v/4.18.2", "pkg:npm/express@4.18.2"},
+		{"https://www.npmjs.com/package/@types/node/v/20.0.0", "pkg:npm/@types/node@20.0.0"},
 		// Query strings + fragments are UI state; strip.
 		{"https://www.npmjs.com/package/express?activeTab=versions", "pkg:npm/express"},
 		{"https://www.npmjs.com/package/express#readme", "pkg:npm/express"},
@@ -121,6 +123,92 @@ func TestResolveTarget_PkgURI(t *testing.T) {
 	assert.Equal(t, "pkg", got.Scheme)
 	assert.Empty(t, got.Platform)
 	assert.Empty(t, got.CloneURL, "pkg: URIs have no clone URL")
+	assert.Empty(t, got.Version, "unversioned pkg URI must have empty Version")
+}
+
+// TestResolveTarget_VersionedPkgURI covers the @version suffix grammar
+// introduced by agent-facing-contract.md M1. Versioned pkg URIs are
+// distinct identities from their unversioned counterparts; the URI
+// preserves the @V, and Version surfaces it explicitly so commands
+// don't have to re-parse.
+func TestResolveTarget_VersionedPkgURI(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in          string
+		wantURI     string
+		wantName    string
+		wantVersion string
+	}{
+		{"pkg:npm/express@4.18.2", "pkg:npm/express@4.18.2", "express", "4.18.2"},
+		{"pkg:npm/@types/node@20.0.0", "pkg:npm/@types/node@20.0.0", "node", "20.0.0"},
+		{"pkg:cargo/atuin@0.1.0", "pkg:cargo/atuin@0.1.0", "atuin", "0.1.0"},
+		{"pkg:go/golang.org/x/mod@v0.35.0", "pkg:go/golang.org/x/mod@v0.35.0", "mod", "v0.35.0"},
+		// Pre-release and build metadata passes through verbatim —
+		// the grammar accepts whatever the ecosystem considers a
+		// version string, not just strict semver.
+		{"pkg:npm/foo@1.0.0-alpha.1", "pkg:npm/foo@1.0.0-alpha.1", "foo", "1.0.0-alpha.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI, "canonical URI must preserve @version")
+			assert.Equal(t, tc.wantName, got.ShortName, "ShortName must strip the @version suffix")
+			assert.Equal(t, tc.wantVersion, got.Version, "Version must be extracted")
+		})
+	}
+}
+
+// TestResolveTarget_VersionedPkgURI_Rejects covers the malformed shapes
+// the parser should reject with a specific error.
+func TestResolveTarget_VersionedPkgURI_Rejects(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		in     string
+		errSub string
+	}{
+		{"trailing at", "pkg:npm/express@", "empty version"},
+		{"double at", "pkg:npm/express@1.0@extra", "nested separators"},
+		{"leading at in last segment", "pkg:npm/@1.0.0", "empty name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+			assert.Contains(t, err.Error(), tc.errSub)
+		})
+	}
+}
+
+// TestResolveTarget_NpmjsURL_VersionedPage verifies that npmjs.com
+// version pages resolve to versioned canonical URIs — the user's
+// "copy URL from my browser" workflow preserves version intent.
+func TestResolveTarget_NpmjsURL_VersionedPage(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in          string
+		wantURI     string
+		wantVersion string
+	}{
+		{"https://www.npmjs.com/package/invariant/v/2.2.4", "pkg:npm/invariant@2.2.4", "2.2.4"},
+		{"https://npmjs.com/package/express/v/4.18.2", "pkg:npm/express@4.18.2", "4.18.2"},
+		{"https://www.npmjs.com/package/@types/node/v/20.0.0", "pkg:npm/@types/node@20.0.0", "20.0.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, tc.wantVersion, got.Version)
+		})
+	}
 }
 
 func TestResolveTarget_ScopedNpmPackage(t *testing.T) {

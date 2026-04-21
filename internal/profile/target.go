@@ -55,6 +55,23 @@ type ResolvedTarget struct {
 	// (ecosystem-specific collector routing, provider resolution)
 	// reads this field instead of re-parsing the URI.
 	Ecosystem string
+
+	// Version is populated when the input carried a package version
+	// — either as a `pkg:<eco>/<name>@<version>` suffix on a
+	// canonical URI, or as the `/v/<version>` segment on an
+	// npmjs.com package URL. Empty when no version was specified.
+	//
+	// Only pkg: URIs carry versions in v0.1. repo:, identity:, org:,
+	// and patch: URIs ignore any `@` in their segments — content-hash
+	// / SHA pinning is a v0.2+ topic (see design/agent-facing-
+	// contract.md D7).
+	//
+	// When Version is non-empty, CanonicalURI includes the `@V`
+	// suffix — the URI is the identity, and the version is
+	// load-bearing for that identity. `pkg:npm/X@2.2.4` is a
+	// distinct canonical URI from `pkg:npm/X`; they index to
+	// different entity rows and can hold different postures/burns.
+	Version string
 }
 
 // ResolveTarget normalizes a user-supplied target argument to its
@@ -103,8 +120,12 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// `signatory analyze <url>` should not have to know about
 	// purl syntax. Recognize the npmjs.com form explicitly and
 	// convert to pkg:npm/<name>.
-	if npmName, ok := parseNpmjsURL(s); ok {
-		return resolveCanonicalURI("pkg:npm/" + npmName)
+	if npmName, npmVersion, ok := parseNpmjsURL(s); ok {
+		uri := "pkg:npm/" + npmName
+		if npmVersion != "" {
+			uri += "@" + npmVersion
+		}
+		return resolveCanonicalURI(uri)
 	}
 
 	// Guard against non-github URLs sneaking through
@@ -153,18 +174,21 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 }
 
 // parseNpmjsURL recognizes npmjs.com package URLs and extracts the
-// package name. Returns (name, true) on a match; (_, false) on
-// anything that isn't a well-formed npmjs.com/package/<name> URL.
+// package name plus an optional version from `/v/<version>` paths.
+// Returns (name, version, true) on a match; version is "" when the
+// URL has no `/v/` segment. Returns ("", "", false) on anything that
+// isn't a well-formed npmjs.com/package/<name> URL.
 //
 // Accepted shapes:
 //
-//	https://www.npmjs.com/package/express
-//	https://npmjs.com/package/express
-//	http://www.npmjs.com/package/express
-//	https://www.npmjs.com/package/@types/node        (scoped)
-//	https://www.npmjs.com/package/express/v/4.18.2   (version page — strip /v/)
-//	https://www.npmjs.com/package/express?activeTab=versions (query — strip)
-//	https://www.npmjs.com/package/express#readme     (fragment — strip)
+//	https://www.npmjs.com/package/express                    → ("express", "", true)
+//	https://npmjs.com/package/express                        → ("express", "", true)
+//	http://www.npmjs.com/package/express                     → ("express", "", true)
+//	https://www.npmjs.com/package/@types/node                → ("@types/node", "", true)
+//	https://www.npmjs.com/package/express/v/4.18.2           → ("express", "4.18.2", true)
+//	https://www.npmjs.com/package/@types/node/v/20.0.0       → ("@types/node", "20.0.0", true)
+//	https://www.npmjs.com/package/express?activeTab=versions → ("express", "", true)
+//	https://www.npmjs.com/package/express#readme             → ("express", "", true)
 //
 // Host-anchoring: the check rejects lookalike hosts like
 // `npmjs.com.attacker.com/package/x` by requiring an exact match on
@@ -175,52 +199,70 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 // that's the caller's job via ValidateCanonicalURI (for URI shape)
 // and, downstream, the npm client's ValidatePackageName (for
 // HTTP-URL safety).
-func parseNpmjsURL(input string) (string, bool) {
+func parseNpmjsURL(input string) (name, version string, ok bool) {
 	s := strings.TrimPrefix(input, "https://")
 	s = strings.TrimPrefix(s, "http://")
 	s = strings.TrimPrefix(s, "www.")
 
 	// Host anchoring: must be EXACTLY "npmjs.com/" at this point.
-	rest, ok := strings.CutPrefix(s, "npmjs.com/")
-	if !ok {
-		return "", false
+	rest, hostOK := strings.CutPrefix(s, "npmjs.com/")
+	if !hostOK {
+		return "", "", false
 	}
 
 	// Path must start with "package/".
-	rest, ok = strings.CutPrefix(rest, "package/")
-	if !ok || rest == "" {
-		return "", false
+	rest, pathOK := strings.CutPrefix(rest, "package/")
+	if !pathOK || rest == "" {
+		return "", "", false
 	}
 
 	// Drop fragment and query — the npmjs.com UI adds these for
 	// tabs, version pickers, etc., and they're not part of the
 	// package identifier.
-	if before, _, ok := strings.Cut(rest, "#"); ok {
+	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
 		rest = before
 	}
-	if before, _, ok := strings.Cut(rest, "?"); ok {
+	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
 		rest = before
 	}
 
-	// Scoped packages: "@scope/name" takes TWO path segments.
-	// Everything after is version-page or other subpath noise.
+	// Scoped packages: "@scope/name" takes TWO path segments; any
+	// subsequent /v/<version> is version-page, everything else is
+	// noise we ignore.
 	if strings.HasPrefix(rest, "@") {
-		parts := strings.SplitN(rest, "/", 3)
+		parts := strings.SplitN(rest, "/", 4)
 		if len(parts) < 2 || parts[0] == "@" || parts[1] == "" {
-			return "", false
+			return "", "", false
 		}
-		return parts[0] + "/" + parts[1], true
+		scopedName := parts[0] + "/" + parts[1]
+		// /v/<version> at parts[2]/parts[3]
+		if len(parts) >= 4 && parts[2] == "v" && parts[3] != "" {
+			// parts[3] may itself contain further path segments
+			// (/v/1.0/README.md etc.); take only up to the next slash.
+			ver := parts[3]
+			if idx := strings.IndexByte(ver, '/'); idx >= 0 {
+				ver = ver[:idx]
+			}
+			return scopedName, ver, true
+		}
+		return scopedName, "", true
 	}
 
-	// Unscoped: one path segment is the name; trailing slash or
-	// /v/<version> or /README etc. gets stripped.
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		rest = rest[:idx]
+	// Unscoped: first path segment is the name; optional /v/<version>
+	// follows; anything else (/README, trailing slash) is stripped.
+	segs := strings.SplitN(rest, "/", 4)
+	if segs[0] == "" {
+		return "", "", false
 	}
-	if rest == "" {
-		return "", false
+	nameOut := segs[0]
+	if len(segs) >= 3 && segs[1] == "v" && segs[2] != "" {
+		ver := segs[2]
+		if idx := strings.IndexByte(ver, '/'); idx >= 0 {
+			ver = ver[:idx]
+		}
+		return nameOut, ver, true
 	}
-	return rest, true
+	return nameOut, "", true
 }
 
 // isGitHubURL returns true when input is an http(s) URL whose host
@@ -284,14 +326,37 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		// the CLI hasn't validated.
 
 	case "pkg":
-		// pkg:<ecosystem>/<name...> where name may contain further
-		// slashes (npm scoped packages: pkg:npm/@types/node).
-		// ShortName is the final segment; Ecosystem is the first.
+		// pkg:<ecosystem>/<name...>[@<version>] where name may contain
+		// further slashes (npm scoped packages: pkg:npm/@types/node)
+		// and an optional `@<version>` suffix on the LAST segment
+		// (pkg:npm/X@1.2.3, pkg:npm/@types/node@20.0.0).
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("pkg URI %q: expected ecosystem/name, got %d segment(s)", uri, len(parts))
 		}
 		out.Ecosystem = parts[0]
-		out.ShortName = parts[len(parts)-1]
+
+		// Extract the optional @<version> suffix from the last
+		// segment. The scope prefix on scoped npm names (@types) lives
+		// in its OWN segment and never collides with the version @.
+		lastIdx := len(parts) - 1
+		lastSeg := parts[lastIdx]
+		if atIdx := strings.IndexByte(lastSeg, '@'); atIdx >= 0 {
+			name := lastSeg[:atIdx]
+			version := lastSeg[atIdx+1:]
+			if name == "" {
+				return nil, fmt.Errorf("pkg URI %q: empty name before '@version'", uri)
+			}
+			if version == "" {
+				return nil, fmt.Errorf("pkg URI %q: empty version after '@'", uri)
+			}
+			if strings.ContainsRune(version, '@') {
+				return nil, fmt.Errorf("pkg URI %q: version contains '@' (nested separators not allowed)", uri)
+			}
+			out.ShortName = name
+			out.Version = version
+		} else {
+			out.ShortName = lastSeg
+		}
 
 	case "identity", "org":
 		// identity:<platform>/<user> or org:<platform>/<org>

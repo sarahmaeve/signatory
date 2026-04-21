@@ -144,6 +144,19 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 		return fmt.Errorf("resolve team identity: %w", err)
 	}
 
+	// Reconcile URI-embedded @version with the explicit --version
+	// flag. If the URI carries a version and --version is also set
+	// they must agree; otherwise the caller is stating two different
+	// things about one posture row (§3.3, agent-facing-contract.md).
+	if resolved, rerr := profile.ResolveTarget(cmd.Target); rerr == nil && resolved.Version != "" {
+		switch {
+		case cmd.Version == "":
+			cmd.Version = resolved.Version
+		case cmd.Version != resolved.Version:
+			return fmt.Errorf("--version %q conflicts with target URI version %q; pass a single version or remove one of the two", cmd.Version, resolved.Version)
+		}
+	}
+
 	entity, err := ensureEntity(ctx, s, cmd.Target)
 	if err != nil {
 		return err
@@ -201,23 +214,19 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 //     interest is "does this entity exist?" — the parse failure is
 //     an implementation detail of how we try to resolve it.
 func resolveEntity(ctx context.Context, s store.Store, target string) (*profile.Entity, error) {
-	// First try the target as-is — it might already be a canonical URI.
-	if entity, err := s.FindEntityByURI(ctx, target); err == nil {
-		return entity, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("lookup entity: %w", err)
-	}
-
-	// Fall back to GitHub-style input normalization. A parse
-	// failure here is semantically the same as "the entity doesn't
-	// exist": the input was neither a canonical URI we have nor a
-	// GitHub shape we can normalize. Report it as ErrNotFound so
-	// callers handle both absence conditions uniformly.
-	normalized, _, _, perr := profile.NormalizeGitHubRepoInput(target)
-	if perr != nil {
+	// Route through ResolveTarget so every accepted form (shorthand,
+	// URL, canonical URI, versioned pkg URI) maps to its canonical
+	// URI uniformly. Before M1 this function tried the target as-is
+	// then fell back to GitHubRepoInput normalization; that split-
+	// pipeline path couldn't see the @version suffix on pkg URIs.
+	resolved, rerr := profile.ResolveTarget(target)
+	if rerr != nil {
+		// Target isn't any form we recognize. Caller's "does this
+		// entity exist?" question resolves to "no" regardless of
+		// the underlying parse failure.
 		return nil, store.ErrNotFound
 	}
-	entity, err := s.FindEntityByURI(ctx, normalized)
+	entity, err := s.FindEntityByURI(ctx, resolved.CanonicalURI)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, store.ErrNotFound
 	}
@@ -243,40 +252,21 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 		return nil, err
 	}
 
-	// Create a stub entity. Try to parse as a GitHub repo first so we
-	// get a proper canonical URI; otherwise, treat the target as a
-	// canonical URI itself (e.g. `pkg:npm/express`).
-	canonicalURI, owner, repoName, perr := profile.NormalizeGitHubRepoInput(target)
-	if perr == nil {
-		// Looks like a GitHub repo.
-		entity := &profile.Entity{
-			ID:           profile.NewEntityID(),
-			CanonicalURI: canonicalURI,
-			Type:         profile.EntityProject,
-			ShortName:    owner + "/" + repoName,
-			URL:          "https://github.com/" + owner + "/" + repoName,
-			CreatedAt:    time.Now().UTC(),
-			UpdatedAt:    time.Now().UTC(),
-		}
-		if err := s.PutEntity(ctx, entity); err != nil {
-			return nil, fmt.Errorf("create entity: %w", err)
-		}
-		return entity, nil
+	// Entity not found. ResolveTarget already proved the target is
+	// a form we recognize (resolveEntity returned ErrNotFound, not a
+	// parse error) — call it again for the canonical metadata we
+	// need to build the stub row.
+	resolved, rerr := profile.ResolveTarget(target)
+	if rerr != nil {
+		return nil, fmt.Errorf("cannot resolve %q: not a recognized target form (expected GitHub shorthand / URL or one of pkg:<ecosystem>/<name>[@<version>], repo:<platform>/<owner>/<name>, identity:<platform>/<user>, org:<platform>/<name>, patch:<platform>/<owner>/<repo>/<id>): %w", target, rerr)
 	}
 
-	// Treat the target as a canonical URI (e.g. purl) — the caller
-	// probably knows what they're doing and wants the entity created
-	// under the URI they supplied. Validate before persisting so we
-	// fail closed on garbage input rather than wrapping arbitrary
-	// text as if it were a canonical identifier (#78).
-	if err := profile.ValidateCanonicalURI(target); err != nil {
-		return nil, fmt.Errorf("cannot resolve %q: not a parseable GitHub repo and not a valid canonical URI (expected forms: pkg:<ecosystem>/<name>, repo:<platform>/<owner>/<name>, identity:<platform>/<user>, org:<platform>/<name>, patch:<platform>/<owner>/<repo>/<id>): %w", target, err)
-	}
 	entity := &profile.Entity{
 		ID:           profile.NewEntityID(),
-		CanonicalURI: target,
-		Type:         profile.EntityPackage,
-		ShortName:    target,
+		CanonicalURI: resolved.CanonicalURI,
+		Type:         entityTypeForScheme(resolved.Scheme),
+		ShortName:    resolved.ShortName,
+		URL:          resolved.CloneURL, // empty for non-repo schemes
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
@@ -284,4 +274,31 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 		return nil, fmt.Errorf("create entity: %w", err)
 	}
 	return entity, nil
+}
+
+// entityTypeForScheme maps a canonical-URI scheme to the EntityType
+// that should be stored on the entity row. Previously ensureEntity
+// hardcoded EntityProject for GitHub URLs and EntityPackage for
+// everything else — identity: and org: URIs would have landed under
+// EntityPackage, which is wrong but rarely surfaced because those
+// schemes came in through different code paths. Routing through
+// ResolveTarget makes the mapping explicit.
+func entityTypeForScheme(scheme string) profile.EntityType {
+	switch scheme {
+	case "repo":
+		return profile.EntityProject
+	case "pkg":
+		return profile.EntityPackage
+	case "identity":
+		return profile.EntityIdentity
+	case "org":
+		return profile.EntityOrg
+	case "patch":
+		return profile.EntityPatch
+	default:
+		// Unknown schemes shouldn't reach here — ResolveTarget
+		// constrains the set — but EntityPackage is the least-
+		// surprising fallback (purl-style identifier).
+		return profile.EntityPackage
+	}
 }
