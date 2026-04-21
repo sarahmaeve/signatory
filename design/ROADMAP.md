@@ -23,6 +23,12 @@ Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-fac
 - **Agent-facing-contract M3** — `internal/ecosystem/resolver/` registry with pluggable `Resolver` interface. npm + Go resolvers shipped; `applyNetworkPrecheck` routes every `pkg:<eco>/` target through the registry. Go uses offline path-prefix rules covering github.com/, golang.org/x/, gopkg.in/.
 - **Agent-facing-contract M2** — identity-indexed storage. `analyst_outputs` gains `collected_from_entity_id` (migration v7). `IngestAnalystOutput` accepts `WithPrimaryTarget(uri)` to index under the caller's identity while capturing the analyst-stated target as collected_from. `ListAnalystOutputs` walks both URIs so `pkg:npm/X` and its resolved `repo:github/Y` find the same analysis. CLI `ingest --as`; MCP `signatory_ingest_analysis` `collected_from`.
 - **Agent-facing-contract M7** — `signatory summary` verb (CLI + MCP). One-call view: canonical URI + related URIs + posture snapshot + burn snapshot + per-analyst rollup with severity-bucketed conclusion counts. Replaces the cross-tool flail (show-analyses → show-conclusions → posture get → burn list) yesterday's synthesist dogfood exposed. Composes on top of M2's cross-URI walk so related identities surface both directions.
+- **Agent-facing-contract M6** — synthesist contract. Shipped 2026-04-21 as five sub-milestones (M6a-e, see [`m6-synthesis-contract.md`](m6-synthesis-contract.md)):
+  - **M6a** — `SynthesisSupplement` struct on `AnalystOutput`; validator-gated to synthesist role (prefix `signatory-synthesis`); migration v8 adds `synthesis_supplement_json` + denormalized `proposed_tier` / `proposed_version_scope` columns; `GetSynthesisProposal` helper.
+  - **M6b** — `internal/synthesis/` evidence assembler: sibling to summary but returns full conclusion bodies, positive absences, observations, and cross-URI hops for the synthesist handoff. D9 cross-pollination filter (no prior syntheses in the evidence) enforced at the data layer.
+  - **M6c** — `signatory handoff synthesist` now inlines the full structured evidence as `{EVIDENCE_JSON}`. Synthesist template rewritten around "inputs = evidence block"; D9 independence-rule fence added to all 6 analyst/synthesist templates with a CI-enforced presence check. `signatory handoff` refuses to emit a synthesist handoff against a target with zero analyses.
+  - **M6d** — `signatory posture accept <output-id>` promotes a synthesist's proposed posture into a recorded posture row, with optional `--tier` / `--version` / `--rationale` overrides. Deviations are captured in the audit detail as `proposed_*` fields (presence = deviation); `accepted_from_synthesis_id` links every accepted posture back to its source synthesis.
+  - **M6e** — `signatory show-synthesis <output-id>` renders a synthesis output as markdown (the filestore markdown is now a view, not the source). `/analyze` skill Step 4 flips synthesist to land via MCP ingest; Step 5 routes through `posture accept`. Synthesist allowed-tools tightened to `WebFetch mcp__signatory__signatory_ingest_analysis` — CI-enforced.
 
 ## V0.1 — Remaining
 
@@ -30,9 +36,8 @@ V0.1 blocks until every item in this section is complete. Order within each subs
 
 ### Agent-facing contract milestones
 
-Six of eight milestones shipped (M1, M5, M4, M3, M2, M7 — see Shipped section above). Remaining, ordered by dependency:
+Seven of eight milestones shipped (M1, M5, M4, M3, M2, M7, M6 — see Shipped section above). Remaining, ordered by dependency:
 
-- **M6 — Synthesist contract.** Structured evidence in handoff body (no filestore browsing), `proposed_posture` in deposit schema, filestore markdown becomes a view. Same cross-pollination prohibition added to security + provenance templates. `signatory posture accept <synthesis-id>`. ~500 LOC + ~600 LOC tests.
 - **M8 — `/analyze` retirement.** Port the 150-line bash orchestration into `signatory run analysis <target>`. Human and LLM invoke the same entry point. /analyze SKILL.md becomes a pointer. ~400 LOC + ~500 LOC tests.
 - **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.
 - ~~**Follow-up: /analyze skill update to pass --as.**~~ Shipped 2026-04-21. Both analyst prompts now carry `collected_from: "{TARGET}"` when calling `signatory_ingest_analysis`; the orchestrator substitutes `$TARGET` into the prompt at dispatch time. Step 3 verification now queries under `$TARGET` to match. Closes the M2 dogfood loop until M8 retires the skill.
