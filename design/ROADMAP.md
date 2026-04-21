@@ -11,12 +11,16 @@ Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-fac
 - **go.mod manifest parser.** Dependency enumeration for Go projects.
 - **MCP server.** 8 read-only tools (`signatory_analyze`, `signatory_signals`, `signatory_detail`, `signatory_show_analyses`, `signatory_show_conclusions`, `signatory_show_methodology`, `signatory_survey`, `signatory_ingest_analysis`) and 6 resources. Shape differs from the original scoping — mutations are CLI-side, reads are MCP-side, reflecting what dogfood actually needed.
 - **`signatory serve`.** Pipeline message service with start/stop/status/restart/logs subcommands.
-- **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm-aware), `--clone-dir`, `--json`.
+- **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm + Go aware via M3), `--clone-dir`, `--json`.
 - **`signatory ingest` + `format-check`.** Analyst output validation and ingestion.
 - **`/analyze` skill.** LLM-orchestrated pipeline: session → handoff → parallel analyst dispatch → verify → synthesize. Candidate for retirement in M8 (see below).
 - **Git signal collector.** Identity signals (mailmap, domain, concentration), commit-signing, tag-signing, first-commit-date.
 - **v0.1 architectural invariants** (Invariant 1–4) with CI enforcement.
 - **109+ tests** with race detection, pre-commit hooks (gofmt + vet + race).
+- **Agent-facing-contract M1** — `pkg:<eco>/<name>@<version>` first-class grammar with per-version identity; `--version` override with conflict detection. Per-version burns fall out for free.
+- **Agent-facing-contract M5** — `--rationale-file`, `--reason-file`, `--intake-file` for multi-line inputs (path or `-` for stdin). Replaces bash-heredoc gymnastics for agent invocations.
+- **Agent-facing-contract M4** — `posture unset`, `burn remove`, `--dry-run` on all mutators, `EX_USAGE` (64) exit codes on flag conflicts. Soft-delete semantics with audit-log preservation. (ingest withdraw deferred — separate narrower commit.)
+- **Agent-facing-contract M3** — `internal/ecosystem/resolver/` registry with pluggable `Resolver` interface. npm + Go resolvers shipped; `applyNetworkPrecheck` routes every `pkg:<eco>/` target through the registry. Go uses offline path-prefix rules covering github.com/, golang.org/x/, gopkg.in/.
 
 ## V0.1 — Remaining
 
@@ -24,16 +28,13 @@ V0.1 blocks until every item in this section is complete. Order within each subs
 
 ### Agent-facing contract milestones
 
-Eight milestones from [`agent-facing-contract.md`](agent-facing-contract.md). Ordered by dependency — earlier milestones unblock later ones.
+Four of eight milestones shipped (M1, M5, M4, M3 — see Shipped section above). Remaining, ordered by dependency:
 
-- **M1 — Target grammar unification.** `@version` parsed as first-class on `pkg:` URIs; `--version` flag becomes an override with conflict detection. Per-version burns fall out for free. ~200 LOC + ~300 LOC tests.
-- **M5 — File-based free-text inputs.** `--rationale-file`, `--intake-file`, `-` for stdin. Kills the heredoc-gymnastics invocation pattern. ~100 LOC + ~200 LOC tests.
-- **M4 — Undo verbs + dry-run.** `posture unset`, `burn remove`, `ingest withdraw` (soft-delete as `INGEST_ERROR` status). `--dry-run` on every mutating verb. EX_USAGE exit codes. ~250 LOC + ~350 LOC tests.
-- **M3 — Ecosystem resolver registry.** `pkg:<eco>/<name>` → declared source as a pluggable capability. npm bridge ported in; Go resolver added. Replaces ad-hoc branches in precheck / clone / handoff. ~400 LOC + ~500 LOC tests.
 - **M2 — Identity-indexed storage.** Rows keyed under the caller's URI with `collected_from` links to resolved source. Drop-and-recollect migration (no backfill logic). ~300 LOC + ~400 LOC tests.
 - **M7 — `signatory summary` verb.** CLI + MCP. One-call view: canonical URI + `collected_from` + posture + burn + analysis rollup + proposed postures. Consumed by M6 and the /analyze-skill short-circuit. ~300 LOC + ~400 LOC tests.
 - **M6 — Synthesist contract.** Structured evidence in handoff body (no filestore browsing), `proposed_posture` in deposit schema, filestore markdown becomes a view. Same cross-pollination prohibition added to security + provenance templates. `signatory posture accept <synthesis-id>`. ~500 LOC + ~600 LOC tests.
 - **M8 — `/analyze` retirement.** Port the 150-line bash orchestration into `signatory run analysis <target>`. Human and LLM invoke the same entry point. /analyze SKILL.md becomes a pointer. ~400 LOC + ~500 LOC tests.
+- **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.
 
 ### Ecosystem providers
 

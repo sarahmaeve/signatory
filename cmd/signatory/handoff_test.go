@@ -12,9 +12,51 @@ import (
 	"testing"
 
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
+	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubNpmResolverFunc adapts a simple (name → url, error) callback
+// into an ecosystem resolver for use in handoff tests. Built so
+// pre-M3 tests that used HandoffCmd.ResolveNpmSource can migrate
+// with minimal churn: the callback shape is identical.
+type stubNpmResolverFunc func(ctx context.Context, name string) (string, error)
+
+func (f stubNpmResolverFunc) ResolveSource(ctx context.Context, name string) (resolver.DeclaredSource, error) {
+	url, err := f(ctx, name)
+	if err != nil {
+		return resolver.DeclaredSource{}, err
+	}
+	if url == "" {
+		return resolver.DeclaredSource{SelfReported: true}, nil
+	}
+	// Populate URI only when the URL resolves to a github target;
+	// non-github URLs flow through as URL-only so the handoff-level
+	// non-github test case still exercises the downstream error path.
+	uri := ""
+	cloneURL := url
+	if res, perr := profile.ResolveTarget(url); perr == nil {
+		uri = res.CanonicalURI
+		if res.CloneURL != "" {
+			cloneURL = res.CloneURL
+		}
+	}
+	return resolver.DeclaredSource{
+		URI:          uri,
+		URL:          cloneURL,
+		SelfReported: true,
+	}, nil
+}
+
+// stubNpmRegistry builds a *resolver.Registry whose npm resolver
+// delegates to fn. Tests inject via HandoffCmd.EcosystemRegistry.
+func stubNpmRegistry(fn stubNpmResolverFunc) *resolver.Registry {
+	r := resolver.NewRegistry()
+	r.Register("npm", fn)
+	return r
+}
 
 // CLI-level tests focus on wiring: flag parsing, template-name
 // inference, output destination, and error shapes. Substitution /
@@ -751,10 +793,10 @@ func TestHandoff_NetworkPrecheck_NpmjsURL_ResolvesToGitHub(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, name string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, name string) (string, error) {
 			resolvedName = name
 			return "https://github.com/expressjs/express", nil
-		},
+		}),
 		PrecheckSource: &fakePrecheckSource{
 			Files:    []string{"package.json"},
 			Language: "JavaScript",
@@ -782,9 +824,9 @@ func TestHandoff_NetworkPrecheck_PkgNpmURI_ResolvesToGitHub(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          outPath,
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "https://github.com/expressjs/express", nil
-		},
+		}),
 		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
@@ -804,10 +846,10 @@ func TestHandoff_NetworkPrecheck_ScopedPackage(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, name string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, name string) (string, error) {
 			resolvedName = name
 			return "https://github.com/DefinitelyTyped/DefinitelyTyped", nil
-		},
+		}),
 		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))
@@ -827,14 +869,14 @@ func TestHandoff_NetworkPrecheck_NpmNoDeclaredSource(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "", nil // no declared repository
-		},
+		}),
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"orphan"`)
-	assert.Contains(t, err.Error(), "no source repository")
+	assert.Contains(t, err.Error(), "no resolvable source")
 }
 
 // TestHandoff_NetworkPrecheck_NpmNonGitHubSource covers a package that
@@ -849,9 +891,9 @@ func TestHandoff_NetworkPrecheck_NpmNonGitHubSource(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "https://gitlab.com/foo/bar", nil
-		},
+		}),
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
@@ -872,9 +914,9 @@ func TestHandoff_NetworkPrecheck_NpmResolverError(t *testing.T) {
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "", sentinel
-		},
+		}),
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
@@ -894,9 +936,9 @@ func TestHandoff_NetworkPrecheck_NpmDisclosureInReport(t *testing.T) {
 		Path:            "/tmp/express",
 		NetworkPrecheck: true,
 		Output:          outPath,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "https://github.com/expressjs/express", nil
-		},
+		}),
 		PrecheckSource: &fakePrecheckSource{Files: []string{"package.json"}},
 	}
 	stderr := captureStderr(t, func() {
@@ -906,6 +948,75 @@ func TestHandoff_NetworkPrecheck_NpmDisclosureInReport(t *testing.T) {
 	assert.Contains(t, stderr, "https://github.com/expressjs/express")
 	assert.Contains(t, stderr, "self-reported",
 		"disclosure must call out that the source URL is self-declared, not verified")
+}
+
+// TestHandoff_NetworkPrecheck_PkgGoResolvesViaRegistry is the M3
+// sibling of the npm tests: a pkg:go/<module> target goes through
+// the ecosystem registry (specifically the Go resolver's offline
+// path-prefix rules) and gets rewritten to its github source URL
+// before the GitHub-API detector runs. No stub needed — the default
+// registry ships the Go resolver.
+func TestHandoff_NetworkPrecheck_PkgGoResolvesViaRegistry(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:go/golang.org/x/mod",
+		Path:            "/tmp/mod",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
+		// No EcosystemRegistry override: uses resolver.Default which
+		// has the shipped Go resolver registered at init time.
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/golang/mod", cmd.Target,
+		"pkg:go target must be rewritten to the github source URL via the resolver registry")
+}
+
+// TestHandoff_NetworkPrecheck_PkgGoGithubDirect verifies the simpler
+// Go case where the module path itself starts with github.com.
+func TestHandoff_NetworkPrecheck_PkgGoGithubDirect(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:go/github.com/alecthomas/kong",
+		Path:            "/tmp/kong",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/alecthomas/kong", cmd.Target)
+}
+
+// TestHandoff_NetworkPrecheck_PkgUnknownEcosystem verifies the error
+// path when a caller passes pkg:<eco>/ with no registered resolver.
+// Message names the supported ecosystems so the caller sees what's
+// available.
+func TestHandoff_NetworkPrecheck_PkgUnknownEcosystem(t *testing.T) {
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:madeup-ecosystem/anything",
+		Path:            "/tmp/x",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		// Use a fresh empty registry so the test is independent of
+		// whatever resolver.Default ships.
+		EcosystemRegistry: resolver.NewRegistry(),
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no source resolver registered")
+	assert.Contains(t, err.Error(), `"madeup-ecosystem"`)
 }
 
 // TestHandoff_NetworkPrecheck_NpmDoesNotInvokeResolverForGitHubTarget
@@ -922,10 +1033,10 @@ func TestHandoff_NetworkPrecheck_NpmDoesNotInvokeResolverForGitHubTarget(t *test
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
 		Quiet:           true,
-		ResolveNpmSource: func(_ context.Context, _ string) (string, error) {
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			invoked = true
 			return "", nil
-		},
+		}),
 		PrecheckSource: &fakePrecheckSource{Files: []string{"go.mod"}},
 	}
 	require.NoError(t, cmd.Run(&Globals{}))

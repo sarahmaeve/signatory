@@ -164,6 +164,7 @@ This is shape, not a commitment. Each milestone lands as its own PR with its own
 - Register npm; add go resolver (`proxy.golang.org` → `repository.url`).
 - Every `pkg:` consumer (precheck, clone, handoff target rewriting) goes through the registry.
 - ~400 LOC + ~500 LOC tests.
+- **Implementation status (2026-04-21):** shipped. `internal/ecosystem/resolver/` with `Resolver` interface, `Registry` type, and a process-global `Default` populated by sibling init() funcs. npm resolver wraps the existing `internal/signal/registry/npm` client; Go resolver uses offline path-prefix rules (`github.com/<o>/<n>`, `golang.org/x/<n>`, `gopkg.in/<n>.v<N>`, `gopkg.in/<u>/<n>.v<N>`). `applyNetworkPrecheck` routes every `pkg:<eco>/` target through the registry — the npm-only inline call is gone. Handoff's `ResolveNpmSource` test seam replaced with `EcosystemRegistry *resolver.Registry`. go-get meta-import lookup deferred; offline rules cover 95% of Go modules we'd analyze.
 
 **M4 — Undo verbs + dry-run.**
 - `posture unset`, `burn remove`, `ingest withdraw`.
