@@ -35,7 +35,7 @@ Six of eight milestones shipped (M1, M5, M4, M3, M2, M7 — see Shipped section 
 - **M6 — Synthesist contract.** Structured evidence in handoff body (no filestore browsing), `proposed_posture` in deposit schema, filestore markdown becomes a view. Same cross-pollination prohibition added to security + provenance templates. `signatory posture accept <synthesis-id>`. ~500 LOC + ~600 LOC tests.
 - **M8 — `/analyze` retirement.** Port the 150-line bash orchestration into `signatory run analysis <target>`. Human and LLM invoke the same entry point. /analyze SKILL.md becomes a pointer. ~400 LOC + ~500 LOC tests.
 - **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.
-- **Follow-up: /analyze skill update to pass --as.** Small change to `.claude/skills/analyze/SKILL.md` so the existing bash pipeline uses `signatory_ingest_analysis` with `collected_from` set to the original target. Until M8 retires the skill, this closes the dogfood loop for the already-shipped M2 capability.
+- ~~**Follow-up: /analyze skill update to pass --as.**~~ Shipped 2026-04-21. Both analyst prompts now carry `collected_from: "{TARGET}"` when calling `signatory_ingest_analysis`; the orchestrator substitutes `$TARGET` into the prompt at dispatch time. Step 3 verification now queries under `$TARGET` to match. Closes the M2 dogfood loop until M8 retires the skill.
 
 ### Ecosystem providers
 
