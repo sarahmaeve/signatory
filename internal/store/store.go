@@ -68,6 +68,13 @@ type Store interface {
 	SeverityCounts(ctx context.Context, outputID string) (map[exchange.SeverityValue]int, error)
 	ListRelatedURIs(ctx context.Context, entityID string) ([]string, error)
 
+	// Synthesis proposal reader (M6d). Narrow helper for `posture
+	// accept <output-id>`: returns the ProposedPosture recorded on
+	// a synthesis output without reconstructing the full document.
+	// Returns ErrNotFound when outputID is unknown OR when the row
+	// isn't a synthesis (both cases mean "no proposal to accept").
+	GetSynthesisProposal(ctx context.Context, outputID string) (*exchange.ProposedPosture, error)
+
 	// Close releases database resources.
 	Close() error
 }

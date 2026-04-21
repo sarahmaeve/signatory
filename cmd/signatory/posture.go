@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/identity"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -20,9 +23,10 @@ import (
 // automatically "unexamined" until the user reviews it. This is the
 // core shift from v1 — vetting a version no longer leaks forward.
 type PostureCmd struct {
-	Get   PostureGetCmd   `cmd:"" default:"withargs" help:"View the posture for an entity."`
-	Set   PostureSetCmd   `cmd:"" help:"Set the posture tier for an entity."`
-	Unset PostureUnsetCmd `cmd:"" help:"Withdraw (soft-delete) a previously-set posture. Use when a recorded decision turns out to be wrong."`
+	Get    PostureGetCmd    `cmd:"" default:"withargs" help:"View the posture for an entity."`
+	Set    PostureSetCmd    `cmd:"" help:"Set the posture tier for an entity."`
+	Unset  PostureUnsetCmd  `cmd:"" help:"Withdraw (soft-delete) a previously-set posture. Use when a recorded decision turns out to be wrong."`
+	Accept PostureAcceptCmd `cmd:"" help:"Promote a synthesist's proposed posture into a recorded posture row. Reads the proposal from a synthesis output id and writes a posture with optional tier/version/rationale overrides."`
 }
 
 // PostureGetCmd views the posture for an entity.
@@ -444,4 +448,238 @@ func firstLine(s string) string {
 		}
 	}
 	return s
+}
+
+// PostureAcceptCmd promotes a synthesist's proposed_posture into a
+// recorded Posture row. Reads the proposal from a synthesis output
+// id (produced by /analyze or a manual synthesist run) and writes a
+// posture row whose tier/version/rationale come from the proposal
+// by default, with optional per-field overrides.
+//
+// Deviations — places where the user diverged from the synthesist's
+// proposal — are captured in the audit log detail as `proposed_*`
+// fields. Presence of a `proposed_tier` / `proposed_version_scope`
+// / `proposed_rationale_summary` field in the audit blob IS the
+// deviation signal. Absence means "accepted verbatim."
+//
+// Safety:
+//
+//   - Non-TTY invocations must pass --yes. The confirmation prompt
+//     is interactive-only; without --yes in a script, the command
+//     errors rather than silently blocking on stdin.
+//   - --dry-run prints the resolved proposal + deviations without
+//     touching the store or audit log. Use before the real accept.
+//
+// See design/m6-synthesis-contract.md §6 (M6d).
+type PostureAcceptCmd struct {
+	OutputID string `arg:"" help:"Synthesis output UUID to accept. Find it in signatory show-analyses or /analyze pipeline output."`
+
+	// Overrides. Each empty → pull from the synthesist's proposal.
+	// Non-empty → override and record the original proposal in the
+	// audit detail under the matching proposed_* field.
+	Tier          string `help:"Override the proposed tier." enum:"vetted-frozen,trusted-for-now,unexamined,unknown-provenance,rejected," default:""`
+	Version       string `help:"Override the proposed version_scope."`
+	Rationale     string `help:"Override the proposed rationale (one-line). For multi-line use --rationale-file."`
+	RationaleFile string `name:"rationale-file" help:"Path to a file containing the override rationale (or '-' for stdin)."`
+
+	Yes    bool `help:"Skip the confirmation prompt. Required in non-TTY environments so scripts can't accidentally block on stdin."`
+	DryRun bool `name:"dry-run" help:"Print the resolved proposal and any deviations without writing to the store or audit log."`
+
+	// IsTTY overrides the default stdin-is-terminal check. nil →
+	// fall through to isStdinTTY. Exists so unit tests can
+	// deterministically simulate non-TTY regardless of how `go
+	// test` is invoked — without this hook, a test run from a
+	// terminal inherits a TTY stdin and the non-TTY error path
+	// can't be exercised. kong:"-" excludes the field from the
+	// CLI surface; it's a programmatic test seam only.
+	IsTTY func() bool `kong:"-"`
+}
+
+func (cmd *PostureAcceptCmd) Run(globals *Globals) error {
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+
+	// Load the proposal first — fails fast with a clear error if the
+	// output id doesn't exist or isn't a synthesis (GetSynthesisProposal
+	// returns ErrNotFound for both cases; the user-facing message has
+	// to cover both).
+	proposal, err := s.GetSynthesisProposal(ctx, cmd.OutputID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf(
+				"no synthesis proposal found for output id %q: the id may not exist, or the output may not be a synthesis. "+
+					"Run `signatory show-analyses <target>` to see available analyses",
+				cmd.OutputID)
+		}
+		return fmt.Errorf("load synthesis proposal: %w", err)
+	}
+
+	// Reconcile --rationale / --rationale-file before proceeding.
+	// Empty rationale override means "use the proposal's
+	// rationale_summary"; non-empty means deviate.
+	overrideRationale, err := readFreeText("rationale", cmd.Rationale, cmd.RationaleFile)
+	if err != nil {
+		return NewUsageError(err)
+	}
+
+	// Resolve the final posture fields. Each override defaults to
+	// the proposal when empty.
+	finalTier := proposal.Tier
+	if cmd.Tier != "" {
+		finalTier = cmd.Tier
+	}
+	finalVersion := proposal.VersionScope
+	if cmd.Version != "" {
+		finalVersion = cmd.Version
+	}
+	finalRationale := proposal.RationaleSummary
+	if overrideRationale != "" {
+		finalRationale = overrideRationale
+	}
+
+	// Look up the synthesis's entity so we know where to write the
+	// posture row. The entity is the one this synthesis was indexed
+	// under (respects the M2 collected_from hop: a synthesis indexed
+	// under pkg:npm/X with collected_from=repo:github/Y produces a
+	// posture on pkg:npm/X, matching agent-facing-contract §3.2).
+	synOutput, err := s.GetAnalystOutput(ctx, cmd.OutputID)
+	if err != nil {
+		return fmt.Errorf("load synthesis output: %w", err)
+	}
+	entity, err := s.FindEntityByURI(ctx, synOutput.Target)
+	if err != nil {
+		return fmt.Errorf("locate entity for synthesis target %q: %w", synOutput.Target, err)
+	}
+
+	if cmd.DryRun {
+		fmt.Printf("[dry-run] Would accept synthesis %s for %s\n", cmd.OutputID, entity.ShortName)
+		cmd.printProposalSummary(os.Stdout, entity, proposal, finalTier, finalVersion, finalRationale, overrideRationale)
+		return nil
+	}
+
+	// Non-TTY invocations require --yes. The TTY check is injectable
+	// so tests can simulate non-TTY deterministically; production
+	// leaves cmd.IsTTY nil and falls through to isStdinTTY.
+	ttyCheck := cmd.IsTTY
+	if ttyCheck == nil {
+		ttyCheck = isStdinTTY
+	}
+	if !cmd.Yes {
+		if !ttyCheck() {
+			return NewUsageError(fmt.Errorf(
+				"posture accept refuses to prompt in a non-TTY environment; pass --yes to confirm up-front"))
+		}
+		fmt.Printf("Accept synthesis %s for %s?\n", cmd.OutputID, entity.ShortName)
+		cmd.printProposalSummary(os.Stdout, entity, proposal, finalTier, finalVersion, finalRationale, overrideRationale)
+		fmt.Print("Proceed? [y/N]: ")
+		var response string
+		if _, scanErr := fmt.Fscanln(os.Stdin, &response); scanErr != nil {
+			// Scanln returns an error on empty input (user just
+			// hit enter). Treat that as "no."
+			response = ""
+		}
+		if strings.ToLower(strings.TrimSpace(response)) != "y" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	actor, err := identity.Current()
+	if err != nil {
+		return fmt.Errorf("resolve team identity: %w", err)
+	}
+
+	posture := &profile.Posture{
+		EntityID:  entity.ID,
+		Tier:      profile.PostureTier(finalTier),
+		Version:   finalVersion,
+		Rationale: finalRationale,
+		SetBy:     actor,
+		SetAt:     time.Now().UTC(),
+	}
+	if err := s.SetPosture(ctx, posture); err != nil {
+		return err
+	}
+
+	// Audit detail with deviation signals. Each proposed_* field is
+	// present only when the user overrode — its presence IS the
+	// "user disagreed on this field" signal.
+	detail := map[string]interface{}{
+		"canonical_uri":              entity.CanonicalURI,
+		"version":                    finalVersion,
+		"tier":                       finalTier,
+		"rationale":                  finalRationale,
+		"accepted_from_synthesis_id": cmd.OutputID,
+	}
+	if cmd.Tier != "" && cmd.Tier != proposal.Tier {
+		detail["proposed_tier"] = proposal.Tier
+	}
+	if cmd.Version != "" && cmd.Version != proposal.VersionScope {
+		detail["proposed_version_scope"] = proposal.VersionScope
+	}
+	if overrideRationale != "" && overrideRationale != proposal.RationaleSummary {
+		detail["proposed_rationale_summary"] = proposal.RationaleSummary
+	}
+	detailJSON, _ := json.Marshal(detail)
+	auditLog := globals.NewAuditLogger(s)
+	if err := auditLog.LogAction(ctx, actor, "accept_posture", entity.ID, string(detailJSON)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: audit log write failed: %v\n", err)
+	}
+
+	if finalVersion != "" {
+		fmt.Printf("Posture accepted for %s @ %s: %s\n", entity.ShortName, finalVersion, finalTier)
+	} else {
+		fmt.Printf("Posture accepted for %s (unversioned): %s\n", entity.ShortName, finalTier)
+	}
+	return nil
+}
+
+// printProposalSummary formats the resolved proposal + any
+// overrides to w. Shared between --dry-run output and the TTY
+// confirmation prompt so both surfaces show the same information.
+func (cmd *PostureAcceptCmd) printProposalSummary(
+	w io.Writer,
+	entity *profile.Entity,
+	proposal *exchange.ProposedPosture,
+	finalTier, finalVersion, finalRationale, overrideRationale string,
+) {
+	fmt.Fprintf(w, "  URI:       %s\n", entity.CanonicalURI)
+	fmt.Fprintf(w, "  Tier:      %s", finalTier)
+	if cmd.Tier != "" && cmd.Tier != proposal.Tier {
+		fmt.Fprintf(w, " (overridden from %s)", proposal.Tier)
+	}
+	fmt.Fprintln(w)
+	if finalVersion != "" {
+		fmt.Fprintf(w, "  Version:   %s", finalVersion)
+		if cmd.Version != "" && cmd.Version != proposal.VersionScope {
+			from := proposal.VersionScope
+			if from == "" {
+				from = "(unversioned)"
+			}
+			fmt.Fprintf(w, " (overridden from %s)", from)
+		}
+		fmt.Fprintln(w)
+	}
+	fmt.Fprintf(w, "  Rationale: %s", firstLine(finalRationale))
+	if overrideRationale != "" && overrideRationale != proposal.RationaleSummary {
+		fmt.Fprint(w, " (overridden)")
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Source:    synthesis output %s\n", cmd.OutputID)
+}
+
+// isStdinTTY reports whether stdin is attached to a terminal. Used
+// by PostureAcceptCmd to decide whether to prompt interactively or
+// require --yes. Pure stdlib (os.Stat of the file descriptor mode)
+// to avoid adding an isatty dependency.
+func isStdinTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
