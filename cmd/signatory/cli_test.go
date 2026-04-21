@@ -166,11 +166,22 @@ func TestBurnCmd_MissingTarget(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestBurnCmd_MissingReason verifies that omitting both --reason and
+// --reason-file produces a Run-level error — kong no longer rejects
+// at parse time because either flag can satisfy the requirement.
+// See agent-facing-contract §3.4.
 func TestBurnCmd_MissingReason(t *testing.T) {
 	t.Parallel()
 
-	err := parseCLIExpectError(t, "burn", "evil-package")
-	assert.Error(t, err)
+	cmd := &BurnAddCmd{Target: "pkg:npm/evil-package"}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--reason or --reason-file is required")
 }
 
 func TestBurnAddCmd_Run(t *testing.T) {
@@ -227,11 +238,22 @@ func TestPostureSetCmd_MissingTier(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestPostureSetCmd_MissingRationale verifies that omitting both
+// --rationale and --rationale-file produces a Run-level error — kong
+// no longer rejects at parse time because either flag can satisfy
+// the requirement. See agent-facing-contract §3.4.
 func TestPostureSetCmd_MissingRationale(t *testing.T) {
 	t.Parallel()
 
-	err := parseCLIExpectError(t, "posture", "set", "lodash", "--tier", "vetted-frozen")
-	assert.Error(t, err)
+	cmd := &PostureSetCmd{Target: "pkg:npm/lodash", Tier: "vetted-frozen"}
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:        filepath.Join(dir, "test.db"),
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--rationale or --rationale-file is required")
 }
 
 func TestPostureSetCmd_AllValidTiers(t *testing.T) {

@@ -63,9 +63,10 @@ type HandoffCmd struct {
 	// --network-precheck path needs that distinction to know whether
 	// to apply a detected language. Resolved to "python" in Run if
 	// still empty after precheck.
-	Language string `help:"Language flavor for security role (python|go). Auto-detected with --network-precheck; falls back to python." default:"" enum:"python,go,"`
-	Intake   string `help:"INTAKE_QUESTION body; the user's specific question for this engagement."`
-	Template string `help:"Explicit template name (e.g., handoffs/security-review-v1.md). Bypasses --role/--language inference."`
+	Language   string `help:"Language flavor for security role (python|go). Auto-detected with --network-precheck; falls back to python." default:"" enum:"python,go,"`
+	Intake     string `help:"INTAKE_QUESTION body; the user's specific question for this engagement (one-line)."`
+	IntakeFile string `name:"intake-file" help:"Path to a file containing the INTAKE_QUESTION (or '-' for stdin). Use this for multi-line briefs that would otherwise need heredoc gymnastics."`
+	Template   string `help:"Explicit template name (e.g., handoffs/security-review-v1.md). Bypasses --role/--language inference."`
 
 	TemplateDir  []string `name:"template-dir" help:"Additional template search directory (repeatable, highest priority)."`
 	FilestoreDir []string `name:"filestore-dir" help:"Additional filestore output directory (repeatable). Unused unless --output is a bare filename."`
@@ -112,6 +113,16 @@ type HandoffCmd struct {
 // (template source, unfilled placeholders, embedded-fallback notice)
 // is informational and goes out independently of Success/failure.
 func (cmd *HandoffCmd) Run(globals *Globals) error {
+	// Reconcile --intake / --intake-file (§3.4 agent-facing-contract).
+	// Intake is optional — the template falls back to an embedded
+	// default — so an empty result is fine; the readFreeText helper
+	// only cares about conflict and malformed inputs.
+	intake, err := readFreeText("intake", cmd.Intake, cmd.IntakeFile)
+	if err != nil {
+		return err
+	}
+	cmd.Intake = intake
+
 	// Resolve the target to canonical form. For any input that
 	// ResolveTarget understands (GitHub shorthand, github.com URL,
 	// `repo:` canonical URI, etc.) pre-populate --name and --url

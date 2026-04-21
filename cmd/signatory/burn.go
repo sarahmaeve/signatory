@@ -22,13 +22,30 @@ type BurnCmd struct {
 }
 
 // BurnAddCmd records a burn against an entity.
+//
+// Reason may be supplied via --reason (one-line) or --reason-file
+// (multi-line, path or "-" for stdin). Exactly one must be non-empty.
+// See agent-facing-contract §3.4.
 type BurnAddCmd struct {
-	Target string `arg:"" help:"Entity to burn."`
-	Reason string `help:"Reason for the burn." required:""`
+	Target     string `arg:"" help:"Entity to burn."`
+	Reason     string `help:"Reason for the burn (one-line). For multi-line reasons use --reason-file."`
+	ReasonFile string `name:"reason-file" help:"Path to a file containing the burn reason (or '-' for stdin)."`
 }
 
 func (cmd *BurnAddCmd) Run(globals *Globals) error {
 	ctx := context.Background()
+
+	// Resolve --reason / --reason-file early so a missing/malformed
+	// source fails before we open the store (§3.4).
+	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
+	if err != nil {
+		return err
+	}
+	if reason == "" {
+		return fmt.Errorf("burn add: --reason or --reason-file is required (an empty reason isn't a burn)")
+	}
+	cmd.Reason = reason
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

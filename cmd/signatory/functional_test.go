@@ -306,6 +306,100 @@ func TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions(t *testing.T) {
 		"v2.2.3 must NOT be burned — per-version burns are non-propagating")
 }
 
+// TestFunctional_PostureSet_RationaleFromFile verifies the M5
+// file-form end-to-end: a multi-line rationale stored in a file
+// lands in the DB verbatim (minus the editor-added trailing
+// newline). Demonstrates the "agent writes file, passes path" flow
+// that replaces bash heredoc invocations.
+func TestFunctional_PostureSet_RationaleFromFile(t *testing.T) {
+	globals := testGlobals(t)
+
+	rationaleBody := "First-party Go-team module.\n\n" +
+		"Load-bearing positives:\n" +
+		"- sum.golang.org transparency log anchors publish path\n" +
+		"- Ed25519 + SHA-256 throughout\n" +
+		"- zero medium+ security findings\n\n" +
+		"Caveats: one low (CreateFromVCS arg-injection; caller validation required)."
+	rationalePath := filepath.Join(t.TempDir(), "rationale.md")
+	require.NoError(t, os.WriteFile(rationalePath, []byte(rationaleBody+"\n"), 0o600))
+
+	cmd := &PostureSetCmd{
+		Target:        "pkg:go/golang.org/x/mod@v0.35.0",
+		Tier:          "vetted-frozen",
+		RationaleFile: rationalePath,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:go/golang.org/x/mod@v0.35.0")
+	require.NoError(t, err)
+	postures, err := s.GetPostures(context.Background(), entity.ID)
+	require.NoError(t, err)
+	require.Len(t, postures, 1)
+	assert.Equal(t, rationaleBody, postures[0].Rationale,
+		"rationale should match the file contents verbatim (minus trailing newline)")
+	assert.Equal(t, "v0.35.0", postures[0].Version)
+}
+
+// TestFunctional_PostureSet_RationaleConflict verifies the loud-
+// failure case: both --rationale and --rationale-file set. The
+// command errors before writing anything.
+func TestFunctional_PostureSet_RationaleConflict(t *testing.T) {
+	globals := testGlobals(t)
+
+	path := filepath.Join(t.TempDir(), "rationale.txt")
+	require.NoError(t, os.WriteFile(path, []byte("from file"), 0o600))
+
+	cmd := &PostureSetCmd{
+		Target:        "pkg:npm/lodash",
+		Tier:          "vetted-frozen",
+		Rationale:     "from flag",
+		RationaleFile: path,
+	}
+	err := cmd.Run(globals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "both set")
+
+	// Nothing should have been written. The entity row MAY exist
+	// (ensureEntity ran earlier? no — the rationale check runs
+	// before ensureEntity now) but we check absence of posture rows.
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+	_, findErr := s.FindEntityByURI(context.Background(), "pkg:npm/lodash")
+	assert.ErrorIs(t, findErr, store.ErrNotFound,
+		"conflict error must fire before any store write")
+}
+
+// TestFunctional_BurnAdd_ReasonFromFile covers the burn-side M5
+// wiring — same pattern as posture, different flag names.
+func TestFunctional_BurnAdd_ReasonFromFile(t *testing.T) {
+	globals := testGlobals(t)
+
+	reason := "Multi-paragraph explanation.\n\nThe orphan tag points\nto an unreachable commit."
+	path := filepath.Join(t.TempDir(), "reason.txt")
+	require.NoError(t, os.WriteFile(path, []byte(reason+"\n"), 0o600))
+
+	cmd := &BurnAddCmd{
+		Target:     "pkg:npm/invariant@2.2.4",
+		ReasonFile: path,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/invariant@2.2.4")
+	require.NoError(t, err)
+	burn, err := s.GetBurn(context.Background(), entity.ID)
+	require.NoError(t, err)
+	assert.Equal(t, reason, burn.Reason)
+}
+
 // TestFunctional_PostureSet_VersionedURI_InheritsVersion verifies
 // the M1 inheritance path end-to-end: posture set on a @V URI
 // without --version produces a stored Posture with Version = @V.

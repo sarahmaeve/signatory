@@ -123,11 +123,16 @@ func printPosture(entity *profile.Entity, p *profile.Posture) {
 // version applies to "the entity as a whole" (the v1-style semantics),
 // which is almost never what you want. The CLI warns when --version
 // is omitted.
+//
+// Rationale may be supplied via --rationale (one-line) or
+// --rationale-file (multi-line, path or "-" for stdin). Exactly one
+// must be non-empty. See agent-facing-contract §3.4.
 type PostureSetCmd struct {
-	Target    string `arg:"" help:"Entity to set posture for."`
-	Tier      string `help:"Posture tier (vetted-frozen, trusted-for-now, unexamined, unknown-provenance, or rejected)." enum:"vetted-frozen,trusted-for-now,unexamined,unknown-provenance,rejected" required:""`
-	Rationale string `help:"Rationale for the posture decision." required:""`
-	Version   string `help:"Specific version being attested (strongly recommended)." optional:""`
+	Target        string `arg:"" help:"Entity to set posture for."`
+	Tier          string `help:"Posture tier (vetted-frozen, trusted-for-now, unexamined, unknown-provenance, or rejected)." enum:"vetted-frozen,trusted-for-now,unexamined,unknown-provenance,rejected" required:""`
+	Rationale     string `help:"Rationale for the posture decision (one-line). For multi-line rationales use --rationale-file."`
+	RationaleFile string `name:"rationale-file" help:"Path to a file containing the rationale (or '-' for stdin). Use this for multi-line synthesis output that would otherwise need heredoc gymnastics."`
+	Version       string `help:"Specific version being attested (strongly recommended; inherited from URI @version when target carries one)." optional:""`
 }
 
 func (cmd *PostureSetCmd) Run(globals *Globals) error {
@@ -156,6 +161,19 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 			return fmt.Errorf("--version %q conflicts with target URI version %q; pass a single version or remove one of the two", cmd.Version, resolved.Version)
 		}
 	}
+
+	// Reconcile --rationale / --rationale-file. Exactly one must be
+	// non-empty; we preserve kong's "required" semantic in Run-level
+	// validation rather than via a kong tag so either flag form can
+	// satisfy it (§3.4, agent-facing-contract.md).
+	rationale, err := readFreeText("rationale", cmd.Rationale, cmd.RationaleFile)
+	if err != nil {
+		return err
+	}
+	if rationale == "" {
+		return fmt.Errorf("posture set: --rationale or --rationale-file is required (an empty rationale isn't a decision)")
+	}
+	cmd.Rationale = rationale
 
 	entity, err := ensureEntity(ctx, s, cmd.Target)
 	if err != nil {
