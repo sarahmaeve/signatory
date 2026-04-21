@@ -64,9 +64,28 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 
 // analystAgentRoles enumerates the reasoning-agent roles that must
 // be denied Bash, Write, and MCP read tools in
-// .claude/skills/analyze/SKILL.md. The synthesist role is covered
-// separately in M6e when its allowed-tools line tightens.
+// .claude/skills/analyze/SKILL.md.
 var analystAgentRoles = []string{"security-analyst", "provenance-analyst"}
+
+// synthesistAgentRole is checked separately because the synthesist's
+// tooling fence is strictly tighter than the analysts: post-M6e the
+// synthesist's entire input is the evidence block in the handoff
+// body, so Read/Glob/Grep are also forbidden (no filesystem reads,
+// no prior-analysis browsing). The only tools it needs are
+// WebFetch (to retrieve the handoff) and signatory_ingest_analysis
+// (to land its v1 JSON output).
+var synthesistAgentRole = "synthesist"
+
+// forbiddenSynthesistTools extends forbiddenAnalystTools with
+// Read/Glob/Grep. The synthesist does not read any file; its
+// entire input arrives inline in the handoff body via WebFetch.
+// Allowing Read would reopen the cross-pollination attack surface
+// (synthesist could Read filestore/analysis/*.md) that M6's D9
+// fence was designed to close.
+var forbiddenSynthesistTools = append(append([]string{},
+	forbiddenAnalystTools...),
+	"Read", "Glob", "Grep",
+)
 
 // forbiddenAnalystTools is the set of tool names that must NOT appear
 // on an analyst Agent block's allowed-tools line.
@@ -130,5 +149,37 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSynthesistAgent_AllowedToolsMinimized enforces the post-M6e
+// synthesist tool fence: Bash, Write, Read, Glob, Grep, and every
+// signatory_* read tool are forbidden. The synthesist's entire
+// input arrives via WebFetch in the handoff body, and its output
+// lands via signatory_ingest_analysis. Any other tool grant is a
+// regression to the pre-M6 "browse filestore, shell out to
+// show-conclusions" pattern that M6 was designed to retire.
+func TestSynthesistAgent_AllowedToolsMinimized(t *testing.T) {
+	root := findModuleRoot(t)
+	skillPath := filepath.Join(root, ".claude", "skills", "analyze", "SKILL.md")
+	data, err := os.ReadFile(skillPath) //nolint:gosec // G304: path is under module root, build-time fixture
+	require.NoError(t, err, "SKILL.md not found at %s", skillPath)
+	text := string(data)
+
+	re := regexp.MustCompile(
+		`(?s)Agent\(` + regexp.QuoteMeta(synthesistAgentRole) + `\).*?allowed-tools:\s*([^\n]+)`)
+	matches := re.FindAllStringSubmatch(text, -1)
+	require.NotEmpty(t, matches,
+		"no Agent(%s) block with allowed-tools: found in SKILL.md", synthesistAgentRole)
+
+	for i, match := range matches {
+		toolsLine := match[1]
+		for _, forbidden := range forbiddenSynthesistTools {
+			b := regexp.MustCompile(`\b` + regexp.QuoteMeta(forbidden) + `\b`)
+			assert.False(t, b.MatchString(toolsLine),
+				"Agent(synthesist) block #%d: allowed-tools must not grant %q "+
+					"(synthesist fence / inputs-are-the-handoff-body). "+
+					"Line: %s", i, forbidden, toolsLine)
+		}
 	}
 }

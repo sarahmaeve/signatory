@@ -275,8 +275,12 @@ surface it to the user so they can decide whether to re-dispatch
 
 ## Step 4 — Dispatch synthesist agent
 
-Generate the synthesis handoff, deposit it in the session, and
-dispatch a synthesist agent that retrieves it via WebFetch.
+Generate the synthesis handoff and deposit it in the session. Since
+M6c, the handoff body carries the full structured evidence — every
+analyst conclusion, positive absence, and observation for this
+target, ready to reason over. The synthesist does NOT query the
+store, read filestore, or run CLI commands; its entire input
+arrives via WebFetch.
 
 ```bash
 # --json is especially important here: the synthesis handoff
@@ -291,46 +295,102 @@ curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   --data-binary "{\"role\":\"synthesist\",\"msg_type\":\"handoff\",\"content\":$SYNTHESIS_HANDOFF_JSON}"
 ```
 
+If the handoff command fails with "no entity matches" or "no
+non-synthesis analyses to synthesize," Step 3 did not land any
+analyst output. Re-dispatch the missing analyst role(s) before
+continuing.
+
 ```
 Agent(synthesist):
   prompt: |
     You are a synthesist for signatory's trust analysis pipeline.
-    
+
     FIRST: Retrieve your full handoff instructions using WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=synthesist&type=handoff&format=raw
-    
-    Follow those instructions exactly.
-    
-    IMPORTANT: The posture tier goes at the TOP of your output,
-    before the reasoning — commit first, justify second. Read ALL
-    conclusions from the store before writing anything.
-    
-    Your output is a narrative trust assessment (markdown).
-    Write it to: filestore/analysis/{target-name}-synthesis.md
-  allowed-tools: Bash Read Write Glob Grep WebFetch
+
+    The handoff body contains every analyst conclusion you need
+    as an inlined JSON block. It is your entire source of truth;
+    you have no other tools to read prior analyses, and there is
+    no fallback path that would let you browse the store.
+
+    OUTPUT INSTRUCTIONS:
+    - Produce v1-schema JSON (see internal/exchange/types.go for
+      the shape). Your output is an AnalystOutput whose
+      attribution.analyst_id is "signatory-synthesis-v1" and whose
+      synthesis_supplement field carries proposed_posture,
+      reasoning, summary, concordance_strengths,
+      contradictions_detected, key_conclusion_refs, gaps,
+      action_items, and optional notes.
+    - Do NOT populate conclusions / positive_absences /
+      observations / methodology_trace. Those are Layer-2 analyst
+      artifacts; you are Layer-3. The validator rejects a
+      synthesis output that carries them.
+    - Land your output by calling signatory_ingest_analysis:
+        analyst_output:  <your v1 JSON object>
+        source:          "mcp:synthesist"
+    - Do NOT pass collected_from — the synthesist inherits the
+      caller-identity indexing from the analyses it is
+      synthesizing.
+    - The tool validates your payload. If validation fails, the
+      error names the first offending field; fix the JSON and
+      retry in the same turn. Do NOT drop fields to get past
+      validation.
+    - The tool's response includes the output_id of your synthesis
+      record. Report it in your final message so the orchestrator
+      can offer `signatory posture accept <output-id>` in Step 5.
+    - Do NOT write files. Do NOT read files. Do NOT run any
+      signatory commands (you have no Bash). The MCP tool is the
+      sole transport for your output.
+  allowed-tools: WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
-The synthesist DOES need Bash (to run `signatory show-conclusions`,
-`signatory show-analyses`, `signatory show-methodology`) and
-WebFetch (to retrieve its handoff from the pipeline service).
-
-The synthesist's output is the human-readable assessment that makes
-the pipeline's data meaningful. Present it to the user as the final
-result.
+The synthesist's output is a v1-schema synthesis record; the
+human-readable markdown rendering is produced on demand by
+`signatory show-synthesis <output-id>` against the stored record.
+The store, not the filestore, is the canonical copy.
 
 ## Step 5 — Record posture (with user confirmation)
 
-**The decision is the user's.** Present the recommendation; do not
-record it without confirmation.
+**The decision is the user's.** Present the synthesist's
+`proposed_posture` (tier + rationale_summary) and wait for explicit
+approval before recording anything.
 
-If the user approves a posture:
+Primary path — accept the synthesist's proposal verbatim:
 
 ```bash
-signatory posture set --tier "$TIER" --rationale "$RATIONALE" "$CANONICAL_URI"
+# Capture the synthesis output_id from Step 4's ingest response
+# (the agent's transcript reports it).
+signatory posture accept "$SYNTHESIS_OUTPUT_ID" --yes
+```
+
+With overrides, when the user disagrees with a specific field but
+wants to keep the rest:
+
+```bash
+# Example: user disagrees with the synthesist's tier, keeping
+# everything else from the proposal. The override is recorded in
+# the audit detail under proposed_tier so the deviation is
+# auditable.
+signatory posture accept "$SYNTHESIS_OUTPUT_ID" \
+  --tier rejected --yes
+
+# Or override the rationale via a file.
+signatory posture accept "$SYNTHESIS_OUTPUT_ID" \
+  --rationale-file /tmp/user-rationale.md --yes
+```
+
+Fallback — if the user wants to record a posture that diverges
+from the proposal in multiple fields at once, or wants a fresh
+rationale unrelated to the synthesist's framing:
+
+```bash
+signatory posture set --tier "$TIER" \
+  --rationale-file /tmp/user-rationale.md "$CANONICAL_URI"
 ```
 
 "Analysis only — no posture recorded" is a valid terminal state for
-non-dependency targets.
+non-dependency targets. Preview with `--dry-run` on either verb
+before the real write.
 
 ## Important constraints
 
