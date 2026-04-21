@@ -19,6 +19,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
+	"github.com/sarahmaeve/signatory/internal/synthesis"
 )
 
 // HandoffCmd renders a handoff prompt by loading a template from the
@@ -236,6 +237,21 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		return fmt.Errorf("provenance role requires --ecosystem (one of: pypi, npm, crates, go)")
 	}
 
+	// Synthesist role needs the evidence rollup assembled from the
+	// store — the synthesis-v1 template embeds it as the body of a
+	// fenced JSON block under {EVIDENCE_JSON}. This is the M6c wiring
+	// that turns the synthesist from a store-browsing agent into a
+	// self-contained one (agent-facing-contract §3.5). Other roles
+	// don't need store access; leaving the map untouched keeps the
+	// security/provenance handoff paths offline.
+	if cmd.Role == "synthesist" {
+		evidenceJSON, err := cmd.assembleSynthesisEvidence(context.Background(), globals)
+		if err != nil {
+			return err
+		}
+		subs["EVIDENCE_JSON"] = evidenceJSON
+	}
+
 	rendered, unfilled := config.RenderTemplate(raw, subs)
 
 	// --json wraps the rendered bytes as a JSON string literal
@@ -268,6 +284,70 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		}
 	}
 	return nil
+}
+
+// assembleSynthesisEvidence opens the store, resolves cmd.Target to
+// its canonical URI, and composes the structured evidence rollup
+// that the synthesist-v1 template embeds under {EVIDENCE_JSON}.
+// Returns the pretty-printed JSON body as a string for direct
+// substitution into the template.
+//
+// Failure modes:
+//
+//   - Target doesn't parse as a recognized form → usage error, no
+//     store read.
+//   - Target has no entity in the store or zero non-synthesis
+//     analyses → refuse to emit a synthesist handoff. Dispatching a
+//     synthesist against empty evidence produces either a no-op or a
+//     fabricated synthesis; catching the empty case here fails fast
+//     with a message that tells the operator the right next step
+//     (run /analyze on the target first).
+//
+// Pretty-prints with two-space indent. The handoff body travels via
+// WebFetch to the synthesist agent; compact JSON saves bytes but
+// hurts token-level attention across a multi-kilobyte evidence
+// block.
+func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *Globals) (string, error) {
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return "", fmt.Errorf("open store for synthesis evidence: %w", err)
+	}
+	defer s.Close() //nolint:errcheck // store close on function exit; errors not actionable
+
+	resolved, err := profile.ResolveTarget(cmd.Target)
+	if err != nil {
+		return "", NewUsageError(fmt.Errorf(
+			"synthesist handoff: cannot resolve target %q: %w",
+			cmd.Target, err))
+	}
+
+	assembler := synthesis.New(s)
+	evidence, err := assembler.Assemble(ctx, resolved.CanonicalURI)
+	if err != nil {
+		if errors.Is(err, synthesis.ErrEntityNotFound) {
+			return "", fmt.Errorf(
+				"synthesist handoff: no entity matches %q in the store. "+
+					"Run /analyze on this target first so the security and "+
+					"provenance analysts can populate the evidence the "+
+					"synthesist will consume",
+				resolved.CanonicalURI)
+		}
+		return "", fmt.Errorf("assemble synthesis evidence: %w", err)
+	}
+
+	if len(evidence.Analyses) == 0 {
+		return "", fmt.Errorf(
+			"synthesist handoff: entity %q has no non-synthesis analyses to synthesize. "+
+				"Run /analyze on this target so the security and provenance "+
+				"analysts deposit conclusions first",
+			resolved.CanonicalURI)
+	}
+
+	raw, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal synthesis evidence: %w", err)
+	}
+	return string(raw), nil
 }
 
 // applyNetworkPrecheck resolves the target to a GitHub owner/name,

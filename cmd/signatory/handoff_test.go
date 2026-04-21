@@ -13,6 +13,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
+	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1909,4 +1910,159 @@ func TestCaptureStream_DrainGoroutineTerminatesOnClose(t *testing.T) {
 		// Intentionally write nothing.
 	})
 	assert.Equal(t, "", result, "drain goroutine must return empty string when fn writes nothing")
+}
+
+// --- Synthesist handoff tests (M6c) ---
+
+// synthesisFixtureTarget seeds a temp store with one analyst output
+// for the given canonical URI and returns a Globals pointed at that
+// store. Used by the synthesist handoff tests.
+func synthesisFixtureTarget(t *testing.T, canonicalURI string) *Globals {
+	t.Helper()
+	g := newTestGlobals(t)
+	s, err := g.OpenStore(t.Context())
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+
+	lineStart := 10
+	_, err = s.IngestAnalystOutput(t.Context(), &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "external-sec-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: canonicalURI,
+		Conclusions: []exchange.Conclusion{
+			{
+				ID:        "F001",
+				Verdict:   "synthesist-fixture finding",
+				Rationale: "synthesist-fixture rationale",
+				Severity:  exchange.Severity{Default: exchange.SeverityMedium},
+				Category:  "injection",
+				Citations: []exchange.Citation{
+					{Path: "src/main.go", LineStart: &lineStart},
+				},
+			},
+		},
+	}, "synthesist-fixture-source")
+	require.NoError(t, err)
+	return g
+}
+
+// TestHandoff_Synthesist_EmbedsEvidenceJSON covers the M6c contract:
+// when role=synthesist, the rendered handoff must contain the
+// evidence block substituted in place of {EVIDENCE_JSON} and carry
+// the actual analyst data the synthesist will reason over.
+func TestHandoff_Synthesist_EmbedsEvidenceJSON(t *testing.T) {
+	const canonicalURI = "repo:github/example/synthesist-embed"
+	g := synthesisFixtureTarget(t, canonicalURI)
+
+	outPath := filepath.Join(t.TempDir(), "synthesis-handoff.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: canonicalURI,
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	// The placeholder must not leak through.
+	assert.NotContains(t, rendered, "{EVIDENCE_JSON}",
+		"{EVIDENCE_JSON} placeholder must be substituted for synthesist role")
+
+	// Evidence content must appear: analyst id, conclusion verdict,
+	// canonical URI.
+	assert.Contains(t, rendered, canonicalURI,
+		"rendered evidence must cite the target canonical URI")
+	assert.Contains(t, rendered, "external-sec-v1",
+		"rendered evidence must surface the contributing analyst role")
+	assert.Contains(t, rendered, "synthesist-fixture finding",
+		"rendered evidence must carry the conclusion verdict verbatim")
+	assert.Contains(t, rendered, "F001",
+		"rendered evidence must carry the conclusion local id for F-ID citation")
+
+	// The independence rule must survive the render (the template
+	// fence persists; not consumed by substitution).
+	assert.Contains(t, rendered,
+		"Previous reports do not corroborate new conclusions",
+		"independence rule must be present in the rendered synthesist handoff")
+}
+
+// TestHandoff_Synthesist_FailsWhenNoAnalyses asserts the CLI refuses
+// to emit a synthesist handoff when the target has no ingested
+// non-synthesis analyses. Dispatching a synthesist against empty
+// evidence would produce a no-op or a fabricated synthesis — both
+// are failure modes the CLI catches here rather than later.
+func TestHandoff_Synthesist_FailsWhenNoAnalyses(t *testing.T) {
+	g := newTestGlobals(t) // empty store — no analyses ingested
+
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: "repo:github/example/never-analyzed",
+		Output: filepath.Join(t.TempDir(), "synthesis.md"),
+		Quiet:  true,
+	}
+	err := cmd.Run(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no entity matches",
+		"error must explain that the target hasn't been analyzed yet")
+}
+
+// TestHandoff_Synthesist_ExcludesPriorSyntheses ensures the D9
+// cross-pollination prohibition holds end-to-end through the CLI:
+// even when a prior synthesis exists for the same target, the
+// rendered handoff must not surface it in the embedded evidence.
+// The rendered handoff is the synthesist's ENTIRE input — if a
+// prior synthesis leaked through, the next synthesist would anchor
+// on it. This test proves the M6b filter survives the CLI round-trip.
+func TestHandoff_Synthesist_ExcludesPriorSyntheses(t *testing.T) {
+	const canonicalURI = "repo:github/example/already-synthesized"
+	g := synthesisFixtureTarget(t, canonicalURI)
+
+	// Add a prior synthesis with a very distinctive tier/reasoning
+	// marker that we'll assert-absent from the rendered handoff.
+	s, err := g.OpenStore(t.Context())
+	require.NoError(t, err)
+	_, err = s.IngestAnalystOutput(t.Context(), &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T01:00:00Z",
+		},
+		Target: canonicalURI,
+		SynthesisSupplement: &exchange.SynthesisSupplement{
+			ProposedPosture: exchange.ProposedPosture{
+				Tier:             exchange.ProposedTierVettedFrozen,
+				RationaleSummary: "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER",
+			},
+			Reasoning: "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER body",
+			Summary:   "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER summary",
+		},
+	}, "prior-synthesis-source")
+	require.NoError(t, err)
+	s.Close() //nolint:errcheck // test cleanup
+
+	outPath := filepath.Join(t.TempDir(), "synthesis-next.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: canonicalURI,
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	assert.NotContains(t, rendered, "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER",
+		"D9 regression: prior synthesis content leaked into synthesist handoff. "+
+			"The evidence assembler must filter signatory-synthesis-* analyst IDs.")
+	// But the real analyst output must still be there.
+	assert.Contains(t, rendered, "external-sec-v1",
+		"legitimate analyst output must still render in the evidence")
 }

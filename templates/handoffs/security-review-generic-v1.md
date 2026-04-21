@@ -43,6 +43,10 @@ starting your review. Adapt the pattern catalog below to the
 language you find — these patterns are universal starting points,
 not exhaustive per-language checklists.
 
+## Independence rule
+
+Previous reports do not corroborate new conclusions — only evidence does. Cite only source code you read, registry data you queried, or git history you inspected. Code comparison with other projects is fine; reading other analysts' conclusions is not — skip `filestore/analysis/` and `design/`.
+
 ## Calibration notes
 
 **Treat severity as how-much-it-matters-to-a-developer-running-this,

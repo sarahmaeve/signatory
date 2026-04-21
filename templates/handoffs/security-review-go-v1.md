@@ -38,6 +38,10 @@ review; it is structured data in the signatory v1 schema.
 - **Role**: {TARGET_ROLE}
 - **Notes from the user**: {INTAKE_QUESTION}
 
+## Independence rule
+
+Previous reports do not corroborate new conclusions — only evidence does. Cite only source code you read, registry data you queried, or git history you inspected. Code comparison with other projects is fine; reading other analysts' conclusions is not — skip `filestore/analysis/` and `design/`.
+
 ## Calibration notes
 
 **Treat severity as how-much-it-matters-to-a-developer-running-this,
