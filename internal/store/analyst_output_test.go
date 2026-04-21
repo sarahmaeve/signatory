@@ -410,6 +410,215 @@ func TestIngest_AppendOnlyTriggers_FireOnUpdate(t *testing.T) {
 	assert.Contains(t, err.Error(), "append-only")
 }
 
+// synthesisTestInput returns a minimally-valid synthesist AnalystOutput
+// for M6a round-trip tests. Keeping this inline (rather than in a
+// fixture file) means the test and its expected shape live together.
+func synthesisTestInput() *exchange.AnalystOutput {
+	return &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/example",
+		SynthesisSupplement: &exchange.SynthesisSupplement{
+			ProposedPosture: exchange.ProposedPosture{
+				Tier:             exchange.ProposedTierTrustedForNow,
+				RationaleSummary: "minimal rationale for round-trip test",
+			},
+			Reasoning: "minimal reasoning paragraph",
+			Summary:   "minimal summary",
+		},
+	}
+}
+
+// TestIngest_SynthesisSupplement_RoundTrip is the M6a integration test:
+// a synthesist AnalystOutput with a supplement round-trips through
+// IngestAnalystOutput → GetAnalystOutput unchanged. Drives migration v8
+// (new columns), the supplement-aware ingest write, and the
+// supplement-aware Get read.
+func TestIngest_SynthesisSupplement_RoundTrip(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	input := synthesisTestInput()
+	result, err := s.IngestAnalystOutput(ctx, input, "synthesis-test")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.OutputID)
+
+	loaded, err := s.GetAnalystOutput(ctx, result.OutputID)
+	require.NoError(t, err)
+
+	require.NotNil(t, loaded.SynthesisSupplement,
+		"supplement must round-trip through storage")
+	assert.Equal(t, input.SynthesisSupplement.ProposedPosture.Tier,
+		loaded.SynthesisSupplement.ProposedPosture.Tier)
+	assert.Equal(t, input.SynthesisSupplement.ProposedPosture.RationaleSummary,
+		loaded.SynthesisSupplement.ProposedPosture.RationaleSummary)
+	assert.Equal(t, input.SynthesisSupplement.Reasoning,
+		loaded.SynthesisSupplement.Reasoning)
+	assert.Equal(t, input.SynthesisSupplement.Summary,
+		loaded.SynthesisSupplement.Summary)
+}
+
+// TestIngest_SynthesisSupplement_FullShapeRoundTrip exercises every
+// field on the SynthesisSupplement struct (concordance, contradictions,
+// conclusion refs, gaps, action_items, notes, version_scope) through
+// the JSON-column round-trip. Deep equality verifies that the JSON
+// serialization + deserialization doesn't lose or reshape any field.
+func TestIngest_SynthesisSupplement_FullShapeRoundTrip(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	input := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/full-shape-example",
+		SynthesisSupplement: &exchange.SynthesisSupplement{
+			ProposedPosture: exchange.ProposedPosture{
+				Tier:             exchange.ProposedTierVettedFrozen,
+				VersionScope:     "2.2.4",
+				RationaleSummary: "full-shape rationale for round-trip coverage",
+			},
+			Reasoning: "multi-paragraph reasoning body in markdown",
+			Summary:   "two-sentence summary of the full-shape fixture",
+			ConcordanceStrengths: []exchange.ConcordanceEntry{
+				{
+					Topic:         "minimal supply-chain surface",
+					Description:   "both analysts arrived at zero-dep conclusion independently",
+					AnalystRefs:   []string{"signatory-provenance", "external-sec-v1"},
+					ConclusionIDs: []string{"F005", "O001"},
+					Confidence:    "HIGH",
+				},
+			},
+			ContradictionsDetected: []exchange.ContradictionEntry{
+				{
+					Topic:                "release cadence interpretation",
+					Description:          "provenance calls it healthy; security calls it slow",
+					SupportingAnalystA:   "signatory-provenance",
+					SupportingAnalystB:   "external-sec-v1",
+					ConclusionIDsA:       []string{"F003"},
+					ConclusionIDsB:       []string{"F011"},
+					ResolutionPreference: "provenance's read; cadence is context-dependent",
+				},
+			},
+			KeyConclusionRefs: []exchange.ConclusionRef{
+				{
+					OutputID:          "out-uuid-prov",
+					ConclusionLocalID: "F002",
+					Weight:            1,
+					ForgeryResistance: "VERY HIGH",
+					RelevanceNote:     "publication anchor is the load-bearing signal",
+				},
+			},
+			Gaps:        []string{"no OSV cross-check", "transitives not audited"},
+			ActionItems: []string{"pin in go.sum", "validate CreateFromVCS inputs"},
+			Notes:       "confidence slightly shaded by mid-analysis upstream update",
+		},
+	}
+
+	result, err := s.IngestAnalystOutput(ctx, input, "full-shape-test")
+	require.NoError(t, err)
+
+	loaded, err := s.GetAnalystOutput(ctx, result.OutputID)
+	require.NoError(t, err)
+
+	require.NotNil(t, loaded.SynthesisSupplement)
+	// Deep equality across the whole supplement. If this fails, the
+	// diff pinpoints which field didn't round-trip.
+	assert.Equal(t, input.SynthesisSupplement, loaded.SynthesisSupplement)
+}
+
+// TestGetAnalystOutput_NonSynthesist_NoSupplement confirms that
+// loading a normal analyst output (security/provenance/etc.) returns
+// a nil SynthesisSupplement. Belt-and-suspenders against a future
+// bug where the Get path incorrectly materializes an empty supplement
+// for non-synthesist rows.
+func TestGetAnalystOutput_NonSynthesist_NoSupplement(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := loadFixture(t, "atuin-schema-trial.json") // security-analyst fixture
+	result, err := s.IngestAnalystOutput(ctx, out, "non-synthesist-test")
+	require.NoError(t, err)
+
+	loaded, err := s.GetAnalystOutput(ctx, result.OutputID)
+	require.NoError(t, err)
+
+	assert.Nil(t, loaded.SynthesisSupplement,
+		"non-synthesist output must come back from Get with nil supplement")
+}
+
+// TestGetSynthesisProposal_HappyPath loads a synthesist output's
+// proposed posture via the narrow GetSynthesisProposal helper — the
+// read path `signatory posture accept` (M6d) will use. The helper
+// reads the denormalized columns directly, avoiding the full Get
+// reconstruction cost when the caller only needs the proposal.
+func TestGetSynthesisProposal_HappyPath(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	input := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/accept-target",
+		SynthesisSupplement: &exchange.SynthesisSupplement{
+			ProposedPosture: exchange.ProposedPosture{
+				Tier:             exchange.ProposedTierVettedFrozen,
+				VersionScope:     "1.2.3",
+				RationaleSummary: "rationale the accept verb will copy verbatim",
+			},
+			Reasoning: "r",
+			Summary:   "s",
+		},
+	}
+	result, err := s.IngestAnalystOutput(ctx, input, "proposal-test")
+	require.NoError(t, err)
+
+	proposal, err := s.GetSynthesisProposal(ctx, result.OutputID)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	assert.Equal(t, exchange.ProposedTierVettedFrozen, proposal.Tier)
+	assert.Equal(t, "1.2.3", proposal.VersionScope)
+	assert.Equal(t, "rationale the accept verb will copy verbatim", proposal.RationaleSummary)
+}
+
+// TestGetSynthesisProposal_NonSynthesist_NotFound asserts the
+// narrow helper refuses to return a proposal for a non-synthesist
+// row. A non-synthesist row has proposed_tier NULL, so the helper
+// returns ErrNotFound — the accept verb uses this to error out
+// early ("that output isn't a synthesis").
+func TestGetSynthesisProposal_NonSynthesist_NotFound(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := loadFixture(t, "atuin-schema-trial.json")
+	result, err := s.IngestAnalystOutput(ctx, out, "non-synthesis-proposal-test")
+	require.NoError(t, err)
+
+	_, err = s.GetSynthesisProposal(ctx, result.OutputID)
+	assert.ErrorIs(t, err, ErrNotFound,
+		"non-synthesist output must not yield a proposal; caller should get ErrNotFound")
+}
+
+// TestGetSynthesisProposal_UnknownOutputID_NotFound: asking about an
+// output that doesn't exist at all returns ErrNotFound, same as a
+// non-synthesist row. The accept verb treats both as "no proposal
+// here" and surfaces a user-facing "no such synthesis" error.
+func TestGetSynthesisProposal_UnknownOutputID_NotFound(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	_, err := s.GetSynthesisProposal(ctx, "00000000-0000-0000-0000-000000000000")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
 // --- helpers ---
 
 func contentHash(t *testing.T, out *exchange.AnalystOutput) string {

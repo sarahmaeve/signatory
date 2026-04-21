@@ -201,3 +201,32 @@ const (
 	PlatformWindows = "windows"
 	PlatformAny     = "any"
 )
+
+// Proposed-posture tier vocabulary used by
+// SynthesisSupplement.ProposedPosture. Mirrors the canonical
+// profile.PostureTier constants — the exchange package cannot
+// import profile without a cycle, so we maintain the list here and
+// rely on a cross-package test to catch drift (see
+// internal/profile/posture_test.go). Any new tier added in profile
+// should be added here in the same PR.
+const (
+	ProposedTierVettedFrozen      = "vetted-frozen"
+	ProposedTierTrustedForNow     = "trusted-for-now"
+	ProposedTierUnexamined        = "unexamined"
+	ProposedTierUnknownProvenance = "unknown-provenance"
+	ProposedTierRejected          = "rejected"
+)
+
+// ValidProposedPostureTier reports whether t is a recognized tier
+// value for SynthesisSupplement.ProposedPosture.Tier. Empty is
+// rejected — unlike some enum fields here, tier is a required input
+// to a posture decision.
+func ValidProposedPostureTier(t string) bool {
+	switch t {
+	case ProposedTierVettedFrozen, ProposedTierTrustedForNow,
+		ProposedTierUnexamined, ProposedTierUnknownProvenance,
+		ProposedTierRejected:
+		return true
+	}
+	return false
+}

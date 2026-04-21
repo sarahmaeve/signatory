@@ -401,22 +401,58 @@ func insertAnalystOutputRow(
 	if collectedFromEntityID != "" {
 		collectedFrom = collectedFromEntityID
 	}
-	_, err := tx.ExecContext(ctx,
+
+	// M6a: if the output carries a SynthesisSupplement, serialize
+	// the full supplement to JSON and denormalize the proposed
+	// tier + version_scope into their own columns for cheap query
+	// access. Validator has already enforced that supplement is
+	// present iff analyst_id is a synthesis role.
+	supplementJSON, proposedTier, proposedVersionScope, err := synthesisSupplementColumns(out.SynthesisSupplement)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO analyst_outputs
 		 (id, entity_id, analyst_id, model, prompt_version, invoked_at,
 		  ingested_at, round, target_commit, round_notes, source_path,
-		  content_hash, collected_from_entity_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  content_hash, collected_from_entity_id,
+		  synthesis_supplement_json, proposed_tier, proposed_version_scope)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		outputID, entityID,
 		out.Attribution.AnalystID, out.Attribution.Model,
 		out.Attribution.PromptVersion, out.Attribution.InvokedAt,
 		ingestedAt, out.Attribution.Round,
 		out.TargetCommit, out.RoundNotes, sourcePath, contentHash,
-		collectedFrom)
+		collectedFrom,
+		supplementJSON, proposedTier, proposedVersionScope)
 	if err != nil {
 		return fmt.Errorf("insert analyst_outputs: %w", err)
 	}
 	return nil
+}
+
+// synthesisSupplementColumns serializes a SynthesisSupplement into the
+// three storage columns: the opaque JSON blob plus the two
+// denormalized fields. nil supplement → three NULL values (the common
+// case for non-synthesist outputs).
+func synthesisSupplementColumns(supplement *exchange.SynthesisSupplement) (
+	supplementJSON, proposedTier, proposedVersionScope interface{},
+	err error,
+) {
+	if supplement == nil {
+		return nil, nil, nil, nil
+	}
+	raw, err := json.Marshal(supplement)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal synthesis supplement: %w", err)
+	}
+	supplementJSON = string(raw)
+	proposedTier = supplement.ProposedPosture.Tier
+	if supplement.ProposedPosture.VersionScope != "" {
+		proposedVersionScope = supplement.ProposedPosture.VersionScope
+	}
+	return supplementJSON, proposedTier, proposedVersionScope, nil
 }
 
 func insertConclusions(ctx context.Context, tx *sql.Tx, outputID string, conclusions []exchange.Conclusion) error {

@@ -251,7 +251,18 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v7 → v6. Drops the collected_from_entity_id
+	// First rollback: v8 → v7. Drops the M6a synthesis-supplement
+	// columns (synthesis_supplement_json, proposed_tier,
+	// proposed_version_scope) from analyst_outputs. All three were
+	// NULL for our seed data, so nothing meaningful is lost.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 7, version)
+
+	// Second rollback: v7 → v6. Drops the collected_from_entity_id
 	// column from analyst_outputs. Pre-M2 data unaffected (it had
 	// the column set to NULL).
 	err = migrateDown(t.Context(), db, path)
@@ -521,7 +532,19 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v6 (drops collected_from_entity_id from analyst_outputs). ---
+	// --- Down: vN → v7 (drops M6a synthesis-supplement columns). ---
+	// The v8 migration added synthesis_supplement_json, proposed_tier,
+	// and proposed_version_scope as nullable columns on
+	// analyst_outputs; rolling back drops them. V8 is M6a; pre-M6a
+	// data had all three NULL.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 7, version)
+
+	// --- Down: v7 → v6 (drops collected_from_entity_id from analyst_outputs). ---
 	// The v7 migration added one nullable column; rolling back drops
 	// it. V7 is M2 identity-indexing; pre-M2 data had the column set
 	// to NULL (untouched by backfill per D2).

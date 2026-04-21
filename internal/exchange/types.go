@@ -18,17 +18,144 @@ package exchange
 // Produced by signatory://analyze/provenance and ://analyze/security;
 // consumed by signatory://analyze/synthesis and by the CLI's
 // rendering / persistence layers.
+//
+// SynthesisSupplement carries synthesis-specific payload (narrative
+// reasoning, concordance/contradiction analysis across prior analysts,
+// a proposed posture) that has no natural home in the conclusion /
+// observation / absence model. Gated by attribution.analyst_id:
+// outputs whose analyst_id starts with "signatory-synthesis" must
+// carry a supplement; other roles must not. See
+// design/m6-synthesis-contract.md.
 type AnalystOutput struct {
-	Attribution      AgentAttribution    `json:"attribution" yaml:"attribution"`
-	Target           string              `json:"target" yaml:"target"`
-	TargetCommit     string              `json:"target_commit,omitempty" yaml:"target_commit,omitempty"`
-	Conclusions      []Conclusion        `json:"conclusions" yaml:"conclusions"`
-	PositiveAbsences []PositiveAbsence   `json:"positive_absences,omitempty" yaml:"positive_absences,omitempty"`
-	Observations     []Observation       `json:"observations,omitempty" yaml:"observations,omitempty"`
-	MethodologyTrace *MethodologyCatalog `json:"methodology_trace,omitempty" yaml:"methodology_trace,omitempty"`
-	Supersedes       []Supersession      `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
-	ReframesFrom     []string            `json:"reframes_from,omitempty" yaml:"reframes_from,omitempty"`
-	RoundNotes       string              `json:"round_notes,omitempty" yaml:"round_notes,omitempty"`
+	Attribution         AgentAttribution     `json:"attribution" yaml:"attribution"`
+	Target              string               `json:"target" yaml:"target"`
+	TargetCommit        string               `json:"target_commit,omitempty" yaml:"target_commit,omitempty"`
+	Conclusions         []Conclusion         `json:"conclusions" yaml:"conclusions"`
+	PositiveAbsences    []PositiveAbsence    `json:"positive_absences,omitempty" yaml:"positive_absences,omitempty"`
+	Observations        []Observation        `json:"observations,omitempty" yaml:"observations,omitempty"`
+	MethodologyTrace    *MethodologyCatalog  `json:"methodology_trace,omitempty" yaml:"methodology_trace,omitempty"`
+	Supersedes          []Supersession       `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
+	ReframesFrom        []string             `json:"reframes_from,omitempty" yaml:"reframes_from,omitempty"`
+	RoundNotes          string               `json:"round_notes,omitempty" yaml:"round_notes,omitempty"`
+	SynthesisSupplement *SynthesisSupplement `json:"synthesis_supplement,omitempty" yaml:"synthesis_supplement,omitempty"`
+}
+
+// SynthesisSupplement carries the Layer-3 synthesis payload: the
+// narrative that justifies the proposed tier, the cross-analyst
+// agreement/contradiction analysis, the weighted conclusion
+// references that make the synthesis auditable back to specific
+// analyst findings, and the proposed posture itself. See
+// design/m6-synthesis-contract.md §3 for the target shape.
+type SynthesisSupplement struct {
+	// ProposedPosture is the synthesist's tier recommendation.
+	// Required when the supplement is present; `signatory posture
+	// accept <output-id>` promotes this into a real Posture row.
+	ProposedPosture ProposedPosture `json:"proposed_posture" yaml:"proposed_posture"`
+
+	// Reasoning justifies the proposed tier, traced to specific
+	// conclusion IDs. Markdown-bodied; required when supplement
+	// present.
+	Reasoning string `json:"reasoning" yaml:"reasoning"`
+
+	// Summary is the 2-3 sentence overview compressed from the
+	// reasoning. Markdown; required when supplement present.
+	Summary string `json:"summary" yaml:"summary"`
+
+	// ConcordanceStrengths lists places where two or more analysts
+	// independently reached compatible conclusions. High-confidence
+	// evidence class — what the synthesist's calibration notes name
+	// as "Agreement" in the agreement/contradiction/silence framework.
+	ConcordanceStrengths []ConcordanceEntry `json:"concordance_strengths,omitempty" yaml:"concordance_strengths,omitempty"`
+
+	// ContradictionsDetected lists places where two analysts disagree.
+	// The synthesist must state a ResolutionPreference per entry —
+	// silent unresolved contradictions are a failure mode of Layer 3
+	// (leaves the reader to pick a side unaided).
+	ContradictionsDetected []ContradictionEntry `json:"contradictions_detected,omitempty" yaml:"contradictions_detected,omitempty"`
+
+	// KeyConclusionRefs is the weighted, ranked citation list: the
+	// synthesist's pointers back to specific analyst conclusions, with
+	// the relative weight each carried in the tier decision. Makes
+	// the synthesis auditable against the source findings without
+	// duplicating their bodies.
+	KeyConclusionRefs []ConclusionRef `json:"key_conclusion_refs,omitempty" yaml:"key_conclusion_refs,omitempty"`
+
+	// Gaps names what neither analyst could determine and what a
+	// future round would need to resolve it. Distinct from
+	// ActionItems — gaps are questions; action items are answers.
+	Gaps []string `json:"gaps,omitempty" yaml:"gaps,omitempty"`
+
+	// ActionItems is the concrete next steps for the consumer:
+	// pinning, filing upstream patches, auditing a specific
+	// transitive, re-running under a new round question, etc.
+	ActionItems []string `json:"action_items,omitempty" yaml:"action_items,omitempty"`
+
+	// Notes is the synthesist's escape hatch for commentary that
+	// doesn't fit Reasoning, Gaps, or ActionItems — calibration
+	// remarks, meta-observations about the synthesis process, hedges
+	// worth recording without inflating Reasoning. Parallels
+	// AnalystOutput.RoundNotes but at synthesis-body scope. Optional.
+	Notes string `json:"notes,omitempty" yaml:"notes,omitempty"`
+}
+
+// ConcordanceEntry records one point of agreement across analysts.
+// Populated into SynthesisSupplement.ConcordanceStrengths. The
+// ConclusionIDs link back to the specific analyst findings that
+// underpin the agreement.
+type ConcordanceEntry struct {
+	Topic         string   `json:"topic" yaml:"topic"`
+	Description   string   `json:"description" yaml:"description"`
+	AnalystRefs   []string `json:"analyst_refs" yaml:"analyst_refs"`
+	ConclusionIDs []string `json:"conclusion_ids,omitempty" yaml:"conclusion_ids,omitempty"`
+	Confidence    string   `json:"confidence" yaml:"confidence"` // "HIGH"/"MEDIUM"/"LOW"
+}
+
+// ContradictionEntry records one disagreement across analysts. The
+// ResolutionPreference field expresses the synthesist's call on which
+// side carried the day, and why — the synthesist's job is to take the
+// call, not defer.
+type ContradictionEntry struct {
+	Topic                string   `json:"topic" yaml:"topic"`
+	Description          string   `json:"description" yaml:"description"`
+	SupportingAnalystA   string   `json:"supporting_analyst_a" yaml:"supporting_analyst_a"`
+	SupportingAnalystB   string   `json:"supporting_analyst_b" yaml:"supporting_analyst_b"`
+	ConclusionIDsA       []string `json:"conclusion_ids_a,omitempty" yaml:"conclusion_ids_a,omitempty"`
+	ConclusionIDsB       []string `json:"conclusion_ids_b,omitempty" yaml:"conclusion_ids_b,omitempty"`
+	ResolutionPreference string   `json:"resolution_preference,omitempty" yaml:"resolution_preference,omitempty"`
+}
+
+// ConclusionRef is a weighted pointer to an analyst conclusion. Lives
+// in SynthesisSupplement.KeyConclusionRefs. Weight encodes rank within
+// the synthesis's own prioritization: Weight=1 is most-load-bearing
+// on the tier decision.
+type ConclusionRef struct {
+	OutputID          string `json:"output_id" yaml:"output_id"`                     // analyst_outputs.id
+	ConclusionLocalID string `json:"conclusion_local_id" yaml:"conclusion_local_id"` // F001 etc.
+	Weight            int    `json:"weight" yaml:"weight"`
+	ForgeryResistance string `json:"forgery_resistance" yaml:"forgery_resistance"` // VERY HIGH/HIGH/MEDIUM/LOW
+	RelevanceNote     string `json:"relevance_note,omitempty" yaml:"relevance_note,omitempty"`
+}
+
+// ProposedPosture is the synthesist's tier recommendation. Lives on
+// SynthesisSupplement. The `signatory posture accept` verb reads
+// Tier + VersionScope + RationaleSummary to write a real Posture row.
+type ProposedPosture struct {
+	// Tier matches profile.PostureTier string values (vetted-frozen,
+	// trusted-for-now, unexamined, unknown-provenance, rejected).
+	// The exchange package does not import profile to avoid a cycle;
+	// validation is performed against the canonical vocabulary
+	// maintained in enums.go.
+	Tier string `json:"tier" yaml:"tier"`
+
+	// VersionScope is the pkg @version this proposal applies to, or
+	// empty for unversioned. Copied verbatim into the posture row's
+	// version field on accept. Optional — an empty value is a valid
+	// proposal (unversioned posture).
+	VersionScope string `json:"version_scope,omitempty" yaml:"version_scope,omitempty"`
+
+	// RationaleSummary is the one-paragraph distillation the accept
+	// verb copies into the posture row's rationale. Required.
+	RationaleSummary string `json:"rationale_summary" yaml:"rationale_summary"`
 }
 
 // AgentAttribution identifies which agent produced an output, on which

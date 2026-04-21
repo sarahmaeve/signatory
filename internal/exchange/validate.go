@@ -3,7 +3,23 @@ package exchange
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// synthesistAnalystIDPrefix gates the SynthesisSupplement field.
+// Only outputs whose attribution.analyst_id starts with this prefix
+// may carry a supplement (and must carry one). Deliberately generous
+// — matches "signatory-synthesis-v1", "signatory-synthesis-v2",
+// "signatory-synthesis-experimental" etc. without the validator
+// having to know the current active version. See
+// design/m6-synthesis-contract.md §4.
+const synthesistAnalystIDPrefix = "signatory-synthesis"
+
+// isSynthesistRole returns true when analystID identifies a synthesist
+// role by prefix.
+func isSynthesistRole(analystID string) bool {
+	return strings.HasPrefix(analystID, synthesistAnalystIDPrefix)
+}
 
 // Validate checks structural invariants on an AnalystOutput and
 // returns a joined error describing every problem it finds. Nil means
@@ -65,7 +81,54 @@ func (o *AnalystOutput) Validate() error {
 		errs = append(errs, s.validate(fmt.Sprintf("supersedes[%d]", i))...)
 	}
 
+	// Trust-boundary guard: SynthesisSupplement presence is gated to
+	// the synthesist role in both directions. Non-synthesist roles
+	// may not carry a supplement (that would be Layer-2 proposing a
+	// Layer-3 decision); synthesist roles must carry one (a synthesis
+	// without a supplement is an empty row). See
+	// design/m6-synthesis-contract.md §4.
+	switch {
+	case o.SynthesisSupplement != nil && !isSynthesistRole(o.Attribution.AnalystID):
+		errs = append(errs, fmt.Errorf(
+			"synthesis_supplement only allowed for synthesist role; got analyst_id %q",
+			o.Attribution.AnalystID))
+	case o.SynthesisSupplement == nil && isSynthesistRole(o.Attribution.AnalystID):
+		errs = append(errs, errors.New("synthesist output requires synthesis_supplement"))
+	case o.SynthesisSupplement != nil:
+		errs = append(errs, o.SynthesisSupplement.validate("synthesis_supplement")...)
+	}
+
 	return errors.Join(errs...)
+}
+
+// validate checks required-field rules on the supplement. Only called
+// from AnalystOutput.Validate after the role-gating switch has confirmed
+// the supplement is allowed here.
+func (s *SynthesisSupplement) validate(path string) []error {
+	var errs []error
+	errs = append(errs, s.ProposedPosture.validate(path+".proposed_posture")...)
+	if s.Reasoning == "" {
+		errs = append(errs, fmt.Errorf("%s.reasoning required", path))
+	}
+	if s.Summary == "" {
+		errs = append(errs, fmt.Errorf("%s.summary required", path))
+	}
+	return errs
+}
+
+// validate checks required-field rules on the proposed posture.
+// Called from SynthesisSupplement.validate; path carries the caller's
+// JSON-path context so errors say "synthesis_supplement.proposed_posture.tier"
+// rather than bare "tier".
+func (p *ProposedPosture) validate(path string) []error {
+	var errs []error
+	if !ValidProposedPostureTier(p.Tier) {
+		errs = append(errs, fmt.Errorf("%s.tier %q invalid", path, p.Tier))
+	}
+	if p.RationaleSummary == "" {
+		errs = append(errs, fmt.Errorf("%s.rationale_summary required", path))
+	}
+	return errs
 }
 
 func (a *AgentAttribution) validate(path string) []error {

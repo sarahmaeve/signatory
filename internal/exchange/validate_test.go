@@ -388,3 +388,124 @@ func TestValidate_EnumValues(t *testing.T) {
 	assert.True(t, ValidScopeKind("crate"))
 	assert.False(t, ValidScopeKind("planet"))
 }
+
+// --- SynthesisSupplement (M6a) ---
+//
+// Synthesist outputs carry a SynthesisSupplement that has no natural
+// home in the conclusion/observation/absence model. The supplement is
+// gated by attribution.analyst_id: outputs whose analyst_id starts
+// with "signatory-synthesis" must carry a supplement; outputs from
+// any other role must not. See design/m6-synthesis-contract.md §4.
+
+// validSynthesisBase returns a minimally-valid synthesist output.
+// Tests mutate it to introduce specific invariant violations and
+// check that Validate() flags them.
+func validSynthesisBase() *AnalystOutput {
+	return &AnalystOutput{
+		Attribution: AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:test/example",
+		SynthesisSupplement: &SynthesisSupplement{
+			ProposedPosture: ProposedPosture{
+				Tier:             "trusted-for-now",
+				RationaleSummary: "minimal rationale for the synthesis helper",
+			},
+			Reasoning: "minimal reasoning paragraph for the synthesis helper",
+			Summary:   "two-sentence summary for the synthesis helper",
+		},
+	}
+}
+
+func TestValidate_SynthesisBaseDoesPass(t *testing.T) {
+	require.NoError(t, validSynthesisBase().Validate(),
+		"validSynthesisBase should always produce a valid document; "+
+			"if this fails, validSynthesisBase has a bug")
+}
+
+// TestValidate_SupplementOnNonSynthesistRejected is the trust-boundary
+// guard: a security or provenance analyst producing a SynthesisSupplement
+// must be rejected at validation time. Only synthesist outputs (analyst_id
+// prefix "signatory-synthesis") may carry a supplement — this is how M6a
+// keeps the proposed_posture concept out of the analyst layer.
+func TestValidate_SupplementOnNonSynthesistRejected(t *testing.T) {
+	// Start from a normal analyst output (non-synthesist), attach a
+	// supplement anyway, expect rejection.
+	o := validBase()
+	o.SynthesisSupplement = &SynthesisSupplement{
+		ProposedPosture: ProposedPosture{
+			Tier:             "trusted-for-now",
+			RationaleSummary: "should not be accepted from a non-synthesist",
+		},
+		Reasoning: "irrelevant — this role cannot propose",
+		Summary:   "irrelevant",
+	}
+	err := o.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "synthesis_supplement only allowed for synthesist role")
+	assert.Contains(t, err.Error(), `"test-analyst"`,
+		"error should name the offending analyst_id")
+}
+
+// TestValidate_SynthesistWithoutSupplementRejected is the other side
+// of the gate: a synthesist output that omits the supplement is
+// rejected. A synthesis without a proposed posture + reasoning isn't
+// a synthesis — it's an empty row. Forcing the supplement to be
+// present keeps the synthesist from degenerating into "Layer-2 but
+// with different branding."
+func TestValidate_SynthesistWithoutSupplementRejected(t *testing.T) {
+	o := validSynthesisBase()
+	o.SynthesisSupplement = nil
+	err := o.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "synthesist output requires synthesis_supplement")
+}
+
+// TestValidate_SynthesisSupplementFields exercises the required-field
+// rules inside the supplement. Table-driven so adding a new required
+// field is one row; each row mutates validSynthesisBase() to violate
+// exactly one rule.
+func TestValidate_SynthesisSupplementFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*SynthesisSupplement)
+		wantErr string
+	}{
+		{
+			name:    "missing proposed_posture.tier",
+			mutate:  func(s *SynthesisSupplement) { s.ProposedPosture.Tier = "" },
+			wantErr: `proposed_posture.tier "" invalid`,
+		},
+		{
+			name:    "invalid proposed_posture.tier",
+			mutate:  func(s *SynthesisSupplement) { s.ProposedPosture.Tier = "galactically-frozen" },
+			wantErr: `proposed_posture.tier "galactically-frozen" invalid`,
+		},
+		{
+			name:    "missing proposed_posture.rationale_summary",
+			mutate:  func(s *SynthesisSupplement) { s.ProposedPosture.RationaleSummary = "" },
+			wantErr: "proposed_posture.rationale_summary required",
+		},
+		{
+			name:    "missing reasoning",
+			mutate:  func(s *SynthesisSupplement) { s.Reasoning = "" },
+			wantErr: "synthesis_supplement.reasoning required",
+		},
+		{
+			name:    "missing summary",
+			mutate:  func(s *SynthesisSupplement) { s.Summary = "" },
+			wantErr: "synthesis_supplement.summary required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := validSynthesisBase()
+			tt.mutate(o.SynthesisSupplement)
+			err := o.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

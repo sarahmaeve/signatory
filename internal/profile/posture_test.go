@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +52,40 @@ func TestPostureTier_LiteralValues(t *testing.T) {
 	assert.Equal(t, "unexamined", string(PostureUnexamined))
 	assert.Equal(t, "unknown-provenance", string(PostureUnknownProvenance))
 	assert.Equal(t, "rejected", string(PostureRejected))
+}
+
+// TestPostureTier_ExchangeVocabularyMatches pins the exchange
+// package's ProposedPosture tier vocabulary (used by
+// SynthesisSupplement.ProposedPosture.Tier, M6a) to the canonical
+// PostureTier constants defined here. The exchange package cannot
+// import profile without a cycle, so it maintains its own string
+// literals — this test is the safety net that catches drift if a
+// tier gets added, renamed, or removed in one place but not the
+// other. A failure here means the two vocabularies have drifted;
+// update both together in the same PR.
+func TestPostureTier_ExchangeVocabularyMatches(t *testing.T) {
+	t.Parallel()
+
+	// Pin each profile tier to its exchange counterpart by literal
+	// string. These must match character-for-character.
+	assert.Equal(t, string(PostureVettedFrozen), exchange.ProposedTierVettedFrozen)
+	assert.Equal(t, string(PostureTrustedForNow), exchange.ProposedTierTrustedForNow)
+	assert.Equal(t, string(PostureUnexamined), exchange.ProposedTierUnexamined)
+	assert.Equal(t, string(PostureUnknownProvenance), exchange.ProposedTierUnknownProvenance)
+	assert.Equal(t, string(PostureRejected), exchange.ProposedTierRejected)
+
+	// Every profile tier must validate as a proposed-posture tier.
+	// If exchange grows a tier that profile doesn't have (or loses
+	// one profile still has), ValidProposedPostureTier returns the
+	// wrong answer and we fail here.
+	for _, tier := range []PostureTier{
+		PostureVettedFrozen, PostureTrustedForNow, PostureUnexamined,
+		PostureUnknownProvenance, PostureRejected,
+	} {
+		assert.True(t,
+			exchange.ValidProposedPostureTier(string(tier)),
+			"profile tier %q must be a valid exchange ProposedPosture tier", tier)
+	}
 }
 
 func TestBurnSourceConstants(t *testing.T) {

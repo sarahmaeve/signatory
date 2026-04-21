@@ -66,6 +66,12 @@ var migrations = []Migration{
 		Up:          migrationV7Up,
 		Down:        migrationV7Down,
 	},
+	{
+		Version:     8,
+		Description: "analyst_outputs synthesis supplement columns: synthesis_supplement_json + proposed_tier + proposed_version_scope (agent-facing-contract M6a)",
+		Up:          migrationV8Up,
+		Down:        migrationV8Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -830,6 +836,56 @@ CREATE INDEX IF NOT EXISTS idx_outputs_collected_from ON analyst_outputs(collect
 const migrationV7Down = `
 DROP INDEX IF EXISTS idx_outputs_collected_from;
 ALTER TABLE analyst_outputs DROP COLUMN collected_from_entity_id;
+`
+
+// migrationV8Up adds the synthesis-supplement columns to
+// analyst_outputs for agent-facing-contract M6a. Three nullable
+// columns:
+//
+//   - synthesis_supplement_json: opaque JSON blob carrying the full
+//     SynthesisSupplement (reasoning, summary, concordance,
+//     contradictions, conclusion refs, gaps, action_items, notes).
+//     Display-only — never queried at the SQL layer.
+//
+//   - proposed_tier: denormalized from synthesis_supplement.
+//     proposed_posture.tier. Read by `signatory posture accept`
+//     (M6d) to avoid JSON unmarshaling, and by Summary (M7) to
+//     surface pending-recommendation state without unpacking the
+//     blob.
+//
+//   - proposed_version_scope: denormalized from synthesis_supplement.
+//     proposed_posture.version_scope. Feeds the posture row's
+//     version on accept.
+//
+// All three are NULL on every existing row (security/provenance
+// outputs never carry a supplement) and on non-synthesist rows going
+// forward (validator-enforced). Non-null iff attribution.analyst_id
+// starts with "signatory-synthesis". The invariant is enforced at the
+// Go validator layer; no CHECK constraint here (SQLite CHECK on
+// cross-column JSON introspection is clumsy and the validator runs
+// on every write path).
+//
+// Per D2 (agent-facing-contract.md): no backfill. The current
+// filestore synthesis markdowns are historical artifacts; new
+// syntheses land in the store via M6e's skill update.
+//
+// Indexing rationale: no index on proposed_tier/proposed_version_scope
+// for v0.1. The expected read pattern is `posture accept <output-id>`
+// (primary-key lookup on analyst_outputs.id, the JSON-adjacent columns
+// come along for the ride) and Summary rollups (already bounded by
+// entity_id). Add indexes when a "find all syntheses proposing tier X"
+// query surfaces.
+const migrationV8Up = `
+ALTER TABLE analyst_outputs ADD COLUMN synthesis_supplement_json TEXT;
+ALTER TABLE analyst_outputs ADD COLUMN proposed_tier TEXT;
+ALTER TABLE analyst_outputs ADD COLUMN proposed_version_scope TEXT;
+`
+
+// migrationV8Down drops the three M6a columns.
+const migrationV8Down = `
+ALTER TABLE analyst_outputs DROP COLUMN proposed_version_scope;
+ALTER TABLE analyst_outputs DROP COLUMN proposed_tier;
+ALTER TABLE analyst_outputs DROP COLUMN synthesis_supplement_json;
 `
 
 // migrate runs all pending migrations on the database. It:

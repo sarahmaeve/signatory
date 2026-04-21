@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -525,6 +526,65 @@ func (s *SQLite) ListRelatedURIs(ctx context.Context, entityID string) ([]string
 	return out, rows.Err()
 }
 
+// GetSynthesisProposal returns the ProposedPosture recorded against a
+// synthesis output, reading only the denormalized proposed_tier /
+// proposed_version_scope columns plus the rationale_summary field
+// inside the JSON blob. Avoids the full GetAnalystOutput
+// reconstruction when the caller (M6d `signatory posture accept`)
+// only needs the proposal fields.
+//
+// Returns ErrNotFound when:
+//   - outputID doesn't exist, OR
+//   - the row has proposed_tier = NULL (i.e. it's not a synthesis)
+//
+// The caller can't tell these apart from this method alone; that's
+// by design — both are "there's no proposal to accept here." Callers
+// that need to distinguish "row missing" from "row present but not a
+// synthesis" should use GetAnalystOutput first.
+func (s *SQLite) GetSynthesisProposal(ctx context.Context, outputID string) (*exchange.ProposedPosture, error) {
+	if outputID == "" {
+		return nil, fmt.Errorf("%w: outputID required", ErrNilInput)
+	}
+	var (
+		proposedTier         sql.NullString
+		proposedVersionScope sql.NullString
+		supplementJSON       sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT proposed_tier, proposed_version_scope, synthesis_supplement_json
+		 FROM analyst_outputs WHERE id = ?`, outputID).Scan(
+		&proposedTier, &proposedVersionScope, &supplementJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load synthesis proposal for %s: %w", outputID, err)
+	}
+	// proposed_tier NULL means the row isn't a synthesis. Treat as
+	// not-found to keep the accept verb's error handling uniform.
+	if !proposedTier.Valid {
+		return nil, ErrNotFound
+	}
+	// The rationale lives inside the JSON blob — we already decided
+	// not to denormalize it (too long-form, never filtered on). Pull
+	// just that one field out of the blob.
+	var partial struct {
+		ProposedPosture struct {
+			RationaleSummary string `json:"rationale_summary"`
+		} `json:"proposed_posture"`
+	}
+	if supplementJSON.Valid && supplementJSON.String != "" {
+		if err := json.Unmarshal([]byte(supplementJSON.String), &partial); err != nil {
+			return nil, fmt.Errorf("unmarshal synthesis_supplement for proposal %s: %w", outputID, err)
+		}
+	}
+	return &exchange.ProposedPosture{
+		Tier:             proposedTier.String,
+		VersionScope:     proposedVersionScope.String, // NullString zero-value is "", which is the correct "unversioned" marker
+		RationaleSummary: partial.ProposedPosture.RationaleSummary,
+	}, nil
+}
+
 // GetAnalystOutput reconstructs the full AnalystOutput document
 // from the v4 row decomposition. Inverse of IngestAnalystOutput.
 //
@@ -539,16 +599,18 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 
 	out := &exchange.AnalystOutput{}
 	var ignoredEntityID, ignoredHash, ignoredIngestedAt, ignoredSourcePath string
+	var supplementJSON sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT entity_id, analyst_id, model, prompt_version, invoked_at,
 		        ingested_at, round, target_commit, round_notes, source_path,
-		        content_hash
+		        content_hash, synthesis_supplement_json
 		 FROM analyst_outputs WHERE id = ?`, outputID).Scan(
 		&ignoredEntityID,
 		&out.Attribution.AnalystID, &out.Attribution.Model,
 		&out.Attribution.PromptVersion, &out.Attribution.InvokedAt,
 		&ignoredIngestedAt, &out.Attribution.Round,
 		&out.TargetCommit, &out.RoundNotes, &ignoredSourcePath, &ignoredHash,
+		&supplementJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -564,6 +626,17 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 		return nil, fmt.Errorf("load target URI: %w", err)
 	}
 	out.Target = targetURI
+
+	// M6a: reconstruct the synthesis supplement from the JSON column
+	// when present. Non-synthesist outputs have supplement_json = NULL
+	// and SynthesisSupplement stays nil.
+	if supplementJSON.Valid && supplementJSON.String != "" {
+		var supplement exchange.SynthesisSupplement
+		if err := json.Unmarshal([]byte(supplementJSON.String), &supplement); err != nil {
+			return nil, fmt.Errorf("unmarshal synthesis supplement for %s: %w", outputID, err)
+		}
+		out.SynthesisSupplement = &supplement
+	}
 
 	out.Conclusions, err = s.loadConclusions(ctx, outputID)
 	if err != nil {
