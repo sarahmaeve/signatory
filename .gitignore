@@ -36,6 +36,10 @@ go.work.sum
 # Local working notes
 design/NEXT.md
 
+# Working-pair shared log — kaizen entries, deferred refactors,
+# held-over problems. Useful locally; intentionally not tracked.
+sync/
+
 # Editor/IDE
 # .idea/
 # .vscode/
