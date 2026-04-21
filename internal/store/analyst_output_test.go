@@ -319,6 +319,82 @@ func TestIngest_InvalidOutput_Errors(t *testing.T) {
 	assert.Contains(t, err.Error(), "validate")
 }
 
+// TestIngest_WithPrimaryTarget_CrossURILookup covers the core M2
+// behavior: an analysis whose internal target is repo:github/Y but
+// was collected on behalf of a caller asking about pkg:npm/X gets
+// indexed under pkg:npm/X, and queries by EITHER URI find it.
+func TestIngest_WithPrimaryTarget_CrossURILookup(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// Load a fixture and override its target to a github URI.
+	out := loadFixture(t, "atuin-schema-trial.json")
+	out.Target = "repo:github/expressjs/express"
+
+	// Caller originally asked about pkg:npm/express; ingest with
+	// WithPrimaryTarget records it under pkg:npm/express with the
+	// github URI captured as collected_from.
+	result, err := s.IngestAnalystOutput(ctx, out, "",
+		WithPrimaryTarget("pkg:npm/express"))
+	require.NoError(t, err)
+	require.NotEmpty(t, result.EntityID)
+	require.NotEmpty(t, result.CollectedFromEntityID,
+		"M2: resolution hop must populate CollectedFromEntityID")
+	assert.NotEqual(t, result.EntityID, result.CollectedFromEntityID,
+		"primary entity and collected-from entity must differ")
+
+	// Lookup by pkg URI: the original caller's identity finds the analysis.
+	byPkg, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
+		EntityURI: "pkg:npm/express",
+	})
+	require.NoError(t, err)
+	require.Len(t, byPkg, 1, "pkg:npm/express query must find the analysis")
+	assert.Equal(t, "pkg:npm/express", byPkg[0].EntityURI)
+	assert.Equal(t, "repo:github/expressjs/express", byPkg[0].CollectedFromURI,
+		"transparent-with-citation: response cites both URIs (§3.2)")
+
+	// Lookup by repo URI: the resolved source also finds the analysis
+	// via the reverse index on collected_from_entity_id.
+	byRepo, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
+		EntityURI: "repo:github/expressjs/express",
+	})
+	require.NoError(t, err)
+	require.Len(t, byRepo, 1, "repo:github/... query must also find the analysis (reverse walk)")
+	assert.Equal(t, byPkg[0].OutputID, byRepo[0].OutputID,
+		"both URIs must resolve to the SAME analysis row")
+}
+
+// TestIngest_WithPrimaryTarget_SameAsTarget_NoHop verifies that
+// passing the same URI as WithPrimaryTarget AND as out.Target
+// produces a row with no resolution hop recorded — the column
+// stays NULL.
+func TestIngest_WithPrimaryTarget_SameAsTarget_NoHop(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := loadFixture(t, "atuin-schema-trial.json")
+	// Fixture's target is "pkg:cargo/atuin"; pass the same as primary.
+	result, err := s.IngestAnalystOutput(ctx, out, "",
+		WithPrimaryTarget(out.Target))
+	require.NoError(t, err)
+	assert.Empty(t, result.CollectedFromEntityID,
+		"same-identity passthrough must not record a resolution hop")
+}
+
+// TestIngest_WithoutPrimaryTarget_DefaultBehavior verifies pre-M2
+// behavior is preserved when no options are passed — the row's
+// entity_id matches out.Target's entity, and collected_from is empty.
+func TestIngest_WithoutPrimaryTarget_DefaultBehavior(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := loadFixture(t, "atuin-schema-trial.json")
+	result, err := s.IngestAnalystOutput(ctx, out, "")
+	require.NoError(t, err)
+	assert.Empty(t, result.CollectedFromEntityID,
+		"no options passed → no resolution hop recorded")
+}
+
 func TestIngest_AppendOnlyTriggers_FireOnUpdate(t *testing.T) {
 	// Defense-in-depth: even a SQL-level UPDATE on analyst_outputs
 	// should be blocked by the migration v4 trigger.

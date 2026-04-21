@@ -251,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v6 → v5. Drops soft-delete columns from
+	// First rollback: v7 → v6. Drops the collected_from_entity_id
+	// column from analyst_outputs. Pre-M2 data unaffected (it had
+	// the column set to NULL).
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 6, version)
+
+	// Second rollback: v6 → v5. Drops soft-delete columns from
 	// postures/burns. Entity/signal/burn data is unaffected.
 	err = migrateDown(t.Context(), db, path)
 	require.NoError(t, err)
@@ -260,7 +270,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 5, version)
 
-	// Second rollback: v5 → v4. Renames conclusion tables back to finding
+	// Third rollback: v5 → v4. Renames conclusion tables back to finding
 	// tables. The v4-and-earlier data we care about (entities, signals,
 	// burns) is unaffected.
 	err = migrateDown(t.Context(), db, path)
@@ -511,7 +521,18 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v5 (drops soft-delete columns from postures/burns). ---
+	// --- Down: vN → v6 (drops collected_from_entity_id from analyst_outputs). ---
+	// The v7 migration added one nullable column; rolling back drops
+	// it. V7 is M2 identity-indexing; pre-M2 data had the column set
+	// to NULL (untouched by backfill per D2).
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 6, version)
+
+	// --- Down: v6 → v5 (drops soft-delete columns from postures/burns). ---
 	// The v6 migration added withdrawn_at/by/reason columns to both
 	// tables; rolling back drops them. The v2 entity/signal/posture
 	// data we care about for this test is untouched.

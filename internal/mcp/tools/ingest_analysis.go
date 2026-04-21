@@ -59,6 +59,10 @@ func (t *IngestAnalysisTool) InputSchema() json.RawMessage {
 			"source": {
 				"type": "string",
 				"description": "Optional identifier for the origin of this output — agent role, session id, or file path. Recorded on the store row for audit. Defaults to 'mcp' when omitted."
+			},
+			"collected_from": {
+				"type": "string",
+				"description": "Optional primary-identity override: the target URI the original caller asked about. When set and it resolves to a different canonical URI than analyst_output.target, the analysis is indexed under collected_from with analyst_output.target captured as the resolved source. Use when the caller asked about pkg:<eco>/<name> but the analysis was performed against the resolved github source repo. See agent-facing-contract §3.2."
 			}
 		},
 		"required": ["analyst_output"],
@@ -75,14 +79,21 @@ type ingestAnalysisInput struct {
 
 	// Source is an optional origin identifier; "mcp" by default.
 	Source string `json:"source,omitempty"`
+
+	// CollectedFrom, when non-empty, names the target URI the
+	// caller originally asked about. The store uses it as the
+	// primary identity; analyst_output.target becomes the
+	// collected_from link. Agent-facing-contract §3.2.
+	CollectedFrom string `json:"collected_from,omitempty"`
 }
 
 // ingestAnalysisData is the result payload.
 type ingestAnalysisData struct {
-	OutputID   string               `json:"output_id"`
-	EntityID   string               `json:"entity_id"`
-	Idempotent bool                 `json:"idempotent"`
-	Counts     ingestAnalysisCounts `json:"counts"`
+	OutputID              string               `json:"output_id"`
+	EntityID              string               `json:"entity_id"`
+	CollectedFromEntityID string               `json:"collected_from_entity_id,omitempty"`
+	Idempotent            bool                 `json:"idempotent"`
+	Counts                ingestAnalysisCounts `json:"counts"`
 }
 
 // ingestAnalysisCounts reports the row counts written for this
@@ -136,7 +147,12 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 		source = "mcp"
 	}
 
-	result, err := t.Store.IngestAnalystOutput(ctx, &out, source)
+	var ingestOpts []store.IngestOption
+	if in.CollectedFrom != "" {
+		ingestOpts = append(ingestOpts, store.WithPrimaryTarget(in.CollectedFrom))
+	}
+
+	result, err := t.Store.IngestAnalystOutput(ctx, &out, source, ingestOpts...)
 	if err != nil {
 		return mcp.Err(mcp.CodeInternalError,
 			"ingest failed: "+err.Error(), nil)
@@ -148,9 +164,10 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 	}
 
 	return mcp.OK(ingestAnalysisData{
-		OutputID:   result.OutputID,
-		EntityID:   result.EntityID,
-		Idempotent: result.Idempotent,
+		OutputID:              result.OutputID,
+		EntityID:              result.EntityID,
+		CollectedFromEntityID: result.CollectedFromEntityID,
+		Idempotent:            result.Idempotent,
 		Counts: ingestAnalysisCounts{
 			Conclusions:         len(out.Conclusions),
 			PositiveAbsences:    len(out.PositiveAbsences),

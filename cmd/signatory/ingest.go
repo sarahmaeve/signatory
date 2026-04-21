@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+
+	"github.com/sarahmaeve/signatory/internal/store"
 )
 
 // IngestCmd loads a JSON or markdown analyst output file into the
@@ -23,6 +25,7 @@ import (
 type IngestCmd struct {
 	File   string `arg:"" help:"Path to a JSON or markdown analyst output file." type:"existingfile"`
 	Format string `help:"Input format: json, markdown, or auto (detect from extension/content)." default:"auto" enum:"json,markdown,auto"`
+	As     string `help:"Record the analysis under this target URI as the primary identity, with the analyst output's own target captured as collected_from. Use when the caller asked about a pkg:<eco>/<name> URI but the analysis was run against the resolved source repo. See agent-facing-contract §3.2."`
 	Quiet  bool   `help:"Suppress success summary; errors still print." short:"q"`
 }
 
@@ -50,13 +53,18 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 	}
 
 	ctx := context.Background()
-	store, err := globals.OpenStore(ctx)
+	db, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
 	}
-	defer store.Close() //nolint:errcheck // store close on command exit; error is not actionable
+	defer db.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
-	result, err := store.IngestAnalystOutput(ctx, out, cmd.File)
+	var ingestOpts []store.IngestOption
+	if cmd.As != "" {
+		ingestOpts = append(ingestOpts, store.WithPrimaryTarget(cmd.As))
+	}
+
+	result, err := db.IngestAnalystOutput(ctx, out, cmd.File, ingestOpts...)
 	if err != nil {
 		return fmt.Errorf("ingest %s: %w", cmd.File, err)
 	}
@@ -72,6 +80,9 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 		}
 		fmt.Printf("Ingested %s (%s) → output_id=%s entity_id=%s%s\n",
 			cmd.File, format, result.OutputID, result.EntityID, idempotency)
+		if result.CollectedFromEntityID != "" {
+			fmt.Printf("  collected_from_entity_id=%s\n", result.CollectedFromEntityID)
+		}
 		fmt.Printf("  %d conclusion(s), %d positive absence(s), %d observation(s), %d methodology pattern(s)\n",
 			len(out.Conclusions), len(out.PositiveAbsences),
 			len(out.Observations), patternCount)

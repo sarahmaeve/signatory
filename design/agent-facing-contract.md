@@ -158,6 +158,7 @@ This is shape, not a commitment. Each milestone lands as its own PR with its own
 - Write-path keys on caller-identity; read-path walks `collected_from` for "show me everything related to this identity."
 - Migration: backfill existing rows with `collected_from = canonical_uri` (self-link).
 - ~300 LOC + ~400 LOC tests + migration.
+- **Implementation status (2026-04-21):** shipped. Migration v7 adds `collected_from_entity_id` to `analyst_outputs` (nullable, FK to entities, indexed for reverse lookup). `IngestAnalystOutput` accepts variadic `IngestOption` — `WithPrimaryTarget(uri)` tells the ingest path to index under the caller's URI and capture the analyst-stated target as collected_from. `ListAnalystOutputs` walks both `entity_id` and `collected_from_entity_id` so queries by either URI find the analysis. `AnalystOutputSummary` exposes both URIs (transparent-with-citation per D1). CLI `ingest --as <target>` and MCP `signatory_ingest_analysis` `collected_from` param plumb the override through. Postures aren't versioned with collected_from in this milestone — they're already caller-identity-keyed via M1's URI grammar; cross-URI posture queries land if needed in M7's summary verb.
 
 **M3 — Ecosystem resolver registry.**
 - Extract npm bridge into `internal/ecosystem/resolver/`.

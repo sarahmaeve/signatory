@@ -60,6 +60,12 @@ var migrations = []Migration{
 		Up:          migrationV6Up,
 		Down:        migrationV6Down,
 	},
+	{
+		Version:     7,
+		Description: "analyst_outputs.collected_from_entity_id for identity-indexed storage (agent-facing-contract M2)",
+		Up:          migrationV7Up,
+		Down:        migrationV7Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -796,6 +802,34 @@ ALTER TABLE postures DROP COLUMN withdrawn_at;
 ALTER TABLE burns DROP COLUMN withdrawal_reason;
 ALTER TABLE burns DROP COLUMN withdrawn_by;
 ALTER TABLE burns DROP COLUMN withdrawn_at;
+`
+
+// migrationV7Up adds collected_from_entity_id to analyst_outputs so
+// the store can index an analysis under the caller's URI while
+// retaining a link to the identity the work was actually performed
+// against. This is the schema leg of agent-facing-contract §3.2
+// (transparent-with-citation resolution): an analyst run against
+// repo:github/X by a caller asking about pkg:npm/Y is stored with
+// entity_id → pkg:npm/Y's entity and collected_from_entity_id →
+// repo:github/X's entity, so queries under either URI surface the
+// record.
+//
+// Nullable by default — pre-M2 rows and rows where the caller's
+// URI matches the analyst's target have NULL, treated semantically
+// as "no resolution hop." The index speeds reverse lookups when
+// queries come in under the resolved-source URI.
+//
+// Per D2: no backfill. Existing rows stay as they are; users re-run
+// /analyze on anything they care about.
+const migrationV7Up = `
+ALTER TABLE analyst_outputs ADD COLUMN collected_from_entity_id TEXT REFERENCES entities(id);
+CREATE INDEX IF NOT EXISTS idx_outputs_collected_from ON analyst_outputs(collected_from_entity_id);
+`
+
+// migrationV7Down drops the M2 column and its index.
+const migrationV7Down = `
+DROP INDEX IF EXISTS idx_outputs_collected_from;
+ALTER TABLE analyst_outputs DROP COLUMN collected_from_entity_id;
 `
 
 // migrate runs all pending migrations on the database. It:

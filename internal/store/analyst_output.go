@@ -24,15 +24,54 @@ type IngestResult struct {
 	// UUID.
 	OutputID string
 
-	// EntityID is the UUID of the entity the AnalystOutput targets.
+	// EntityID is the UUID of the primary entity the AnalystOutput
+	// is recorded under — the caller's identity when WithPrimaryTarget
+	// was used, otherwise the target named in the AnalystOutput itself.
 	// Existing entities are reused; missing entities are created with
 	// EntityProject type as a default (callers can refine later).
 	EntityID string
+
+	// CollectedFromEntityID, when non-empty, is the UUID of the entity
+	// the analysis was actually performed against — populated only
+	// when WithPrimaryTarget resolved to a different identity than
+	// out.Target. Empty when the primary identity matches the analyst
+	// output's own target (the common case).
+	CollectedFromEntityID string
 
 	// Idempotent is true when the file's content_hash was already
 	// present in analyst_outputs and no rows were written. Callers
 	// can use this to surface "already ingested" UX.
 	Idempotent bool
+}
+
+// ingestOpts captures variadic IngestAnalystOutput options.
+type ingestOpts struct {
+	// primaryTarget overrides out.Target as the entity identity used
+	// for write-path indexing. When set AND it resolves to a
+	// different canonical URI than out.Target, out.Target's entity
+	// becomes collected_from_entity_id. When empty (default), the
+	// pre-M2 behavior is preserved: out.Target is the only identity.
+	primaryTarget string
+}
+
+// IngestOption configures IngestAnalystOutput. Variadic to keep the
+// existing signature backwards-compatible; callers that don't care
+// about M2 identity indexing pass zero options and get pre-M2
+// behavior.
+type IngestOption func(*ingestOpts)
+
+// WithPrimaryTarget tells the ingest path to record the analysis
+// under target as the caller's identity. When the resolved canonical
+// URI differs from out.Target's canonical URI, out.Target's entity
+// is recorded as collected_from_entity_id. This is the agent-facing-
+// contract §3.2 mechanism: a pkg:npm/X analysis collected from
+// repo:github/Y is indexed under pkg:npm/X and queryable via either
+// URI.
+//
+// Passing the same target as out.Target is a no-op — the resulting
+// row has collected_from_entity_id = NULL.
+func WithPrimaryTarget(target string) IngestOption {
+	return func(o *ingestOpts) { o.primaryTarget = target }
 }
 
 // IngestAnalystOutput stores an exchange.AnalystOutput in the
@@ -55,16 +94,27 @@ type IngestResult struct {
 //
 // sourcePath is recorded on the analyst_outputs row for audit
 // trail; it can be empty when ingesting from in-memory input.
+//
+// Options extend the function for agent-facing-contract use cases
+// — chiefly WithPrimaryTarget, which decouples the caller's stated
+// identity from the analyst's internal target. Pre-M2 callers pass
+// no options and get the original single-identity behavior.
 func (s *SQLite) IngestAnalystOutput(
 	ctx context.Context,
 	out *exchange.AnalystOutput,
 	sourcePath string,
+	opts ...IngestOption,
 ) (*IngestResult, error) {
 	if out == nil {
 		return nil, ErrNilInput
 	}
 	if err := out.Validate(); err != nil {
 		return nil, fmt.Errorf("validate analyst output: %w", err)
+	}
+
+	var options ingestOpts
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	hash, err := analystOutputContentHash(out)
@@ -89,10 +139,28 @@ func (s *SQLite) IngestAnalystOutput(
 		}, nil
 	}
 
-	// Resolve or create the entity for the target.
-	entityID, err := s.ensureEntityForTarget(ctx, out.Target)
+	// Primary identity: resolve the analyst's own target first, then
+	// optionally override with the caller's identity from options.
+	// Both routes go through ensureEntityForTarget so the canonical
+	// URI and entity type are consistent.
+	analystEntityID, err := s.ensureEntityForTarget(ctx, out.Target)
 	if err != nil {
 		return nil, err
+	}
+	entityID := analystEntityID
+	var collectedFromEntityID string
+	if options.primaryTarget != "" {
+		primaryEntityID, err := s.ensureEntityForTarget(ctx, options.primaryTarget)
+		if err != nil {
+			return nil, fmt.Errorf("resolve primary target %q: %w", options.primaryTarget, err)
+		}
+		// Only record the resolution hop when the two identities
+		// actually differ. Same-identity passthrough (pre-M2 default
+		// behavior) keeps the row's collected_from column NULL.
+		if primaryEntityID != analystEntityID {
+			entityID = primaryEntityID
+			collectedFromEntityID = analystEntityID
+		}
 	}
 
 	outputID := uuid.NewString()
@@ -108,7 +176,7 @@ func (s *SQLite) IngestAnalystOutput(
 		}
 	}()
 
-	if err = insertAnalystOutputRow(ctx, tx, outputID, entityID, out, sourcePath, hash, now); err != nil {
+	if err = insertAnalystOutputRow(ctx, tx, outputID, entityID, collectedFromEntityID, out, sourcePath, hash, now); err != nil {
 		return nil, err
 	}
 	if err = insertConclusions(ctx, tx, outputID, out.Conclusions); err != nil {
@@ -135,9 +203,10 @@ func (s *SQLite) IngestAnalystOutput(
 	}
 
 	return &IngestResult{
-		OutputID:   outputID,
-		EntityID:   entityID,
-		Idempotent: false,
+		OutputID:              outputID,
+		EntityID:              entityID,
+		CollectedFromEntityID: collectedFromEntityID,
+		Idempotent:            false,
 	}, nil
 }
 
@@ -322,21 +391,28 @@ func deriveURL(target string) string {
 func insertAnalystOutputRow(
 	ctx context.Context,
 	tx *sql.Tx,
-	outputID, entityID string,
+	outputID, entityID, collectedFromEntityID string,
 	out *exchange.AnalystOutput,
 	sourcePath, contentHash, ingestedAt string,
 ) error {
+	// Normalize empty collected_from to SQL NULL so the FK
+	// constraint doesn't try to resolve it against entities(id).
+	var collectedFrom interface{}
+	if collectedFromEntityID != "" {
+		collectedFrom = collectedFromEntityID
+	}
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO analyst_outputs
 		 (id, entity_id, analyst_id, model, prompt_version, invoked_at,
 		  ingested_at, round, target_commit, round_notes, source_path,
-		  content_hash)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  content_hash, collected_from_entity_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		outputID, entityID,
 		out.Attribution.AnalystID, out.Attribution.Model,
 		out.Attribution.PromptVersion, out.Attribution.InvokedAt,
 		ingestedAt, out.Attribution.Round,
-		out.TargetCommit, out.RoundNotes, sourcePath, contentHash)
+		out.TargetCommit, out.RoundNotes, sourcePath, contentHash,
+		collectedFrom)
 	if err != nil {
 		return fmt.Errorf("insert analyst_outputs: %w", err)
 	}

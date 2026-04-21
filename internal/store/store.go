@@ -53,7 +53,7 @@ type Store interface {
 	PutTeamIdentity(ctx context.Context, identity *profile.TeamIdentity) error
 
 	// Analyst output ingestion (append-only, idempotent on content_hash).
-	IngestAnalystOutput(ctx context.Context, out *exchange.AnalystOutput, sourcePath string) (*IngestResult, error)
+	IngestAnalystOutput(ctx context.Context, out *exchange.AnalystOutput, sourcePath string, opts ...IngestOption) (*IngestResult, error)
 
 	// Analyst output queries (read path).
 	ListAnalystOutputs(ctx context.Context, filter AnalystOutputFilter) ([]AnalystOutputSummary, error)

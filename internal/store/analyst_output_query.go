@@ -16,9 +16,24 @@ import (
 // of reconstructing the full AnalystOutput document tree. Callers
 // who need the full document use GetAnalystOutput.
 type AnalystOutputSummary struct {
-	OutputID             string
-	EntityID             string
-	EntityURI            string // canonical_uri from the joined entity row
+	OutputID string
+	EntityID string
+	// EntityURI is the canonical_uri of the entity the analysis is
+	// indexed under — the caller's identity in the M2 model
+	// (pkg:npm/X), or the analyst's own target when no resolution
+	// hop happened.
+	EntityURI string
+	// CollectedFromEntityID is the UUID of the entity the analysis
+	// was actually performed against, when it differs from EntityID.
+	// Empty when there was no resolution hop (pre-M2 rows, or rows
+	// where primary_target == out.Target at ingest).
+	CollectedFromEntityID string
+	// CollectedFromURI is the canonical_uri of the collected-from
+	// entity, joined for display. Empty when CollectedFromEntityID
+	// is empty. Agent-facing-contract §3.2 transparent-with-citation:
+	// every response where a resolution hop happened cites both
+	// URIs so duplicates are hard to create and the hop is visible.
+	CollectedFromURI     string
 	AnalystID            string
 	Model                string
 	PromptVersion        string
@@ -90,8 +105,13 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	var clauses []string
 	var args []any
 	if entityID != "" {
-		clauses = append(clauses, "ao.entity_id = ?")
-		args = append(args, entityID)
+		// Walk both the primary entity_id and the collected_from_entity_id
+		// (M2 identity indexing): a query for pkg:npm/X finds analyses
+		// that were collected against repo:github/Y and indexed under
+		// pkg:npm/X, AND finds analyses indexed directly under the
+		// caller's repo:github/Y URI.
+		clauses = append(clauses, "(ao.entity_id = ? OR ao.collected_from_entity_id = ?)")
+		args = append(args, entityID, entityID)
 	}
 	if filter.AnalystID != "" {
 		clauses = append(clauses, "ao.analyst_id = ?")
@@ -113,6 +133,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	query := fmt.Sprintf(`
 		SELECT
 			ao.id, ao.entity_id, e.canonical_uri,
+			ao.collected_from_entity_id, COALESCE(cf.canonical_uri, ''),
 			ao.analyst_id, ao.model, ao.prompt_version,
 			ao.invoked_at, ao.ingested_at, ao.round,
 			ao.target_commit, ao.source_path, ao.content_hash,
@@ -122,6 +143,7 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 			(SELECT COUNT(*) FROM methodology_patterns WHERE output_id = ao.id) AS pat_count
 		FROM analyst_outputs ao
 		INNER JOIN entities e ON e.id = ao.entity_id
+		LEFT JOIN entities cf ON cf.id = ao.collected_from_entity_id
 		%s
 		ORDER BY ao.ingested_at DESC
 		%s`, whereSQL, limitSQL)
@@ -135,8 +157,10 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 	var out []AnalystOutputSummary
 	for rows.Next() {
 		var s AnalystOutputSummary
+		var collectedFromID sql.NullString
 		if err := rows.Scan(
 			&s.OutputID, &s.EntityID, &s.EntityURI,
+			&collectedFromID, &s.CollectedFromURI,
 			&s.AnalystID, &s.Model, &s.PromptVersion,
 			&s.InvokedAt, &s.IngestedAt, &s.Round,
 			&s.TargetCommit, &s.SourcePath, &s.ContentHash,
@@ -144,6 +168,9 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 			&s.ObservationCount, &s.PatternCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan analyst_output row: %w", err)
+		}
+		if collectedFromID.Valid {
+			s.CollectedFromEntityID = collectedFromID.String
 		}
 		out = append(out, s)
 	}
@@ -215,8 +242,13 @@ func (s *SQLite) ListConclusions(ctx context.Context, filter ConclusionFilter) (
 	var clauses []string
 	var args []any
 	if entityID != "" {
-		clauses = append(clauses, "ao.entity_id = ?")
-		args = append(args, entityID)
+		// Walk both the primary entity_id and the collected_from_entity_id
+		// (M2 identity indexing): a query for pkg:npm/X finds analyses
+		// that were collected against repo:github/Y and indexed under
+		// pkg:npm/X, AND finds analyses indexed directly under the
+		// caller's repo:github/Y URI.
+		clauses = append(clauses, "(ao.entity_id = ? OR ao.collected_from_entity_id = ?)")
+		args = append(args, entityID, entityID)
 	}
 	if filter.AnalystID != "" {
 		clauses = append(clauses, "ao.analyst_id = ?")
@@ -343,8 +375,13 @@ func (s *SQLite) ListMethodologyPatterns(ctx context.Context, filter Methodology
 	var clauses []string
 	var args []any
 	if entityID != "" {
-		clauses = append(clauses, "ao.entity_id = ?")
-		args = append(args, entityID)
+		// Walk both the primary entity_id and the collected_from_entity_id
+		// (M2 identity indexing): a query for pkg:npm/X finds analyses
+		// that were collected against repo:github/Y and indexed under
+		// pkg:npm/X, AND finds analyses indexed directly under the
+		// caller's repo:github/Y URI.
+		clauses = append(clauses, "(ao.entity_id = ? OR ao.collected_from_entity_id = ?)")
+		args = append(args, entityID, entityID)
 	}
 	if filter.AnalystID != "" {
 		clauses = append(clauses, "ao.analyst_id = ?")
