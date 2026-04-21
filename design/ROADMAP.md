@@ -22,6 +22,7 @@ Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-fac
 - **Agent-facing-contract M4** — `posture unset`, `burn remove`, `--dry-run` on all mutators, `EX_USAGE` (64) exit codes on flag conflicts. Soft-delete semantics with audit-log preservation. (ingest withdraw deferred — separate narrower commit.)
 - **Agent-facing-contract M3** — `internal/ecosystem/resolver/` registry with pluggable `Resolver` interface. npm + Go resolvers shipped; `applyNetworkPrecheck` routes every `pkg:<eco>/` target through the registry. Go uses offline path-prefix rules covering github.com/, golang.org/x/, gopkg.in/.
 - **Agent-facing-contract M2** — identity-indexed storage. `analyst_outputs` gains `collected_from_entity_id` (migration v7). `IngestAnalystOutput` accepts `WithPrimaryTarget(uri)` to index under the caller's identity while capturing the analyst-stated target as collected_from. `ListAnalystOutputs` walks both URIs so `pkg:npm/X` and its resolved `repo:github/Y` find the same analysis. CLI `ingest --as`; MCP `signatory_ingest_analysis` `collected_from`.
+- **Agent-facing-contract M7** — `signatory summary` verb (CLI + MCP). One-call view: canonical URI + related URIs + posture snapshot + burn snapshot + per-analyst rollup with severity-bucketed conclusion counts. Replaces the cross-tool flail (show-analyses → show-conclusions → posture get → burn list) yesterday's synthesist dogfood exposed. Composes on top of M2's cross-URI walk so related identities surface both directions.
 
 ## V0.1 — Remaining
 
@@ -29,9 +30,8 @@ V0.1 blocks until every item in this section is complete. Order within each subs
 
 ### Agent-facing contract milestones
 
-Five of eight milestones shipped (M1, M5, M4, M3, M2 — see Shipped section above). Remaining, ordered by dependency:
+Six of eight milestones shipped (M1, M5, M4, M3, M2, M7 — see Shipped section above). Remaining, ordered by dependency:
 
-- **M7 — `signatory summary` verb.** CLI + MCP. One-call view: canonical URI + `collected_from` + posture + burn + analysis rollup + proposed postures. Consumed by M6 and the /analyze-skill short-circuit. ~300 LOC + ~400 LOC tests.
 - **M6 — Synthesist contract.** Structured evidence in handoff body (no filestore browsing), `proposed_posture` in deposit schema, filestore markdown becomes a view. Same cross-pollination prohibition added to security + provenance templates. `signatory posture accept <synthesis-id>`. ~500 LOC + ~600 LOC tests.
 - **M8 — `/analyze` retirement.** Port the 150-line bash orchestration into `signatory run analysis <target>`. Human and LLM invoke the same entry point. /analyze SKILL.md becomes a pointer. ~400 LOC + ~500 LOC tests.
 - **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.

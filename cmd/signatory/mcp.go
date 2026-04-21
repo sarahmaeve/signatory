@@ -82,6 +82,7 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 	// confirmation-metadata for other mutating tools (burn, posture)
 	// still defers to a later phase.
 	srv.Register(&tools.AnalyzeTool{Store: s})
+	srv.Register(&tools.SummaryTool{Store: s})
 	srv.Register(&tools.DetailTool{Store: s})
 	srv.Register(&tools.SignalsTool{Store: s})
 	srv.Register(&tools.ShowAnalysesTool{Store: s})

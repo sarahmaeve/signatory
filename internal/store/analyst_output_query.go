@@ -455,6 +455,76 @@ func (s *SQLite) ListMethodologyPatterns(ctx context.Context, filter Methodology
 	return out, rows.Err()
 }
 
+// SeverityCounts returns the per-severity count of conclusions on
+// one AnalystOutput. Keys are exchange.SeverityValue; values are
+// counts. Zero counts are omitted — callers iterating the map see
+// only severities that actually occur on this output. Used by the
+// summary assembler (M7).
+func (s *SQLite) SeverityCounts(ctx context.Context, outputID string) (map[exchange.SeverityValue]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT severity_default, COUNT(*)
+		 FROM conclusions
+		 WHERE output_id = ?
+		 GROUP BY severity_default`, outputID)
+	if err != nil {
+		return nil, fmt.Errorf("query severity counts: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only rows; scan errors propagate below
+
+	out := make(map[exchange.SeverityValue]int)
+	for rows.Next() {
+		var sev string
+		var n int
+		if err := rows.Scan(&sev, &n); err != nil {
+			return nil, fmt.Errorf("scan severity-count row: %w", err)
+		}
+		out[exchange.SeverityValue(sev)] = n
+	}
+	return out, rows.Err()
+}
+
+// ListRelatedURIs returns canonical URIs of entities that share an
+// analyst_outputs row with entityID via the M2 collected_from link
+// — both directions: entities this one's analyses were collected
+// from, and entities whose analyses were collected from this one.
+// Used by the summary assembler to surface "what other identities
+// does signatory know are related to this one?"
+//
+// Deduplication happens at the SQL level via DISTINCT; the caller
+// additionally strips its own URI and sorts for stable display.
+func (s *SQLite) ListRelatedURIs(ctx context.Context, entityID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT uri FROM (
+		    -- Forward: this entity's analyses → the source entities
+		    -- those analyses were collected from.
+		    SELECT e.canonical_uri AS uri
+		    FROM analyst_outputs ao
+		    JOIN entities e ON e.id = ao.collected_from_entity_id
+		    WHERE ao.entity_id = ?
+		    UNION
+		    -- Reverse: analyses collected from this entity → the
+		    -- primary-identity entities those analyses landed under.
+		    SELECT e.canonical_uri AS uri
+		    FROM analyst_outputs ao
+		    JOIN entities e ON e.id = ao.entity_id
+		    WHERE ao.collected_from_entity_id = ?
+		)`, entityID, entityID)
+	if err != nil {
+		return nil, fmt.Errorf("query related URIs: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only rows
+
+	var out []string
+	for rows.Next() {
+		var uri string
+		if err := rows.Scan(&uri); err != nil {
+			return nil, fmt.Errorf("scan related URI: %w", err)
+		}
+		out = append(out, uri)
+	}
+	return out, rows.Err()
+}
+
 // GetAnalystOutput reconstructs the full AnalystOutput document
 // from the v4 row decomposition. Inverse of IngestAnalystOutput.
 //

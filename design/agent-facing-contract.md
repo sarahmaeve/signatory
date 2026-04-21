@@ -194,6 +194,7 @@ This is shape, not a commitment. Each milestone lands as its own PR with its own
 - Sits on top of M2 (needs identity-linked reads) and feeds M6 (synthesist's structured input is `summary` output + extra evidence fields).
 - Also consumed by the /analyze skill pre-dispatch: check summary first, short-circuit if prior work exists.
 - ~300 LOC + ~400 LOC tests.
+- **Implementation status (2026-04-21):** shipped. `internal/summary/` defines the `Summary` value type and the `Assembler` that composes it from store reads. `Summary` carries canonical URI + short name + entity type + URL + related URIs + posture snapshot + burn snapshot + per-analyst rollup with severity-bucketed conclusion counts. Store layer gained `SeverityCounts` and `ListRelatedURIs` (both directions of the M2 collected_from link). CLI `signatory summary <target> [--json]` and MCP tool `signatory_summary` both sit on top of the same assembler. `proposed_posture` suggestions land with M6; today summary reports the evidence counts without a tier recommendation.
 
 **M8 — /analyze retirement into `signatory run analysis`.**
 - Port the /analyze skill's orchestration (session create → handoff → deposit → dispatch analysts → verify ingestion → dispatch synthesist → present proposed posture) into a first-class CLI verb.

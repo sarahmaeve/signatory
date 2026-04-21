@@ -61,6 +61,13 @@ type Store interface {
 	ListConclusions(ctx context.Context, filter ConclusionFilter) ([]ConclusionSummary, error)
 	ListMethodologyPatterns(ctx context.Context, filter MethodologyPatternFilter) ([]MethodologyPatternSummary, error)
 
+	// Summary helpers (M7). SeverityCounts groups one output's
+	// conclusions by severity_default; ListRelatedURIs walks the
+	// collected_from links in both directions to surface identity
+	// relationships. Both power the signatory_summary verb.
+	SeverityCounts(ctx context.Context, outputID string) (map[exchange.SeverityValue]int, error)
+	ListRelatedURIs(ctx context.Context, entityID string) ([]string, error)
+
 	// Close releases database resources.
 	Close() error
 }

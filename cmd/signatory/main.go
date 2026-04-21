@@ -20,6 +20,7 @@ type CLI struct {
 	Verbose bool   `help:"Verbose output." short:"v"`
 
 	Analyze         AnalyzeCmd         `cmd:"" help:"Analyze trust signals for a package, repo, or identity."`
+	Summary         SummaryCmd         `cmd:"" help:"One-call view: canonical URI, posture, burn status, analyses rollup, related identities. The 'start here' verb for any target."`
 	Survey          SurveyCmd          `cmd:"" help:"Assess trust posture of a project's dependency tree."`
 	Burn            BurnCmd            `cmd:"" help:"Burn an entity, degrading its trust signals."`
 	Posture         PostureCmd         `cmd:"" help:"Set or view dependency posture tier for an entity."`
