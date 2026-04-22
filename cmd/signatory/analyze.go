@@ -14,6 +14,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/identity"
 	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/signal"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -205,23 +206,45 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// the orchestrator stamps it on the entity so downstream
 	// collectors (github, git-local-clone) pick it up via entity.URL.
 	//
-	// Failure here is non-fatal: the npm collector still runs and
-	// emits registry signals; only the github-side collectors get
-	// skipped (because isGitHostedEntity stays false). A warning to
-	// stderr gives the operator a trail.
+	// Failure is always recorded as an absence:repo_declaration signal
+	// with retryable=true so the stored profile carries a machine-
+	// readable marker: "we tried and the registry failed." This
+	// distinguishes the degraded state from a legitimate "no declared
+	// repo" result and from "we never tried." On an explicit --refresh,
+	// the error is also returned to the caller (fail loud) because the
+	// user asked for fresh data and we cannot silently decline.
 	if entity.Type == profile.EntityPackage && entity.Ecosystem == "npm" && entity.URL == "" {
-		if err := resolveNpmRepo(ctx, s, entity, globals); err != nil {
-			// Deliberate `_, _ =` on stderr writes throughout Run():
-			// these are diagnostic progress/warning lines, not the
-			// command's contract output. A failure to write them
-			// (stderr closed, broken pipe to an unusual pipeline
-			// configuration) doesn't change what the analysis
-			// should report on stdout. The rendered-output path
-			// (displayProfile → displayHuman / JSON write) DOES
-			// propagate write errors via stickyWriter; this
-			// asymmetry is intentional.
+		if resolveErr := resolveNpmRepo(ctx, s, entity, globals); resolveErr != nil {
+			// Always write an absence signal so the profile carries a
+			// stored record of the failure — not just ephemeral stderr
+			// chatter. This is a standalone AppendSignals write so it
+			// persists even when we return an error on the --refresh path.
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"npm-registry",
+				resolveErr.Error(),
+				true, // retryable: transient registry failure or attacker-controlled response
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
+
+			if cmd.Refresh {
+				// Deliberate `_, _ =` on stderr writes throughout Run():
+				// these are diagnostic progress/warning lines, not the
+				// command's contract output. A failure to write them
+				// (stderr closed, broken pipe) doesn't change what we
+				// should report.
+				_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh npm repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			// Non-refresh path: warn only. The absence signal above
+			// gives operators a stored trail; analysis continues with
+			// whatever signals the npm collector can still provide.
 			_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, err)
+				entity.CanonicalURI, resolveErr)
 		}
 	}
 

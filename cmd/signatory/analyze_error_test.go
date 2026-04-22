@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,8 +15,109 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
+
+// failingNpmSrv returns an httptest server that always replies 500 for
+// registry calls, simulating a transient npm registry failure.
+func failingNpmSrv() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":"registry unavailable"}`)
+	}))
+}
+
+// TestFunctional_AnalyzeRefresh_NpmFailurePropagates_Error (Test A)
+// verifies that when the npm registry call fails during --refresh, Run
+// returns a non-nil error whose message names the npm failure.
+// Prior to the fix, the error was demoted to a stderr warning and Run
+// returned nil — silently degrading the analysis.
+func TestFunctional_AnalyzeRefresh_NpmFailurePropagates_Error(t *testing.T) {
+	npmSrv := failingNpmSrv()
+	defer npmSrv.Close()
+
+	npmCollector := npmregistry.NewCollectorWithClient(
+		npmregistry.NewClientWithBaseURL(npmSrv.URL))
+
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:         filepath.Join(dir, "test.db"),
+		Collectors:     []signal.Collector{npmCollector},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+
+	cmd := &AnalyzeCmd{Target: "pkg:npm/express", Refresh: true}
+	err := cmd.Run(globals)
+
+	// Test A: --refresh + npm failure must return an error, not nil.
+	require.Error(t, err, "npm registry failure during --refresh must propagate as an error")
+	assert.Contains(t, err.Error(), "npm",
+		"error message must name the npm failure")
+}
+
+// TestFunctional_AnalyzeRefresh_NpmFailurePropagates_AbsenceSignal (Test B)
+// verifies that when the npm registry call fails, an absence:repo_declaration
+// signal with retryable=true is written to the store BEFORE the error return.
+// This gives the profile a machine-readable marker distinguishing
+// "tried and registry failed" from "tried and got no declared repo."
+func TestFunctional_AnalyzeRefresh_NpmFailurePropagates_AbsenceSignal(t *testing.T) {
+	npmSrv := failingNpmSrv()
+	defer npmSrv.Close()
+
+	npmCollector := npmregistry.NewCollectorWithClient(
+		npmregistry.NewClientWithBaseURL(npmSrv.URL))
+
+	dir := t.TempDir()
+	globals := &Globals{
+		DBPath:         filepath.Join(dir, "test.db"),
+		Collectors:     []signal.Collector{npmCollector},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+
+	cmd := &AnalyzeCmd{Target: "pkg:npm/express", Refresh: true}
+	err := cmd.Run(globals)
+
+	// Test B: error is expected (covered by Test A); now check the store.
+	require.Error(t, err, "expected error from npm failure")
+
+	// Open the store and look for the absence signal.
+	s, openErr := store.OpenSQLite(t.Context(), globals.DBPath)
+	require.NoError(t, openErr)
+	defer s.Close()
+
+	entity, findErr := s.FindEntityByURI(context.Background(), "pkg:npm/express")
+	require.NoError(t, findErr, "entity must exist even when npm resolution fails")
+
+	signals, sigErr := s.GetSignals(context.Background(), entity.ID)
+	require.NoError(t, sigErr)
+
+	var absenceSig *profile.Signal
+	for i := range signals {
+		if signals[i].Type == "absence:repo_declaration" {
+			absenceSig = &signals[i]
+			break
+		}
+	}
+	require.NotNil(t, absenceSig,
+		"absence:repo_declaration signal must be written before the error return; got signals: %v",
+		func() []string {
+			var types []string
+			for _, s := range signals {
+				types = append(types, s.Type)
+			}
+			return types
+		}())
+
+	// Decode the value and assert retryable=true.
+	var val map[string]any
+	require.NoError(t, json.Unmarshal(absenceSig.Value, &val))
+	retryable, ok := val["retryable"].(bool)
+	assert.True(t, ok && retryable,
+		"absence:repo_declaration signal must carry retryable=true in its metadata; got val=%v", val)
+}
 
 // TestAnalyze_CorruptedEntityErrorNotSwallowed verifies that a
 // non-ErrNotFound error from FindEntityByURI is surfaced to the user,
