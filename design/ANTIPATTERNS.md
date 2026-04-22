@@ -47,6 +47,15 @@ Cross-refs:
 ## Feature creep (violating "complement, don't compete")
 
 - A vulnerability scanner. Even a small one. Even "just CVE lookup."
+- A `signatory scan` subcommand, or any CLI primitive that runs
+  `/analyze` across every dep in a manifest. Signatory is a
+  *decision-moment* tool (see [`analysis-economics.md`](analysis-economics.md)
+  §7 and [`v0.1-invariants.md`](v0.1-invariants.md) non-goals). Per-install /
+  per-row-of-the-lockfile invocation is uneconomic at current model
+  prices *and* a design mismatch: the tool produces most value when
+  a human-plus-LLM pair has a specific adoption or re-vet decision
+  in hand. Shipping the primitive ("but it'd be easy to add") invites
+  scanner-style adoption the architecture will then bend to justify.
 - Auto-remediation — "signatory can fix your go.mod."
 - License compliance as a first-class feature. Scope expansion into the
   legal-tech adjacent space is a well-trodden path to becoming another
@@ -77,6 +86,16 @@ Cross-refs:
 
 ## Usage antipatterns (how the ecosystem leans on it wrong)
 
+- Running signatory across an entire dependency tree as a batch
+  scan. At ~200k tokens per target floor (see
+  [`analysis-economics.md`](analysis-economics.md) §1), fanning out
+  over even a medium `go.mod` or `package-lock.json` is tens of
+  millions of tokens of analysis to learn things mostly below the
+  economic break-even. Signatory is invoked at *decision moments*
+  — pre-adoption, version bumps, incident triage, shopping between
+  alternatives — not as a pass over the closure. Solo-dev usage is
+  the sharp case: tokens come out of the operator's own quota, so
+  scanner-style use is uneconomic before it is undesirable.
 - LLMs citing signatory output as authoritative in PR descriptions:
   *"Approved this dep — signatory says it's fine."* This is laundering
   judgment through a tool explicitly designed not to provide judgment.

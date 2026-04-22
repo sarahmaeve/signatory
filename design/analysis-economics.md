@@ -226,6 +226,58 @@ small teams vetting ~10-100 critical deps per project. Enterprise
 security teams vetting dependencies that enter production. Not
 per-line npm automation.
 
+### Signatory is a decision-moment tool, not a scanner
+
+Stated positively rather than by negation: signatory is invoked
+when a human-plus-LLM pair has a *specific* adoption or re-vet
+decision to make, and is willing to spend minutes and dollars of
+tokens to inform it. The load-bearing trait of the target user is
+not "senior engineer" or "security team" — it's **has a decision
+to make right now**.
+
+The solo-dev case makes the economics sharp. In v0.1's
+single-user shape (see [`v0.1-invariants.md`](v0.1-invariants.md)
+Invariant 1), the tokens come straight out of the operator's Max
+quota or API spend. Per-install scanner-style use is not just
+discouraged — at ~200k tokens per target, it is uneconomic. One
+person running `/analyze` against every row of a `package-lock.json`
+is burning weeks of budget to learn things mostly below the
+economic break-even (§3). The single-user shape forces decision-
+moment use; shared/org deployment (v0.2+) changes the math but
+doesn't reintroduce "scan everything" — it just lets multiple
+consumers amortize one decision.
+
+Contexts where invocation is economically rational:
+
+1. **Pre-adoption gate** — "should I add this dep?" The canonical
+   case and the biggest value: provenance findings (e.g. Stripe
+   F004) that a PR review would miss.
+2. **Version-bump re-vet** — Dependabot opened a PR, a major
+   jumped, or a maintainer changed. Cheaper on the second run if
+   the per-publisher cache (§8) lands.
+3. **Incident-adjacent triage** — "X got flagged in advisory feed
+   Y, do we use it and does it matter?" Highest urgency, least
+   forgiving of pipeline slowness.
+4. **Shopping between alternatives** — choosing among N candidate
+   libraries. Here the economics bite: analyzing 3 candidates at
+   200k each can exceed just picking one and rewriting.
+5. **Backlog audit** — "we inherited this repo, what's on the
+   trust budget?" Batch-shaped, but the batch is human-curated
+   ("these 10 deps I'm worried about"), not dep-tree-wide.
+
+What signatory is *not* designed for, and what the economics
+actively reject:
+
+- `signatory scan-everything` over a lockfile or `go.mod` closure.
+- A CI action that gates PRs on signatory output for every
+  changed dep. (Also an antipattern for a second reason — see
+  [`ANTIPATTERNS.md`](ANTIPATTERNS.md) §"Usage antipatterns".)
+- Scheduled re-analysis without a user-visible decision moment
+  on the other side. (Also an Invariant-1 non-goal.)
+- "Run signatory on the top 1000 npm packages so users can look
+  them up." The hosted-aggregator shape signatory explicitly
+  refuses.
+
 ## 8. Future work
 
 Named as possibilities, not commitments. All post-v0.1.

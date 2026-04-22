@@ -44,7 +44,14 @@ trustworthy." Signatory answers that question.
 
 **Key properties:**
 - Language/ecosystem agnostic. Not tied to Go, npm, or any single ecosystem.
-- Aggregator, not scanner. We don't run vulnerability checks ourselves.
+- Aggregator, not scanner — in two senses. (1) *Tool kind:* we surface
+  signals from existing sources rather than running our own vulnerability
+  checks. (2) *Use pattern:* signatory is invoked at specific decision
+  moments (pre-adoption, version bumps, incident triage), not swept across
+  a dependency tree. Both senses are load-bearing; the analysis economics
+  (`design/analysis-economics.md` §7) make scanner-style use uneconomic
+  for the single-user v0.1 shape, and scanner-style use would be a design
+  mismatch at any scale.
 - Raw signals, not opinionated scores. Users can define their own risk thresholds
   and scoring mechanisms, ideally via MCP integration.
 - Unit of analysis: repository or code module, with drill-down to individual PRs
