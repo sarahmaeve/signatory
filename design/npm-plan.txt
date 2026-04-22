@@ -1,373 +1,295 @@
 # npm ecosystem provider: implementation plan
 
-Status: redrafted 2026-04-20 after reconciliation audit against current
-repo state. Supersedes the original conversational plan (full history
-in git). The original was drafted before the following work landed:
+**Status:** shipped 2026-04-20. Phases A / B / B.6 / C landed the
+same day, followed by three adversarial-review follow-ups. This
+doc is the tracking record — amend when new npm work lands.
+Historical reframe 2026-04-22 to reflect delivered state; the
+pre-implementation plan is in git history before this commit.
+
+**Predecessor context (unchanged — these predate the npm plan and
+still hold as invariants):**
 
 - Entity model v2 (34c3421) — EntityPackage/EntityProject split, Ecosystem field
-- Signal-type registry (593574c) — signal.Make now panics on unregistered types
-- Git local-clone collector (2e1a176) — collectorsFor is now [github, git]
+- Signal-type registry (593574c) — signal.Make panics on unregistered types
+- Git local-clone collector (2e1a176) — collectorsFor started as [github, git]
 - profile.ResolveTarget (f3d5b73) — single source of truth for CLI target parsing
-- internal/manifest/ + signatory survey (bfe5df8, yesterday) — ecosystem-
-  neutral Dep/ProjectInfo types, survey command
+- internal/manifest/ + signatory survey (bfe5df8) — ecosystem-neutral Dep/ProjectInfo types
 - yaml strict-mode hardening (220ed34) — strict-decode discipline
 
-ROADMAP v0.1 must-do #2. npm is highest-risk ecosystem per the axios
-case study; this plan lands manifest parsing + registry signals +
-provider integration.
+ROADMAP v0.1 must-do #2 (shipped). npm is highest-risk ecosystem
+per the axios case study; this work landed manifest parsing +
+registry signals + provider integration.
 
 --------------------------------------------------------------------
 
-## Locked decisions
+## Locked decisions (as resolved)
 
 - **Q1 Manifests.** `package.json` + `package-lock.json` only.
-  yarn.lock / pnpm-lock.yaml deferred to post-v0.1.
-- **Q2 Validator.** DONE. ValidateCanonicalURI admits scoped-package
-  URIs since #78's printable-ASCII refactor. Pinned with test cases
-  in `TestValidateCanonicalURI_Accepts` for `@types/node`,
-  `@nestjs/core`, `@angular/core`.
-- **Q3 Verification.** Trust the registry's `repository.url` claim
-  without pre-verifying existence (one extra API call per package is
-  expensive and the downstream github collector handles absence
-  gracefully). Ship OIDC trusted-publishing attestation presence as
-  the provenance signal — it's cryptographically verifiable and
-  directly addresses the axios attack pattern. Defer git-tag-
-  correspondence and tarball-diff to post-v0.1; they require cross-
-  collector orchestration worth its own design pass.
-- **Q4 Decomposition.** Three commits (Phase A / B / C), not one
-  megacommit. Each is independently reviewable and leaves the test
-  suite green.
-- **Q5 Signals.** Flat metadata, 5 or 6 entries (see open question
-  below): `last_publish`, `maintainer_count`, `postinstall_present`,
-  `trusted_publishing`, `weekly_downloads`, optionally
-  `dependent_count`.
-- **Decision (a) Repo resolution.** Lives in analyze.go orchestration,
-  not inside the npm collector. Provider answers "what's the repo for
-  this package?"; orchestrator stamps it on the entity; collectors
-  work against the resolved entity.
-- **Decision (b) Default-on.** Collector is default-enabled. Scheme-
-  filtered (acts only on `pkg:npm/*` entities) so no false triggers.
-- **Decision (c) Traffic.** 3 external calls per npm analyze is
-  acceptable for v0.1. Prefer bundling where feasible.
+  yarn.lock / pnpm-lock.yaml deferred to post-v0.1. Shipped as
+  specified.
+- **Q2 Validator.** DONE pre-plan. ValidateCanonicalURI admits
+  scoped-package URIs since #78's printable-ASCII refactor. Pinned
+  with test cases in `TestValidateCanonicalURI_Accepts` for
+  `@types/node`, `@nestjs/core`, `@angular/core`.
+- **Q3 Verification.** Shipped: trust the registry's
+  `repository.url` claim without pre-verifying existence. OIDC
+  trusted-publishing attestation presence lands as the
+  `trusted_publishing` signal; `publish_origin_consistency`
+  (Phase B.6) adds cross-version publisher + attestation stability
+  on top. Git-tag-correspondence and tarball-diff remain post-v0.1.
+- **Q4 Decomposition.** Shipped as four commits, not three — Phase
+  A / B / B.6 / C. B.6 was added mid-stream after a parallel
+  analysis pointed out that snapshot-only signals can't distinguish
+  axios-style transitions from legitimate publishes. Each commit
+  independently reviewable; test suite green at each.
+- **Q5 Signals.** Seven registry signals shipped: `last_publish`
+  (A); `maintainer_count`, `postinstall_present`, `trusted_publishing`,
+  `weekly_downloads` (B); `postinstall_introduced`,
+  `publish_origin_consistency` (B.6). `dependent_count` was
+  dropped per OQ1's default position (not reinstated). A pending
+  composition group (`direct_dep_count`, `transitive_dep_count`) is
+  named in OQ1 as the next signal addition.
+- **Decision (a) Repo resolution.** Shipped in analyze.go
+  orchestration, not inside the npm collector — the npm client
+  exposes `NormalizeDeclaredRepoURL`; the orchestrator stamps the
+  URL on the entity.
+- **Decision (b) Default-on.** Shipped: collector is default-enabled,
+  scheme-filtered (acts only on `pkg:npm/*` entities), no false
+  triggers.
+- **Decision (c) Traffic.** Shipped at 2 external calls per npm
+  analyze (registry metadata + weekly downloads). OQ1's composition
+  signal landing will not change this — `direct_dep_count` is
+  derivable from the already-fetched registry response.
 
 --------------------------------------------------------------------
 
-## Current repo state (load-bearing facts)
+## Shipped state (as of 2026-04-20)
 
-Facts the plan relies on; verify these are still true if resuming in
-a future session.
+Verified facts about the current repo. Update this section when
+reconciling after future npm work lands.
 
-- `internal/signal/registry/` placeholder directory exists, empty.
-  Invariant 2 (`design/v0.1-invariants.md:138`) binds the npm
-  collector to `internal/signal/registry/npm/`.
-- `profile.ResolveTarget` (`internal/profile/target.go`) is the
-  shipped single-parse entry for CLI targets. `cmd/signatory/show.go`
-  and `cmd/signatory/handoff.go` use it; `cmd/signatory/analyze.go`
-  does NOT yet (uses `NormalizeGitHubRepoInput` directly). Phase A.1
-  pays this debt down.
-- `signal.Make` (`internal/signal/make.go:33-38`) panics on
-  unregistered types. Every new signal type must have an entry in
-  `internal/signal/types.go`'s `signalTypeRegistry`.
-- `collectorsFor` (`cmd/signatory/collectors.go:70-81`) returns
-  `[github, git-local-clone]` unconditionally. The git collector's
-  `--path`/`--clone` contract fires for every analyze; Phase A.2
-  gates that on entity type.
-- `internal/manifest/` (Dep/ProjectInfo/Detect) is the established
-  shape for parsed deps. `internal/manifest/gomod/parse.go` is the
-  reference parser. npm parser must return `[]manifest.Dep`.
-- `manifest.Detect` (`internal/manifest/detect.go:37`) scans only for
-  `go.mod` today. Phase C adds `package.json`.
-- `analyze.go:119-136` hardcodes `Type: EntityProject` + a GitHub URL
-  at entity creation. Phase A.1 branches on the resolved URI scheme.
-- `.claude/skills/analyze/SKILL.md` already lists npm among supported
-  coordinates — the skill's user-facing copy writes a check the
-  implementation doesn't yet cash. Phase A closes that gap for
-  single-target analyze; Phase C closes it for survey.
+- `internal/signal/registry/npm/` populated: `client.go`,
+  `collector.go`, `resolve.go`, `doc.go` + tests (~70KB total).
+  Invariant 2 (`design/v0.1-invariants.md:138`) satisfied.
+- `internal/manifest/npm/` populated: `parse.go`, `parse_test.go`,
+  `doc.go` + `testdata/` fixtures.
+- `cmd/signatory/analyze.go:108` calls
+  `profile.ResolveTarget(cmd.Target)`; branches on scheme at :184
+  (`pkg:npm/*` → `EntityPackage` + `Ecosystem="npm"`).
+- `cmd/signatory/collectors.go` `collectorsFor` is entity-type-aware:
+  `npm-registry` for `EntityPackage` + `Ecosystem="npm"`; `github` +
+  `git-local-clone` for `EntityProject` + github URL.
+  `ErrCloneRequired` only fires for git-hosted entities without
+  `--path`/`--clone`.
+- `internal/manifest/detect.go:38` recognizes `package.json`
+  alongside `go.mod`. First-match-wins documented inline (closes
+  OQ2).
+- `internal/survey/survey.go:84` routes `package.json` to
+  `npmmanifest.Parse`.
+- All seven shipped signal types registered in
+  `internal/signal/types.go`'s `signalTypeRegistry` with Group,
+  ForgeryResistance, Description, Caveats populated.
+- `.claude/skills/analyze/SKILL.md`'s npm claim is now cashed
+  end-to-end for both single-target `analyze` and `survey`.
 
 --------------------------------------------------------------------
 
-## Architecture shape
+## Architecture shape (as shipped)
 
 Three orthogonal pieces:
 
 1. **Manifest parsing** — `internal/manifest/npm/`. Returns
-   `[]manifest.Dep` identical to gomod's shape so survey can consume
+   `[]manifest.Dep` identical to gomod's shape; survey consumes
    it without special-case code.
 2. **Registry client** — `internal/signal/registry/npm/client.go`.
-   HTTP to `registry.npmjs.org` (main metadata) and `api.npmjs.org`
-   (downloads). Models `signal/github/client.go` for defense-in-depth.
+   HTTPS to `registry.npmjs.org` (main metadata) and `api.npmjs.org`
+   (downloads). Models `signal/github/client.go` for
+   defense-in-depth.
 3. **Signal collector** — `internal/signal/registry/npm/collector.go`.
    Implements `signal.Collector`; scheme-filtered to `pkg:npm/*`.
 
 Orchestration in `analyze.go`:
 
 - `profile.ResolveTarget(cmd.Target)` → canonical URI + scheme
-- If `scheme == pkg` + `ecosystem == npm`: call npm client once for
+- If `scheme == pkg` + `ecosystem == npm`: call npm client for
   `repository.url`, structurally validate, stamp on entity
 - `collectorsFor(entity)` returns the applicable subset based on
   entity type + resolved URL
 
---------------------------------------------------------------------
+Client surface:
 
-## Phase A — architecture shift + first end-to-end signal (~500 LOC)
+- `GetPackage(ctx, name) (*RegistryPackage, error)` — full metadata
+- `GetWeeklyDownloads(ctx, name) (int, error)` — downloads API
+- `NormalizeDeclaredRepoURL(url) (string, bool)` — repo-URL shape
+  normalization for the A.5 stamping step
 
-Goal: prove analyze → npm-collector → store plumbing end-to-end with
-a single signal. This phase pays down the analyze.go tech debt
-(ResolveTarget adoption + collector-list generalization) as a
-byproduct, independent of the npm-signals-quality conversation.
-
-### A.1 analyze.go: adopt ResolveTarget
-
-- Replace the direct `NormalizeGitHubRepoInput` call at
-  `analyze.go:73` with `profile.ResolveTarget(cmd.Target)`.
-- Branch entity creation on `resolved.Scheme`:
-  - `repo:*` → `EntityProject` + `URL=https://<platform>/<owner>/<name>`
-    (preserves existing behavior exactly)
-  - `pkg:npm/*` → `EntityPackage` + `Ecosystem="npm"` + `URL=""`
-    (URL populated in A.5 after repo resolution)
-- Tests: every existing github analyze case stays green; one new
-  test for a `pkg:npm/` target that exercises the new branch.
-
-### A.2 collectorsFor: gate by entity type
-
-Current: `[github, git-local-clone]` for all entities; git mandates
-`--path`/`--clone` unconditionally.
-
-New dispatch:
-
-- `EntityProject` + github URL → `[github, git-local-clone]` (git
-  requires `--path`/`--clone` as today)
-- `EntityPackage` + `Ecosystem=npm` → `[npm-registry]`; git-local-
-  clone skipped; `--path`/`--clone` NOT required
-- `EntityPackage` that resolves to a github repo (A.5) →
-  `[npm-registry, github, git-local-clone]`; git-local-clone still
-  requires `--path`/`--clone` to run but is now optional
-
-The sentinel `ErrCloneRequired` must only fire when a git-hosted
-entity is analyzed without `--path`/`--clone`. npm-only analysis
-doesn't trigger it. Update tests for the 5 existing sentinel errors
-accordingly.
-
-### A.3 npm registry client
-
-`internal/signal/registry/npm/client.go`. Single method for Phase A:
-
-```
-GetPackage(ctx context.Context, name string) (*registryPackage, error)
-```
-
-Defense-in-depth invariants (all tested):
-
-- HTTPS-only redirect policy — refuse http downgrade (#89 pattern)
-- Max response size 10MB (npm metadata can be multi-MB legitimately)
-- Error string NEVER contains response body (#93 pattern)
-- `json.Decoder.DisallowUnknownFields()` on `registryPackage` struct
-  — strict decode surfaces registry-schema drift the same way
-  yaml-strict-mode surfaces analyst-output drift (220ed34 lesson)
-- Context propagation + 60s per-request timeout
-- Package-name validation before URL construction — allowlist
-  `[A-Za-z0-9._-]` plus a single leading `@<scope>/` for scoped
-  names; reject anything else before any HTTP activity
-
-`registryPackage` models only what Phases A+B read: `time` (last
-publish), `maintainers`, `versions[<dist-tags.latest>].scripts.postinstall`,
-`dist.attestations` (OIDC), `repository.url`. Unused fields are not
-modeled (DisallowUnknownFields → any drift is a test failure we'd
-want to know about).
-
-Client tests use httptest server returning hand-crafted minimal JSON:
-happy path, size-cap, HTTPS downgrade rejection, error-body
-sanitization, malformed-name rejection pre-HTTP, context cancellation.
-
-### A.4 npm collector + first signal
-
-`internal/signal/registry/npm/collector.go` implements
-`signal.Collector`:
-
-- `Name() → "npm-registry"`
-- `Collect(ctx, entity)` — no-op (empty result) for any entity whose
-  `CanonicalURI` doesn't start with `pkg:npm/`; otherwise fetch via
-  client and emit signals
-
-Phase A ships ONE signal: `last_publish` (Group=vitality,
-ForgeryResistance=medium). Must land with:
-
-- Entry in `internal/signal/types.go`'s `signalTypeRegistry` with
-  Group, ForgeryResistance, Description, Caveats populated
-- Unit tests: happy-path extraction, missing `time` field →
-  absence signal, non-npm entity → empty result
-
-### A.5 Repo resolution in analyze.go
-
-After entity creation, if `EntityPackage` + `Ecosystem=npm`:
-
-1. Call `npm.Client.GetPackage(ctx, name)`
-2. Extract `repository.url` (handle both string and `{type,url}`
-   object shapes — npm allows both)
-3. Structurally validate: must parse to a URL with host matching
-   an allowlist (`github.com` for v0.1 — other platforms in later
-   work)
-4. Stamp on entity as `URL`
-
-If repository is absent, malformed, or non-allowlisted: leave
-`URL=""`. github collector is either skipped by A.2's dispatch or
-records absences when run — both acceptable.
-
-Don't pre-verify the github repo exists (Q3 locked). Failures
-surface downstream as collector absences.
-
-### A.6 End-to-end functional test
-
-`cmd/signatory/functional_test.go` —
-`TestFunctional_AnalyzeNpm_EndToEnd`:
-
-- Two httptest servers: npm registry + github api
-- Target: `pkg:npm/express`
-- Assertions: entity exists with `CanonicalURI=pkg:npm/express`,
-  `Ecosystem=npm`, resolved github URL; `last_publish` signal
-  recorded; github signals recorded; audit log entry exists
-
-Commit title: `npm: provider shell + analyze refactor + first signal`
+`RegistryPackage` models what the collector reads: `Time`
+(per-version publish timestamps), `Maintainers`, `Versions` map
+with per-version `Scripts` (postinstall), `Dist.Attestations`
+(OIDC), `NpmUser.Name/Email` (publisher identity — added for B.6),
+`Repository.URL`. Unused fields unmodeled;
+`json.DisallowUnknownFields` surfaces registry drift as a test
+failure we'd want to know about.
 
 --------------------------------------------------------------------
 
-## Phase B — remaining signals (~300-400 LOC)
+## Phase A — shipped 2026-04-20 (093a6dd)
 
-Goal: fill out the signal set with one commit per signal or a single
-bundled commit (your call based on reviewability).
+Commit: `npm Phase A: provider shell + analyze refactor + first signal end-to-end`
 
-Signals, each requiring (1) `signalTypeRegistry` entry, (2)
-collector method, (3) unit tests (happy + absence), (4) dogfood
-spot-check:
+Delivered:
+
+- `analyze.go` adopts `ResolveTarget` and branches entity creation
+  on scheme (`repo:*` → EntityProject; `pkg:npm/*` → EntityPackage).
+- `collectorsFor` gated by entity type; npm-only analyze doesn't
+  require `--path`/`--clone`.
+- npm registry client with HTTPS-only redirect, 10MB response cap,
+  body-free error strings, `DisallowUnknownFields`, 60s timeout,
+  pre-HTTP name validation (allowlist + scoped-name grammar).
+- npm collector scheme-filtered to `pkg:npm/*`.
+- First signal: `last_publish` (vitality / medium FR).
+- A.5 repo resolution: `repository.url` extracted (string or
+  `{type,url}` shape), structurally validated, github-hosts
+  allowlisted.
+- E2E functional test with httptest servers for npm + github.
+
+Tech-debt byproducts (ResolveTarget adoption + collectorsFor
+generalization) are reusable for future ecosystem providers.
+
+--------------------------------------------------------------------
+
+## Phase B — shipped 2026-04-20 (d795e3b)
+
+Commit: `npm Phase B: maintainer_count, postinstall_present, trusted_publishing, weekly_downloads`
+
+Delivered signals:
 
 | Signal | Source | Group | Forgery resistance |
 |---|---|---|---|
-| `maintainer_count` | `maintainers` (len) | governance | medium |
+| `maintainer_count` | `maintainers` (len + list) | governance | medium |
 | `postinstall_present` | `versions[latest].scripts.postinstall` | publication | high |
 | `trusted_publishing` | `dist.attestations` presence | publication | very_high |
 | `weekly_downloads` | `api.npmjs.org/downloads/point/last-week/<pkg>` | criticality | low |
-| `direct_dep_count` | `versions[latest].dependencies` (len) | composition | — (measurement) |
-| `dependent_count` (deprecated — see OQ1) | `registry.npmjs.org/-/v1/search?text=<pkg>` | criticality | low |
 
-**New `composition` group.** `direct_dep_count` is mechanistic —
-pure Go extraction from the already-fetched `registryPackage`, zero
-analyst tokens, zero additional HTTP traffic. It belongs in a new
-signal group separate from vitality/governance/publication/
-criticality: measurements of the target's composed surface rather
-than evidence about its publisher.
+`dependent_count` was not implemented — OQ1's default-drop
+position was taken.
 
-Composition signals do not carry a ForgeryResistance rating. They
-describe the object being adopted, not a claim someone made about
-it — an adversary can't hide that a package has N declared
-dependencies once the manifest is public.
-
-The load-bearing observation these signals support: a package with
-extensive dependencies is expensive to verify, expensive to repair
-(each transitive author patches on their own cadence), and
-expensive to re-vet on updates. A `provenance` or `analyze` verdict
-on the root covers one publisher out of N — it does not speak to
-the composition. Signatory's contract for composition signals is
-therefore to **surface the shape — count, attestation distribution,
-install-script surface, maintainer-age distribution — and not to
-produce a verdict on whether the surface is acceptable. That is
-org-policy, not a signatory decision. Anything stronger is
-signatory pretending to know a risk appetite it wasn't given.**
-
-`transitive_dep_count` is the higher-signal composition metric but
-requires either a registry tree-walk (N additional HTTP calls) or a
-parsed lockfile (Phase C deliverable). Deferred to Phase C+;
-`direct_dep_count` alone gives a useful first-pass indicator at
-zero incremental cost.
-
-`weekly_downloads` requires a second client method
-(`GetWeeklyDownloads(ctx, name) (int, error)`) against a different
-host (`api.npmjs.org`). Apply identical defense-in-depth to the
-main registry client.
-
-Commit title: `npm: complete signal set` (or one commit per signal)
+`weekly_downloads` added a second client method
+(`GetWeeklyDownloads`) against `api.npmjs.org` with identical
+defense-in-depth to the main registry client.
 
 --------------------------------------------------------------------
 
-## Phase C — manifest parsing + survey routing (~300-400 LOC)
+## Phase B.6 — shipped 2026-04-20 (5f5519b)
 
-Goal: `signatory survey` works against npm projects. Closes the
-dogfood gap the /analyze skill already claims.
+Commit: `npm Phase B.6: longitudinal signals (postinstall_introduced, publish_origin_consistency)`
 
-### C.1 internal/manifest/npm/ parser
+Added mid-stream after a parallel analysis observed that every
+Phase A/B signal was single-version-of-latest metadata. An
+axios-style attack — one malicious patch, one compromised account —
+cannot be distinguished from a legitimate publish using snapshot
+data alone. The pattern is in the transition, not the state.
 
-- `Parse(path) (manifest.ProjectInfo, []manifest.Dep, error)`
-- Input: `package.json` (required) + `package-lock.json` v3 (if
-  present — used to resolve transitive versions)
-- Four dep classes: `dependencies`, `devDependencies`,
-  `peerDependencies`, `optionalDependencies`. All become
-  `manifest.Dep` entries with `Direct=true`; class captured via
-  the `Ecosystem` subfield or a new tag if justified
-- Transitive deps (from lockfile): `Direct=false`
-- CanonicalURI:
-  - Unscoped: `pkg:npm/<name>`
-  - Scoped: `pkg:npm/@<scope>/<name>`
-- Non-registry deps (file:, git:, npm:alias): `Ecosystem=
-  "npm-local"`, empty CanonicalURI (mirrors gomod's
-  `go-local-replace` pattern)
-- `package-lock.json` v3 only for v0.1 (npm 7+). v1/v2 and workspace
-  entries: gracefully parsed-past or skipped; not an error
+Delivered signals (no additional HTTP traffic — derived from the
+already-fetched `RegistryPackage`):
 
-testdata/ fixtures (check in as real package.json + package-lock.json
-pairs for determinism):
+| Signal | Source | Group | Forgery resistance |
+|---|---|---|---|
+| `postinstall_introduced` | postinstall transition over latest N versions | publication | high |
+| `publish_origin_consistency` | `_npmUser` + attestation distribution across versions | publication | very_high |
 
-- `simple/` — 2 direct deps + ~5 transitive
-- `scoped/` — includes a `@types/node` direct dep
-- `mixed/` — all four dep classes populated
-- `no-lockfile/` — package.json only
+Implementation notes:
 
-Parser edge cases to cover:
+- `PackageVersion` struct gained `NpmUser` (Name, Email). Email
+  parsed but not emitted (PII).
+- Versions ordered by `pkg.Time[version]` publish timestamp,
+  newest-first. Versions without a corresponding time entry are
+  skipped rather than ordered by semver fallback — a wrong order
+  silently corrupts longitudinal signals, and "can't order" is
+  safer than "order wrong."
+- Cross-version window bounded at 10 (`crossVersionWindow`).
+  Tested with a 14-version fixture to confirm the cap blocks
+  false transition detection when an old-version postinstall
+  sits outside the window.
+- Both signals record absence (not bogus value) when the version
+  set is unorderable — consistent with the "crashing over data
+  corruption" rule.
 
-- Empty dependencies map
-- `repository` as string vs object
-- Missing `repository` field
-- Workspace-style lockfile entries (ignore gracefully)
+The publisher-identity data B.6 started collecting is the
+signal-side groundwork for the per-publisher trust profile named
+in `analysis-economics.md` §8 and `analyst-composability.md` §1.
+Not a full amortization system yet — just the raw material.
 
-### C.2 manifest.Detect routing
-
-- Append `package.json` to the candidate list in
-  `internal/manifest/detect.go`
-- Tie-breaking order (if both go.mod and package.json exist):
-  first-found wins; document the expectation. v0.1 doesn't need
-  explicit tie-breaking because real projects are single-ecosystem.
-
-### C.3 survey.Run routing
-
-- `internal/survey/survey.go` `parseManifest` switch: add
-  `"package.json"` case routing to `npmmanifest.Parse`
-- Tests: survey against each testdata fixture; summary renders
-  correctly; tiers resolve against store
-
-### C.4 Dogfood
-
-- Live run: `signatory analyze pkg:npm/vitest --refresh`
-- Optional: add a small npm testdata project; run
-  `signatory survey` against it
-- /analyze skill routing check: does `/analyze pkg:npm/vitest`
-  route through the skill correctly?
-
-Commit title: `npm: manifest parsing + survey integration`
+Live dogfood (`pkg:npm/zod`): produced the "solo-but-coherent"
+pattern the signals were designed to distinguish from an
+axios-style transition (single publisher, consistent attestation
+presence, zero transitions).
 
 --------------------------------------------------------------------
 
-## Security invariants (apply to every phase)
+## Phase C — shipped 2026-04-20 (f203226)
 
-- `ValidateCanonicalURI` at persistence boundary — unchanged
+Commit: `npm Phase C: manifest parser + survey integration`
+
+Delivered:
+
+- `internal/manifest/npm/parse.go` parses `package.json` (required)
+  and `package-lock.json` v3 (optional, for transitive resolution).
+- Four dep classes handled: `dependencies`, `devDependencies`,
+  `peerDependencies`, `optionalDependencies`. Direct entries
+  `Direct=true`; transitives from the lockfile `Direct=false`.
+- CanonicalURI: `pkg:npm/<name>` or `pkg:npm/@<scope>/<name>` for
+  scoped.
+- Non-registry deps (`file:`, `git:`, `npm:alias`) →
+  `Ecosystem="npm-local"`, empty CanonicalURI (mirrors gomod
+  `go-local-replace` pattern).
+- Lockfile v1/v2 and workspace entries: parsed-past/skipped
+  gracefully.
+- `manifest.Detect` and `survey.Run` routing wired; `/analyze`
+  skill's npm claim now cashed end-to-end.
+- testdata fixtures: `simple/`, `scoped/`, `mixed/`, `no-lockfile/`.
+
+--------------------------------------------------------------------
+
+## Adversarial review follow-ups — shipped 2026-04-20 (800c31c, c57af8e, fd575c5)
+
+Three commits from a post-Phase-C adversarial review. All green
+under -race.
+
+- **Commit 1/3 (800c31c):** correctness fixes surfaced by the
+  review pass.
+- **Commit 2/3 (c57af8e):** modernization — `any` over
+  `interface{}`, `strings.Cut`/`CutPrefix` over index-then-slice,
+  `bytes.NewReader` alloc-fix for the downloads call, gofmt-drift
+  normalization in already-committed test files.
+- **Commit 3/3 (fd575c5):** `signatory analyze` stdout/stderr
+  discipline + SIGINT handling + exit codes.
+
+Lessons worth keeping:
+
+- `signal.Make`'s panic-on-unregistered-type caught regressions
+  during the review pass. Invariant stands.
+- `DisallowUnknownFields` surfaced a field-name drift that would
+  have been silently lost otherwise. Invariant stands.
+- Writer-injection discipline paid off for test parallelism (no
+  global `os.Stdout` surgery in any npm test).
+
+--------------------------------------------------------------------
+
+## Security invariants (enforced across all npm code)
+
+- `ValidateCanonicalURI` at persistence boundary
 - HTTPS-only redirect in npm client (#89)
 - Max response size cap (10MB per github-client pattern)
 - Error sanitization: response body NEVER in error string (#93)
 - Package-name validation before URL construction (allowlist +
   scoped-name grammar)
 - Context cancellation propagation tested (#87 pattern)
-- `json.DisallowUnknownFields()` for every registry-response struct
+- `json.DisallowUnknownFields()` on every registry-response struct
 - `signalTypeRegistry` entry for every new signal type (otherwise
   `signal.Make` panics at first emission)
 
-## Test discipline
+## Test discipline (observed)
 
 - Table-driven unit tests with explicit `name` fields and
   `t.Run(tc.name, …)` per case
@@ -376,7 +298,7 @@ Commit title: `npm: manifest parsing + survey integration`
   no global `os.Stdout` redirection — breaks `t.Parallel()`
 - Functional tests via `httptest`, never live npm/github
 
-## Out of scope (post-v0.1)
+## Out of scope (still post-v0.1)
 
 - yarn.lock / pnpm-lock.yaml
 - Git tag correspondence provenance signal
@@ -386,26 +308,75 @@ Commit title: `npm: manifest parsing + survey integration`
 - Cross-ecosystem correlation
 - TTL cache on registry responses (ROADMAP should-do)
 
-## Open questions before execution
+--------------------------------------------------------------------
 
-1. **`dependent_count` vs. `direct_dep_count`**: original Phase B
-   included `dependent_count` (inbound popularity, ForgeryResistance
-   low, gameable) as an optional 6th signal. Replace with
-   `direct_dep_count` in the new `composition` group — same
-   external-traffic cost (zero additional calls; the dependencies
-   map is already in the fetched struct), stronger signal, directly
-   supports skim-mode triage of high-fanout targets. Drop
-   `dependent_count` entirely. Default position: swap.
-2. **Survey tie-breaking**: if both `go.mod` and `package.json` live
-   in the same directory, first-found wins — OK, or do we want
-   explicit ordering? Default position: first-found, documented.
+## Next
 
-## Resuming this work in a future session
+Pending npm work, ordered roughly by readiness.
+
+1. **Composition group — `direct_dep_count` then
+   `transitive_dep_count`.** New signal group for measurements of
+   the target's composed surface (vs. evidence about its
+   publisher). `direct_dep_count` is zero incremental cost — the
+   `dependencies` map is already in the fetched `RegistryPackage`.
+   `transitive_dep_count` requires either a tree-walk (N HTTP
+   calls) or a parsed lockfile; the lockfile path is preferred
+   since Phase C already parses it. ForgeryResistance does not
+   apply (composition signals describe the object, not claims
+   someone made about it). Contract: surface the shape, do not
+   produce a verdict — org-policy decides acceptability. See
+   `analyst-composability.md` §6 for the skim-mode motivation.
+
+2. **Derived signals over the B.6 longitudinal data.** Phase B.6
+   collects publisher distribution per-version but does not yet
+   produce derivatives like `has_historically_published_with_oidc`
+   or `maintainer_account_age_spread`. Cheap to add once dogfood
+   shows which derivatives are decision-relevant.
+
+3. **Per-publisher profile (stretch).** The `_npmUser` data B.6
+   started collecting points toward the amortization model named
+   in `analysis-economics.md` §8 and `analyst-composability.md`
+   §1. Needs a store-side shape (publisher table keyed on
+   `(ecosystem, maintainer_id)`) before a cross-package profile
+   is meaningful. Not scoped yet — wants 5-10 dogfood runs from
+   the same maintainer first.
+
+## Open questions
+
+1. **`dependent_count` vs. `direct_dep_count`:** Phase B dropped
+   `dependent_count` (gameable inbound-popularity signal). Fill
+   the empty slot with `direct_dep_count` in the new `composition`
+   group — same external-traffic cost (zero additional calls; the
+   `dependencies` map is already in the fetched struct), stronger
+   signal, directly supports skim-mode triage of high-fanout
+   targets. Default position: add `direct_dep_count`; do not
+   reinstate `dependent_count`.
+
+## Closed questions
+
+- **OQ2 Survey tie-breaking** (from the pre-implementation plan):
+  if both `go.mod` and `package.json` live in the same directory,
+  first-found wins — OK, or do we want explicit ordering? Closed:
+  `manifest.Detect` iterates a fixed-order candidate list
+  (`go.mod`, `package.json`) and returns the first existing file;
+  the `--manifest` flag is the escape hatch for multi-manifest
+  polyglot roots. Behavior documented inline in
+  `internal/manifest/detect.go`.
+
+--------------------------------------------------------------------
+
+## Resuming maintenance work
 
 1. Read this doc in full.
-2. `git log --oneline --all | grep "^[a-f0-9]* npm:"` to see which
-   phases have merged.
-3. Dogfood: `signatory survey` on self + `signatory analyze
-   pkg:npm/vitest` if Phase A merged.
-4. Continue from the next unstarted sub-phase. Verify "Current repo
-   state" facts above haven't shifted under you.
+2. `git log --oneline -- internal/signal/registry/npm/
+   internal/manifest/npm/` to see commits since the shipped set.
+3. Verify the "Shipped state" section still matches the repo;
+   update if drifted.
+4. For new signal additions: follow the `signalTypeRegistry` +
+   collector method + unit tests + dogfood pattern established by
+   Phases A/B/B.6. `signal.Make`'s panic-on-unregistered-type
+   catches missing registry entries at first emission — lean on
+   it rather than defending against the absence.
+5. For manifest changes: extend `manifest.Detect`'s candidate list
+   and add a matching case in `internal/survey/survey.go`'s
+   `parseManifest` switch.
