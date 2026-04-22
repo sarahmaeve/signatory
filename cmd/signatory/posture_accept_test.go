@@ -53,7 +53,7 @@ func ingestSynthesisForAccept(t *testing.T, g *Globals, out *exchange.AnalystOut
 // latestAcceptAuditDetail returns the parsed detail JSON of the
 // most recent audit_log row with action == "accept_posture" for
 // entityID. Fails the test if no such row exists.
-func latestAcceptAuditDetail(t *testing.T, g *Globals, entityID string) map[string]interface{} {
+func latestAcceptAuditDetail(t *testing.T, g *Globals, entityID string) map[string]any {
 	t.Helper()
 	ctx := context.Background()
 	s, err := g.OpenStore(ctx)
@@ -70,7 +70,7 @@ func latestAcceptAuditDetail(t *testing.T, g *Globals, entityID string) map[stri
 		"accept_posture", entityID).Scan(&rawDetail)
 	require.NoError(t, err, "expected an accept_posture audit row for entity %s", entityID)
 
-	var detail map[string]interface{}
+	var detail map[string]any
 	require.NoError(t, json.Unmarshal([]byte(rawDetail), &detail),
 		"audit detail must be valid JSON")
 	return detail

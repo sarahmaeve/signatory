@@ -106,7 +106,7 @@ func (t *SignalsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 		})
 	}
 
-	return mcp.OK(map[string]interface{}{
+	return mcp.OK(map[string]any{
 		"target":  entity.CanonicalURI,
 		"signals": records,
 	}).WithCacheHit(len(records) > 0)

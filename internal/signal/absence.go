@@ -71,7 +71,7 @@ type AbsenceRecord struct {
 // property is hard to fake independently of whether the underlying
 // signal is stars (easy to forge) or commit_signing (hard to forge).
 func (a *AbsenceRecord) ToSignal() profile.Signal {
-	value, _ := json.Marshal(map[string]interface{}{
+	value, _ := json.Marshal(map[string]any{
 		"absent":    true,
 		"reason":    a.Reason,
 		"retryable": a.Retryable,

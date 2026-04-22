@@ -22,7 +22,7 @@ func TestShowConclusionsTool_HappyPath_EmptyList(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/findtest"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	conclusions, ok := data["conclusions"].([]store.ConclusionSummary)
 	require.True(t, ok)
@@ -98,7 +98,7 @@ func TestShowConclusionsTool_DesignIntent(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/ditest","design_intent":true}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, 0, data["count"])
 }

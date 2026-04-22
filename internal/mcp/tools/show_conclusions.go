@@ -114,7 +114,7 @@ func (t *ShowConclusionsTool) Handle(ctx context.Context, raw json.RawMessage) *
 		rows = []store.ConclusionSummary{}
 	}
 
-	return mcp.OK(map[string]interface{}{
+	return mcp.OK(map[string]any{
 		"conclusions": rows,
 		"count":       len(rows),
 	})

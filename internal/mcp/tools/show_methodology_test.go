@@ -22,7 +22,7 @@ func TestShowMethodologyTool_HappyPath_EmptyList(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/methtest"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	patterns, ok := data["patterns"].([]store.MethodologyPatternSummary)
 	require.True(t, ok)

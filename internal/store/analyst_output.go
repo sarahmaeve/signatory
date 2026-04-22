@@ -432,7 +432,7 @@ func insertAnalystOutputRow(
 ) error {
 	// Normalize empty collected_from to SQL NULL so the FK
 	// constraint doesn't try to resolve it against entities(id).
-	var collectedFrom interface{}
+	var collectedFrom any
 	if collectedFromEntityID != "" {
 		collectedFrom = collectedFromEntityID
 	}
@@ -472,7 +472,7 @@ func insertAnalystOutputRow(
 // denormalized fields. nil supplement → three NULL values (the common
 // case for non-synthesist outputs).
 func synthesisSupplementColumns(supplement *exchange.SynthesisSupplement) (
-	supplementJSON, proposedTier, proposedVersionScope interface{},
+	supplementJSON, proposedTier, proposedVersionScope any,
 	err error,
 ) {
 	if supplement == nil {

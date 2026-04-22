@@ -43,9 +43,7 @@ func readFreeText(name, inline, file string) (string, error) {
 			}
 			return stripTrailingNewline(string(data)), nil
 		}
-		// #nosec G304 — file path comes from the user's own CLI
-		// invocation; reading it is the whole point of the flag.
-		data, err := os.ReadFile(file) //nolint:gosec // G304: CLI-supplied path is the feature
+		data, err := os.ReadFile(file) //nolint:gosec // G304: path comes from the user's own CLI invocation; reading it is the whole point of the flag
 		if err != nil {
 			return "", fmt.Errorf("read --%s-file %q: %w", name, file, err)
 		}

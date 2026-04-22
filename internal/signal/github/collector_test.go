@@ -214,40 +214,40 @@ func TestCollector_SignalValues(t *testing.T) {
 	}
 
 	// Stars value.
-	var starsVal map[string]interface{}
+	var starsVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["stars"].Value, &starsVal))
 	assert.Equal(t, float64(3023), starsVal["count"])
 
 	// Commit signing ratio.
-	var signingVal map[string]interface{}
+	var signingVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["commit_signing"].Value, &signingVal))
 	assert.Equal(t, float64(2), signingVal["signed_count"])
 	assert.Equal(t, float64(3), signingVal["total_count"])
 
 	// Total commits.
-	var totalVal map[string]interface{}
+	var totalVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["total_commits"].Value, &totalVal))
 	assert.Equal(t, float64(467), totalVal["count"])
 
 	// Owner profile.
-	var ownerVal map[string]interface{}
+	var ownerVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["owner_profile"].Value, &ownerVal))
 	assert.Equal(t, "alecthomas", ownerVal["login"])
 	assert.Equal(t, float64(1419), ownerVal["followers"])
 	assert.Equal(t, float64(175), ownerVal["public_repos"])
 
 	// Tags.
-	var tagsVal map[string]interface{}
+	var tagsVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["tags"].Value, &tagsVal))
 	assert.Equal(t, float64(3), tagsVal["count"])
 
 	// Contributors.
-	var contribVal map[string]interface{}
+	var contribVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["contributors"].Value, &contribVal))
 	assert.Equal(t, float64(3), contribVal["count"])
 
 	// Adoption and refs-to-stars ratio.
-	var adoptionVal map[string]interface{}
+	var adoptionVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["adoption"].Value, &adoptionVal))
 	assert.Equal(t, float64(2008), adoptionVal["go_mod_refs"])
 	assert.Equal(t, float64(3023), adoptionVal["stars"])
@@ -255,14 +255,14 @@ func TestCollector_SignalValues(t *testing.T) {
 	assert.Equal(t, "direct", adoptionVal["adoption_type"])
 
 	// CI/CD presence.
-	var ciVal map[string]interface{}
+	var ciVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["ci_cd"].Value, &ciVal))
-	providers := ciVal["providers"].([]interface{})
+	providers := ciVal["providers"].([]any)
 	assert.Contains(t, providers, "github-actions")
 	assert.Contains(t, providers, "renovate")
 
 	// Go dependencies.
-	var depsVal map[string]interface{}
+	var depsVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["go_dependencies"].Value, &depsVal))
 	assert.Equal(t, float64(2), depsVal["direct_count"])
 	assert.Equal(t, float64(1), depsVal["indirect_count"])
@@ -430,7 +430,7 @@ func TestCollector_PartialCollection(t *testing.T) {
 		if strings.HasPrefix(s.Type, "absence:") {
 			absences++
 			// Verify absence metadata.
-			var val map[string]interface{}
+			var val map[string]any
 			json.Unmarshal(s.Value, &val)
 			assert.Equal(t, true, val["absent"])
 		} else {
@@ -500,11 +500,11 @@ func TestCollector_TemporalEraClassification(t *testing.T) {
 	}
 
 	// Last push and last commit should include era classification.
-	var pushVal map[string]interface{}
+	var pushVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["last_push"].Value, &pushVal))
 	assert.Equal(t, "modern-ai", pushVal["era"])
 
-	var commitVal map[string]interface{}
+	var commitVal map[string]any
 	require.NoError(t, json.Unmarshal(byType["last_commit"].Value, &commitVal))
 	assert.Equal(t, "modern-ai", commitVal["era"])
 }

@@ -67,7 +67,7 @@ func TestLogger_WritesToStoreAndFile(t *testing.T) {
 		assert.Equal(t, "set_posture", line.Action)
 		assert.Equal(t, "ent-1", line.Entity)
 		// Detail should be embedded as raw JSON, not a string.
-		var detail map[string]interface{}
+		var detail map[string]any
 		require.NoError(t, json.Unmarshal(line.Detail, &detail))
 		assert.Equal(t, "vetted-frozen", detail["tier"])
 	}
@@ -178,7 +178,7 @@ func TestLogger_InvalidDetailFallsBackToEmptyObject(t *testing.T) {
 	var line fileLine
 	require.NoError(t, json.Unmarshal(data[:len(data)-1], &line))
 	// Detail should be parseable as JSON (empty object fallback).
-	var detail map[string]interface{}
+	var detail map[string]any
 	require.NoError(t, json.Unmarshal(line.Detail, &detail))
 	assert.Empty(t, detail)
 }

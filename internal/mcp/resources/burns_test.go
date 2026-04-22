@@ -49,7 +49,7 @@ func TestBurnsResource_EmptyStore(t *testing.T) {
 
 	// Data should be an empty array, not null.
 	raw := mustMarshal(t, resp.Data)
-	var arr []interface{}
+	var arr []any
 	require.NoError(t, unmarshal(raw, &arr))
 	assert.Empty(t, arr, "empty store should return empty array, not null")
 }
@@ -106,7 +106,7 @@ func TestBurnsResource_MutationVerify_CountChangesOnInsert(t *testing.T) {
 	// Before: one burn.
 	resp1 := r.Read(ctx, "signatory://burns")
 	raw1 := mustMarshal(t, resp1.Data)
-	var arr1 []interface{}
+	var arr1 []any
 	require.NoError(t, unmarshal(raw1, &arr1))
 	assert.Len(t, arr1, 1, "mutation-verify: before insert count must be 1")
 
@@ -116,7 +116,7 @@ func TestBurnsResource_MutationVerify_CountChangesOnInsert(t *testing.T) {
 	// After: two burns.
 	resp2 := r.Read(ctx, "signatory://burns")
 	raw2 := mustMarshal(t, resp2.Data)
-	var arr2 []interface{}
+	var arr2 []any
 	require.NoError(t, unmarshal(raw2, &arr2))
 	assert.Len(t, arr2, 2, "mutation-verify: after insert count must be 2")
 }

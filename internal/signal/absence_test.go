@@ -34,7 +34,7 @@ func TestMakeAbsence(t *testing.T) {
 	assert.Equal(t, "github", sig.Source)
 	assert.Equal(t, profile.ForgeryHigh, sig.ForgeryResistance)
 
-	var val map[string]interface{}
+	var val map[string]any
 	require.NoError(t, json.Unmarshal(sig.Value, &val))
 	assert.Equal(t, true, val["absent"])
 	assert.Equal(t, "rate limited", val["reason"])
@@ -54,7 +54,7 @@ func TestAbsence_NonRetryable(t *testing.T) {
 	now := time.Now().UTC()
 	soa := MakeAbsence("entity-1", "go_dependencies", "github", "no go.mod found", false, now)
 
-	var val map[string]interface{}
+	var val map[string]any
 	require.NoError(t, json.Unmarshal(soa.ToSignal().Value, &val))
 	assert.Equal(t, false, val["retryable"])
 }

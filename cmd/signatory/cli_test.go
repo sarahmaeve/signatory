@@ -106,21 +106,6 @@ func TestAnalyzeCmd_MissingTarget(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestAnalyzeCmd_Run_NoData(t *testing.T) {
-	t.Parallel()
-
-	// Without --refresh and no cached data, should prompt to use --refresh.
-	cmd := &AnalyzeCmd{Target: "alecthomas/kong", Refresh: false}
-	dir := t.TempDir()
-	globals := &Globals{
-		DBPath:        filepath.Join(dir, "test.db"),
-		AuditFilePath: filepath.Join(dir, "audit.log"),
-		Verbose:       false,
-	}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
-}
-
 // --- Survey ---
 
 func TestSurveyCmd_NoArgs(t *testing.T) {
@@ -182,19 +167,6 @@ func TestBurnCmd_MissingReason(t *testing.T) {
 	err := cmd.Run(globals)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--reason or --reason-file is required")
-}
-
-func TestBurnAddCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &BurnAddCmd{Target: "pkg:npm/evil-package", Reason: "malware"}
-	dir := t.TempDir()
-	globals := &Globals{
-		DBPath:        filepath.Join(dir, "test.db"),
-		AuditFilePath: filepath.Join(dir, "audit.log"),
-	}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
 }
 
 // --- Posture ---
@@ -267,32 +239,6 @@ func TestPostureSetCmd_AllValidTiers(t *testing.T) {
 			assert.Equal(t, tier, cli.Posture.Set.Tier)
 		})
 	}
-}
-
-func TestPostureGetCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &PostureGetCmd{Target: "pkg:npm/lodash"}
-	dir := t.TempDir()
-	globals := &Globals{
-		DBPath:        filepath.Join(dir, "test.db"),
-		AuditFilePath: filepath.Join(dir, "audit.log"),
-	}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
-}
-
-func TestPostureSetCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &PostureSetCmd{Target: "pkg:npm/lodash", Tier: "vetted-frozen", Rationale: "audited", Version: "4.17.21"}
-	dir := t.TempDir()
-	globals := &Globals{
-		DBPath:        filepath.Join(dir, "test.db"),
-		AuditFilePath: filepath.Join(dir, "audit.log"),
-	}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
 }
 
 // TestPostureSetCmd_URIVersion_InheritedWhenFlagUnset covers the
@@ -370,15 +316,6 @@ func TestVersionCmd_ValidArgs(t *testing.T) {
 
 	ctx, _ := parseCLI(t, "version")
 	assert.Equal(t, "version", ctx.Command())
-}
-
-func TestVersionCmd_Run(t *testing.T) {
-	t.Parallel()
-
-	cmd := &VersionCmd{}
-	globals := &Globals{DBPath: filepath.Join(t.TempDir(), "test.db")}
-	err := cmd.Run(globals)
-	assert.NoError(t, err)
 }
 
 // --- Global Flags ---

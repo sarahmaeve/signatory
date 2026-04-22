@@ -111,7 +111,7 @@ func (cmd *BurnAddCmd) Run(globals *Globals) error {
 
 	// Audit. The `overwriting` boolean was captured immediately after
 	// the GetBurn call above; it cannot be affected by intervening code.
-	detail, _ := json.Marshal(map[string]interface{}{
+	detail, _ := json.Marshal(map[string]any{
 		"canonical_uri": entity.CanonicalURI,
 		"reason":        cmd.Reason,
 		"overwrite":     overwriting,
@@ -186,7 +186,7 @@ func (cmd *BurnRemoveCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	detail, _ := json.Marshal(map[string]interface{}{
+	detail, _ := json.Marshal(map[string]any{
 		"canonical_uri": entity.CanonicalURI,
 		"reason":        reason,
 	})

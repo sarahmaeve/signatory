@@ -105,7 +105,7 @@ func (t *ShowMethodologyTool) Handle(ctx context.Context, raw json.RawMessage) *
 		rows = []store.MethodologyPatternSummary{}
 	}
 
-	return mcp.OK(map[string]interface{}{
+	return mcp.OK(map[string]any{
 		"patterns": rows,
 		"count":    len(rows),
 	})

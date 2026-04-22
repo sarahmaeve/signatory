@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -342,21 +343,16 @@ func resourceName(pattern string) string {
 	return base
 }
 
-// sortToolEntries sorts tool entries by name (in-place, insertion sort).
-// Tools are registered once; sort cost is negligible.
+// sortToolEntries sorts tool entries by name (in-place).
 func sortToolEntries(entries []toolEntry) {
-	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j].Name < entries[j-1].Name; j-- {
-			entries[j], entries[j-1] = entries[j-1], entries[j]
-		}
-	}
+	slices.SortFunc(entries, func(a, b toolEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 }
 
 // sortResourceEntries sorts resource entries by URI (in-place).
 func sortResourceEntries(entries []resourceEntry) {
-	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j].URI < entries[j-1].URI; j-- {
-			entries[j], entries[j-1] = entries[j-1], entries[j]
-		}
-	}
+	slices.SortFunc(entries, func(a, b resourceEntry) int {
+		return strings.Compare(a.URI, b.URI)
+	})
 }

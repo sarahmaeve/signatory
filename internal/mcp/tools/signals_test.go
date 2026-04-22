@@ -21,7 +21,7 @@ func TestSignalsTool_HappyPath(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/sigtest"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	signals, ok := data["signals"].([]signalRecord)
 	require.True(t, ok)
@@ -78,7 +78,7 @@ func TestSignalsTool_EmptySignals(t *testing.T) {
 
 	// Should be OK with empty slice.
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	signals, ok := data["signals"].([]signalRecord)
 	require.True(t, ok)

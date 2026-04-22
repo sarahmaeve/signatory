@@ -46,8 +46,8 @@ func TestAnalysesResource_EmptyStore(t *testing.T) {
 
 	raw := mustMarshal(t, resp.Data)
 	var decoded struct {
-		Outputs []interface{} `json:"outputs"`
-		Total   int           `json:"total"`
+		Outputs []any `json:"outputs"`
+		Total   int   `json:"total"`
 	}
 	require.NoError(t, unmarshal(raw, &decoded))
 	assert.Equal(t, 0, decoded.Total)

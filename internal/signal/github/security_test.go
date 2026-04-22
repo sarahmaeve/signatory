@@ -418,7 +418,7 @@ func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
 	// Find the ci_cd signal.
 	for _, sig := range signals {
 		if sig.Type == "absence:ci_cd" {
-			var val map[string]interface{}
+			var val map[string]any
 			require.NoError(t, json.Unmarshal(sig.Value, &val))
 
 			// CRITICAL: Must be retryable, not a definitive "no CI found".
@@ -533,7 +533,7 @@ func TestSecurity_LargeResponseRejected(t *testing.T) {
 		baseURL:    server.URL,
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	err := client.get(context.Background(), "/test", &result)
 	assert.Error(t, err, "should reject response exceeding size limit")
 }
@@ -807,7 +807,7 @@ func TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect(t *testing.T) {
 	// Make any request through the client. The request goes to httpsSource,
 	// which redirects to httpTarget. With the fix, the client returns an
 	// error from the redirect handler and never reaches httpTarget.
-	var ignored map[string]interface{}
+	var ignored map[string]any
 	err := client.get(context.Background(), "/repos/owner/repo", &ignored)
 	require.Error(t, err, "client must return an error when the redirect chain hits a non-HTTPS URL")
 
@@ -1019,7 +1019,7 @@ func TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod(t *testing.T) {
 
 	// The absence reason must indicate the size limit, not echo the
 	// raw parser error (which would leak the byte counts).
-	var absenceData map[string]interface{}
+	var absenceData map[string]any
 	require.NoError(t, json.Unmarshal(goDepsSignal.Value, &absenceData))
 	assert.Equal(t, "go.mod too large to parse safely", absenceData["reason"],
 		"oversized go.mod must produce a structured absence reason, not the raw parser error")

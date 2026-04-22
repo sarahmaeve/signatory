@@ -63,23 +63,23 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 
 	result.RecordSignal(entity.ID, "last_push", "github", now, ttl,
-		map[string]interface{}{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))})
+		map[string]any{"date": r.PushedAt.Format(time.RFC3339), "era": string(profile.ClassifyEra(r.PushedAt))})
 	result.RecordSignal(entity.ID, "repo_age", "github", now, ttl,
-		map[string]interface{}{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)})
+		map[string]any{"created": r.CreatedAt.Format(time.RFC3339), "age_days": int(now.Sub(r.CreatedAt).Hours() / 24)})
 	result.RecordSignal(entity.ID, "stars", "github", now, ttl,
-		map[string]interface{}{"count": r.StargazersCount})
+		map[string]any{"count": r.StargazersCount})
 	result.RecordSignal(entity.ID, "forks", "github", now, ttl,
-		map[string]interface{}{"count": r.ForksCount})
+		map[string]any{"count": r.ForksCount})
 	result.RecordSignal(entity.ID, "open_issues", "github", now, ttl,
-		map[string]interface{}{"count": r.OpenIssuesCount})
+		map[string]any{"count": r.OpenIssuesCount})
 	result.RecordSignal(entity.ID, "archived", "github", now, ttl,
-		map[string]interface{}{"archived": r.Archived})
+		map[string]any{"archived": r.Archived})
 	result.RecordSignal(entity.ID, "owner_type", "github", now, ttl,
-		map[string]interface{}{"type": r.Owner.Type, "login": r.Owner.Login})
+		map[string]any{"type": r.Owner.Type, "login": r.Owner.Login})
 
 	if r.License != nil {
 		result.RecordSignal(entity.ID, "license", "github", now, ttl,
-			map[string]interface{}{"spdx_id": r.License.SPDXID})
+			map[string]any{"spdx_id": r.License.SPDXID})
 	} else {
 		result.RecordAbsence(entity.ID, "license", "github",
 			"no license detected", false, now)
@@ -121,15 +121,15 @@ func (c *Collector) collectContributors(ctx context.Context, result *signal.Coll
 		return
 	}
 
-	topContribs := make([]map[string]interface{}, 0, len(contributors))
+	topContribs := make([]map[string]any, 0, len(contributors))
 	for _, contrib := range contributors {
-		topContribs = append(topContribs, map[string]interface{}{
+		topContribs = append(topContribs, map[string]any{
 			"login":         contrib.Login,
 			"contributions": contrib.Contributions,
 		})
 	}
 	result.RecordSignal(entityID, "contributors", "github", now, ttl,
-		map[string]interface{}{"count": len(contributors), "top": topContribs})
+		map[string]any{"count": len(contributors), "top": topContribs})
 }
 
 func (c *Collector) collectCommits(ctx context.Context, result *signal.CollectionResult,
@@ -165,13 +165,13 @@ func (c *Collector) collectCommits(ctx context.Context, result *signal.Collectio
 	}
 
 	result.RecordSignal(entityID, "last_commit", "github", now, ttl,
-		map[string]interface{}{
+		map[string]any{
 			"date":     commits[0].Commit.Author.Date.Format(time.RFC3339),
 			"era":      string(profile.ClassifyEra(commits[0].Commit.Author.Date)),
 			"days_ago": int(now.Sub(commits[0].Commit.Author.Date).Hours() / 24),
 		})
 	result.RecordSignal(entityID, "commit_signing", "github", now, ttl,
-		map[string]interface{}{
+		map[string]any{
 			"signed_count": signedCount,
 			"total_count":  len(commits),
 			"ratio":        float64(signedCount) / float64(len(commits)),
@@ -188,7 +188,7 @@ func (c *Collector) collectTotalCommits(ctx context.Context, result *signal.Coll
 	}
 
 	result.RecordSignal(entityID, "total_commits", "github", now, ttl,
-		map[string]interface{}{"count": totalCommits})
+		map[string]any{"count": totalCommits})
 }
 
 func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionResult,
@@ -205,7 +205,7 @@ func (c *Collector) collectTags(ctx context.Context, result *signal.CollectionRe
 		tagNames = append(tagNames, t.Name)
 	}
 	result.RecordSignal(entityID, "tags", "github", now, ttl,
-		map[string]interface{}{"count": len(tags), "recent": tagNames})
+		map[string]any{"count": len(tags), "recent": tagNames})
 }
 
 func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.CollectionResult,
@@ -218,7 +218,7 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 	}
 
 	result.RecordSignal(entityID, "owner_profile", "github", now, ttl,
-		map[string]interface{}{
+		map[string]any{
 			"login":            ownerUser.Login,
 			"name":             ownerUser.Name,
 			"company":          ownerUser.Company,
@@ -250,7 +250,7 @@ func (c *Collector) collectAdoption(ctx context.Context, result *signal.Collecti
 		adoptionType = "mixed"
 	}
 	result.RecordSignal(entityID, "adoption", "github", now, ttl,
-		map[string]interface{}{
+		map[string]any{
 			"go_mod_refs":   refCount,
 			"stars":         stars,
 			"refs_to_stars": ratio,
@@ -265,7 +265,7 @@ func (c *Collector) collectCI(ctx context.Context, result *signal.CollectionResu
 	switch {
 	case len(providers) > 0:
 		result.RecordSignal(entityID, "ci_cd", "github", now, ttl,
-			map[string]interface{}{"providers": providers})
+			map[string]any{"providers": providers})
 	case hadErrors:
 		// We couldn't check — retryable absence, not a definitive "no CI".
 		result.RecordFailure(entityID, "ci_cd", "github",
@@ -303,7 +303,7 @@ func (c *Collector) collectGoDeps(ctx context.Context, result *signal.Collection
 		return
 	}
 	result.RecordSignal(entityID, "go_dependencies", "github", now, ttl,
-		map[string]interface{}{
+		map[string]any{
 			"direct_count":   deps.directCount,
 			"indirect_count": deps.indirectCount,
 			"total_count":    deps.directCount + deps.indirectCount,

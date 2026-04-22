@@ -98,7 +98,7 @@ func (t *ShowAnalysesTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 		rows = []store.AnalystOutputSummary{}
 	}
 
-	return mcp.OK(map[string]interface{}{
+	return mcp.OK(map[string]any{
 		"analyses": rows,
 		"count":    len(rows),
 	})

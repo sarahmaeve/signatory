@@ -628,7 +628,7 @@ func contentHash(t *testing.T, out *exchange.AnalystOutput) string {
 	return hash
 }
 
-func assertCount(t *testing.T, s *SQLite, table, where string, arg interface{}, expected int) {
+func assertCount(t *testing.T, s *SQLite, table, where string, arg any, expected int) {
 	t.Helper()
 	var got int
 	err := s.db.QueryRowContext(t.Context(),

@@ -76,7 +76,7 @@ func TestUnexaminedResource_EmptyStore(t *testing.T) {
 	require.Nil(t, resp.Error)
 
 	raw := mustMarshal(t, resp.Data)
-	var arr []interface{}
+	var arr []any
 	require.NoError(t, unmarshal(raw, &arr))
 	assert.Empty(t, arr)
 }
@@ -165,7 +165,7 @@ func TestUnexaminedResource_MutationVerify_PostureRemovesFromList(t *testing.T) 
 	// Before: one unexamined entity.
 	resp1 := r.Read(ctx, "signatory://unexamined")
 	raw1 := mustMarshal(t, resp1.Data)
-	var arr1 []interface{}
+	var arr1 []any
 	require.NoError(t, unmarshal(raw1, &arr1))
 	assert.Len(t, arr1, 1, "mutation-verify: before posture, entity must appear")
 
@@ -180,7 +180,7 @@ func TestUnexaminedResource_MutationVerify_PostureRemovesFromList(t *testing.T) 
 
 	resp2 := r.Read(ctx, "signatory://unexamined")
 	raw2 := mustMarshal(t, resp2.Data)
-	var arr2 []interface{}
+	var arr2 []any
 	require.NoError(t, unmarshal(raw2, &arr2))
 	assert.Empty(t, arr2, "mutation-verify: after posture, entity must not appear")
 }

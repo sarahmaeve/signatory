@@ -222,7 +222,7 @@ func (e *RateLimitError) Error() string {
 }
 
 // get performs a GET request to the GitHub API.
-func (c *Client) get(ctx context.Context, path string, result interface{}) error {
+func (c *Client) get(ctx context.Context, path string, result any) error {
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -282,7 +282,7 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 }
 
 // getWithLinkHeader performs a GET and returns the Link header for pagination.
-func (c *Client) getWithLinkHeader(ctx context.Context, path string, result interface{}) (string, error) {
+func (c *Client) getWithLinkHeader(ctx context.Context, path string, result any) (string, error) {
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

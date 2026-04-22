@@ -128,7 +128,7 @@ func (t *DetailTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Respo
 		})
 	}
 
-	return mcp.OK(map[string]interface{}{
+	return mcp.OK(map[string]any{
 		"target":       entity.CanonicalURI,
 		"signal_group": in.SignalGroup,
 		"signals":      records,

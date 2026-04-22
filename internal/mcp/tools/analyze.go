@@ -80,11 +80,11 @@ type analyzePosture struct {
 }
 
 type signalsSummary struct {
-	Vitality    map[string]interface{} `json:"vitality,omitempty"`
-	Governance  map[string]interface{} `json:"governance,omitempty"`
-	Criticality map[string]interface{} `json:"criticality,omitempty"`
-	Hygiene     map[string]interface{} `json:"hygiene,omitempty"`
-	Publication map[string]interface{} `json:"publication,omitempty"`
+	Vitality    map[string]any `json:"vitality,omitempty"`
+	Governance  map[string]any `json:"governance,omitempty"`
+	Criticality map[string]any `json:"criticality,omitempty"`
+	Hygiene     map[string]any `json:"hygiene,omitempty"`
+	Publication map[string]any `json:"publication,omitempty"`
 }
 
 func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Response {
@@ -175,35 +175,35 @@ func buildSignalsSummary(signals []profile.Signal) signalsSummary {
 		// an empty map, which is the documented shape for an unknown
 		// or unreadable value. The raw bytes remain in the store for
 		// debugging via signatory_signals.
-		var val map[string]interface{}
+		var val map[string]any
 		_ = json.Unmarshal(sig.Value, &val) //nolint:errcheck // see comment above: nil-safe summary on decode failure
 		if val == nil {
-			val = map[string]interface{}{}
+			val = map[string]any{}
 		}
 		switch sig.Group {
 		case profile.SignalGroupVitality:
 			if s.Vitality == nil {
-				s.Vitality = map[string]interface{}{}
+				s.Vitality = map[string]any{}
 			}
 			s.Vitality[sig.Type] = val
 		case profile.SignalGroupGovernance:
 			if s.Governance == nil {
-				s.Governance = map[string]interface{}{}
+				s.Governance = map[string]any{}
 			}
 			s.Governance[sig.Type] = val
 		case profile.SignalGroupCriticality:
 			if s.Criticality == nil {
-				s.Criticality = map[string]interface{}{}
+				s.Criticality = map[string]any{}
 			}
 			s.Criticality[sig.Type] = val
 		case profile.SignalGroupHygiene:
 			if s.Hygiene == nil {
-				s.Hygiene = map[string]interface{}{}
+				s.Hygiene = map[string]any{}
 			}
 			s.Hygiene[sig.Type] = val
 		case profile.SignalGroupPublication:
 			if s.Publication == nil {
-				s.Publication = map[string]interface{}{}
+				s.Publication = map[string]any{}
 			}
 			s.Publication[sig.Type] = val
 		}

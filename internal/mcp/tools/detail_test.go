@@ -23,7 +23,7 @@ func TestDetailTool_HappyPath(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/detailtest","signal_group":"criticality"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "criticality", data["signal_group"])
 	sigs, ok := data["signals"].([]signalRecord)
@@ -92,7 +92,7 @@ func TestDetailTool_EmptyGroup(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/detailempty","signal_group":"vitality"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	sigs, ok := data["signals"].([]signalRecord)
 	require.True(t, ok)

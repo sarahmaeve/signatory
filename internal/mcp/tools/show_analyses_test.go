@@ -22,7 +22,7 @@ func TestShowAnalysesTool_HappyPath_EmptyList(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/showtest"}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	analyses, ok := data["analyses"].([]store.AnalystOutputSummary)
 	require.True(t, ok)
@@ -89,7 +89,7 @@ func TestShowAnalysesTool_NoTarget_EmptyStore(t *testing.T) {
 	resp := tool.Handle(context.Background(), json.RawMessage(`{}`))
 
 	require.Equal(t, "ok", resp.Status)
-	data, ok := resp.Data.(map[string]interface{})
+	data, ok := resp.Data.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, 0, data["count"])
 }

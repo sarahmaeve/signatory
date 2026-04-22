@@ -15,6 +15,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -149,12 +150,7 @@ func (s *inputSchema) validFields() []string {
 	for name := range s.properties {
 		names = append(names, name)
 	}
-	// Simple insertion sort — schemas have at most ~10 fields.
-	for i := 1; i < len(names); i++ {
-		for j := i; j > 0 && names[j] < names[j-1]; j-- {
-			names[j], names[j-1] = names[j-1], names[j]
-		}
-	}
+	slices.Sort(names)
 	return names
 }
 

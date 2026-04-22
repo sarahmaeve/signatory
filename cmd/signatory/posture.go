@@ -237,7 +237,7 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	}
 
 	// Audit.
-	detail, _ := json.Marshal(map[string]interface{}{
+	detail, _ := json.Marshal(map[string]any{
 		"canonical_uri": entity.CanonicalURI,
 		"version":       cmd.Version,
 		"tier":          cmd.Tier,
@@ -477,7 +477,7 @@ func (cmd *PostureUnsetCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	detail, _ := json.Marshal(map[string]interface{}{
+	detail, _ := json.Marshal(map[string]any{
 		"canonical_uri": entity.CanonicalURI,
 		"version":       cmd.Version,
 		"reason":        reason,
@@ -670,7 +670,7 @@ func (cmd *PostureAcceptCmd) Run(globals *Globals) error {
 	// Audit detail with deviation signals. Each proposed_* field is
 	// present only when the user overrode — its presence IS the
 	// "user disagreed on this field" signal.
-	detail := map[string]interface{}{
+	detail := map[string]any{
 		"canonical_uri":              entity.CanonicalURI,
 		"version":                    finalVersion,
 		"tier":                       finalTier,

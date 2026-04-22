@@ -1322,8 +1322,8 @@ func assertResponseBodyJSONSafe(t *testing.T, label string, body []byte) {
 	// Must parse — catches malformed envelopes and raw control
 	// chars embedded in string fields (encoding/json rejects the
 	// latter per RFC 8259 §7).
-	var any interface{}
-	require.NoError(t, json.Unmarshal(body, &any),
+	var parsed any
+	require.NoError(t, json.Unmarshal(body, &parsed),
 		"%s must be valid JSON", label)
 
 	// Top-level bytes check — only \t \n \r tolerated outside

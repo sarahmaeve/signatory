@@ -248,7 +248,7 @@ func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Sig
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
@@ -292,7 +292,7 @@ func (s *SQLite) GetLatestSignals(ctx context.Context, entityID string) ([]profi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
@@ -308,7 +308,7 @@ func (s *SQLite) GetSignalsByGroup(ctx context.Context, entityID string, group p
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
 	return scanSignals(rows)
 }
 
