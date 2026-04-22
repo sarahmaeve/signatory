@@ -107,6 +107,37 @@ func TestIngest_KongIntegration(t *testing.T) {
 	assert.Equal(t, "auto", cli.Ingest.Format)
 }
 
+// TestIngest_OversizedFile_RejectedBeforeParse is the regression
+// guard for the F003 OOM-via-unbounded-ReadFile finding in
+// design/analysis/signatory-security-v1.json. Pre-fix, IngestCmd
+// called os.ReadFile with no size cap; an attacker who could place
+// a multi-GB file on disk and socially-engineer the operator into
+// running `signatory ingest` could OOM the process before any
+// validation ran.
+//
+// Post-fix, the file is read via readBoundedAnalystFile, which
+// caps consumption at maxAnalystFileBytes+1 and returns
+// errAnalystFileTooLarge for anything larger.
+//
+// Revert proof: change `readBoundedAnalystFile(cmd.File)` back to
+// `os.ReadFile(cmd.File)` in IngestCmd.Run; this test fails because
+// the read succeeds and the returned error names the parse phase
+// instead of the size cap.
+//
+// Sparse-file fixture: makeSparseFile uses Truncate, so a 10 MiB+1
+// fixture costs ~zero disk I/O and ~zero wall time.
+func TestIngest_OversizedFile_RejectedBeforeParse(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	makeSparseFile(t, path, maxAnalystFileBytes+1)
+
+	cmd := &IngestCmd{File: path, Format: "json", Quiet: true}
+	err := cmd.Run(newTestGlobals(t))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAnalystFileTooLarge,
+		"oversized ingest input must be rejected with errAnalystFileTooLarge before parse runs")
+}
+
 func TestIngest_KongIntegration_FormatFlag(t *testing.T) {
 	path := writeTempFile(t, "valid.json", minimalValidJSON)
 	_, cli := parseCLI(t, "ingest", path, "--format", "json", "-q")

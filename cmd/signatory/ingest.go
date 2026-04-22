@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -30,7 +29,11 @@ type IngestCmd struct {
 }
 
 func (cmd *IngestCmd) Run(globals *Globals) error {
-	raw, err := os.ReadFile(cmd.File)
+	// Bounded read: caps file consumption at maxAnalystFileBytes to
+	// close the F003 OOM-via-unbounded-ReadFile shape from
+	// design/analysis/signatory-security-v1.json. Pre-fix this was a
+	// raw os.ReadFile.
+	raw, err := readBoundedAnalystFile(cmd.File)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cmd.File, err)
 	}

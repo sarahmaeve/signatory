@@ -185,6 +185,31 @@ func TestFormatCheck_FileNotFound_FailsCleanly(t *testing.T) {
 	assert.Contains(t, err.Error(), "read")
 }
 
+// TestFormatCheck_OversizedFile_RejectedBeforeParse mirrors the
+// IngestCmd guard. format-check is the lower-stakes sibling
+// (read-only, no DB write), but it shares the unbounded-ReadFile
+// shape and is just as exposed to the F003 OOM path. Both surfaces
+// must be capped, not just the one with side effects, because a
+// pre-flight `signatory format-check` is the documented workflow
+// before `signatory ingest` and a hostile file would OOM the
+// pre-flight before ingest ever ran.
+//
+// Revert proof: change `readBoundedAnalystFile(cmd.File)` back to
+// `os.ReadFile(cmd.File)` in FormatCheckCmd.Run; this test fails
+// because read succeeds and the parse error doesn't carry the
+// errAnalystFileTooLarge sentinel.
+func TestFormatCheck_OversizedFile_RejectedBeforeParse(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	makeSparseFile(t, path, maxAnalystFileBytes+1)
+
+	cmd := &FormatCheckCmd{File: path, Format: "json", Quiet: true}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAnalystFileTooLarge,
+		"oversized format-check input must be rejected with errAnalystFileTooLarge before parse runs")
+}
+
 // TestFormatCheck_KongIntegration confirms the command parses
 // through the CLI struct (not just via direct construction). This
 // catches mistakes in the kong tag declarations like a typo'd cmd

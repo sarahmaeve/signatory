@@ -38,7 +38,12 @@ type FormatCheckCmd struct {
 }
 
 func (cmd *FormatCheckCmd) Run(globals *Globals) error {
-	raw, err := os.ReadFile(cmd.File)
+	// Bounded read — see IngestCmd.Run / bounded_read.go for the
+	// F003 threat-model rationale. format-check is the documented
+	// pre-flight before ingest, so its file-read surface needs the
+	// same cap or the OOM shape just moves from ingest to its
+	// pre-flight sibling.
+	raw, err := readBoundedAnalystFile(cmd.File)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cmd.File, err)
 	}
