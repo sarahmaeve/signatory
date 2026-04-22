@@ -1,5 +1,60 @@
 package manifest
 
+import "errors"
+
+// Edge represents one directed dependency relationship in the
+// transitive module graph: Parent declares Child as a dependency.
+// Both fields are canonical URIs in signatory's scheme (the same
+// form as Dep.CanonicalURI), with any ecosystem-native version
+// suffix stripped — version selection is handled by the ecosystem
+// resolver, but reachability questions ("does any path from a
+// direct lead to this indirect?") are URI-level.
+type Edge struct {
+	Parent string
+	Child  string
+}
+
+// Graph is the full transitive dependency graph for a parsed
+// manifest. Produced by per-ecosystem ParseGraph functions
+// (currently gomod only; npm follow-up). Used by survey to
+// compute reachability buckets — which indirect deps are reachable
+// only via resolved directs (defer-safe) versus reachable via at
+// least one unresolved direct (await an unresolved direct).
+//
+// Edges are order-preserved from the source where the source has
+// a stable order; consumers should not assume any particular
+// ordering, but reproducibility helps with tests and diffs.
+type Graph struct {
+	// RootURI is the canonical URI of the module the manifest
+	// declares — the project itself. Edges rooted here represent
+	// the direct dependencies; edges deeper in the graph
+	// represent transitives.
+	RootURI string
+
+	// Edges is the directed edge list. A module appearing only
+	// as a Parent has no further dependencies in the graph; a
+	// module appearing only as a Child is a leaf dependency.
+	Edges []Edge
+}
+
+// ErrGraphUnavailable signals that a parser cannot produce a
+// dependency graph for this manifest in this environment.
+// Callers (notably survey) should treat it as non-fatal and fall
+// back to behavior that doesn't require graph data.
+//
+// Reasons a parser may return this:
+//
+//   - The ecosystem doesn't have graph extraction implemented yet
+//     (npm in v0.1; PyPI / cargo / etc. when they land).
+//   - The required external tooling isn't available (e.g., the Go
+//     toolchain isn't on PATH for `go mod graph`).
+//   - The tooling failed (e.g., go.sum is missing modules).
+//
+// Wrapped errors carry the underlying cause via errors.Unwrap;
+// callers that just want to know "no graph available" can use
+// errors.Is(err, ErrGraphUnavailable).
+var ErrGraphUnavailable = errors.New("dependency graph unavailable for this manifest")
+
 // Dep is one entry from a dependency manifest, normalized to the
 // shape signatory's store uses for entity lookups.
 type Dep struct {

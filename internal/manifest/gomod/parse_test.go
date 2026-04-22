@@ -1,6 +1,8 @@
 package gomod
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -245,4 +247,116 @@ func filterIndirect(deps []manifest.Dep) []manifest.Dep {
 //nolint:gosec // G306: test fixture permissions; not user data
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+// TestParseGoModGraphOutput_HappyPath exercises the pure parser
+// against representative `go mod graph` output: one root module
+// (no @version on the parent), several direct edges, a few
+// transitive edges. Locks in the canonical-URI conversion (github
+// → repo:, others → pkg:go/) and the root-detection rule
+// (parent without @version).
+func TestParseGoModGraphOutput_HappyPath(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`github.com/sarahmaeve/signatory github.com/alecthomas/kong@v1.15.0
+github.com/sarahmaeve/signatory gopkg.in/yaml.v3@v3.0.1
+github.com/sarahmaeve/signatory modernc.org/sqlite@v1.49.1
+modernc.org/sqlite@v1.49.1 github.com/dustin/go-humanize@v1.0.1
+modernc.org/sqlite@v1.49.1 modernc.org/libc@v1.55.3
+github.com/alecthomas/kong@v1.15.0 github.com/pkg/errors@v0.9.1
+`)
+
+	g, err := parseGoModGraphOutput(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, "repo:github/sarahmaeve/signatory", g.RootURI,
+		"root module is the parent without @version")
+	require.Len(t, g.Edges, 6, "all six edges should be parsed")
+
+	// Spot-check one edge of each canonical-URI shape: github →
+	// repo:, vanity domain → pkg:go/, and a transitive edge
+	// where the parent itself is non-root.
+	assert.Equal(t, manifest.Edge{
+		Parent: "repo:github/sarahmaeve/signatory",
+		Child:  "repo:github/alecthomas/kong",
+	}, g.Edges[0])
+	assert.Equal(t, manifest.Edge{
+		Parent: "repo:github/sarahmaeve/signatory",
+		Child:  "pkg:go/gopkg.in/yaml.v3",
+	}, g.Edges[1])
+	assert.Equal(t, manifest.Edge{
+		Parent: "pkg:go/modernc.org/sqlite",
+		Child:  "repo:github/dustin/go-humanize",
+	}, g.Edges[3])
+}
+
+// TestParseGoModGraphOutput_TolerantOfBlankLinesAndTrailingNewline
+// covers the formatting quirks `go mod graph` may emit: trailing
+// newline (always), and the rare blank-line in the middle (we
+// haven't observed this in practice but it costs nothing to be
+// tolerant).
+func TestParseGoModGraphOutput_TolerantOfBlankLinesAndTrailingNewline(t *testing.T) {
+	t.Parallel()
+	raw := []byte("github.com/me/proj github.com/dep/a@v1.0.0\n\ngithub.com/me/proj github.com/dep/b@v2.0.0\n")
+	g, err := parseGoModGraphOutput(raw)
+	require.NoError(t, err)
+	assert.Len(t, g.Edges, 2, "blank lines must not produce phantom edges")
+}
+
+// TestParseGoModGraphOutput_MalformedLineRejected asserts a line
+// missing the parent/child separator is treated as a parse error
+// (rather than silently dropped). Catches regressions where a
+// future "be more permissive" refactor loses edges to typos.
+func TestParseGoModGraphOutput_MalformedLineRejected(t *testing.T) {
+	t.Parallel()
+	raw := []byte("github.com/me/proj github.com/dep/a@v1.0.0\nthis-line-has-no-space\n")
+	_, err := parseGoModGraphOutput(raw)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "line 2",
+		"error should name the offending line so the user can find it")
+}
+
+// TestParseGoModGraphOutput_EmptyInputIsError makes empty graph
+// output an explicit error so survey can route through ErrGraph-
+// Unavailable rather than rendering zero buckets. A real go.mod
+// with zero deps still has the root module's identity to emit
+// somewhere; truly empty output usually means tooling failure.
+func TestParseGoModGraphOutput_EmptyInputIsError(t *testing.T) {
+	t.Parallel()
+	_, err := parseGoModGraphOutput(nil)
+	require.Error(t, err)
+}
+
+// TestParseGraph_SubprocessFailure_WrapsErrGraphUnavailable covers
+// the production seam: when runGoModGraph returns a subprocess
+// error (binary not on PATH, go.sum missing modules, sandbox
+// blocking exec), ParseGraph wraps with ErrGraphUnavailable so
+// callers can errors.Is-detect the "no graph available, fall
+// back" condition without inspecting the underlying error.
+func TestParseGraph_SubprocessFailure_WrapsErrGraphUnavailable(t *testing.T) {
+	orig := runGoModGraph
+	t.Cleanup(func() { runGoModGraph = orig })
+	runGoModGraph = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, fmt.Errorf("simulated `go` not found")
+	}
+	_, err := ParseGraph(t.Context(), "/tmp/no-such-go.mod")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, manifest.ErrGraphUnavailable,
+		"subprocess failure must surface as ErrGraphUnavailable so survey can fall back")
+}
+
+// TestParseGraph_SubprocessHappyPath runs the production
+// ParseGraph wrapper end-to-end with a stubbed subprocess. Proves
+// the path from runGoModGraph through parseGoModGraphOutput to
+// the returned manifest.Graph is wired correctly and that the
+// root URI propagates.
+func TestParseGraph_SubprocessHappyPath(t *testing.T) {
+	orig := runGoModGraph
+	t.Cleanup(func() { runGoModGraph = orig })
+	runGoModGraph = func(_ context.Context, _ string) ([]byte, error) {
+		return []byte("github.com/me/proj github.com/dep/a@v1.0.0\n"), nil
+	}
+	g, err := ParseGraph(t.Context(), "/tmp/fake-go.mod")
+	require.NoError(t, err)
+	assert.Equal(t, "repo:github/me/proj", g.RootURI)
+	require.Len(t, g.Edges, 1)
 }

@@ -65,7 +65,83 @@ func Run(ctx context.Context, s store.Store, manifestPath string) (Result, error
 		}
 	}
 
+	// Reachability pass: attempt to extract the dep graph and
+	// bucket indirects by which directs reach them. Best-effort:
+	// when the parser returns ErrGraphUnavailable (graph extraction
+	// not implemented for this ecosystem, or the toolchain failed),
+	// we proceed with zero-valued IndirectByReachability and the
+	// renderer falls back to the no-graph rendering.
+	if g, err := parseGraph(ctx, manifestPath); err == nil {
+		populateReachability(g, &out)
+	}
+	// Note: we deliberately discard the err. Graph absence is
+	// non-fatal — the user-visible survey still completes — and
+	// the rendering layer signals "drill-down unavailable" when
+	// the breakdown is zero-valued.
+
 	return out, nil
+}
+
+// parseGraph dispatches to the per-ecosystem graph parser based
+// on the manifest's filename. Mirrors parseManifest's dispatch
+// shape. Returns manifest.ErrGraphUnavailable for ecosystems
+// without graph extraction implemented (npm in v0.1 — follow-up
+// commit will land it).
+func parseGraph(ctx context.Context, path string) (manifest.Graph, error) {
+	if path == "" {
+		return manifest.Graph{}, fmt.Errorf("%w: manifest path is required",
+			manifest.ErrGraphUnavailable)
+	}
+	switch base := filepath.Base(path); base {
+	case "go.mod":
+		return gomod.ParseGraph(ctx, path)
+	case "package.json":
+		// npm graph extraction is a follow-up commit.
+		return manifest.Graph{}, fmt.Errorf("%w: npm graph extraction is a v0.1 follow-up",
+			manifest.ErrGraphUnavailable)
+	default:
+		return manifest.Graph{}, fmt.Errorf("%w: unrecognized manifest %q",
+			manifest.ErrGraphUnavailable, base)
+	}
+}
+
+// populateReachability runs the reachability + bucketing passes
+// against an already-resolved Result and writes the outputs to
+// the result in place. Split from Run() so the integration test
+// can construct a result + graph in-memory without going through
+// the file-based dispatch.
+func populateReachability(g manifest.Graph, out *Result) {
+	// Build the (URI → Tier) map for direct deps so the
+	// bucketing pass can classify each indirect's reaching
+	// parents in O(1).
+	directs := make([]manifest.Dep, 0, out.Summary.Direct)
+	directTier := make(map[string]Tier, out.Summary.Direct)
+	for _, d := range out.Deps {
+		if d.Dep.Direct {
+			directs = append(directs, d.Dep)
+			directTier[d.Dep.CanonicalURI] = d.Tier
+		}
+	}
+
+	reach := computeReachability(g, directs)
+	if reach == nil {
+		// Empty graph or no directs — nothing to bucket. Leave
+		// IndirectByReachability zero-valued so renderers fall
+		// back to no-graph rendering.
+		return
+	}
+
+	// Annotate each indirect DepResult with its reachability data.
+	for i := range out.Deps {
+		if out.Deps[i].Dep.Direct {
+			continue
+		}
+		if r, ok := reach[out.Deps[i].Dep.CanonicalURI]; ok {
+			out.Deps[i].Reachability = r
+		}
+	}
+
+	out.Summary.IndirectByReachability = bucketIndirects(out.Deps, directTier)
 }
 
 // parseManifest dispatches to the correct parser based on the

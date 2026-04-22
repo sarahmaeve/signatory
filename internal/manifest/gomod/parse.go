@@ -10,8 +10,14 @@
 package gomod
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/mod/modfile"
@@ -165,4 +171,120 @@ func isLocalPath(s string) bool {
 		strings.HasPrefix(s, "../") ||
 		strings.HasPrefix(s, "/") ||
 		strings.HasPrefix(s, "~")
+}
+
+// runGoModGraph is the seam for executing `go mod graph` against
+// a manifest directory. Package-level variable so tests can
+// substitute a fake-output function without needing the Go
+// toolchain on PATH or a fully resolvable go.sum. Production
+// code calls defaultRunGoModGraph; tests assign their own.
+var runGoModGraph = defaultRunGoModGraph
+
+func defaultRunGoModGraph(ctx context.Context, manifestDir string) ([]byte, error) {
+	//nolint:gosec // G204: argv-form exec of "go" with literal subcommand and flags;
+	// manifestDir is set via cmd.Dir, not injected into args
+	cmd := exec.CommandContext(ctx, "go", "mod", "graph")
+	cmd.Dir = manifestDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("`go mod graph` in %q: %w: %s",
+			manifestDir, err, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
+
+// ParseGraph extracts the transitive dependency graph for the
+// go.mod at path by running `go mod graph` and parsing its
+// output (one edge per line, "parent@version child@version").
+// Both sides of each edge are converted to canonical URIs via
+// canonicalizeGoImportPath, and the @version suffix is dropped
+// — reachability questions are URI-level, not version-pinned.
+//
+// The root module is the one parent that appears WITHOUT an
+// @version suffix in the output (`go mod graph` formats the
+// current module that way). The first such parent we encounter
+// becomes Graph.RootURI.
+//
+// Returns manifest.ErrGraphUnavailable (wrapped with the
+// underlying cause) if the toolchain isn't available, the
+// subprocess fails, or the output is unparseable. Survey treats
+// this as non-fatal and falls back to a no-graph rendering.
+func ParseGraph(ctx context.Context, path string) (manifest.Graph, error) {
+	raw, err := runGoModGraph(ctx, filepath.Dir(path))
+	if err != nil {
+		return manifest.Graph{}, fmt.Errorf("%w: %w", manifest.ErrGraphUnavailable, err)
+	}
+	g, err := parseGoModGraphOutput(raw)
+	if err != nil {
+		return manifest.Graph{}, fmt.Errorf("%w: %w", manifest.ErrGraphUnavailable, err)
+	}
+	return g, nil
+}
+
+// parseGoModGraphOutput is the pure parser for `go mod graph`
+// stdout. Each non-empty line is "parent[@version] child@version";
+// anything else is a parse error (we'd rather fail loud than
+// silently drop edges).
+//
+// Split out from ParseGraph so unit tests exercise the parser
+// without needing a real subprocess or go.sum. Tolerates blank
+// lines and a trailing newline.
+func parseGoModGraphOutput(raw []byte) (manifest.Graph, error) {
+	g := manifest.Graph{}
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	// Allow long lines — module paths plus version suffixes can
+	// add up. 1 MiB per line is well above any realistic edge.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parent, child, ok := strings.Cut(line, " ")
+		if !ok {
+			return manifest.Graph{}, fmt.Errorf(
+				"line %d: expected `parent child`, got %q", lineNo, line)
+		}
+		parentURI, parentHasVersion := splitModulePathVersion(parent)
+		childURI, _ := splitModulePathVersion(child)
+		if parentURI == "" || childURI == "" {
+			return manifest.Graph{}, fmt.Errorf(
+				"line %d: empty module path on one side of edge %q", lineNo, line)
+		}
+		// First parent without an @version suffix is the root
+		// module (the project itself per `go mod graph` semantics).
+		if !parentHasVersion && g.RootURI == "" {
+			g.RootURI = parentURI
+		}
+		g.Edges = append(g.Edges, manifest.Edge{Parent: parentURI, Child: childURI})
+	}
+	if err := scanner.Err(); err != nil {
+		return manifest.Graph{}, fmt.Errorf("scan graph output: %w", err)
+	}
+	if len(g.Edges) == 0 {
+		// Empty graph is unusual but not strictly an error — a
+		// module with zero deps would produce zero edges. Fold
+		// into ErrGraphUnavailable so survey treats it as
+		// "nothing to bucket" rather than spurious empty buckets.
+		return manifest.Graph{}, errors.New("no edges in `go mod graph` output")
+	}
+	return g, nil
+}
+
+// splitModulePathVersion splits "path@version" into ("path",
+// true) when the @version suffix is present, or ("path", false)
+// when it isn't. The path component is converted to a canonical
+// URI via canonicalizeGoImportPath. Empty input returns ("", false).
+func splitModulePathVersion(s string) (canonical string, hasVersion bool) {
+	if s == "" {
+		return "", false
+	}
+	if at := strings.IndexByte(s, '@'); at >= 0 {
+		return canonicalizeGoImportPath(s[:at]), true
+	}
+	return canonicalizeGoImportPath(s), false
 }

@@ -206,6 +206,7 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 			}
 			summary := formatIndirectSummary(byTier)
 			sw.Writef("Indirect dependencies: %d — %s\n", len(indirect), summary)
+			renderIndirectBreakdown(sw, r.Summary.IndirectByReachability)
 			sw.Writeln("  (use --all to list)")
 			sw.Writeln()
 		}
@@ -314,6 +315,38 @@ func tierIcon(t survey.Tier) string {
 		return "[·]"
 	default:
 		return "[·]"
+	}
+}
+
+// renderIndirectBreakdown emits the three-bucket breakdown of
+// indirect deps (resolved on their own / inherit coverage from
+// resolved directs / await an unresolved direct) when the
+// reachability pass produced data. When data is unavailable
+// (graph extraction not implemented for this ecosystem, or the
+// toolchain failed), emits a single "(drill-down unavailable on
+// this system)" line instead.
+//
+// Wording chosen deliberately — Option B from the planning
+// chat. "Inherit coverage" / "await" frames the trust
+// relationship; "resolved on their own" names the indirect's
+// own verdict. Avoid prescriptive language ("blocked by",
+// "defer-safe"); survey reports state, doesn't recommend action.
+//
+// Buckets render only when non-zero, so a project where every
+// indirect is OwnResolved gets a single line, not three.
+func renderIndirectBreakdown(sw *stickyWriter, b survey.IndirectReachabilityBreakdown) {
+	if !b.HasData() {
+		sw.Writeln("  (drill-down unavailable on this system)")
+		return
+	}
+	if b.OwnResolved > 0 {
+		sw.Writef("  %d resolved on their own\n", b.OwnResolved)
+	}
+	if b.ViaResolved > 0 {
+		sw.Writef("  %d inherit coverage from resolved directs\n", b.ViaResolved)
+	}
+	if b.ViaUnresolved > 0 {
+		sw.Writef("  %d await an unresolved direct\n", b.ViaUnresolved)
 	}
 }
 

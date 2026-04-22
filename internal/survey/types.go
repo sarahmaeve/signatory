@@ -73,6 +73,91 @@ type DepResult struct {
 	// Replaces the prior HasOtherVersions bool which signaled
 	// existence without surfacing what was there.
 	OtherVersions *OtherVersionsSummary
+
+	// Reachability records which direct deps can transitively
+	// reach this dep via the manifest's dependency graph.
+	// Populated only on indirect deps when the manifest parser
+	// produced a graph (see manifest.Graph + manifest.ErrGraph-
+	// Unavailable). Nil on direct deps and on indirects when
+	// graph data was unavailable.
+	//
+	// Used by survey to bucket indirects into "inherit coverage
+	// from a resolved direct" vs "await an unresolved direct"
+	// — see Summary.IndirectByReachability and
+	// IsResolvedTier for the categorization rule.
+	Reachability *Reachability
+}
+
+// Reachability lists the direct deps that can reach a given
+// indirect via some path in the manifest graph. Nil on direct
+// deps; carried only on indirects, and only when the parser
+// emitted graph data.
+type Reachability struct {
+	// FromDirects is the set of canonical URIs of direct deps
+	// that reach this indirect. A given direct appears at most
+	// once even if multiple paths from that direct exist.
+	// Order is iteration-order of the BFS, not stable across
+	// runs — consumers that need stable output should sort.
+	FromDirects []string
+}
+
+// IndirectReachabilityBreakdown partitions the indirect dep
+// count into three buckets that answer the user's "can I defer
+// these?" question. Counts sum to Summary.Indirect. Zero-valued
+// when the manifest parser didn't emit graph data — renderers
+// detect this with HasData() and fall back accordingly.
+//
+// The bucketing rule (deliberately conservative — diamond deps
+// fall into ViaUnresolved if ANY path crosses an unresolved
+// direct, per the agreed maximum-pessimism convention):
+//
+//   - OwnResolved: the indirect itself has a resolved tier
+//     (vetted-frozen, trusted-for-now, rejected, burned, or
+//     local-replace). Bucketed first; the indirect's own
+//     verdict overrides any reachability story.
+//   - ViaResolved: indirect lacks its own resolved tier but
+//     EVERY direct that reaches it has a resolved tier. Safe
+//     to defer: any future path the user takes to resolve a
+//     direct will also resolve this indirect's situation.
+//   - ViaUnresolved: indirect lacks its own resolved tier AND
+//     at least one reaching direct is unresolved. Address
+//     after the unresolved direct gets handled.
+type IndirectReachabilityBreakdown struct {
+	OwnResolved   int
+	ViaResolved   int
+	ViaUnresolved int
+}
+
+// HasData reports whether the breakdown was populated by the
+// reachability pass. False when the manifest parser returned
+// ErrGraphUnavailable — renderers use this to switch between
+// the three-line breakdown and the fallback "(drill-down
+// unavailable on this system)" line.
+//
+// Note: a project with zero indirect deps will also produce
+// HasData == false (no buckets ever touched). That's the
+// correct behavior — there's nothing to break down.
+func (b IndirectReachabilityBreakdown) HasData() bool {
+	return b.OwnResolved+b.ViaResolved+b.ViaUnresolved > 0
+}
+
+// IsResolvedTier reports whether t represents a tier with a
+// recorded verdict. Used by the indirect-reachability bucketing
+// to distinguish "the user has decided about this" from "the
+// user has not yet decided." Resolved tiers don't need further
+// action; unresolved tiers do.
+//
+// Per the design conversation on 2026-04-22, unknown-provenance
+// is treated as UNRESOLVED — it's a tier-with-a-name but the
+// "verdict" it carries is "we couldn't pin identity confidently,"
+// which is still pending the user's call.
+func IsResolvedTier(t Tier) bool {
+	switch t {
+	case TierVettedFrozen, TierTrustedForNow,
+		TierRejected, TierBurned, TierLocalReplace:
+		return true
+	}
+	return false
 }
 
 // OtherVersionPosture summarizes a single posture recorded on a
@@ -142,6 +227,14 @@ type Summary struct {
 	// that are not-in-store or unexamined. These are the action
 	// items survey surfaces at the bottom of its output.
 	NeedsReview []string
+
+	// IndirectByReachability partitions the indirect dep count
+	// into resolved-on-their-own / inherit-coverage / await-an-
+	// unresolved-direct buckets. Zero-valued when graph data
+	// wasn't available; renderers use the breakdown's HasData()
+	// to switch between the three-line breakdown and the
+	// fallback rendering.
+	IndirectByReachability IndirectReachabilityBreakdown
 }
 
 // Result is survey's full return value: project info, per-dep

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sarahmaeve/signatory/internal/manifest"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 	"github.com/sarahmaeve/signatory/internal/survey"
@@ -235,6 +236,111 @@ require (
 	// (TestSurvey_NeedsReview_*). The Action-items rendering that
 	// formerly proved it via stdout was removed, so we no longer
 	// re-assert it here through a presentation-layer proxy.
+}
+
+// TestSurvey_Human_IndirectBreakdown_AllBuckets exercises the
+// indirect-reachability breakdown rendering with a Result
+// constructed in-memory — so the test doesn't need a real
+// go.mod that resolves through `go mod graph`. Asserts each
+// bucket's rendered line shape per Option B wording.
+//
+// Revert proof: change any of "resolved on their own", "inherit
+// coverage from resolved directs", "await an unresolved direct"
+// in survey.go's renderIndirectBreakdown; this test fails on the
+// missing substring.
+func TestSurvey_Human_IndirectBreakdown_AllBuckets(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			// One indirect of each kind so filterIndirectDeps
+			// returns at least one (the indirect block only
+			// renders when len(indirect) > 0).
+			{Dep: manifest.Dep{Name: "i1", Direct: false}, Tier: survey.TierVettedFrozen},
+			{Dep: manifest.Dep{Name: "i2", Direct: false}, Tier: survey.TierNotInStore},
+			{Dep: manifest.Dep{Name: "i3", Direct: false}, Tier: survey.TierNotInStore},
+		},
+		Summary: survey.Summary{
+			Total:    3,
+			Indirect: 3,
+			ByTier:   map[survey.Tier]int{survey.TierNotInStore: 2, survey.TierVettedFrozen: 1},
+			IndirectByReachability: survey.IndirectReachabilityBreakdown{
+				OwnResolved:   1,
+				ViaResolved:   1,
+				ViaUnresolved: 1,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, false))
+	out := buf.String()
+
+	assert.Contains(t, out, "1 resolved on their own")
+	assert.Contains(t, out, "1 inherit coverage from resolved directs")
+	assert.Contains(t, out, "1 await an unresolved direct")
+	assert.NotContains(t, out, "drill-down unavailable",
+		"breakdown is populated, so the fallback line must NOT appear")
+}
+
+// TestSurvey_Human_IndirectBreakdown_FallbackWhenUnavailable
+// covers the no-graph-data path: when IndirectByReachability is
+// zero-valued (the parser returned ErrGraphUnavailable, or no
+// graph implementation exists for this ecosystem), the
+// breakdown lines are replaced with a single "(drill-down
+// unavailable on this system)" line.
+func TestSurvey_Human_IndirectBreakdown_FallbackWhenUnavailable(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			{Dep: manifest.Dep{Name: "i1", Direct: false}, Tier: survey.TierNotInStore},
+		},
+		Summary: survey.Summary{
+			Total:    1,
+			Indirect: 1,
+			ByTier:   map[survey.Tier]int{survey.TierNotInStore: 1},
+			// IndirectByReachability deliberately zero-valued.
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, false))
+	out := buf.String()
+
+	assert.Contains(t, out, "(drill-down unavailable on this system)",
+		"zero-valued breakdown must produce the fallback line")
+	assert.NotContains(t, out, "inherit coverage",
+		"fallback path must not emit any of the bucket lines")
+}
+
+// TestSurvey_Human_IndirectBreakdown_OnlyNonzeroBucketsRender
+// confirms zero-count buckets are skipped — a project where
+// every indirect is OwnResolved gets a one-line breakdown, not
+// three. Keeps the output compact for fully-vetted projects.
+func TestSurvey_Human_IndirectBreakdown_OnlyNonzeroBucketsRender(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			{Dep: manifest.Dep{Name: "i1", Direct: false}, Tier: survey.TierVettedFrozen},
+		},
+		Summary: survey.Summary{
+			Total:    1,
+			Indirect: 1,
+			ByTier:   map[survey.Tier]int{survey.TierVettedFrozen: 1},
+			IndirectByReachability: survey.IndirectReachabilityBreakdown{
+				OwnResolved: 1, // others 0
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, false))
+	out := buf.String()
+
+	assert.Contains(t, out, "1 resolved on their own")
+	assert.NotContains(t, out, "inherit coverage",
+		"zero-count ViaResolved bucket must not render")
+	assert.NotContains(t, out, "await an unresolved",
+		"zero-count ViaUnresolved bucket must not render")
 }
 
 // TestSurvey_Human_OtherVersionsSuffix covers the per-row suffix
