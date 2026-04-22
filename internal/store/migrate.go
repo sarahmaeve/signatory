@@ -72,6 +72,12 @@ var migrations = []Migration{
 		Up:          migrationV8Up,
 		Down:        migrationV8Down,
 	},
+	{
+		Version:     9,
+		Description: "citations.parent_kind CHECK constraint — pin to {conclusion, positive_absence, observation}; cleanup pre-v5 'finding' values (F002)",
+		Up:          migrationV9Up,
+		Down:        migrationV9Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -521,7 +527,10 @@ CREATE TABLE IF NOT EXISTS methodology_pattern_composes (
 );
 
 -- Citations: polymorphic FK via parent_kind + parent_id.
--- parent_kind in {finding, positive_absence, observation, methodology_pattern}.
+-- parent_kind in {conclusion, positive_absence, observation} (CHECK added in v9).
+-- The v4 comment here historically named 'finding' (renamed to 'conclusion' by
+-- v5) and 'methodology_pattern' (never inserted — MethodologyPattern has no
+-- Citations field). v9's CHECK constraint is the authoritative list.
 CREATE TABLE IF NOT EXISTS citations (
     id              TEXT PRIMARY KEY,
     parent_kind     TEXT NOT NULL,
@@ -886,6 +895,112 @@ const migrationV8Down = `
 ALTER TABLE analyst_outputs DROP COLUMN proposed_version_scope;
 ALTER TABLE analyst_outputs DROP COLUMN proposed_tier;
 ALTER TABLE analyst_outputs DROP COLUMN synthesis_supplement_json;
+`
+
+// migrationV9Up adds a CHECK constraint to citations.parent_kind
+// pinning it to the three production values {conclusion,
+// positive_absence, observation}. Closes F002 from
+// design/analysis/signatory-security-v1.json: the v4 schema
+// comment named four valid values but the table imposed zero
+// constraint, so a stray tx.Exec with a typo'd parent_kind would
+// land silently and produce rows invisible to every later query.
+//
+// The MethodologyPattern type has no Citations field (see
+// internal/exchange/types.go), so 'methodology_pattern' — named
+// in the v4 schema comment as if it were a legitimate parent_kind —
+// was always a stale-comment fiction. It is not in the CHECK list.
+//
+// Pre-v5 data cleanup: any citations row with parent_kind='finding'
+// (inserted before v5's Finding→Conclusion rename) is rewritten to
+// 'conclusion' before the rebuild, so the CHECK doesn't fail on
+// legacy data. No-op on clean databases. Not reversible by v9Down
+// — once cleaned, the rows stay consistent with post-v5 code, which
+// is what you want.
+//
+// SQLite has no ALTER TABLE ADD CONSTRAINT, so the CHECK is
+// installed via the standard rebuild-through-new-table ceremony:
+// create _new with the constraint, copy rows, drop old, rename.
+// Indexes drop with the table and are recreated afterward. No
+// FKs in or out of citations, so no foreign_keys PRAGMA gymnastics.
+//
+// If the rebuild INSERT fails on a row whose parent_kind isn't in
+// the CHECK list (and isn't the 'finding' value we cleaned up),
+// the migration aborts its transaction and the operator keeps the
+// v8 schema — intended behavior. They'd need to manually identify
+// and clean the anomalous row before re-running. For v0.1 solo-
+// dogfood scope, this is acceptable; no automated remediation is
+// warranted for an edge case that requires someone to have
+// inserted a non-production value into the store.
+const migrationV9Up = `
+-- Defensive cleanup: pre-v5 'finding' → post-v5 'conclusion'.
+-- Safe no-op on databases that never held pre-v5 data.
+UPDATE citations SET parent_kind = 'conclusion' WHERE parent_kind = 'finding';
+
+-- Rebuild citations with the CHECK constraint (SQLite can't ALTER
+-- TABLE ADD CONSTRAINT, so we copy through a new table).
+CREATE TABLE citations_new (
+    id              TEXT PRIMARY KEY,
+    parent_kind     TEXT NOT NULL CHECK (parent_kind IN ('conclusion', 'positive_absence', 'observation')),
+    parent_id       TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    path            TEXT NOT NULL DEFAULT '',
+    line_start      INTEGER NOT NULL DEFAULT -1,
+    line_end        INTEGER NOT NULL DEFAULT -1,
+    scope_kind      TEXT NOT NULL DEFAULT '',
+    scope_path      TEXT NOT NULL DEFAULT '',
+    commit_sha      TEXT NOT NULL DEFAULT '',
+    quoted          TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO citations_new
+    (id, parent_kind, parent_id, seq, path, line_start, line_end,
+     scope_kind, scope_path, commit_sha, quoted)
+SELECT id, parent_kind, parent_id, seq, path, line_start, line_end,
+       scope_kind, scope_path, commit_sha, quoted
+FROM citations;
+
+DROP TABLE citations;
+ALTER TABLE citations_new RENAME TO citations;
+
+-- Recreate indexes (they were attached to the old table).
+CREATE INDEX IF NOT EXISTS idx_citations_parent ON citations(parent_kind, parent_id);
+CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
+`
+
+// migrationV9Down reverses the CHECK by rebuilding the table
+// without it. The pre-v5 'finding' → 'conclusion' cleanup is
+// intentionally NOT reversed — rewriting consistent rows back to
+// a legacy value the rest of the code no longer understands would
+// be a foot-gun masquerading as a recovery path. Down is for
+// reverting the CHECK specifically, not for time-traveling the
+// table's contents back to before v5.
+const migrationV9Down = `
+CREATE TABLE citations_old (
+    id              TEXT PRIMARY KEY,
+    parent_kind     TEXT NOT NULL,
+    parent_id       TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+    path            TEXT NOT NULL DEFAULT '',
+    line_start      INTEGER NOT NULL DEFAULT -1,
+    line_end        INTEGER NOT NULL DEFAULT -1,
+    scope_kind      TEXT NOT NULL DEFAULT '',
+    scope_path      TEXT NOT NULL DEFAULT '',
+    commit_sha      TEXT NOT NULL DEFAULT '',
+    quoted          TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO citations_old
+    (id, parent_kind, parent_id, seq, path, line_start, line_end,
+     scope_kind, scope_path, commit_sha, quoted)
+SELECT id, parent_kind, parent_id, seq, path, line_start, line_end,
+       scope_kind, scope_path, commit_sha, quoted
+FROM citations;
+
+DROP TABLE citations;
+ALTER TABLE citations_old RENAME TO citations;
+
+CREATE INDEX IF NOT EXISTS idx_citations_parent ON citations(parent_kind, parent_id);
+CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
 `
 
 // migrate runs all pending migrations on the database. It:

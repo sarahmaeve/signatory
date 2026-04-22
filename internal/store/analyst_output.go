@@ -695,7 +695,8 @@ func insertOutputReframesFrom(
 
 // insertCitations inserts a slice of Citations attached to a parent
 // row of a given kind. parentKind ∈ {"conclusion", "positive_absence",
-// "observation", "methodology_pattern"}.
+// "observation"} — matches the CHECK constraint installed by
+// migration v9. Any other value is rejected at the SQLite layer.
 //
 // Citation's nullable LineStart/LineEnd are stored as -1 sentinel
 // values per the schema convention (SQLite has no real nullable INT

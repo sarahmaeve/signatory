@@ -251,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v8 → v7. Drops the M6a synthesis-supplement
+	// First rollback: v9 → v8. Drops the citations.parent_kind CHECK
+	// constraint by rebuilding the table without it. citations is
+	// empty in our seed data so the rebuild is a no-op on rows.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 8, version)
+
+	// Second rollback: v8 → v7. Drops the M6a synthesis-supplement
 	// columns (synthesis_supplement_json, proposed_tier,
 	// proposed_version_scope) from analyst_outputs. All three were
 	// NULL for our seed data, so nothing meaningful is lost.
@@ -532,7 +542,22 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v7 (drops M6a synthesis-supplement columns). ---
+	// --- Down: vN → v8 (drops citations.parent_kind CHECK; rebuilds table). ---
+	// The v9 migration installed a CHECK constraint via the
+	// rebuild-through-new-table ceremony. Down reverses the
+	// rebuild without the CHECK; the pre-v5 'finding' → 'conclusion'
+	// data cleanup is intentionally NOT reversed (see migrationV9Down
+	// doc). The v2 entity/signal/burn/posture data this test cares
+	// about is in entirely different tables; citations is empty in
+	// the v2 fixture so the rebuild is a no-op on data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 8, version)
+
+	// --- Down: v8 → v7 (drops M6a synthesis-supplement columns). ---
 	// The v8 migration added synthesis_supplement_json, proposed_tier,
 	// and proposed_version_scope as nullable columns on
 	// analyst_outputs; rolling back drops them. V8 is M6a; pre-M6a

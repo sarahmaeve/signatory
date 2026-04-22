@@ -157,3 +157,93 @@ func TestSecurity_AppendOnly_AuditLogBlocksMutation(t *testing.T) {
 	assert.Equal(t, `{"version":"1.0.0","tier":"vetted-frozen"}`, detail,
 		"audit detail must be unchanged after blocked UPDATE")
 }
+
+// --- citations.parent_kind CHECK constraint (F002) --------------------------
+//
+// The citations table uses a polymorphic-FK pattern: parent_kind +
+// parent_id together name the row being cited, but SQLite has no
+// way to express a polymorphic foreign key. F002 from
+// design/analysis/signatory-security-v1.json called out that the
+// schema imposed NO check on parent_kind, so the Go layer's
+// discipline (only ever inserting one of three literal constants)
+// was the only thing keeping malformed or orphan citations out of
+// the table. A stray tx.Exec with a typo'd parent_kind string
+// would land silently and produce rows that every later query
+// would fail to match.
+//
+// Migration v9 adds a CHECK constraint that pins parent_kind to
+// the three production values: 'conclusion', 'positive_absence',
+// 'observation'. The fourth value the schema comment historically
+// mentioned ('methodology_pattern') was never inserted and the
+// MethodologyPattern type has no Citations field — it was a
+// stale comment claiming a relationship that doesn't exist, not
+// a legitimate value being used somewhere.
+//
+// The pre-v5 legacy value 'finding' is also rejected post-v9; v9's
+// Up migration includes a one-time UPDATE that rewrites any extant
+// 'finding' rows to 'conclusion' before installing the CHECK, so
+// the rebuild's INSERT INTO citations_new doesn't fail on legacy
+// data.
+
+// TestSecurity_CitationsCheckParentKind_RejectsUnknown verifies that
+// an arbitrary unknown parent_kind value (simulating a future typo
+// or corrupted insert) is rejected at the schema layer, not just by
+// the Go code.
+//
+// Revert proof: remove the CHECK clause from migrationV9Up's
+// citations_new CREATE TABLE; this test fails because the INSERT
+// with parent_kind='xxx' succeeds.
+func TestSecurity_CitationsCheckParentKind_RejectsUnknown(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO citations (id, parent_kind, parent_id, seq)
+		 VALUES (?, ?, ?, ?)`,
+		"cite-xxx", "xxx", "parent-1", 0)
+	require.Error(t, err,
+		"INSERT with unknown parent_kind must be rejected by the CHECK constraint")
+	assert.Contains(t, err.Error(), "CHECK",
+		"error should name the CHECK constraint so future debugging points at the schema invariant, not a Go-layer bug")
+}
+
+// TestSecurity_CitationsCheckParentKind_RejectsLegacyFinding pins
+// that the pre-v5 'finding' value is no longer accepted. Guards
+// against a future refactor that tries to accept both names for
+// backward compatibility — the whole point of v5 was to make
+// 'conclusion' the one true name.
+//
+// Revert proof: add 'finding' to the CHECK list; this test fails
+// because the INSERT succeeds.
+func TestSecurity_CitationsCheckParentKind_RejectsLegacyFinding(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO citations (id, parent_kind, parent_id, seq)
+		 VALUES (?, ?, ?, ?)`,
+		"cite-legacy", "finding", "parent-1", 0)
+	require.Error(t, err,
+		"INSERT with pre-v5 legacy 'finding' parent_kind must be rejected — the rename was total")
+	assert.Contains(t, err.Error(), "CHECK")
+}
+
+// TestSecurity_CitationsCheckParentKind_AcceptsValid is the
+// positive-path companion: the three production values must all
+// pass the CHECK. Without this companion, the implementation could
+// regress to an over-restrictive CHECK (e.g., only 'conclusion')
+// and the rejection tests above would still pass — a false-secure
+// mode the Go layer would trip on during real ingest.
+func TestSecurity_CitationsCheckParentKind_AcceptsValid(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	for i, kind := range []string{"conclusion", "positive_absence", "observation"} {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO citations (id, parent_kind, parent_id, seq)
+			 VALUES (?, ?, ?, ?)`,
+			"cite-valid-"+kind, kind, "parent-x", i)
+		assert.NoErrorf(t, err,
+			"INSERT with legitimate parent_kind %q must succeed", kind)
+	}
+}
