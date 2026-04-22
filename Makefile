@@ -33,7 +33,12 @@ SHELL := /bin/bash
 #   tag + N, dirty       → v0.1.0-N-gabc1234-dirty
 VERSION := $(shell git describe --tags --dirty 2>/dev/null || echo v0.1.0-dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
-LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+# UTC RFC3339 timestamp of this install. Surfaces in `signatory version`
+# so a stale binary is one command away from being spotted (dogfood
+# 2026-04-21: a 5-hour-old binary emitted pre-M6 templates and the
+# drift wasn't caught until the output itself was weird).
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
 .PHONY: help install install-hooks check test lint fmt-check smoke
 
@@ -50,9 +55,11 @@ install:  ## Install signatory to $GOBIN with a git-derived version stamp.
 # tracked — and therefore not portable — is git's per-clone
 # core.hooksPath setting. Running this target once per fresh clone
 # activates it; it's idempotent to re-run.
-install-hooks:  ## Wire .githooks/ into this clone's core.hooksPath so pre-commit fires.
+install-hooks:  ## Wire .githooks/ into this clone's core.hooksPath so pre-commit + post-commit fire.
 	@git config core.hooksPath .githooks
-	@echo "git hooks: .githooks/ activated (pre-commit runs gofmt + vet + test -race)"
+	@echo "git hooks: .githooks/ activated"
+	@echo "  pre-commit:  gofmt + vet + test -race"
+	@echo "  post-commit: make install (keeps \$$GOBIN/signatory in sync with HEAD)"
 
 check: fmt-check vet test smoke  ## Run the full pre-commit gauntlet (matches what CI enforces).
 

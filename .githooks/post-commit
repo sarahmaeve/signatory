@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# post-commit: re-install signatory to $GOBIN so the installed binary
+# stays in sync with HEAD. Without this, a committer (or an agent using
+# `signatory` via Bash) can find themselves running a stale binary
+# while the source tree has moved on — templates get embedded at build
+# time via go:embed, so a stale binary silently emits pre-rewrite
+# template text. That was a real failure mode during M6 dogfood on
+# 2026-04-21.
+#
+# We delegate to `make install`, which applies the version ldflags.
+# Output is kept compact: the success case prints one line, the
+# failure case prints the full build output.
+#
+# Runs AFTER the commit lands, so the installed version reflects the
+# committed state (not the uncommitted state the way a pre-commit hook
+# would).
+set -euo pipefail
+
+# Guard: only attempt install if cmd/ or templates/ actually changed in
+# this commit. Docs-only or design-only commits don't affect the
+# binary. Grep against the file list from the commit itself.
+changed=$(git diff-tree --no-commit-id --name-only -r HEAD)
+if ! echo "$changed" | grep -qE '^(cmd/|internal/|templates/|go\.(mod|sum)|embedded\.go|Makefile)'; then
+    exit 0
+fi
+
+echo "=== post-commit: updating \$GOBIN/signatory ==="
+if out=$(make install 2>&1); then
+    # make install already echoes "installing signatory ... (commit)";
+    # surface only that line to keep commit output quiet.
+    echo "$out" | tail -2
+else
+    echo "ERROR: make install failed after commit — your \$GOBIN binary is now stale"
+    echo "$out"
+    exit 1
+fi

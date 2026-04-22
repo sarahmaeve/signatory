@@ -38,9 +38,21 @@ type CLI struct {
 	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 
+// version, commit, and buildDate are stamped by the Makefile via
+// -ldflags at install time. Defaults are deliberately bland strings
+// so a plain `go build` (without ldflags) produces a binary that
+// still works and self-identifies as an unstamped build — useful
+// during local development where `go run` or `go build` skips make.
+//
+// Without a stamped buildDate, a stale binary is invisible to the
+// user; the 2026-04-21 M6 dogfood ran against a ~5-hour-old binary
+// and the template drift wasn't caught until the output was weird.
+// `signatory version` now surfaces the build timestamp so drift is
+// one command away from being spotted.
 var (
-	version = "dev"
-	commit  = "none"
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
 )
 
 func main() {
