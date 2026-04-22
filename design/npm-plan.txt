@@ -246,13 +246,38 @@ spot-check:
 | `postinstall_present` | `versions[latest].scripts.postinstall` | publication | high |
 | `trusted_publishing` | `dist.attestations` presence | publication | very_high |
 | `weekly_downloads` | `api.npmjs.org/downloads/point/last-week/<pkg>` | criticality | low |
-| `dependent_count` (optional) | `registry.npmjs.org/-/v1/search?text=<pkg>` | criticality | low |
+| `direct_dep_count` | `versions[latest].dependencies` (len) | composition | — (measurement) |
+| `dependent_count` (deprecated — see OQ1) | `registry.npmjs.org/-/v1/search?text=<pkg>` | criticality | low |
 
-**Open question before Phase B kickoff:** include `dependent_count`
-or drop it? Dropping reduces external-traffic cost from 3 calls to
-2 and removes the weakest signal (low forgery resistance, gameable).
-Keeping matches the original signal set. Default position: drop
-unless you override.
+**New `composition` group.** `direct_dep_count` is mechanistic —
+pure Go extraction from the already-fetched `registryPackage`, zero
+analyst tokens, zero additional HTTP traffic. It belongs in a new
+signal group separate from vitality/governance/publication/
+criticality: measurements of the target's composed surface rather
+than evidence about its publisher.
+
+Composition signals do not carry a ForgeryResistance rating. They
+describe the object being adopted, not a claim someone made about
+it — an adversary can't hide that a package has N declared
+dependencies once the manifest is public.
+
+The load-bearing observation these signals support: a package with
+extensive dependencies is expensive to verify, expensive to repair
+(each transitive author patches on their own cadence), and
+expensive to re-vet on updates. A `provenance` or `analyze` verdict
+on the root covers one publisher out of N — it does not speak to
+the composition. Signatory's contract for composition signals is
+therefore to **surface the shape — count, attestation distribution,
+install-script surface, maintainer-age distribution — and not to
+produce a verdict on whether the surface is acceptable. That is
+org-policy, not a signatory decision. Anything stronger is
+signatory pretending to know a risk appetite it wasn't given.**
+
+`transitive_dep_count` is the higher-signal composition metric but
+requires either a registry tree-walk (N additional HTTP calls) or a
+parsed lockfile (Phase C deliverable). Deferred to Phase C+;
+`direct_dep_count` alone gives a useful first-pass indicator at
+zero incremental cost.
 
 `weekly_downloads` requires a second client method
 (`GetWeeklyDownloads(ctx, name) (int, error)`) against a different
@@ -363,9 +388,14 @@ Commit title: `npm: manifest parsing + survey integration`
 
 ## Open questions before execution
 
-1. **`dependent_count`**: include (6 signals / 3 calls) or drop
-   (5 signals / 2 calls, lower external traffic, drops the weakest
-   signal)? Default position: drop.
+1. **`dependent_count` vs. `direct_dep_count`**: original Phase B
+   included `dependent_count` (inbound popularity, ForgeryResistance
+   low, gameable) as an optional 6th signal. Replace with
+   `direct_dep_count` in the new `composition` group — same
+   external-traffic cost (zero additional calls; the dependencies
+   map is already in the fetched struct), stronger signal, directly
+   supports skim-mode triage of high-fanout targets. Drop
+   `dependent_count` entirely. Default position: swap.
 2. **Survey tie-breaking**: if both `go.mod` and `package.json` live
    in the same directory, first-found wins — OK, or do we want
    explicit ordering? Default position: first-found, documented.

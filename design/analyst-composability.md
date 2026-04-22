@@ -189,6 +189,25 @@ supply-chain. Pay ~60-100k tokens, get a decision.
 provenance flags concerns OR if the code surface is large enough
 to warrant behavioral review regardless.
 
+**npm high-fanout packages (extensive direct and transitive
+deps):** composition is itself the skim signal. A package with
+extensive dependencies is expensive to verify, expensive to repair
+(forking or replacing each transitively-trusted publisher is
+generally infeasible), and expensive to re-vet on updates.
+`analyze` on the root implicitly claims to cover the composition
+but only covers 1/N of the actual trust surface — that's the wrong
+question, not an expensive-but-correct one. The honest output
+shape is `provenance` on the root, paired with mechanistic
+composition signals (`direct_dep_count` now, `transitive_dep_count`
+later; see `npm-plan.txt` Phase B for the group definition).
+
+**Signatory's contract for composition signals is to surface the
+shape — count, OIDC attestation distribution across the resolved
+graph, install-script surface, maintainer-age distribution — and
+not to produce a verdict on whether the surface is acceptable.**
+That is org-policy, not a signatory decision. Anything stronger is
+signatory pretending to know a risk appetite it wasn't given.
+
 **Go modules:** full `analyze` is usually the right default.
 Sizes rarely fall below the economics crossover, and Go's
 culture is anti-microdep, so the cheap-skim-for-tiny-utilities
