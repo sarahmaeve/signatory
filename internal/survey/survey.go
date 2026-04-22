@@ -43,7 +43,10 @@ func Run(ctx context.Context, s store.Store, manifestPath string) (Result, error
 	}
 
 	for _, d := range deps {
-		r := resolveDep(ctx, s, d)
+		r, err := resolveDep(ctx, s, d)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolve dep %s: %w", d.CanonicalURI, err)
+		}
 		out.Deps = append(out.Deps, r)
 
 		if d.Direct {
@@ -94,7 +97,14 @@ func parseManifest(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 //
 // Ordering matches the trust-policy sketch's Layer 0 (burn) →
 // Layer 1 (explicit posture) → absent-case fallback.
-func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) DepResult {
+//
+// Returns a non-nil error only for unexpected store failures
+// (i.e. errors that are not store.ErrNotFound). ErrNotFound is
+// the normal "not seen yet" signal and is handled inline as a
+// tier assignment. Propagating unexpected errors is correct on
+// the trust-answering path: a storage hiccup must never silently
+// render a burned dep as "unexamined."
+func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) (DepResult, error) {
 	r := DepResult{Dep: d}
 
 	// Local replaces can't be resolved against the store — there's
@@ -102,7 +112,7 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) DepResult {
 	// renderers can message "local fork, not analyzable remotely."
 	if d.Ecosystem == "go-local-replace" {
 		r.Tier = TierLocalReplace
-		return r
+		return r, nil
 	}
 
 	// Empty canonical URI means the parser couldn't build one
@@ -110,40 +120,38 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) DepResult {
 	// tier for "nothing to look up."
 	if d.CanonicalURI == "" {
 		r.Tier = TierNotInStore
-		return r
+		return r, nil
 	}
 
 	entity, err := s.FindEntityByURI(ctx, d.CanonicalURI)
 	if errors.Is(err, store.ErrNotFound) {
 		r.Tier = TierNotInStore
-		return r
+		return r, nil
 	}
 	if err != nil {
-		// Unexpected error from the store (I/O, migration mismatch,
-		// etc.). Treat as not-in-store for display purposes — the
-		// dep appears absent to this survey run. Log-level handling
-		// is the caller's choice; we don't want a transient DB hiccup
-		// to panic the whole survey.
-		r.Tier = TierNotInStore
-		return r
+		return DepResult{}, err
 	}
 
 	// Layer 0: burns win absolutely.
 	burn, burnErr := s.GetBurn(ctx, entity.ID)
+	if burnErr != nil && !errors.Is(burnErr, store.ErrNotFound) {
+		return DepResult{}, burnErr
+	}
 	if burnErr == nil && burn != nil {
 		r.Tier = TierBurned
 		r.BurnReason = burn.Reason
-		return r
+		return r, nil
 	}
 
 	// Layer 1: explicit postures. Prefer exact version match.
 	postures, postureErr := s.GetPostures(ctx, entity.ID)
+	if postureErr != nil && !errors.Is(postureErr, store.ErrNotFound) {
+		return DepResult{}, postureErr
+	}
 	if postureErr != nil || len(postures) == 0 {
 		// Entity exists but no postures recorded → unexamined.
-		// Treat GetPostures errors the same way: conservative
-		// default rather than a misleading specific tier.
 		r.Tier = TierUnexamined
-		return r
+		return r, nil
 	}
 
 	for _, p := range postures {
@@ -151,7 +159,7 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) DepResult {
 			r.Tier = postureTierToSurveyTier(p.Tier)
 			r.PostureVersion = p.Version
 			r.PostureRationale = p.Rationale
-			return r
+			return r, nil
 		}
 	}
 
@@ -160,7 +168,7 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) DepResult {
 	// "v1.14 is vetted-frozen but you pinned v1.15."
 	r.Tier = TierUnexamined
 	r.HasOtherVersions = true
-	return r
+	return r, nil
 }
 
 // postureTierToSurveyTier maps the profile.PostureTier constants

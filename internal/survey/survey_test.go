@@ -2,6 +2,7 @@ package survey
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -396,4 +397,137 @@ func lastSegment(uri string) string {
 		}
 	}
 	return uri
+}
+
+// ---- mock store for error-injection tests ----
+
+// burnErrStore wraps a real SQLite store but overrides GetBurn to
+// return an injected non-ErrNotFound error for a specific entityID.
+// All other methods delegate to the real store so entity and posture
+// setup still works.
+type burnErrStore struct {
+	store.Store
+	burnEntityID string
+	burnErr      error
+}
+
+func (b *burnErrStore) GetBurn(ctx context.Context, entityID string) (*profile.Burn, error) {
+	if entityID == b.burnEntityID {
+		return nil, b.burnErr
+	}
+	return b.Store.GetBurn(ctx, entityID)
+}
+
+// findErrStore wraps a real SQLite store and overrides
+// FindEntityByURI to return an injected non-ErrNotFound error.
+type findErrStore struct {
+	store.Store
+	targetURI string
+	findErr   error
+}
+
+func (f *findErrStore) FindEntityByURI(ctx context.Context, uri string) (*profile.Entity, error) {
+	if uri == f.targetURI {
+		return nil, f.findErr
+	}
+	return f.Store.FindEntityByURI(ctx, uri)
+}
+
+// postureErrStore wraps a real SQLite store and overrides
+// GetPostures to return an injected non-ErrNotFound error.
+type postureErrStore struct {
+	store.Store
+	postureEntityID string
+	postureErr      error
+}
+
+func (p *postureErrStore) GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error) {
+	if entityID == p.postureEntityID {
+		return nil, p.postureErr
+	}
+	return p.Store.GetPostures(ctx, entityID)
+}
+
+// TestRun_GetBurnStorageError_PropagatesError verifies that a
+// non-ErrNotFound error from GetBurn is surfaced by Run rather
+// than silently falling through to a benign tier (the bug).
+//
+// Before the fix this test fails: Run returns (result, nil) with
+// the dep rendered as TierNotInStore instead of propagating the
+// storage error.
+func TestRun_GetBurnStorageError_PropagatesError(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/burn-err-test
+
+go 1.25.1
+
+require github.com/compromised/lib v1.0.0
+`)
+
+	real := openTestStore(t)
+	e := seedEntity(t, real, "repo:github/compromised/lib")
+
+	storageErr := errors.New("disk I/O failure")
+	s := &burnErrStore{
+		Store:        real,
+		burnEntityID: e.ID,
+		burnErr:      storageErr,
+	}
+
+	_, err := Run(context.Background(), s, path)
+	require.Error(t, err, "storage error from GetBurn must propagate; got nil")
+	assert.ErrorIs(t, err, storageErr)
+}
+
+// TestRun_FindEntityStorageError_PropagatesError verifies that a
+// non-ErrNotFound error from FindEntityByURI is surfaced by Run.
+func TestRun_FindEntityStorageError_PropagatesError(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/find-err-test
+
+go 1.25.1
+
+require github.com/some/dep v1.0.0
+`)
+
+	real := openTestStore(t)
+	storageErr := errors.New("connection pool exhausted")
+	s := &findErrStore{
+		Store:     real,
+		targetURI: "repo:github/some/dep",
+		findErr:   storageErr,
+	}
+
+	_, err := Run(context.Background(), s, path)
+	require.Error(t, err, "storage error from FindEntityByURI must propagate; got nil")
+	assert.ErrorIs(t, err, storageErr)
+}
+
+// TestRun_GetPosturesStorageError_PropagatesError verifies that a
+// non-ErrNotFound error from GetPostures is surfaced by Run.
+func TestRun_GetPosturesStorageError_PropagatesError(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/posture-err-test
+
+go 1.25.1
+
+require github.com/some/dep v1.5.0
+`)
+
+	real := openTestStore(t)
+	e := seedEntity(t, real, "repo:github/some/dep")
+
+	storageErr := errors.New("schema migration pending")
+	s := &postureErrStore{
+		Store:           real,
+		postureEntityID: e.ID,
+		postureErr:      storageErr,
+	}
+
+	_, err := Run(context.Background(), s, path)
+	require.Error(t, err, "storage error from GetPostures must propagate; got nil")
+	assert.ErrorIs(t, err, storageErr)
 }
