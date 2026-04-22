@@ -125,6 +125,54 @@ func TestPostureSet_VersionedURI_WritesToUnversionedEntity(t *testing.T) {
 	assert.Equal(t, "2.0.0", posture.Version)
 }
 
+// TestSummary_UnknownTarget_SoftAbsence asserts that `summary` on a
+// target with no entity is a soft absence (no error, exit 0, human-
+// readable "no record" message), matching `posture get`'s behavior
+// for the same condition. Pre-fix, summary returned a usage error
+// (exit 64) — asymmetric with the sibling read verbs and confusing
+// for scripters pipelining queries. 2026-04-22 read-surface pass.
+func TestSummary_UnknownTarget_SoftAbsence(t *testing.T) {
+	g := newTestGlobals(t)
+
+	cmd := &SummaryCmd{Target: "pkg:npm/never-ingested-target"}
+	stdout := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(g),
+			"unknown target must NOT produce an error — it's a soft absence, "+
+				"matching posture get's contract")
+	})
+
+	assert.Contains(t, stdout, "never-ingested-target",
+		"output should name the queried target")
+	assert.Contains(t, stdout, "No signatory record",
+		"output should say there's no record rather than error out")
+}
+
+// TestSummary_ZeroConclusions_OmitsEmptyBracket: the severity
+// breakdown `[-]` placeholder is visual noise on synthesis rows
+// (which always have 0 conclusions by Plan-A design). Drop the
+// bracket entirely when the count is 0. 2026-04-22 read-surface
+// pass.
+func TestSummary_ZeroConclusions_OmitsEmptyBracket(t *testing.T) {
+	g := newTestGlobals(t)
+
+	// Ingest a synthesis output (0 conclusions) to get the zero-
+	// conclusion rendering path.
+	outputID := ingestSynthesisForAccept(t, g, synthesisForAccept())
+	_ = outputID
+
+	cmd := &SummaryCmd{Target: "pkg:npm/accept-example"}
+	stdout := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(g))
+	})
+
+	assert.Contains(t, stdout, "0 conclusion(s)",
+		"the conclusion count still renders")
+	assert.NotContains(t, stdout, "0 conclusion(s) [-]",
+		"the empty-severity-bracket placeholder must be suppressed when there are 0 conclusions")
+	assert.NotContains(t, stdout, "[-]",
+		"no '[-]' placeholder should appear anywhere in the render")
+}
+
 // TestSummary_VersionedURI_SurfacesCanonicalPosture asserts that
 // `signatory summary pkg:npm/X@V` surfaces the posture stored at
 // (unversioned entity, version="V"). This was the SECOND part of

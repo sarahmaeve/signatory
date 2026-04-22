@@ -48,10 +48,15 @@ func (cmd *SummaryCmd) Run(globals *Globals) error {
 	s, err := summary.New(db).Assemble(ctx, resolved.CanonicalURI)
 	if err != nil {
 		if errors.Is(err, summary.ErrEntityNotFound) {
-			// Missing entity is a usage-shaped error: the caller
-			// supplied a target signatory has never seen. Exit 64
-			// so scripts can branch on "nothing to show."
-			return NewUsageError(err)
+			// Soft absence, matching `posture get`'s contract: a
+			// target with no ingested record prints a one-line "no
+			// record" message and exits 0. Pre-2026-04-22 this was
+			// a usage error (exit 64), asymmetric with the sibling
+			// read verbs and confusing for scripters who pipelined
+			// them. The dogfood-walkthrough read-surface pass
+			// highlighted the discrepancy.
+			fmt.Printf("No signatory record for: %s\n", cmd.Target)
+			return nil
 		}
 		return err
 	}
@@ -111,9 +116,20 @@ func renderSummaryHuman(w io.Writer, s *summary.Summary) {
 			if a.CollectedFromURI != "" {
 				fmt.Fprintf(w, "    collected_from: %s\n", a.CollectedFromURI)
 			}
-			fmt.Fprintf(w, "    %d conclusion(s) [%s], %d absence(s), %d observation(s), %d pattern(s)\n",
-				a.ConclusionCount, formatSeverityBreakdown(a.SeverityCounts),
-				a.PositiveAbsenceCount, a.ObservationCount, a.MethodologyPatternCnt)
+			// Severity bracket appears only when there's something to
+			// break down. Zero-conclusion rows (synthesis outputs per
+			// Plan-A design) would otherwise render "[-]" — visual
+			// noise that doesn't say anything useful. 2026-04-22
+			// read-surface pass.
+			if a.ConclusionCount == 0 {
+				fmt.Fprintf(w, "    %d conclusion(s), %d absence(s), %d observation(s), %d pattern(s)\n",
+					a.ConclusionCount,
+					a.PositiveAbsenceCount, a.ObservationCount, a.MethodologyPatternCnt)
+			} else {
+				fmt.Fprintf(w, "    %d conclusion(s) [%s], %d absence(s), %d observation(s), %d pattern(s)\n",
+					a.ConclusionCount, formatSeverityBreakdown(a.SeverityCounts),
+					a.PositiveAbsenceCount, a.ObservationCount, a.MethodologyPatternCnt)
+			}
 		}
 		fmt.Fprintf(w, "\nDrill in: `signatory show-conclusions --target %s`\n", s.CanonicalURI)
 	} else {
