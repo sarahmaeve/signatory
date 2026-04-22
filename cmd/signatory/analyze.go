@@ -19,7 +19,38 @@ import (
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
-// AnalyzeCmd retrieves or collects the trust profile for a target.
+// AnalyzeCmd collects Layer 1 signals for a target and displays the
+// cached trust profile the store currently holds for it.
+//
+// IMPORTANT: despite the verb name, this command does NOT produce a
+// trust verdict, posture recommendation, or LLM-backed analysis. It:
+//
+//   - Runs deterministic collectors (github API, git local clone,
+//     npm registry) against the target and persists Layer 1 signals.
+//   - Reads back any postures already in the store and displays them.
+//
+// What it does NOT do:
+//
+//   - Dispatch analyst agents.
+//   - Produce conclusions, positive_absences, methodology.
+//   - Set or propose a posture.
+//
+// For an actual trust verdict (the work that turns a [?] row in
+// `signatory survey` into [✓] or [✗]), invoke the /analyze skill
+// inside a Claude session with the signatory MCP server connected.
+// That path dispatches specialist analyst agents, ingests their
+// v1-schema output via signatory_ingest_analysis, and materializes
+// a posture via `signatory posture accept <output-id>`.
+//
+// The scope mismatch between this verb's name and its v0.1 behavior
+// is tracked: the original design (design/mcp-dual-analyst-
+// architecture.md) envisioned `signatory analyze --depth=full`
+// running the LLM-backed pipeline in-process. v0.1 Invariant 1
+// ("forbid LLM-client deps and API hostnames" in the binary)
+// forced the LLM work out of the CLI and into the Claude-skill
+// harness. This command is today's `--depth=signals` equivalent;
+// the other depths remain aspirational until v0.2 reopens the
+// question of in-process LLM invocation.
 //
 // Target resolution: the user-supplied target is parsed via
 // profile.ResolveTarget so every accepted input form (GitHub

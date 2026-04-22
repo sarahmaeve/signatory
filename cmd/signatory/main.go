@@ -19,7 +19,7 @@ type CLI struct {
 	DB      string `help:"Path to signatory database." default:"~/.signatory/signatory.db" type:"path" env:"SIGNATORY_DB"`
 	Verbose bool   `help:"Verbose output." short:"v"`
 
-	Analyze         AnalyzeCmd         `cmd:"" help:"Analyze trust signals for a package, repo, or identity."`
+	Analyze         AnalyzeCmd         `cmd:"" help:"Collect Layer 1 signals (github/git/registry metadata) and display the cached trust profile for a target. Does NOT produce a trust verdict — run /analyze in a Claude session for that. v0.1 scope: signal collection + cached-profile display; LLM-backed synthesis is v0.2."`
 	Summary         SummaryCmd         `cmd:"" help:"One-call view: canonical URI, posture, burn status, analyses rollup, related identities. The 'start here' verb for any target."`
 	Survey          SurveyCmd          `cmd:"" help:"Assess trust posture of a project's dependency tree."`
 	Burn            BurnCmd            `cmd:"" help:"Burn an entity, degrading its trust signals."`
