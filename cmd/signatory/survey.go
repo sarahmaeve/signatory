@@ -24,9 +24,19 @@ import (
 // into a per-project "what's the state of my dep tree?" view.
 //
 // Output: human-readable by default (summary + direct-deps
-// table + indirect count + action items); --json for machine
-// consumption by downstream tooling (CI gates, dashboards,
-// future web UI).
+// table + indirect count); --json for machine consumption by
+// downstream tooling (CI gates, dashboards, future web UI).
+//
+// Deliberately does NOT render an "action items" / suggested-
+// commands section. The CLI verbs survey would naturally point at
+// (`signatory analyze ...`) only collect signals — they cannot
+// produce the trust verdict that flips a [?] row into [✓] / [✗].
+// That verdict requires an analyst-agent dispatch (the /analyze
+// Claude skill, or any client invoking signatory_ingest_analysis
+// over MCP). Suggesting a CLI command that doesn't deliver the
+// thing the user expects is worse than suggesting nothing —
+// removed 2026-04-22 after dogfood walk-through made the
+// vocabulary mismatch explicit.
 //
 // Scope note: --refresh is accepted but ignored in v0.1 with a
 // stderr note. A useful cross-dep refresh requires decisions
@@ -115,7 +125,8 @@ func printSurveyJSON(w io.Writer, r survey.Result) error {
 
 // printSurveyHuman renders the survey result as a terminal
 // dashboard to w: project header, summary counts, direct-deps
-// table, indirect summary, action items.
+// table, indirect summary. See the package-level doc for why
+// no "action items" / suggested-commands section is emitted.
 //
 // Width discipline: the direct-deps column layout targets an
 // 80-character terminal by default. Longer dep names or version
@@ -194,22 +205,6 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 			sw.Writeln("  (use --all to list)")
 			sw.Writeln()
 		}
-	}
-
-	// ---- Action items ----
-	if len(r.Summary.NeedsReview) > 0 {
-		sw.Writeln("Action items")
-		sw.Writef("  %d direct dependencies to analyze:\n", len(r.Summary.NeedsReview))
-		for _, uri := range r.Summary.NeedsReview {
-			cloneName := cloneDirNameForURI(uri)
-			sw.Writef("    signatory analyze %s --refresh --clone --path filestore/clones/%s\n",
-				analyzableForm(uri), cloneName)
-		}
-		sw.Writeln()
-	} else if len(direct) > 0 {
-		// All direct deps have resolved tiers. Celebrate briefly.
-		sw.Writeln("No outstanding action items — every direct dep has a resolved tier.")
-		sw.Writeln()
 	}
 
 	return sw.Err()
@@ -313,32 +308,6 @@ func formatIndirectSummary(byTier map[survey.Tier]int) string {
 		}
 	}
 	return strings.Join(parts, ", ")
-}
-
-// analyzableForm converts a canonical URI back to a form
-// `signatory analyze` accepts gracefully. `repo:github/X/Y`
-// becomes `github.com/X/Y` (the shorthand ResolveTarget
-// handles); `pkg:go/...` stays as-is.
-func analyzableForm(uri string) string {
-	const repoGithubPrefix = "repo:github/"
-	if strings.HasPrefix(uri, repoGithubPrefix) {
-		return "github.com/" + strings.TrimPrefix(uri, repoGithubPrefix)
-	}
-	return uri
-}
-
-// cloneDirNameForURI derives a safe directory-component name for
-// `--path filestore/clones/<name>` from a canonical URI. Uses
-// the last path segment, sanitized. For `pkg:go/modernc.org/sqlite`
-// this yields "sqlite"; for `repo:github/alecthomas/kong` this
-// yields "kong".
-func cloneDirNameForURI(uri string) string {
-	for i := len(uri) - 1; i >= 0; i-- {
-		if uri[i] == '/' {
-			return uri[i+1:]
-		}
-	}
-	return uri
 }
 
 func filterDirectDeps(deps []survey.DepResult) []survey.DepResult {

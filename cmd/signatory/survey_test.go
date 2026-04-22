@@ -115,11 +115,15 @@ require (
 	assert.Contains(t, out, "github.com/alecthomas/kong")
 	assert.Contains(t, out, "gopkg.in/yaml.v3")
 
-	// Action items.
-	assert.Contains(t, out, "Action items")
-	assert.Contains(t, out, "signatory analyze github.com/alecthomas/kong")
-	assert.Contains(t, out, "--clone --path filestore/clones/")
-	assert.Contains(t, out, "signatory analyze pkg:go/gopkg.in/yaml.v3")
+	// No "Action items" / suggested-commands section. The CLI
+	// verbs survey would naturally point at (signatory analyze)
+	// only collect signals — they cannot produce the trust
+	// verdict that flips a [?] row. See the package-level doc on
+	// printSurveyHuman for the dropped-section rationale.
+	assert.NotContains(t, out, "Action items",
+		"survey output must not steer users to commands that don't deliver postures")
+	assert.NotContains(t, out, "signatory analyze ",
+		"survey output must not embed `signatory analyze` invocations — they collect signals but don't produce verdicts")
 }
 
 // TestSurvey_Human_MixedTiers covers the rich output with each
@@ -181,11 +185,11 @@ require (
 	assert.Contains(t, out, "strong signals")
 	assert.Contains(t, out, "abandoned project")
 
-	// Only unexamined deps end up in NeedsReview. Vetted,
-	// rejected, and burned are resolved tiers — not "analyze me."
-	assert.Contains(t, out, "signatory analyze github.com/unexamined/lib")
-	assert.NotContains(t, out, "signatory analyze github.com/burned/lib",
-		"burned deps should not be surfaced as 'analyze me'")
+	// "Only unexamined deps end up in NeedsReview" — that intent
+	// is now covered structurally by internal/survey/survey_test.go
+	// (TestSurvey_NeedsReview_*). The Action-items rendering that
+	// formerly proved it via stdout was removed, so we no longer
+	// re-assert it here through a presentation-layer proxy.
 }
 
 // TestSurvey_JSON_OutputShape asserts --json output is a
