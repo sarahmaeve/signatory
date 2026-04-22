@@ -135,7 +135,77 @@ func (p *ProposedPosture) validate(path string) []error {
 	if p.RationaleSummary == "" {
 		errs = append(errs, fmt.Errorf("%s.rationale_summary required", path))
 	}
+	if err := ValidateVersionScopeShape(p.VersionScope); err != nil {
+		errs = append(errs, fmt.Errorf("%s.version_scope: %w", path, err))
+	}
 	return errs
+}
+
+// Maximum byte length of a version_scope string. Generous — the
+// largest legitimate shapes we've observed across Go / npm / PyPI
+// sit comfortably under 50 bytes (Go pseudo-versions like
+// "v0.0.0-20230101000000-abcdefabcdef" are 40 bytes; calendar-
+// versioned PyPI releases are ~12 bytes). 128 gives ~3× headroom
+// for ecosystems we haven't met yet. A value larger than this is
+// almost certainly prose or a pasted URI, not a version identifier.
+const maxVersionScopeBytes = 128
+
+// canonicalURISchemes are the prefixes a well-formed version MUST
+// NOT start with. They name RELATIONSHIPS between entities, not
+// versions of an entity — the two roles are orthogonal and the
+// "copy-paste the whole URI into version_scope" mistake conflates
+// them. The list mirrors internal/profile/uri.go's validURISchemes.
+// Kept as a standalone slice here to avoid importing internal/profile
+// (which would create a cycle: profile already imports exchange
+// types in some collector paths).
+var canonicalURISchemes = []string{
+	"pkg:", "repo:", "identity:", "org:", "patch:",
+}
+
+// ValidateVersionScopeShape checks that a posture's version_scope
+// has the shape of a version identifier, not something else. It
+// does NOT try to enforce a full version grammar — ecosystems vary
+// (semver, Go pseudo-versions, calendar versioning, git tags) and
+// a strict regex would reject legitimate inputs. Instead, it
+// rejects the specific NON-VERSION shapes we've seen confuse
+// upstream producers:
+//
+//   - Canonical URI strings (e.g., "pkg:npm/X@1.2.3") — the whole
+//     URI was pasted where only the version belongs. Conflates the
+//     "which entity" question with the "which version" question.
+//   - URL-shaped strings (e.g., "https://…/v1.2.3") — similar
+//     confusion, often from a release-page URL.
+//   - Multi-line strings — versions are always single-line.
+//   - Over-length strings — the cap is generous but catches the
+//     "I pasted the whole rationale" class of mistake.
+//
+// Empty is valid: a posture can be unversioned ("applies to the
+// entity as a whole"). Returns nil for empty input.
+//
+// Exported for symmetric use by cmd/signatory's PostureSetCmd —
+// the same check covers the manual `--version` path and the
+// synthesis-ingest path, so malformed versions are rejected
+// regardless of which door they came in through.
+func ValidateVersionScopeShape(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > maxVersionScopeBytes {
+		return fmt.Errorf("exceeds %d-byte cap (got %d bytes); this looks like prose or a pasted URL, not a version identifier",
+			maxVersionScopeBytes, len(v))
+	}
+	if strings.ContainsAny(v, "\n\r") {
+		return fmt.Errorf("must be single-line; got embedded newline")
+	}
+	if strings.Contains(v, "://") {
+		return fmt.Errorf("looks like a URL (%q contains \"://\"); pass only the version identifier, not a URL", v)
+	}
+	for _, scheme := range canonicalURISchemes {
+		if strings.HasPrefix(v, scheme) {
+			return fmt.Errorf("looks like a canonical URI starting with %q; pass only the version part (e.g., \"v1.2.3\"), not the full URI", scheme)
+		}
+	}
+	return nil
 }
 
 func (a *AgentAttribution) validate(path string) []error {

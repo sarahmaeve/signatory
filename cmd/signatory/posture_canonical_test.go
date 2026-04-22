@@ -235,3 +235,97 @@ func TestPostureSet_EquivalentURIForms(t *testing.T) {
 		"latest posture should reflect cmdB (via --version flag)")
 	assert.Equal(t, "via --version flag", latest.Rationale)
 }
+
+// TestPostureSet_MalformedVersion_Rejected covers the manual
+// "paste the whole URI into --version" mistake that produced the
+// google/uuid malformed posture row in dogfood (see the
+// accept_posture audit entry from 2026-04-22T11:35:59Z). The
+// shape-check runs BEFORE ensureEntity / SetPosture, so the
+// rejection is a pure usage error with no side effect on the
+// store.
+//
+// Each row exercises a different reject-category in the
+// exchange.ValidateVersionScopeShape helper; if any category
+// silently degrades to accept, a real malformed posture slips
+// through the manual-input door.
+func TestPostureSet_MalformedVersion_Rejected(t *testing.T) {
+	cases := []struct {
+		name      string
+		version   string
+		errSubstr string
+	}{
+		{
+			name:      "canonical pkg URI",
+			version:   "pkg:golang/github.com/google/uuid@v1.6.0",
+			errSubstr: "canonical URI",
+		},
+		{
+			name:      "canonical repo URI",
+			version:   "repo:github/google/uuid",
+			errSubstr: "canonical URI",
+		},
+		{
+			name:      "https URL",
+			version:   "https://example.com/v1.2.3",
+			errSubstr: "URL",
+		},
+		{
+			name:      "multiline paste",
+			version:   "v1.6.0\n(extracted from the synthesis notes)",
+			errSubstr: "single-line",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newTestGlobals(t)
+			cmd := &PostureSetCmd{
+				Target:    "pkg:npm/manual-bad-version-test",
+				Version:   tc.version,
+				Tier:      "trusted-for-now",
+				Rationale: "should never land — version should be rejected",
+			}
+			err := cmd.Run(g)
+			require.Error(t, err,
+				"malformed --version must be rejected before any store write")
+			assert.Contains(t, err.Error(), "--version",
+				"error should name the offending flag so the caller can fix their command")
+			assert.Contains(t, err.Error(), tc.errSubstr,
+				"error should describe the specific shape problem")
+
+			// Prove no side effect: the entity we named should not have
+			// been created (ensureEntity runs after the check).
+			s, serr := g.OpenStore(t.Context())
+			require.NoError(t, serr)
+			defer s.Close() //nolint:errcheck // test cleanup
+			_, ferr := s.FindEntityByURI(t.Context(), "pkg:npm/manual-bad-version-test")
+			assert.Error(t, ferr,
+				"rejected posture set must not have created any entity")
+		})
+	}
+}
+
+// TestPostureSet_CleanVersion_Accepted is the positive-companion:
+// confirms the reject tests above aren't simply "posture set is
+// broken" — legitimate version strings still pass through and
+// write postures as expected.
+func TestPostureSet_CleanVersion_Accepted(t *testing.T) {
+	g := newTestGlobals(t)
+	cmd := &PostureSetCmd{
+		Target:    "pkg:npm/manual-good-version-test",
+		Version:   "v1.6.0",
+		Tier:      "trusted-for-now",
+		Rationale: "clean version string must work",
+	}
+	require.NoError(t, cmd.Run(g),
+		"a legitimate version must not be rejected by the shape check")
+
+	s, err := g.OpenStore(t.Context())
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/manual-good-version-test")
+	require.NoError(t, err)
+	posture, err := s.GetPosture(t.Context(), entity.ID, "v1.6.0")
+	require.NoError(t, err)
+	assert.Equal(t, "v1.6.0", posture.Version)
+}

@@ -489,6 +489,42 @@ func TestValidate_SynthesisSupplementFields(t *testing.T) {
 			wantErr: "proposed_posture.rationale_summary required",
 		},
 		{
+			name: "version_scope contains a full canonical URI (pkg:)",
+			mutate: func(s *SynthesisSupplement) {
+				s.ProposedPosture.VersionScope = "pkg:npm/example@1.2.3"
+			},
+			wantErr: "proposed_posture.version_scope",
+		},
+		{
+			name: "version_scope contains a full canonical URI (repo:)",
+			mutate: func(s *SynthesisSupplement) {
+				s.ProposedPosture.VersionScope = "repo:github/owner/name"
+			},
+			wantErr: "proposed_posture.version_scope",
+		},
+		{
+			name: "version_scope contains a URL scheme",
+			mutate: func(s *SynthesisSupplement) {
+				s.ProposedPosture.VersionScope = "https://example.com/v1.2.3"
+			},
+			wantErr: "proposed_posture.version_scope",
+		},
+		{
+			name: "version_scope contains a newline",
+			mutate: func(s *SynthesisSupplement) {
+				s.ProposedPosture.VersionScope = "v1.2.3\n(with commentary)"
+			},
+			wantErr: "proposed_posture.version_scope",
+		},
+		{
+			name: "version_scope exceeds length cap",
+			mutate: func(s *SynthesisSupplement) {
+				// 129 characters — one past the 128-byte cap.
+				s.ProposedPosture.VersionScope = "v" + strings.Repeat("1", 128)
+			},
+			wantErr: "proposed_posture.version_scope",
+		},
+		{
 			name:    "missing reasoning",
 			mutate:  func(s *SynthesisSupplement) { s.Reasoning = "" },
 			wantErr: "synthesis_supplement.reasoning required",
@@ -506,6 +542,35 @@ func TestValidate_SynthesisSupplementFields(t *testing.T) {
 			err := o.Validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidate_VersionScope_AcceptsCleanShapes is the positive
+// companion to the reject-cases above: confirms the validator
+// does NOT false-positive on legitimate version strings across
+// the ecosystems signatory targets. Without this, an over-strict
+// validator (e.g., one that required a leading 'v') would silently
+// break npm postures, Go pseudo-versions, or calendar-versioned
+// packages.
+func TestValidate_VersionScope_AcceptsCleanShapes(t *testing.T) {
+	cleanShapes := []string{
+		"",                                 // empty = unversioned, valid
+		"v1.2.3",                           // Go / tag-style
+		"1.2.3",                            // npm-style
+		"1.2.3-alpha.1",                    // semver pre-release
+		"1.2.3+build.meta",                 // semver build metadata
+		"v0.0.0-20230101000000-abcdef0123", // Go pseudo-version
+		"2026.04.15",                       // calendar version
+		"4.17.21",                          // npm real-world
+		"v1.49.1",                          // sqlite real-world
+	}
+	for _, v := range cleanShapes {
+		t.Run(v, func(t *testing.T) {
+			o := validSynthesisBase()
+			o.SynthesisSupplement.ProposedPosture.VersionScope = v
+			assert.NoError(t, o.Validate(),
+				"legitimate version shape %q must pass validation", v)
 		})
 	}
 }

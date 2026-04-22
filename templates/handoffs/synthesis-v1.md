@@ -169,6 +169,28 @@ is a recommendation the user accepts, modifies, or rejects via
 `signatory posture accept <output-id>`. Present it with its
 reasoning; the user confirms or overrides.
 
+**`version_scope` grammar — read carefully.** This field is
+copied verbatim into the posture row's `version` column on
+accept, which means its shape is load-bearing (postures have a
+`UNIQUE(entity_id, version)` constraint, and reads match by
+equality). Put ONLY the version identifier here. Specifically:
+
+- For `pkg:<ecosystem>/<name>@<V>` targets: `version_scope` is
+  exactly `<V>` (e.g., `"11.0.0"`, `"1.2.3-alpha.1"`, not
+  `"pkg:npm/X@11.0.0"`).
+- For `repo:<platform>/<owner>/<name>` targets: `version_scope`
+  is the tag or release identifier your analysis scoped to
+  (e.g., `"v1.6.0"`), or empty for an unversioned proposal.
+- For `identity:` / `org:` targets: usually empty — these names
+  aren't version-bearing.
+- Leave it `""` if your recommendation is unversioned (applies
+  to the entity as a whole).
+
+Do NOT include the URI prefix, the `@` separator, an `https://`
+URL, newlines, or any prose commentary. The validator at
+`signatory_ingest_analysis` rejects those shapes and the
+synthesis ingest will fail; fix the field and retry.
+
 ## Output format — v1-schema JSON via MCP ingest
 
 Your output is a v1-schema `AnalystOutput` landed via the

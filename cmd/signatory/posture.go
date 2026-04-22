@@ -175,6 +175,17 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	cmd.Target = base
 	cmd.Version = version
 
+	// Shape-check the version before any side effect. The same
+	// validator runs at synthesis-ingest (see ProposedPosture.validate);
+	// applying it here closes the manual-input door — whether the
+	// operator typed `--version` directly or pasted a command an agent
+	// emitted, malformed version strings (pasted URIs, multi-line
+	// blobs, over-length pastes) are rejected before ensureEntity or
+	// SetPosture run. Usage-error wrapping so the CLI exits EX_USAGE.
+	if err := exchange.ValidateVersionScopeShape(cmd.Version); err != nil {
+		return NewUsageError(fmt.Errorf("posture set --version: %w", err))
+	}
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
