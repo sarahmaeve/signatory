@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -313,28 +314,62 @@ func (s *SQLite) ensureEntityForTarget(ctx context.Context, target string) (stri
 	return id, nil
 }
 
-// normalizeTargetToCanonicalURI converts an AnalystOutput.Target
-// into a form acceptable to profile.ValidateCanonicalURI. Canonical
-// URIs pass through; recognizable URLs (currently GitHub) get
-// normalized; unrecognized inputs return a wrapped error.
+// normalizeTargetToCanonicalURI converts an ingest-side target
+// string into the canonical URI form signatory stores. Accepts:
+//
+//   - Canonical URIs (pkg:/repo:/identity:/org:/patch:)
+//   - pkg URIs with percent-encoded scope/version markers
+//     (e.g. pkg:npm/%40stripe/foo → pkg:npm/@stripe/foo)
+//   - npmjs.com package URLs (https://www.npmjs.com/package/…)
+//   - GitHub URLs, SCP-form URLs, and owner/repo shorthand
+//   - any other form profile.ResolveTarget accepts
+//
+// Delegates to ResolveTarget so ingest-side URI handling stays in
+// sync with CLI-side handling (agent-facing-contract P1: one target
+// grammar, everywhere). The percent-decode pass handles the
+// 2026-04-21 dogfood case where an analyst transcribed a scoped
+// npm package from an npmjs.com URL and carried the %40 encoding
+// into the pkg URI, creating an orphan entity.
 func normalizeTargetToCanonicalURI(target string) (string, error) {
-	// Already a canonical URI? Use as-is.
-	if err := profile.ValidateCanonicalURI(target); err == nil {
-		return target, nil
+	resolved, err := profile.ResolveTarget(target)
+	if err != nil {
+		return "", fmt.Errorf(
+			"target %q is not a canonical URI, npmjs.com URL, or GitHub repo form: %w",
+			target, err)
 	}
-	// Looks like a GitHub URL? Normalize via the existing helper.
-	lower := strings.ToLower(target)
-	if strings.Contains(lower, "github.com") {
-		uri, _, _, err := profile.NormalizeGitHubRepoInput(target)
-		if err != nil {
-			return "", fmt.Errorf("normalize GitHub target %q: %w", target, err)
+
+	// pkg URIs may arrive with percent-encoded `@` markers when an
+	// analyst mirrored an npmjs.com URL (where scope and version
+	// separators are percent-encoded for URL safety) into the purl
+	// grammar (where they're literal). Decode the body so
+	// pkg:npm/%40scope/name canonicalizes to pkg:npm/@scope/name,
+	// keeping both analysts' outputs on the same entity row.
+	//
+	// Scoped to pkg URIs because other schemes don't use `@` as a
+	// grammar marker — decoding them blind would risk unintended
+	// transforms.
+	if strings.HasPrefix(resolved.CanonicalURI, "pkg:") {
+		body := resolved.CanonicalURI[len("pkg:"):]
+		decoded, decErr := url.PathUnescape(body)
+		if decErr != nil {
+			return "", fmt.Errorf(
+				"pkg URI %q contains invalid percent-encoding: %w",
+				resolved.CanonicalURI, decErr)
 		}
-		return uri, nil
+		if decoded != body {
+			canonical := "pkg:" + decoded
+			// Re-validate the decoded form — a percent-decode can
+			// in principle reveal control chars or other invalid
+			// bytes that the encoded form hid.
+			if verr := profile.ValidateCanonicalURI(canonical); verr != nil {
+				return "", fmt.Errorf(
+					"pkg URI normalization produced invalid form %q: %w",
+					canonical, verr)
+			}
+			return canonical, nil
+		}
 	}
-	// Unrecognized — surface the validation error so the caller knows
-	// what scheme prefix is missing.
-	return "", fmt.Errorf("target %q is not a canonical URI and not a recognized URL form: %w",
-		target, profile.ValidateCanonicalURI(target))
+	return resolved.CanonicalURI, nil
 }
 
 // deriveShortName picks a human-friendly label from a target URI.

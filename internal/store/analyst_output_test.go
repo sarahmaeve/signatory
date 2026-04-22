@@ -637,3 +637,144 @@ func assertCount(t *testing.T, s *SQLite, table, where string, arg interface{}, 
 	require.NoError(t, err)
 	assert.Equal(t, expected, got, "row count in %s where %s", table, where)
 }
+
+// --- normalizeTargetToCanonicalURI (ingest-canonicalization) ---
+//
+// The 2026-04-21 dogfood surfaced two bugs in the ingest path's URI
+// handling:
+//
+//  1. An analyst that URL-encoded the scope `@` of a scoped npm package
+//     (pkg:npm/%40stripe/stripe-react-native) landed its output at a
+//     parallel entity row, orphaned from the other analyst who used
+//     the literal-@ canonical form. Re-dispatch cost ~60k tokens.
+//  2. `normalizeTargetToCanonicalURI` only accepted canonical URIs
+//     and GitHub URLs — an npmjs.com URL passed as `collected_from`
+//     was rejected even though `profile.ResolveTarget` would handle
+//     it fine elsewhere.
+//
+// Fix shape: delegate to profile.ResolveTarget for URL-form inputs,
+// and percent-decode the pkg URI body to canonicalize `%40` → `@`.
+
+func TestNormalizeTargetToCanonicalURI_ScopedNpm_PercentDecoded(t *testing.T) {
+	// The bug from the dogfood: analyst emits the %40 form because
+	// they transcribed from an npmjs.com URL. Should canonicalize to
+	// the literal-@ form so both analysts land at the same entity.
+	got, err := normalizeTargetToCanonicalURI("pkg:npm/%40stripe/stripe-react-native")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg:npm/@stripe/stripe-react-native", got,
+		"percent-encoded scope marker must be decoded to its literal form")
+}
+
+func TestNormalizeTargetToCanonicalURI_PercentEncodedVersion_Decoded(t *testing.T) {
+	// %40 also appears as the version separator in versioned pkg URIs.
+	// Same canonicalization path; cover it explicitly.
+	got, err := normalizeTargetToCanonicalURI("pkg:npm/foo%401.2.3")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg:npm/foo@1.2.3", got)
+}
+
+func TestNormalizeTargetToCanonicalURI_NpmjsURL_Accepted(t *testing.T) {
+	// An npmjs.com URL passed as target (or collected_from via MCP)
+	// must normalize to the pkg:npm/ canonical form. Pre-fix this
+	// returned a "not a recognized URL form" error because the helper
+	// only recognized github.com.
+	got, err := normalizeTargetToCanonicalURI("https://www.npmjs.com/package/@stripe/stripe-react-native")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg:npm/@stripe/stripe-react-native", got,
+		"npmjs.com URL must resolve to the canonical pkg:npm/ form")
+}
+
+func TestNormalizeTargetToCanonicalURI_NpmjsURL_WithVersion(t *testing.T) {
+	got, err := normalizeTargetToCanonicalURI("https://www.npmjs.com/package/express/v/4.18.2")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg:npm/express@4.18.2", got)
+}
+
+func TestNormalizeTargetToCanonicalURI_InvalidPercentEncoding_Rejected(t *testing.T) {
+	// Bogus percent sequences must fail loudly rather than silently
+	// produce corrupted canonical URIs.
+	_, err := normalizeTargetToCanonicalURI("pkg:npm/%ZZ-bogus")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "percent")
+}
+
+func TestNormalizeTargetToCanonicalURI_AlreadyCanonical_Passthrough(t *testing.T) {
+	tests := []string{
+		"pkg:npm/lodash",
+		"pkg:npm/@types/node",
+		"pkg:npm/lodash@4.17.21",
+		"pkg:go/golang.org/x/mod",
+		"repo:github/nvbn/thefuck",
+		"identity:github/alecthomas",
+	}
+	for _, uri := range tests {
+		t.Run(uri, func(t *testing.T) {
+			got, err := normalizeTargetToCanonicalURI(uri)
+			require.NoError(t, err)
+			assert.Equal(t, uri, got, "already-canonical URIs pass through unchanged")
+		})
+	}
+}
+
+func TestNormalizeTargetToCanonicalURI_GitHubURL_Preserved(t *testing.T) {
+	// Don't regress the pre-existing GitHub URL normalization path.
+	got, err := normalizeTargetToCanonicalURI("https://github.com/nvbn/thefuck")
+	require.NoError(t, err)
+	assert.Equal(t, "repo:github/nvbn/thefuck", got)
+}
+
+// TestIngest_ScopedNpmWithPercentEncodedScope_IndexesCanonically is
+// the end-to-end regression check for the dogfood bug: two ingest
+// calls — one with literal @, one with %40 — must land at the SAME
+// entity row. Without the fix, they land at two different entities
+// and downstream synthesis-evidence gathering misses one.
+func TestIngest_ScopedNpmWithPercentEncodedScope_IndexesCanonically(t *testing.T) {
+	s := newTestDB(t)
+	ctx := t.Context()
+
+	lineStart := 10
+	canonical := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "external-sec-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/@stripe/stripe-react-native",
+		Conclusions: []exchange.Conclusion{
+			{
+				ID: "F001", Verdict: "v", Rationale: "r",
+				Severity: exchange.Severity{Default: exchange.SeverityLow},
+				Category: "c",
+				Citations: []exchange.Citation{
+					{Path: "src/main.ts", LineStart: &lineStart},
+				},
+			},
+		},
+	}
+	urlEncoded := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-provenance",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/%40stripe/stripe-react-native",
+		Conclusions: []exchange.Conclusion{
+			{
+				ID: "F001", Verdict: "v", Rationale: "r",
+				Severity: exchange.Severity{Default: exchange.SeverityLow},
+				Category: "c",
+				Citations: []exchange.Citation{
+					{Scope: &exchange.ScopeRef{Kind: exchange.ScopeKindWorkspace, Path: "."}},
+				},
+			},
+		},
+	}
+
+	r1, err := s.IngestAnalystOutput(ctx, canonical, "canonical")
+	require.NoError(t, err)
+	r2, err := s.IngestAnalystOutput(ctx, urlEncoded, "%40-form")
+	require.NoError(t, err)
+
+	assert.Equal(t, r1.EntityID, r2.EntityID,
+		"%40-scope ingest must land under the same entity as literal-@ ingest — no orphan entities from percent-encoding drift")
+}
