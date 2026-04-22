@@ -346,3 +346,158 @@ func TestResolveTarget_Stable(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveTarget_VersionedRepoURI extends the @version grammar
+// to repo: URIs (canonical, github-shorthand, https URL forms).
+// Used by signatory handoff to clone the named ref instead of
+// HEAD; without this grammar, /analyze targets are forced to
+// HEAD-of-default-branch regardless of what the user pinned.
+//
+// Mirrors the pkg: shape: CanonicalURI preserves the @V suffix
+// (the URI is the request identity), Version surfaces the
+// extracted suffix, ShortName carries the bare repo name without
+// version. Storage canonicalization (SplitURIVersion) strips the
+// suffix when looking up the entity row.
+func TestResolveTarget_VersionedRepoURI(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in          string
+		wantURI     string
+		wantName    string
+		wantVersion string
+	}{
+		// Canonical form.
+		{"repo:github/stretchr/testify@v1.11.1",
+			"repo:github/stretchr/testify@v1.11.1", "testify", "v1.11.1"},
+		// GitHub shorthand.
+		{"github.com/stretchr/testify@v1.11.1",
+			"repo:github/stretchr/testify@v1.11.1", "testify", "v1.11.1"},
+		// Raw HTTPS URL.
+		{"https://github.com/stretchr/testify@v1.11.1",
+			"repo:github/stretchr/testify@v1.11.1", "testify", "v1.11.1"},
+		// .git suffix on URL form is stripped before @version split.
+		{"https://github.com/stretchr/testify.git@v1.11.1",
+			"repo:github/stretchr/testify@v1.11.1", "testify", "v1.11.1"},
+		// Owner/repo shorthand.
+		{"stretchr/testify@v1.11.1",
+			"repo:github/stretchr/testify@v1.11.1", "testify", "v1.11.1"},
+		// SemVer pre-release / build metadata pass through verbatim
+		// — the grammar accepts whatever git ref the user names.
+		{"stretchr/testify@v1.0.0-rc.1",
+			"repo:github/stretchr/testify@v1.0.0-rc.1", "testify", "v1.0.0-rc.1"},
+		// Branch name (less common but valid input).
+		{"stretchr/testify@main",
+			"repo:github/stretchr/testify@main", "testify", "main"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI,
+				"canonical URI must preserve @version on repo: targets")
+			assert.Equal(t, tc.wantName, got.ShortName,
+				"ShortName must strip the @version suffix")
+			assert.Equal(t, tc.wantVersion, got.Version,
+				"Version must be extracted")
+		})
+	}
+}
+
+// TestResolveTarget_VersionedRepoURI_Rejects pins the
+// reject-shapes for versioned repo: inputs. Mirrors the pkg: side
+// — empty version, double @, etc. should fail loudly so the user
+// gets a fix-your-input error instead of a silently-stripped suffix.
+func TestResolveTarget_VersionedRepoURI_Rejects(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		in     string
+		errSub string
+	}{
+		{"trailing at on canonical",
+			"repo:github/stretchr/testify@", "empty version"},
+		{"trailing at on shorthand",
+			"stretchr/testify@", "empty version"},
+		{"double at",
+			"stretchr/testify@v1.0@extra", "nested"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+			assert.Contains(t, err.Error(), tc.errSub)
+		})
+	}
+}
+
+// TestResolveTarget_UnversionedRepoUnchanged is the
+// regression guard: bare `repo:github/X/Y` (no @version) must
+// behave EXACTLY as before this grammar extension landed.
+// Storage code paths that didn't expect Version to be set on
+// repo: targets continue to see Version="".
+func TestResolveTarget_UnversionedRepoUnchanged(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"repo:github/stretchr/testify",
+		"github.com/stretchr/testify",
+		"https://github.com/stretchr/testify",
+		"https://github.com/stretchr/testify.git",
+		"stretchr/testify",
+		"git@github.com:stretchr/testify.git",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(in)
+			require.NoError(t, err)
+			assert.Equal(t, "repo:github/stretchr/testify", got.CanonicalURI)
+			assert.Equal(t, "testify", got.ShortName)
+			assert.Empty(t, got.Version,
+				"unversioned repo: input must yield empty Version")
+		})
+	}
+}
+
+// TestSplitURIVersion_RepoURIs covers the SplitURIVersion
+// extension: previously only pkg: URIs split off @version; now
+// repo: URIs also split. Storage canonicalization (posture set
+// / get / accept) calls SplitURIVersion to map a versioned URI
+// to its unversioned entity; without the repo: extension, the
+// entity for `repo:X/Y@v1.0.0` would be the literal versioned
+// form (wrong — Plan A says entity is unversioned and version
+// lives on the posture row).
+func TestSplitURIVersion_RepoURIs(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in          string
+		wantBase    string
+		wantVersion string
+	}{
+		// New: repo URIs split off @version.
+		{"repo:github/stretchr/testify@v1.11.1",
+			"repo:github/stretchr/testify", "v1.11.1"},
+		{"repo:github/X/Y@main",
+			"repo:github/X/Y", "main"},
+		// Pre-existing pkg behavior unchanged.
+		{"pkg:npm/express@1.2.3",
+			"pkg:npm/express", "1.2.3"},
+		// Unversioned passes through unchanged.
+		{"repo:github/X/Y",
+			"repo:github/X/Y", ""},
+		{"pkg:npm/express",
+			"pkg:npm/express", ""},
+		// Other schemes still pass through unchanged.
+		{"identity:github/alecthomas",
+			"identity:github/alecthomas", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			base, version := SplitURIVersion(tc.in)
+			assert.Equal(t, tc.wantBase, base)
+			assert.Equal(t, tc.wantVersion, version)
+		})
+	}
+}

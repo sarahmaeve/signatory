@@ -154,14 +154,61 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 			raw)
 	}
 
+	// Pre-strip @<version> from github shorthand inputs before
+	// delegating to NormalizeGitHubRepoInput. Without this,
+	// NormalizeGitHubRepoInput's path-segment validator rejects
+	// `Y@v1.0.0` because `@` isn't in its allowed character set.
+	// Doing the split here keeps NormalizeGitHubRepoInput strict
+	// on the bare name while extending the user-facing grammar.
+	//
+	// The canonical URI we synthesize on the way out preserves the
+	// @V suffix — mirrors the pkg: shape and lets storage code
+	// route both through SplitURIVersion uniformly.
+	bareInput := s
+	requestedVersion := ""
+	if at := strings.LastIndexByte(s, '@'); at >= 0 {
+		// Skip the SCP-form `git@github.com:...` case — the @ there
+		// is part of the SSH user-host syntax, not a version
+		// separator. SCP-form was already gated above; here we re-
+		// guard so we don't misread that @ as a version split.
+		if !strings.HasPrefix(s, "git@") {
+			candidate := s[at+1:]
+			before := s[:at]
+			// The version separator @ must come AFTER any /
+			// — otherwise it's part of the host portion of a URL
+			// (theoretical; URLs at this point have https:// stripped
+			// upstream of NormalizeGitHubRepoInput, so a / before @
+			// is the path-vs-version boundary).
+			if strings.ContainsRune(before, '/') {
+				if candidate == "" {
+					return nil, fmt.Errorf("target %q: empty version after '@'", raw)
+				}
+				// Reject nested @: the path portion (everything
+				// before the version separator) must not itself
+				// contain another @. Catches inputs like
+				// "owner/repo@v1.0@extra" where LastIndexByte
+				// would otherwise accept "extra" as the version
+				// and silently drop the middle @.
+				if strings.ContainsRune(before, '@') {
+					return nil, fmt.Errorf("target %q: nested separators not allowed (multiple '@' in input)", raw)
+				}
+				bareInput = before
+				requestedVersion = candidate
+			}
+		}
+	}
+
 	// Fall through to GitHub-shorthand parsing. Any form
 	// NormalizeGitHubRepoInput accepts gets promoted to a
 	// canonical repo: URI.
-	canonicalURI, owner, name, err := NormalizeGitHubRepoInput(s)
+	canonicalURI, owner, name, err := NormalizeGitHubRepoInput(bareInput)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"target %q is not a canonical URI (repo:/pkg:/identity:/org:/patch:) and does not parse as a github repo reference: %w",
 			raw, err)
+	}
+	if requestedVersion != "" {
+		canonicalURI += "@" + requestedVersion
 	}
 	return &ResolvedTarget{
 		CanonicalURI: canonicalURI,
@@ -170,6 +217,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		Platform:     PlatformGitHub,
 		Owner:        owner,
 		CloneURL:     "https://github.com/" + owner + "/" + name,
+		Version:      requestedVersion,
 	}, nil
 }
 
@@ -309,13 +357,38 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 
 	switch scheme {
 	case "repo":
-		// repo:<platform>/<owner>/<name>
+		// repo:<platform>/<owner>/<name>[@<version>]
+		// Optional @<version> suffix on the LAST path segment names
+		// a git ref (tag, branch, commit). Used by signatory
+		// handoff to clone the named ref. Storage strips the suffix
+		// (entity is at the unversioned URI; version goes on the
+		// posture row) — see SplitURIVersion.
 		if len(parts) < 3 {
 			return nil, fmt.Errorf("repo URI %q: expected platform/owner/name, got %d segment(s)", uri, len(parts))
 		}
 		out.Platform = parts[0]
 		out.Owner = parts[1]
-		out.ShortName = parts[len(parts)-1]
+		// Extract optional @<version> from the last segment using
+		// the same shape as the pkg: case. Two `@` are not
+		// permitted (nested separators are ambiguous).
+		lastSeg := parts[len(parts)-1]
+		if atIdx := strings.IndexByte(lastSeg, '@'); atIdx >= 0 {
+			name := lastSeg[:atIdx]
+			version := lastSeg[atIdx+1:]
+			if name == "" {
+				return nil, fmt.Errorf("repo URI %q: empty name before '@version'", uri)
+			}
+			if version == "" {
+				return nil, fmt.Errorf("repo URI %q: empty version after '@'", uri)
+			}
+			if strings.ContainsRune(version, '@') {
+				return nil, fmt.Errorf("repo URI %q: version contains '@' (nested separators not allowed)", uri)
+			}
+			out.ShortName = name
+			out.Version = version
+		} else {
+			out.ShortName = lastSeg
+		}
 		if out.Platform == PlatformGitHub {
 			out.CloneURL = "https://github.com/" + out.Owner + "/" + out.ShortName
 		}

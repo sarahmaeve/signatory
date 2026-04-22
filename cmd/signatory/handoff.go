@@ -98,7 +98,20 @@ type HandoffCmd struct {
 	// --clone-dir. nil → fall through to defaultGitClone (exec.CommandContext
 	// with safeGitEnv). Same rationale as PrecheckSource: parallel-safe
 	// injection, visible dependency.
-	RunGitClone func(ctx context.Context, url, dest string) error `kong:"-"`
+	//
+	// version is the git ref (tag/branch) to check out, or empty
+	// for HEAD-of-default-branch. When non-empty, the production
+	// implementation passes `--branch <version>` to git clone.
+	// Tests can assert on the version arg by inspecting their
+	// recorder's captured calls.
+	RunGitClone func(ctx context.Context, url, dest, version string) error `kong:"-"`
+
+	// requestedVersion carries the @V suffix the user attached to
+	// the target (e.g., `github.com/X/Y@v1.0.0`). Populated by
+	// Run() from ResolveTarget's output and consumed by applyClone
+	// to pass `--branch` to git clone. Unexported so kong doesn't
+	// expose it as a flag.
+	requestedVersion string `kong:"-"`
 
 	// EcosystemRegistry overrides the ecosystem resolver registry
 	// that --network-precheck consults for pkg:<eco>/<name> targets.
@@ -144,6 +157,11 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		if cmd.Name == "" {
 			cmd.Name = resolved.ShortName
 		}
+		// Capture the @version suffix (if any) for applyClone.
+		// CloneURL deliberately omits the version (it's the bare
+		// HTTPS git URL); the version is a separate clone-time
+		// parameter (`git clone --branch`).
+		cmd.requestedVersion = resolved.Version
 		if resolved.CloneURL != "" {
 			if cmd.URL == "" {
 				cmd.URL = resolved.CloneURL
@@ -242,6 +260,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		Role:      cmd.TargetRole,
 		Ecosystem: cmd.Ecosystem,
 		Intake:    cmd.Intake,
+		Version:   cmd.requestedVersion,
 	})
 	if err != nil {
 		return err
@@ -552,22 +571,86 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 // or smuggle config that overrides the URL we validated. We strip rather
 // than whitelist so the process still inherits PATH, HOME, and
 // TLS-related vars that legitimate git operations need.
-func defaultGitClone(ctx context.Context, url, dest string) error {
+func defaultGitClone(ctx context.Context, url, dest, version string) error {
 	// G204 rationale: CommandContext doesn't invoke a shell, so
-	// shell-metacharacter injection in url/dest is not a threat.
-	// url is validated by safeGitCloneURL (rejects ?, #, userinfo,
-	// NUL) and constrained upstream by looksLikeGitHubURL /
-	// ClassifyTarget. dest is validated by the containment check in
-	// applyClone (filepath.Rel against an EvalSymlinks-resolved
-	// parent) and by safeCloneRepoName on the derived repo name.
-	// Env inheritance is stripped to a vetted set by safeGitEnv so
-	// GIT_SSH_COMMAND / GIT_PROXY_COMMAND / GIT_CONFIG_* can't
-	// redirect the clone.
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", url, dest) //nolint:gosec // G204: url validated by safeGitCloneURL, dest validated by applyClone containment check, env sanitized by safeGitEnv
+	// shell-metacharacter injection in url/dest/version is not a
+	// threat. url is validated by safeGitCloneURL (rejects ?, #,
+	// userinfo, NUL); dest is validated by the containment check
+	// in applyClone (filepath.Rel against an EvalSymlinks-resolved
+	// parent) and by safeCloneRepoName; version is validated by
+	// safeGitVersion (rejects leading -, shell metacharacters,
+	// path traversal). Env inheritance is stripped to a vetted set
+	// by safeGitEnv so GIT_SSH_COMMAND / GIT_PROXY_COMMAND /
+	// GIT_CONFIG_* can't redirect the clone.
+	args := []string{"clone", "--depth=1"}
+	if version != "" {
+		// --branch accepts both tag names and branch names. Git
+		// resolves to the named ref and detaches HEAD on a tag, or
+		// keeps HEAD on the branch tip. If the ref doesn't exist
+		// remotely, git fails with a clear "Remote branch X not
+		// found" message and we propagate it.
+		args = append(args, "--branch", version)
+	}
+	args = append(args, url, dest)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; url/dest/version pre-validated; env sanitized by safeGitEnv
 	cmd.Env = safeGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// safeGitVersion validates a git ref string before it's passed to
+// `git clone --branch`. Empty input is permitted (it signals
+// HEAD-of-default-branch upstream). Non-empty input must:
+//
+//   - be ≤256 bytes (refs can be long but anything past that is
+//     pasted prose, not a ref)
+//   - contain only [A-Za-z0-9._+/-] (the ecosystem-native
+//     characters across semver, calendar versioning, git tag
+//     conventions, and refspec paths like refs/tags/v1.0.0)
+//   - NOT begin with `-` (otherwise git interprets it as a flag —
+//     the canonical "argument injection" hazard for any CLI that
+//     forwards user input to a tool with positional+flag args)
+//   - NOT contain `..` (path-traversal in ref name space; valid
+//     git ref names disallow this per git-check-ref-format)
+//   - NOT begin or end with `/` or `.` (git-check-ref-format)
+//
+// This is deliberately stricter than full git-check-ref-format
+// (which has many edge cases around control characters, ASCII
+// '~', '^', etc.) — we only need to admit refs that are well-formed
+// version identifiers, branches, or tags as users typically write
+// them. Genuinely-named refs that fail this check (e.g. with `~`
+// in them) get a clear error and the user can rename or skip.
+func safeGitVersion(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > 256 {
+		return fmt.Errorf("git ref exceeds 256-byte limit (got %d bytes)", len(v))
+	}
+	if v[0] == '-' {
+		return fmt.Errorf("git ref %q must not begin with '-' (would be parsed as a flag)", v)
+	}
+	if v[0] == '/' || v[0] == '.' {
+		return fmt.Errorf("git ref %q must not begin with %q", v, v[0:1])
+	}
+	if last := v[len(v)-1]; last == '/' || last == '.' {
+		return fmt.Errorf("git ref %q must not end with %q", v, v[len(v)-1:])
+	}
+	if strings.Contains(v, "..") {
+		return fmt.Errorf("git ref %q must not contain '..'", v)
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		ok := (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '+' || c == '-' || c == '/'
+		if !ok {
+			return fmt.Errorf("git ref %q contains invalid character %q at position %d", v, c, i)
+		}
 	}
 	return nil
 }
@@ -763,15 +846,28 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	// Validate the requested git ref before passing to clone. Empty
+	// is fine (HEAD-of-default-branch); non-empty must pass shape
+	// checks to keep shell-meta and flag-injection out of `git
+	// clone --branch`. See safeGitVersion for the rule set.
+	if err := safeGitVersion(cmd.requestedVersion); err != nil {
+		return "", "", fmt.Errorf("unsafe git ref: %w", err)
+	}
+
 	clone := cmd.RunGitClone
 	if clone == nil {
 		clone = defaultGitClone
 	}
-	if err := clone(cloneCtx, cmd.Target, destClean); err != nil {
+	if err := clone(cloneCtx, cmd.Target, destClean, cmd.requestedVersion); err != nil {
 		return "", "", err
 	}
 
-	report = fmt.Sprintf("# clone: %s → %s\n", cmd.Target, destClean)
+	if cmd.requestedVersion != "" {
+		report = fmt.Sprintf("# clone: %s @ %s → %s\n",
+			cmd.Target, cmd.requestedVersion, destClean)
+	} else {
+		report = fmt.Sprintf("# clone: %s → %s\n", cmd.Target, destClean)
+	}
 	return destClean, report, nil
 }
 

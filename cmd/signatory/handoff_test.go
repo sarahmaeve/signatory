@@ -1065,7 +1065,7 @@ func TestClone_CallsGitWithShallowFlags(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, url, dest string) error {
+		RunGitClone: func(_ context.Context, url, dest, _ string) error {
 			gotURL = url
 			gotDest = dest
 			// Simulate a successful clone by creating the dest dir so
@@ -1102,7 +1102,7 @@ func TestClone_SkipsIfDestExists_NotQuiet(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		// Quiet false: the reuse note SHOULD appear on stderr.
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			called = true
 			return nil
 		},
@@ -1140,7 +1140,7 @@ func TestClone_SkipsIfDestExists_Quiet(t *testing.T) {
 		Language: "python",
 		Output:   outPath,
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			t.Fatal("git must not be invoked")
 			return nil
 		},
@@ -1165,7 +1165,7 @@ func TestClone_FailsOnNonURLTarget(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			called = true
 			return nil
 		},
@@ -1195,7 +1195,7 @@ func TestClone_FailsOnNonWritableParent(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			called = true
 			return nil
 		},
@@ -1235,7 +1235,7 @@ func TestClone_SetsTargetPath(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		Quiet:       true,
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			return os.MkdirAll(dest, 0o755)
 		},
 	}
@@ -1272,7 +1272,7 @@ func TestClone_ExplicitPathWins(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		// Quiet intentionally false so we capture the override warning.
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			return os.MkdirAll(dest, 0o755)
 		},
 	}
@@ -1317,7 +1317,7 @@ func TestClone_QuietSuppressesOverrideWarning(t *testing.T) {
 		Language:    "python",
 		Output:      outPath,
 		Quiet:       true, // the whole point of this test
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			return os.MkdirAll(dest, 0o755)
 		},
 	}
@@ -1390,7 +1390,7 @@ func TestClone_GuardFiresWhenNameValidationLoosens(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			gotDest = dest
 			return os.MkdirAll(dest, 0o755)
 		},
@@ -1582,7 +1582,7 @@ func TestClone_RejectsQueryStringInURL(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			gotCalled = true
 			return nil
 		},
@@ -1610,7 +1610,7 @@ func TestClone_RejectsNullByteInRepoName(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			gotCalled = true
 			return nil
 		},
@@ -1642,7 +1642,7 @@ func TestClone_SymlinkParentIsResolved(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			gotDest = dest
 			return os.MkdirAll(dest, 0o755)
 		},
@@ -1671,7 +1671,7 @@ func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, _ string) error {
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
 			gotCalled = true
 			return nil
 		},
@@ -1884,7 +1884,7 @@ func TestSafeGitEnv_CloneInheritsCleanEnv(t *testing.T) {
 		Language: "python",
 		Output:   filepath.Join(t.TempDir(), "out.md"),
 		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, dest string) error {
+		RunGitClone: func(_ context.Context, _, dest, _ string) error {
 			return os.MkdirAll(dest, 0o755)
 		},
 	}
@@ -2126,4 +2126,216 @@ func TestHandoff_Synthesist_ExcludesPriorSyntheses(t *testing.T) {
 	// But the real analyst output must still be there.
 	assert.Contains(t, rendered, "external-sec-v1",
 		"legitimate analyst output must still render in the evidence")
+}
+
+// --- @version threading through to git clone --branch -------------------------
+//
+// These tests cover the version-aware clone path. They exercise:
+//  1. The version surfaces from ResolveTarget into HandoffCmd.requestedVersion
+//  2. applyClone passes the version to RunGitClone
+//  3. Versioned clone reports name the version in the report string
+//  4. safeGitVersion rejects ref shapes that would inject flags or shell-meta
+//
+// Together these ensure /analyze github.com/X/Y@v1.0.0 will clone v1.0.0,
+// not HEAD-of-default-branch — the GAPS.md fix.
+
+// TestClone_VersionFromTargetIsForwardedToCloneFn captures the
+// version that the fake RunGitClone receives. The fixture target
+// is `https://github.com/nvbn/thefuck@v3.32` so applyClone's
+// upstream Run() resolves it through ResolveTarget, captures
+// "v3.32" into cmd.requestedVersion, and forwards it through.
+func TestClone_VersionFromTargetIsForwardedToCloneFn(t *testing.T) {
+	var gotURL, gotDest, gotVersion string
+	parent := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck@v3.32",
+		CloneDir: parent,
+		Language: "python",
+		Output:   outPath,
+		Quiet:    true,
+		RunGitClone: func(_ context.Context, url, dest, version string) error {
+			gotURL = url
+			gotDest = dest
+			gotVersion = version
+			return os.MkdirAll(dest, 0o755)
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+
+	// The clone URL is the bare HTTPS form (no @version) — the
+	// version is a separate clone-time parameter, not part of the
+	// URL git is asked to clone from.
+	assert.Equal(t, "https://github.com/nvbn/thefuck", gotURL,
+		"clone URL must be the bare HTTPS form; @version is a separate parameter")
+	assert.NotEmpty(t, gotDest, "dest must be set")
+	assert.Equal(t, "v3.32", gotVersion,
+		"requested version must reach the clone function")
+}
+
+// TestClone_NoVersionLeavesVersionEmpty is the regression guard
+// for the "today's behavior" path: when the target has no
+// @version suffix, the clone function receives "" and falls back
+// to HEAD-of-default-branch (production code path).
+func TestClone_NoVersionLeavesVersionEmpty(t *testing.T) {
+	var gotVersion string
+	parent := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck",
+		CloneDir: parent,
+		Language: "python",
+		Output:   outPath,
+		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, dest, version string) error {
+			gotVersion = version
+			return os.MkdirAll(dest, 0o755)
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Empty(t, gotVersion,
+		"unversioned target must yield empty version arg (HEAD-of-default-branch behavior)")
+}
+
+// TestClone_RejectsUnsafeVersion confirms safeGitVersion gates
+// the clone call. The malicious version "-evil" survives
+// ResolveTarget (whose own @V parser only rejects nested
+// separators, not flag-shaped refs) but must fail at applyClone
+// before any subprocess fires. This is the load-bearing
+// flag-injection guard: without it, `git clone --branch -evil
+// <url>` would have git interpret `-evil` as a flag.
+func TestClone_RejectsUnsafeVersion(t *testing.T) {
+	parent := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	called := false
+	cmd := &HandoffCmd{
+		Role: "security",
+		// @-evil — flag-shaped ref that ResolveTarget accepts
+		// (only nested @ / empty version are rejected there) but
+		// safeGitVersion in applyClone refuses before the clone
+		// subprocess is invoked.
+		Target:   "repo:github/nvbn/thefuck@-evil",
+		CloneDir: parent,
+		Language: "python",
+		Output:   outPath,
+		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
+			called = true
+			return nil
+		},
+	}
+
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsafe git ref")
+	assert.False(t, called, "clone function must not be called when ref is unsafe")
+}
+
+// TestSafeGitVersion_AcceptsCleanRefs covers the positive shapes
+// safeGitVersion must let through. Locks in compatibility with
+// the version conventions across Go (v1.2.3, pseudo-versions),
+// npm (1.2.3), calendar versioning (2026.04.15), pre-release
+// (v1.0.0-alpha.1, build metadata 1.0.0+meta), branches (main,
+// release/1.0), and full ref paths (refs/tags/v1.0.0).
+func TestSafeGitVersion_AcceptsCleanRefs(t *testing.T) {
+	cleanRefs := []string{
+		"",                      // empty = HEAD-of-default-branch
+		"v1.2.3",                // Go / tag-style
+		"1.2.3",                 // npm-style
+		"v1.0.0-alpha.1",        // semver pre-release
+		"1.0.0+build.meta",      // semver build metadata
+		"v0.0.0-20230101000000-abcdef0123", // Go pseudo-version
+		"2026.04.15",            // calendar version
+		"main",                  // branch
+		"release/1.0",           // slashed branch
+		"refs/tags/v1.0.0",      // full refspec path
+		"feature_branch",        // underscore
+	}
+	for _, v := range cleanRefs {
+		t.Run(v, func(t *testing.T) {
+			assert.NoError(t, safeGitVersion(v),
+				"legitimate ref %q must pass shape validation", v)
+		})
+	}
+}
+
+// TestSafeGitVersion_RejectsUnsafeRefs covers the rejection cases.
+// Each one is a real attack shape (flag injection, shell-meta,
+// path traversal) or a clear malformation (leading slash, double
+// dot, control chars).
+func TestSafeGitVersion_RejectsUnsafeRefs(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{"flag injection (leading dash)", "-evil", "begin with '-'"},
+		{"path traversal", "v1.0/../etc/passwd", "must not contain '..'"},
+		{"shell metachar — semicolon", "v1.0;rm", "invalid character"},
+		{"shell metachar — pipe", "v1.0|rm", "invalid character"},
+		{"shell metachar — backtick", "v1.0`x`", "invalid character"},
+		{"shell metachar — dollar", "v1.0$x", "invalid character"},
+		{"newline in ref", "v1.0\n", "invalid character"},
+		{"trailing slash", "main/", "must not end with"},
+		{"leading slash", "/main", "must not begin with"},
+		{"trailing dot", "v1.0.", "must not end with"},
+		{"leading dot", ".hidden", "must not begin with"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := safeGitVersion(c.ref)
+			require.Error(t, err, "ref %q must be rejected", c.ref)
+			assert.Contains(t, err.Error(), c.want)
+		})
+	}
+}
+
+// TestDefaultGitClone_ArgvShape uses the same PATH-shimmed fake-
+// git pattern as the env-scrub tests (collectors_test.go) to
+// verify the actual argv defaultGitClone constructs. Confirms
+// --branch is present when version is set, absent when empty,
+// and positional args are ordered correctly.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive — this
+// test is intentionally sequential.
+func TestDefaultGitClone_ArgvShape(t *testing.T) {
+	// Build a fake `git` shim that records its argv to a file.
+	shimDir := t.TempDir()
+	argDump := filepath.Join(t.TempDir(), "argv-dump")
+	fakeGit := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit 0\n", argDump)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Versioned clone: --branch <version> must appear before the
+	// URL and dest positional args.
+	require.NoError(t, defaultGitClone(t.Context(),
+		"https://example.invalid/repo.git",
+		"/tmp/dest-versioned",
+		"v1.2.3"))
+	got, err := os.ReadFile(argDump)
+	require.NoError(t, err)
+	args := strings.Split(strings.TrimSpace(string(got)), "\n")
+	assert.Equal(t,
+		[]string{"clone", "--depth=1", "--branch", "v1.2.3",
+			"https://example.invalid/repo.git", "/tmp/dest-versioned"},
+		args,
+		"versioned clone must include --branch followed by ref, then URL, then dest")
+
+	// Unversioned clone: no --branch.
+	require.NoError(t, os.Remove(argDump))
+	require.NoError(t, defaultGitClone(t.Context(),
+		"https://example.invalid/repo.git",
+		"/tmp/dest-unversioned",
+		""))
+	got, err = os.ReadFile(argDump)
+	require.NoError(t, err)
+	args = strings.Split(strings.TrimSpace(string(got)), "\n")
+	assert.Equal(t,
+		[]string{"clone", "--depth=1",
+			"https://example.invalid/repo.git", "/tmp/dest-unversioned"},
+		args,
+		"unversioned clone must omit --branch entirely")
 }

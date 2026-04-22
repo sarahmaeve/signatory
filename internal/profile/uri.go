@@ -252,15 +252,21 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 // resolve to the same row.
 //
 // Rules (v0.1 grammar):
-//   - Only pkg URIs carry version suffixes. repo:, identity:, org:,
-//     patch: URIs pass through unchanged with version="" — content-hash
-//     / SHA pinning is a v0.2+ concept (agent-facing-contract D7).
-//   - The `@` that separates name from version lives in the LAST path
-//     segment. Scoped npm packages like `pkg:npm/@types/node` have
-//     an `@` inside their name but in the FIRST path segment — the
-//     scan is deliberately anchored to the last segment so the scope
-//     `@` is not mistaken for a version separator.
-//   - Inputs that don't start with `pkg:` pass through verbatim.
+//   - pkg: URIs carry @version suffixes for ecosystem-native version
+//     identifiers (e.g., pkg:npm/X@1.2.3, pkg:go/M@v1.0.0).
+//   - repo: URIs carry @version suffixes naming a git ref (tag,
+//     branch, or commit-shaped string) — used by signatory handoff
+//     to clone the named ref instead of HEAD. Storage strips the
+//     suffix; the entity is at the unversioned URI and the version
+//     lives on the posture row.
+//   - identity:, org:, patch: URIs pass through unchanged with
+//     version="" — they don't have a version-of-an-identity concept.
+//   - The `@` that separates name from version lives in the LAST
+//     path segment. Scoped npm packages like `pkg:npm/@types/node`
+//     have an `@` inside their name but in the FIRST path segment —
+//     the scan is deliberately anchored to the last segment so the
+//     scope `@` is not mistaken for a version separator.
+//   - Inputs that don't start with pkg: or repo: pass through verbatim.
 //
 // Designed to be cheap — a few indexing operations on a single
 // string, no allocations beyond the returned substrings.
@@ -268,12 +274,13 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 // canonical URI; callers that need validation use
 // ValidateCanonicalURI first.
 func SplitURIVersion(uri string) (base, version string) {
-	if !strings.HasPrefix(uri, URISchemePackage) {
+	if !strings.HasPrefix(uri, URISchemePackage) &&
+		!strings.HasPrefix(uri, URISchemeRepo) {
 		return uri, ""
 	}
 	lastSlash := strings.LastIndexByte(uri, '/')
 	if lastSlash < 0 {
-		// Malformed pkg URI with no path. Pass through rather than
+		// Malformed URI with no path. Pass through rather than
 		// synthesize a split that the caller would have to second-
 		// guess.
 		return uri, ""

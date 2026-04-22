@@ -35,6 +35,7 @@ documented below.
 
 - **Name**: `{TARGET_NAME}`
 - **Repo**: `{TARGET_PATH}` (cloned locally, read-only)
+- **Version analyzed**: `{TARGET_VERSION}` — your conclusions apply to THIS ref. If you find yourself reasoning about other versions, name them explicitly in your output.
 - **Role**: {TARGET_ROLE}
 - **Notes from the user**: {INTAKE_QUESTION}
 

@@ -218,6 +218,35 @@ func TestHandoffSubstitutions_OverridesApply(t *testing.T) {
 	assert.Equal(t, "Could this leak credentials?", subs["INTAKE_QUESTION"])
 }
 
+// TestHandoffSubstitutions_VersionPopulatedWhenSet covers the
+// happy path: an explicit Version override surfaces verbatim as
+// TARGET_VERSION. Templates use this to anchor analyst output
+// (analyst_id attribution, synthesist version_scope) to the ref
+// that was actually cloned.
+func TestHandoffSubstitutions_VersionPopulatedWhenSet(t *testing.T) {
+	subs, err := HandoffSubstitutions("https://github.com/X/Y", HandoffOverrides{
+		Version: "v1.11.1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "v1.11.1", subs["TARGET_VERSION"])
+}
+
+// TestHandoffSubstitutions_VersionFallbackWhenEmpty covers the
+// HEAD case: when no Version override is passed (the default for
+// today's unversioned `signatory analyze X` flow), TARGET_VERSION
+// renders as an explicit "(HEAD of default branch)" string. Avoids
+// leaking literal `{TARGET_VERSION}` into the handoff body when
+// the placeholder isn't filled — a footgun the existing
+// substitution machinery handles for other placeholders by
+// erroring out, but here we want the template to read cleanly
+// for the common no-version case rather than refuse to render.
+func TestHandoffSubstitutions_VersionFallbackWhenEmpty(t *testing.T) {
+	subs, err := HandoffSubstitutions("https://github.com/X/Y", HandoffOverrides{})
+	require.NoError(t, err)
+	assert.Equal(t, "(HEAD of default branch)", subs["TARGET_VERSION"],
+		"empty Version must produce an explicit fallback string, not literal {TARGET_VERSION}")
+}
+
 func TestHandoffSubstitutions_RejectsUninferrableName(t *testing.T) {
 	// Bare string with no URL/path shape AND no --name override ⇒
 	// error, because TARGET_NAME would land as the empty string and

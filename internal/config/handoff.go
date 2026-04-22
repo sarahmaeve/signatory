@@ -212,6 +212,18 @@ func HandoffSubstitutions(target string, overrides HandoffOverrides) (map[string
 	setIfPresent(subs, "ECOSYSTEM", overrides.Ecosystem)
 	setIfPresent(subs, "INTAKE_QUESTION", overrides.Intake)
 
+	// TARGET_VERSION is always set (never absent), so the
+	// templates can rely on the placeholder being filled.
+	// Empty Version → "(HEAD of default branch)" so the analyst
+	// reading the handoff sees explicitly that no version was
+	// pinned, rather than a literal "{TARGET_VERSION}" leaking
+	// into prose. Non-empty Version → the version verbatim.
+	if overrides.Version != "" {
+		subs["TARGET_VERSION"] = overrides.Version
+	} else {
+		subs["TARGET_VERSION"] = "(HEAD of default branch)"
+	}
+
 	// Name is the universal placeholder — if we couldn't derive one
 	// and the user didn't supply one, error out so the render doesn't
 	// produce a handoff with `{TARGET_NAME}` as an agent-visible
@@ -242,6 +254,16 @@ type HandoffOverrides struct {
 	Role      string
 	Ecosystem string
 	Intake    string
+
+	// Version is the requested git ref (tag/branch) for URL
+	// targets — populated from the @version suffix on the
+	// user's input target (e.g., `github.com/X/Y@v1.0.0`).
+	// Threads through to the handoff template's TARGET_VERSION
+	// placeholder so the analyst agent (and the synthesist's
+	// version_scope field) name the version that was actually
+	// cloned. Empty signals HEAD-of-default-branch and renders
+	// as "(HEAD of default branch)" in the template body.
+	Version string
 }
 
 // expandTilde converts a leading "~" or "~/" into the caller's home

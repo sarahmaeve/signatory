@@ -32,6 +32,7 @@ inputs are the evidence JSON embedded in this handoff.
 
 - **Name**: `{TARGET_NAME}`
 - **URL**: `{TARGET_URL}`
+- **Version analyzed**: `{TARGET_VERSION}` — the analysts you are synthesizing examined source at THIS ref. Your `synthesis_supplement.proposed_posture.version_scope` MUST equal this value (or empty if it reads "(HEAD of default branch)"). Do not invent a different version; do not strip the `v` prefix; copy verbatim.
 
 ## Independence rule
 
