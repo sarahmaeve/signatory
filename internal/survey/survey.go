@@ -163,12 +163,51 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) (DepResult, 
 		}
 	}
 
-	// Postures exist but none for this version. This is
-	// "unexamined" with an informative flag — renderers can show
-	// "v1.14 is vetted-frozen but you pinned v1.15."
+	// Postures exist but none for this version. Return unexamined
+	// and carry an OtherVersionsSummary so renderers can surface
+	// the most-recent verdict on a different version plus a count
+	// of all postures on record. Visibility only — no
+	// recommendation.
 	r.Tier = TierUnexamined
-	r.HasOtherVersions = true
+	r.OtherVersions = summarizeOtherVersionPostures(postures)
 	return r, nil
+}
+
+// summarizeOtherVersionPostures builds an OtherVersionsSummary
+// from a slice of postures that does NOT contain an exact-version
+// match for the queried dep. All postures passed in are, by
+// construction, for OTHER versions.
+//
+// Picks the most-recent-set_at posture as the "most relevant"
+// view. Rationale: matches the user's likely mental model
+// ("what's the latest thing my team thought about this?") and
+// matches `posture get`'s default which also returns the most
+// recent. Ties are broken by iteration order of the input slice,
+// which is stable across runs for a given store.
+//
+// Returns nil when the input is empty — renderers distinguish
+// "no other-version data" (no suffix) from "other-version data
+// exists" (suffix shown) by checking for nil.
+func summarizeOtherVersionPostures(postures []profile.Posture) *OtherVersionsSummary {
+	if len(postures) == 0 {
+		return nil
+	}
+	mostRecentIdx := 0
+	for i := 1; i < len(postures); i++ {
+		if postures[i].SetAt.After(postures[mostRecentIdx].SetAt) {
+			mostRecentIdx = i
+		}
+	}
+	mr := postures[mostRecentIdx]
+	return &OtherVersionsSummary{
+		MostRecent: &OtherVersionPosture{
+			Version:   mr.Version,
+			Tier:      postureTierToSurveyTier(mr.Tier),
+			SetAt:     mr.SetAt,
+			Rationale: mr.Rationale,
+		},
+		TotalPostures: len(postures),
+	}
 }
 
 // postureTierToSurveyTier maps the profile.PostureTier constants

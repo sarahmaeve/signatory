@@ -264,8 +264,21 @@ func renderDep(sw *stickyWriter, d survey.DepResult) {
 	switch {
 	case d.Tier == survey.TierBurned && d.BurnReason != "":
 		suffix = "burn: " + truncate(d.BurnReason, 60)
-	case d.HasOtherVersions:
-		suffix = "(other versions in store)"
+	case d.OtherVersions != nil && d.OtherVersions.MostRecent != nil:
+		// Surface the most-recent prior-version posture plus a
+		// posture-count. Visibility only — the user decides whether
+		// to navigate (e.g., `signatory posture get --all`) or
+		// commission a fresh review. We deliberately do NOT render
+		// a suggested extension verb here; see the survey package
+		// doc for why.
+		noun := "postures"
+		if d.OtherVersions.TotalPostures == 1 {
+			noun = "posture"
+		}
+		suffix = fmt.Sprintf("(%s %s; %d %s on record)",
+			d.OtherVersions.MostRecent.Version,
+			d.OtherVersions.MostRecent.Tier,
+			d.OtherVersions.TotalPostures, noun)
 	case d.PostureRationale != "":
 		suffix = truncate(d.PostureRationale, 60)
 	}

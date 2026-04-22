@@ -70,6 +70,24 @@ func seedPosture(t *testing.T, s store.Store, entityID, version string, tier pro
 	require.NoError(t, s.SetPosture(context.Background(), p))
 }
 
+// seedPostureAt is the explicit-timestamp variant of seedPosture.
+// Used by tests that need deterministic SetAt ordering — the
+// default seedPosture uses time.Now() which may produce identical
+// timestamps for back-to-back calls at sub-second resolution,
+// making "most recent wins" tiebreaks non-deterministic.
+func seedPostureAt(t *testing.T, s store.Store, entityID, version string, tier profile.PostureTier, rationale string, setAt time.Time) {
+	t.Helper()
+	p := &profile.Posture{
+		EntityID:  entityID,
+		Tier:      tier,
+		Version:   version,
+		Rationale: rationale,
+		SetBy:     "test",
+		SetAt:     setAt,
+	}
+	require.NoError(t, s.SetPosture(context.Background(), p))
+}
+
 // seedBurn attaches a burn record. Per design/trust-policy-v1.md
 // burns are Layer-0 and override anything — survey's resolver
 // should reflect that.
@@ -160,7 +178,8 @@ require github.com/alecthomas/kong v1.15.0
 	assert.Equal(t, TierVettedFrozen, d.Tier)
 	assert.Equal(t, "v1.15.0", d.PostureVersion)
 	assert.Contains(t, d.PostureRationale, "strong publish chain")
-	assert.False(t, d.HasOtherVersions)
+	assert.Nil(t, d.OtherVersions,
+		"exact-match posture short-circuits before other-versions aggregation — summary must be nil")
 
 	// NeedsReview should be empty — vetted-frozen is a
 	// resolved-to-positive decision, not something to review.
@@ -168,11 +187,12 @@ require github.com/alecthomas/kong v1.15.0
 	assert.Equal(t, 1, r.Summary.ByTier[TierVettedFrozen])
 }
 
-// TestRun_PostureForOtherVersionSetsFlag — pinned v1.15.0 but
-// the store has a posture for v1.14.0. Tier is unexamined with
-// HasOtherVersions=true, so renderers can show the "but v1.14 is
-// vetted-frozen" hint.
-func TestRun_PostureForOtherVersionSetsFlag(t *testing.T) {
+// TestRun_PostureForOtherVersion_PopulatesSummary — pinned v1.15.0
+// but the store has a posture for v1.14.0 only. Tier is unexamined
+// and OtherVersions carries the prior-posture metadata so the
+// renderer can surface "(v1.14.0 vetted-frozen; 1 posture on
+// record)" without a second store round-trip.
+func TestRun_PostureForOtherVersion_PopulatesSummary(t *testing.T) {
 	t.Parallel()
 
 	path := writeGoMod(t, `module github.com/example/diff-version
@@ -192,14 +212,147 @@ require github.com/alecthomas/kong v1.15.0
 	require.Len(t, r.Deps, 1)
 	d := r.Deps[0]
 	assert.Equal(t, TierUnexamined, d.Tier)
-	assert.True(t, d.HasOtherVersions,
-		"version mismatch should flip HasOtherVersions to true")
 	assert.Empty(t, d.PostureVersion,
 		"PostureVersion is only populated on an exact match")
+
+	require.NotNil(t, d.OtherVersions, "other-version posture must be surfaced")
+	require.NotNil(t, d.OtherVersions.MostRecent)
+	assert.Equal(t, "v1.14.0", d.OtherVersions.MostRecent.Version)
+	assert.Equal(t, TierVettedFrozen, d.OtherVersions.MostRecent.Tier)
+	assert.Equal(t, "old version vetted", d.OtherVersions.MostRecent.Rationale)
+	assert.Equal(t, 1, d.OtherVersions.TotalPostures)
 
 	// The pinned version is still in NeedsReview because it lacks
 	// an exact posture decision.
 	assert.Contains(t, r.Summary.NeedsReview, "repo:github/alecthomas/kong")
+}
+
+// TestRun_OtherVersions_MostRecentWins seeds three postures on
+// different versions with controlled SetAt timestamps and
+// confirms the aggregation picks the largest-SetAt winner as
+// MostRecent. The three versions are NOT in set_at order — the
+// most recent is v1.14.0 (middle version) to catch an
+// implementation that naively returns the first or last slice
+// element.
+//
+// Revert proof: drop the `After(...)` comparison and return
+// postures[0] unconditionally; this test fails because v1.10.0
+// would become MostRecent instead of v1.14.0.
+func TestRun_OtherVersions_MostRecentWins(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/multi-posture
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:github/alecthomas/kong")
+
+	// Deliberately non-monotonic seeding order so the test
+	// doesn't accidentally pass by taking the last-inserted row.
+	// Timestamps are explicit and well-separated (one minute
+	// apart) so the ordering is unambiguous.
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	seedPostureAt(t, s, e.ID, "v1.10.0", profile.PostureUnknownProvenance,
+		"early review — inconclusive", base)
+	seedPostureAt(t, s, e.ID, "v1.14.0", profile.PostureVettedFrozen,
+		"most recent full review", base.Add(2*time.Minute))
+	seedPostureAt(t, s, e.ID, "v1.12.0", profile.PostureTrustedForNow,
+		"intermediate review", base.Add(1*time.Minute))
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	require.NotNil(t, d.OtherVersions)
+	require.NotNil(t, d.OtherVersions.MostRecent)
+
+	assert.Equal(t, "v1.14.0", d.OtherVersions.MostRecent.Version,
+		"MostRecent must be the largest-SetAt posture, not first/last by seed order")
+	assert.Equal(t, TierVettedFrozen, d.OtherVersions.MostRecent.Tier)
+	assert.Equal(t, "most recent full review", d.OtherVersions.MostRecent.Rationale)
+	assert.Equal(t, 3, d.OtherVersions.TotalPostures,
+		"TotalPostures counts every posture on the entity regardless of version")
+}
+
+// TestRun_OtherVersions_NilWhenNoPostures covers the baseline:
+// an entity in the store with NO postures resolves to
+// TierUnexamined with OtherVersions == nil. Distinct from the
+// "postures exist but none match" case above.
+//
+// Revert proof: change summarizeOtherVersionPostures to always
+// return a non-nil summary even on empty input; this test fails
+// because d.OtherVersions would be non-nil.
+func TestRun_OtherVersions_NilWhenNoPostures(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/entity-only
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	s := openTestStore(t)
+	seedEntity(t, s, "repo:github/alecthomas/kong")
+	// No postures seeded.
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierUnexamined, d.Tier)
+	assert.Nil(t, d.OtherVersions,
+		"entity with no postures must leave OtherVersions nil — distinct from 'postures exist but for other versions'")
+}
+
+// TestRun_OtherVersions_NilOnExactMatch covers the other
+// short-circuit: when the queried version has an exact-match
+// posture, we return at the exact-match branch and never build
+// OtherVersionsSummary. Guards against a future refactor that
+// unconditionally aggregates regardless of exact-match.
+//
+// Revert proof: move the summarizeOtherVersionPostures call
+// ABOVE the exact-match loop; this test fails because
+// OtherVersions would be populated even when the exact match
+// was found.
+func TestRun_OtherVersions_NilOnExactMatch(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/exact-match
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:github/alecthomas/kong")
+	// Two postures: one for the queried version (exact match)
+	// and one for a different version. Exact match wins; the
+	// different-version one is NOT surfaced because the exact
+	// match's rationale is what applies.
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	seedPostureAt(t, s, e.ID, "v1.15.0", profile.PostureVettedFrozen,
+		"current version is good", base.Add(time.Minute))
+	seedPostureAt(t, s, e.ID, "v1.14.0", profile.PostureTrustedForNow,
+		"older version was trusted-for-now", base)
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierVettedFrozen, d.Tier,
+		"exact-match posture wins")
+	assert.Equal(t, "v1.15.0", d.PostureVersion)
+	assert.Nil(t, d.OtherVersions,
+		"exact match short-circuits before aggregation — other-version postures must not be surfaced")
 }
 
 // TestRun_BurnOverridesPosture covers the trust-policy Layer 0

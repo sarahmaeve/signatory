@@ -1,6 +1,10 @@
 package survey
 
-import "github.com/sarahmaeve/signatory/internal/manifest"
+import (
+	"time"
+
+	"github.com/sarahmaeve/signatory/internal/manifest"
+)
 
 // Tier is the resolved trust tier for a single dependency after
 // survey has combined store lookups (entity, postures, burns)
@@ -54,11 +58,71 @@ type DepResult struct {
 	// otherwise.
 	BurnReason string
 
-	// HasOtherVersions is true when the store has postures for
-	// this entity but none match the pinned version. Signals
-	// "there are decisions on record for other versions — the
-	// user might want to consult those before analyzing fresh."
-	HasOtherVersions bool
+	// OtherVersions summarizes what the store knows about this
+	// entity at versions OTHER than the queried one. Populated
+	// only when no exact-version posture matched — the residual
+	// "we have history for this dep, but not for this version"
+	// case. Nil when no other-version postures exist.
+	//
+	// Surfaced by survey rendering to aid navigation: the user
+	// sees the most-recent verdict on a different version plus a
+	// posture-count, and can decide whether to consult the prior
+	// review or commission a fresh one. Survey deliberately does
+	// NOT recommend an action — visibility only.
+	//
+	// Replaces the prior HasOtherVersions bool which signaled
+	// existence without surfacing what was there.
+	OtherVersions *OtherVersionsSummary
+}
+
+// OtherVersionPosture summarizes a single posture recorded on a
+// version other than the one the survey queried. Carried in
+// OtherVersionsSummary.MostRecent so renderers can surface the
+// version, tier, and rationale without a second store round-trip.
+type OtherVersionPosture struct {
+	// Version is the version string the posture was set against.
+	// Always different from the queried Dep.Version (by
+	// construction — exact matches return earlier in resolveDep).
+	Version string
+
+	// Tier is the posture's tier mapped through the same
+	// postureTierToSurveyTier helper used elsewhere.
+	Tier Tier
+
+	// SetAt is the posture's set_at timestamp. Drives the
+	// most-recent tiebreak when multiple other-version postures
+	// exist.
+	SetAt time.Time
+
+	// Rationale is the posture's rationale text as stored.
+	// Truncation, if any, happens at render time — the data layer
+	// passes it through unmodified.
+	Rationale string
+}
+
+// OtherVersionsSummary aggregates the metadata about postures the
+// store holds for an entity at versions other than the one the
+// survey queried. Populated by resolveDep when no exact-version
+// posture matched but other postures exist for the entity.
+//
+// Burns are intentionally NOT carried here. In the current data
+// model burns are entity-level and absolute: an entity with a
+// burn returns Tier=TierBurned at the top of resolveDep, before
+// any posture lookup runs. The OtherVersions branch is therefore
+// unreachable for burned entities, and adding burn fields to this
+// struct would imply a per-version-burn model that doesn't exist.
+type OtherVersionsSummary struct {
+	// MostRecent is the posture with the largest SetAt across
+	// all other-version postures. Nil only if the summary itself
+	// is nil — when populated, MostRecent is always set.
+	MostRecent *OtherVersionPosture
+
+	// TotalPostures is the count of all postures recorded on
+	// this entity (across all versions). Always equal to the
+	// number of postures GetPostures returned, which by
+	// construction excludes the queried-version match (since
+	// that match would have caused an early return).
+	TotalPostures int
 }
 
 // Summary aggregates DepResults into the counts that the

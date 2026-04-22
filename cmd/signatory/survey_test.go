@@ -54,6 +54,23 @@ func seedSurveyPosture(t *testing.T, s store.Store, entityID, version string, ti
 	}))
 }
 
+// seedSurveyPostureAt is the explicit-timestamp variant of
+// seedSurveyPosture. Needed for tests that assert on most-recent-
+// wins semantics — time.Now() collapses back-to-back calls to the
+// same timestamp at sub-second resolution, which makes the
+// tiebreak non-deterministic.
+func seedSurveyPostureAt(t *testing.T, s store.Store, entityID, version string, tier profile.PostureTier, rationale string, setAt time.Time) {
+	t.Helper()
+	require.NoError(t, s.SetPosture(context.Background(), &profile.Posture{
+		EntityID:  entityID,
+		Tier:      tier,
+		Version:   version,
+		Rationale: rationale,
+		SetBy:     "test",
+		SetAt:     setAt,
+	}))
+}
+
 func seedSurveyBurn(t *testing.T, s store.Store, entityID, reason string) {
 	t.Helper()
 	require.NoError(t, s.SetBurn(context.Background(), &profile.Burn{
@@ -218,6 +235,58 @@ require (
 	// (TestSurvey_NeedsReview_*). The Action-items rendering that
 	// formerly proved it via stdout was removed, so we no longer
 	// re-assert it here through a presentation-layer proxy.
+}
+
+// TestSurvey_Human_OtherVersionsSuffix covers the per-row suffix
+// rendering when the dep's pinned version has no exact-match
+// posture but prior-version postures exist. The suffix should
+// surface the most-recent posture's version + tier and the total
+// posture count — visibility only, no action recommendation.
+//
+// Revert proof: change the suffix template in renderDep back to
+// "(other versions in store)"; this test fails because the new
+// substrings are absent from stdout.
+func TestSurvey_Human_OtherVersionsSuffix(t *testing.T) {
+	t.Parallel()
+
+	dir := writeTestManifest(t, `module github.com/example/other-versions
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	globals := testGlobals(t)
+	s, err := store.OpenSQLite(context.Background(), globals.DBPath)
+	require.NoError(t, err)
+
+	// Seed entity + two prior-version postures. v1.14.0 is the
+	// most recent (set_at is larger); v1.10.0 is older. The
+	// queried version (v1.15.0, from the manifest) has no posture.
+	e := seedSurveyEntity(t, s, "repo:github/alecthomas/kong")
+	seedSurveyPostureAt(t, s, e.ID, "v1.10.0", profile.PostureUnknownProvenance,
+		"early look", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
+	seedSurveyPostureAt(t, s, e.ID, "v1.14.0", profile.PostureVettedFrozen,
+		"full review", time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC))
+
+	require.NoError(t, s.Close())
+
+	cmd := &SurveyCmd{Manifest: filepath.Join(dir, "go.mod")}
+	out, _, err := runSurvey(t, cmd, globals)
+	require.NoError(t, err)
+
+	// The dep row's suffix should name the most-recent version
+	// and tier, plus the count. We assert on the key substrings
+	// rather than the full formatted line to stay resilient to
+	// column-width tweaks.
+	assert.Contains(t, out, "v1.14.0 vetted-frozen",
+		"suffix must name the most-recent prior-version posture's version and tier")
+	assert.Contains(t, out, "2 postures on record",
+		"suffix must carry the total posture count (plural form for N>1)")
+
+	// The old hedge must not reappear.
+	assert.NotContains(t, out, "other versions in store",
+		"the vague `(other versions in store)` hedge was replaced with concrete data")
 }
 
 // TestSurvey_JSON_OutputShape asserts --json output is a
