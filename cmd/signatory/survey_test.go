@@ -312,6 +312,199 @@ func TestSurvey_Human_IndirectBreakdown_FallbackWhenUnavailable(t *testing.T) {
 		"fallback path must not emit any of the bucket lines")
 }
 
+// TestShortNameFromURI table-locks the URI-to-shortname helper
+// across each canonical URI scheme. Reachability tags in --all
+// mode use this for "inherit via <short>" / "awaits <short>"
+// — incorrect shortening would surface as ugly tag text but
+// nothing structurally breaks, so this is presentation regression
+// guard rather than safety guard.
+func TestShortNameFromURI(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		uri  string
+		want string
+	}{
+		{"repo:github/sarahmaeve/signatory", "signatory"},
+		{"pkg:go/gopkg.in/yaml.v3", "yaml.v3"},
+		{"pkg:go/modernc.org/sqlite", "sqlite"},
+		{"pkg:npm/express", "express"},
+		{"pkg:npm/@sindresorhus/is", "is"},
+		{"identity:github/alecthomas", "alecthomas"},
+		{"plain-string-no-scheme", "plain-string-no-scheme"},
+	}
+	for _, c := range cases {
+		t.Run(c.uri, func(t *testing.T) {
+			assert.Equal(t, c.want, shortNameFromURI(c.uri))
+		})
+	}
+}
+
+// TestReachabilityLabel covers the three label-producing
+// scenarios (await, inherit, none) plus the precedence rule
+// for diamond cases (max-pessimism: any unresolved reaching
+// direct yields "awaits", not "inherit").
+func TestReachabilityLabel(t *testing.T) {
+	t.Parallel()
+	directTier := map[string]survey.Tier{
+		"repo:github/example/resolved":   survey.TierVettedFrozen,
+		"repo:github/example/unresolved": survey.TierUnexamined,
+	}
+
+	cases := []struct {
+		name string
+		dep  survey.DepResult
+		want string
+	}{
+		{
+			name: "single resolved parent → inherit via",
+			dep: survey.DepResult{
+				Tier: survey.TierNotInStore,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{"repo:github/example/resolved"},
+				},
+			},
+			want: "inherit via resolved",
+		},
+		{
+			name: "single unresolved parent → awaits",
+			dep: survey.DepResult{
+				Tier: survey.TierNotInStore,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{"repo:github/example/unresolved"},
+				},
+			},
+			want: "awaits unresolved",
+		},
+		{
+			name: "diamond (one resolved, one unresolved) → awaits the blocker (max-pessimism)",
+			dep: survey.DepResult{
+				Tier: survey.TierNotInStore,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{
+						"repo:github/example/resolved",
+						"repo:github/example/unresolved",
+					},
+				},
+			},
+			want: "awaits unresolved",
+		},
+		{
+			name: "own-resolved indirect → no label (rationale wins)",
+			dep: survey.DepResult{
+				Tier: survey.TierVettedFrozen,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{"repo:github/example/resolved"},
+				},
+			},
+			want: "",
+		},
+		{
+			name: "no reachability → no label",
+			dep: survey.DepResult{
+				Tier:         survey.TierNotInStore,
+				Reachability: nil,
+			},
+			want: "",
+		},
+		{
+			name: "reachability with empty FromDirects → no label",
+			dep: survey.DepResult{
+				Tier:         survey.TierNotInStore,
+				Reachability: &survey.Reachability{},
+			},
+			want: "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, reachabilityLabel(c.dep, directTier))
+		})
+	}
+}
+
+// TestSurvey_Human_IndirectRow_AwaitsTagUnderAll asserts the
+// per-row "awaits <direct>" tag actually renders under --all.
+// Direct fixture: one resolved direct (R), one unresolved direct
+// (U), one indirect reached via U. Under --all the indirect row
+// must carry "awaits u" (where 'u' is the short name of U).
+func TestSurvey_Human_IndirectRow_AwaitsTagUnderAll(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			{
+				Dep:  manifest.Dep{Name: "u", CanonicalURI: "repo:github/example/u", Direct: true},
+				Tier: survey.TierUnexamined,
+			},
+			{
+				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:go/example.com/transitive-i", Direct: false},
+				Tier: survey.TierNotInStore,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{"repo:github/example/u"},
+				},
+			},
+		},
+		Summary: survey.Summary{
+			Total: 2, Direct: 1, Indirect: 1,
+			ByTier: map[survey.Tier]int{
+				survey.TierUnexamined:  1,
+				survey.TierNotInStore: 1,
+			},
+			IndirectByReachability: survey.IndirectReachabilityBreakdown{
+				ViaUnresolved: 1,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, true)) // --all
+	out := buf.String()
+
+	assert.Contains(t, out, "awaits u",
+		"indirect row must carry the awaits tag naming the unresolved direct")
+	assert.NotContains(t, out, "inherit via",
+		"no resolved-only indirect in this fixture; inherit tag must not appear")
+}
+
+// TestSurvey_Human_IndirectRow_InheritTagUnderAll covers the
+// other half: one indirect reached only via a resolved direct
+// gets "inherit via <short>" tag.
+func TestSurvey_Human_IndirectRow_InheritTagUnderAll(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			{
+				Dep:  manifest.Dep{Name: "r", CanonicalURI: "repo:github/example/r", Direct: true},
+				Tier: survey.TierVettedFrozen,
+			},
+			{
+				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:go/example.com/transitive-i", Direct: false},
+				Tier: survey.TierNotInStore,
+				Reachability: &survey.Reachability{
+					FromDirects: []string{"repo:github/example/r"},
+				},
+			},
+		},
+		Summary: survey.Summary{
+			Total: 2, Direct: 1, Indirect: 1,
+			ByTier: map[survey.Tier]int{
+				survey.TierVettedFrozen: 1,
+				survey.TierNotInStore:   1,
+			},
+			IndirectByReachability: survey.IndirectReachabilityBreakdown{
+				ViaResolved: 1,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, true)) // --all
+	out := buf.String()
+
+	assert.Contains(t, out, "inherit via r",
+		"indirect row must carry the inherit-via tag naming the resolved direct")
+}
+
 // TestSurvey_Human_IndirectBreakdown_RendersUnderAllToo is the
 // regression guard for the bug where --all mode skipped the
 // reachability breakdown. The breakdown belongs in BOTH modes:

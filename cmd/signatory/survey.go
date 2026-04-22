@@ -185,9 +185,18 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 	if len(direct) > 0 {
 		sw.Writef("Direct dependencies (%d)\n", len(direct))
 		for _, d := range direct {
-			renderDep(sw, d)
+			renderDep(sw, d, "")
 		}
 		sw.Writeln()
+	}
+
+	// Build the direct-tier map once for the --all indirect loop
+	// below. Used by reachabilityLabel to classify each indirect's
+	// reaching parents as resolved (→ "inherit via X") or
+	// unresolved (→ "awaits X"). Cheap walk; O(directs).
+	directTier := map[string]survey.Tier{}
+	for _, d := range direct {
+		directTier[d.Dep.CanonicalURI] = d.Tier
 	}
 
 	// ---- Indirect deps (count + breakdown by default, with full
@@ -202,7 +211,7 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 			renderIndirectBreakdown(sw, r.Summary.IndirectByReachability)
 			sw.Writeln()
 			for _, d := range indirect {
-				renderDep(sw, d)
+				renderDep(sw, d, reachabilityLabel(d, directTier))
 			}
 			sw.Writeln()
 		} else {
@@ -247,11 +256,18 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 // like "burn: <reason>" or "other-versions" or the posture
 // rationale (truncated).
 //
+// reachLabel, when non-empty, is used as the suffix when no
+// higher-priority suffix (burn reason / other-versions /
+// posture rationale) fires. Callers that want the per-row
+// reachability tag computed (the --all indirect loop) pass it
+// in; callers that don't (direct-dep loop, non-all paths) pass
+// empty string.
+//
 // Takes a *stickyWriter so it participates in printSurveyHuman's
 // error chain: if the caller has already hit a broken pipe, the
 // format calls here become no-ops instead of racing to write to
 // a closed stream.
-func renderDep(sw *stickyWriter, d survey.DepResult) {
+func renderDep(sw *stickyWriter, d survey.DepResult, reachLabel string) {
 	icon := tierIcon(d.Tier)
 	name := d.Dep.Name
 	version := d.Dep.Version
@@ -288,6 +304,14 @@ func renderDep(sw *stickyWriter, d survey.DepResult) {
 			d.OtherVersions.TotalPostures, noun)
 	case d.PostureRationale != "":
 		suffix = truncate(d.PostureRationale, 60)
+	case reachLabel != "":
+		// Last-resort suffix: when no per-dep rationale /
+		// burn / other-versions data is available, fall back
+		// to the reachability label the caller computed. Fires
+		// primarily on not-in-store indirect rows under --all
+		// — the common case for the transitive tree of a
+		// project with resolved directs.
+		suffix = reachLabel
 	}
 
 	if suffix != "" {
@@ -322,6 +346,89 @@ func tierIcon(t survey.Tier) string {
 	default:
 		return "[·]"
 	}
+}
+
+// reachabilityLabel produces the per-row tag that appears on
+// indirect deps under --all, naming either the resolver that
+// makes the indirect defer-safe ("inherit via <short>") or the
+// unresolved direct that blocks it ("awaits <short>"). Returns
+// empty string when the data isn't available to compute the tag
+// — an indirect with no Reachability, or whose reaching directs
+// aren't in the directTier map — so renderDep falls through to
+// whatever other suffix applies (or none).
+//
+// Prefers the "awaits" framing whenever ANY reaching direct is
+// unresolved — mirrors the max-pessimism bucketing at
+// survey.bucketIndirects. For an indirect reached via both
+// resolved and unresolved directs, the user's actionable next
+// move is the unresolved direct, so name it.
+//
+// Returns "" for OwnResolved indirects too — their posture
+// rationale is the informative suffix, not the path-through-
+// directs. The reachability label would crowd out more useful
+// content.
+func reachabilityLabel(d survey.DepResult, directTier map[string]survey.Tier) string {
+	if d.Reachability == nil || len(d.Reachability.FromDirects) == 0 {
+		return ""
+	}
+	// Own-resolved indirects: skip the label so their rationale
+	// (or other suffix) wins. The user can still read the bucket
+	// count up top.
+	if survey.IsResolvedTier(d.Tier) {
+		return ""
+	}
+
+	var blockers, resolvers []string
+	for _, uri := range d.Reachability.FromDirects {
+		tier, ok := directTier[uri]
+		if !ok {
+			continue
+		}
+		short := shortNameFromURI(uri)
+		if survey.IsResolvedTier(tier) {
+			resolvers = append(resolvers, short)
+		} else {
+			blockers = append(blockers, short)
+		}
+	}
+
+	// Max-pessimism: any unresolved reaching direct → "awaits".
+	if len(blockers) > 0 {
+		return "awaits " + strings.Join(blockers, ", ")
+	}
+	if len(resolvers) > 0 {
+		return "inherit via " + strings.Join(resolvers, ", ")
+	}
+	return ""
+}
+
+// shortNameFromURI returns a display-friendly short name from a
+// canonical URI. Used in reachability tags so "inherit via
+// sqlite" appears instead of "inherit via pkg:go/modernc.org/
+// sqlite". Takes the last path segment after the final "/" in
+// the URI's identifier portion.
+//
+// Examples:
+//
+//	repo:github/sarahmaeve/signatory → "signatory"
+//	pkg:go/gopkg.in/yaml.v3           → "yaml.v3"
+//	pkg:go/modernc.org/sqlite         → "sqlite"
+//	pkg:npm/express                   → "express"
+//	pkg:npm/@sindresorhus/is          → "is"
+//	identity:github/alecthomas        → "alecthomas"
+//
+// Scoped npm packages (@scope/name) lose the scope, which is a
+// deliberate brevity trade — the scope can be recovered from
+// the URI itself when the user needs precision, and the short
+// name is the more-recognizable form in display.
+func shortNameFromURI(uri string) string {
+	if i := strings.LastIndexByte(uri, '/'); i >= 0 {
+		return uri[i+1:]
+	}
+	if i := strings.IndexByte(uri, ':'); i >= 0 {
+		return uri[i+1:]
+	}
+	return uri
 }
 
 // renderIndirectBreakdown emits the three-bucket breakdown of
