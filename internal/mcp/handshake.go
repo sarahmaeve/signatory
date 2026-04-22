@@ -17,6 +17,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 // protocolVersion is the MCP spec version this server implements.
@@ -96,21 +97,42 @@ const (
 )
 
 // handshake manages the MCP initialize/initialized lifecycle. It is
-// owned by the Server and its methods are called from the dispatch loop.
+// owned by the Server; its mutating methods (handleInitialize,
+// handleInitializedNotification) run in the Serve read loop, while
+// its observers (isOperational, ClientInfo) run in spawned handler
+// goroutines per server.go:217. The mu guard closes the resulting
+// race on state + client — see handshake_test.go and
+// server_test.go's TestServer_HandshakeRace_* for the red-before-
+// green evidence.
+//
+// version is set once at construction (NewServer) and never mutated
+// thereafter, so it is outside the lock's coverage.
 type handshake struct {
+	mu     sync.RWMutex
 	state  lifecycleState
 	client clientInfo
 	// version is the server version announced in the initialize
 	// response's serverInfo.version. Threaded from the owning Server's
 	// injected value so tests and production stamp distinct strings
-	// without racing on a package-level var.
+	// without racing on a package-level var. Immutable after
+	// construction — does not require lock coverage.
 	version string
 }
 
 // handleInitialize processes an initialize request. Returns the result
 // to send back. May only be called once; second call returns an error
 // response code.
+//
+// Holds the write lock for the full method body. Callers are the
+// Serve read loop (synchronous dispatch of the initialize frame),
+// so there is no reentrancy risk, and the lock span includes the
+// JSON unmarshal (which operates on a stack-local, not the handshake
+// struct) for simplicity — releasing mid-method would require
+// splitting the state check from the state mutation.
 func (h *handshake) handleInitialize(params json.RawMessage) (*initializeResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	if h.state != statePreInit {
 		return nil, fmt.Errorf("initialize already called")
 	}
@@ -195,6 +217,8 @@ Read signatory://help for the full tool-selection guide and concept map.`
 // doesn't already prescribe, and silently ignoring matches the spec's
 // "strict outputs, liberal inputs" posture for notifications.
 func (h *handshake) handleInitializedNotification() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.state != stateInitialized {
 		return
 	}
@@ -202,14 +226,28 @@ func (h *handshake) handleInitializedNotification() {
 }
 
 // isOperational reports whether the lifecycle is past the handshake
-// and ready for tool/resource calls.
+// and ready for tool/resource calls. Called from spawned handler
+// goroutines (server.go:217), hence the read-lock — paired with
+// handleInitialize / handleInitializedNotification's write-lock to
+// close the race surfaced by TestHandshake_StateAccessIsRaceFree.
 func (h *handshake) isOperational() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return h.state == stateOperational
 }
 
 // ClientInfo returns the clientInfo captured during the initialize
 // handshake. Safe to call at any time; returns zero value before
 // initialize is processed.
+//
+// Read-locked on the same mutex that guards state — the two fields
+// are written together by handleInitialize, and the doc comment on
+// h.client says it is "exposed for audit logging," which means
+// handler goroutines will call this once audit wiring is stamping
+// source tags per request. Closing the race here is forward-
+// looking coverage; see TestHandshake_ClientInfoIsRaceFree.
 func (h *handshake) ClientInfo() clientInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return h.client
 }

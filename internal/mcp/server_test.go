@@ -1030,6 +1030,77 @@ func TestServer_ResourcesRead_PrefixBoundary(t *testing.T) {
 	require.NotNil(t, resp["error"], "extended URI with no exact match must surface not-found")
 }
 
+// TestServer_HandshakeRace_PipelinedToolsListBeforeInitialized is
+// the integration-level race test for the handshake fix. It complements
+// the unit-level TestHandshake_*IsRaceFree tests in handshake_test.go
+// by exercising the race through the production goroutine model —
+// a future refactor of dispatch or Serve that silently reintroduces
+// unsynchronized access to handshake state would pass the unit test
+// (which hits the type directly) but fail this one.
+//
+// Shape: pipeline N tools/list requests between initialize and
+// notifications/initialized. The server's read loop dispatches each
+// tools/list in a spawned handler goroutine (server.go:217), which
+// reads handshake.state via isOperational at dispatch.go:108. The
+// read loop subsequently writes handshake.state when it processes
+// the notifications/initialized frame. There is no happens-before
+// edge from those writes to the earlier-spawned reads — a structural
+// race that `go test -race` flags every run.
+//
+// Revert proof: remove the mutex from handshake's methods. Under
+// `go test -race ./internal/mcp -run TestServer_HandshakeRace`,
+// the detector reports a data race on handshake.state with stacks
+// pointing at handleInitializedNotification (writer, goroutine 1)
+// and isOperational (reader, one of the handler goroutines).
+//
+// The semantic content of each tools/list response isn't asserted.
+// Under the pre-fix code some may observe stateInitialized and
+// return "not yet initialized" while others see stateOperational
+// and return the tool list — both outcomes are protocol-legal for
+// the pipelined client sequence, and neither is the point of the
+// test. The race detector is the entire assertion.
+//
+// Not parallelized: see TestHandshake_StateAccessIsRaceFree for
+// rationale.
+func TestServer_HandshakeRace_PipelinedToolsListBeforeInitialized(t *testing.T) {
+	s, stop := newSession(t, func(srv *Server) {
+		srv.Register(echoTool{})
+	})
+	defer stop()
+
+	s.request(1, "initialize", map[string]any{
+		"protocolVersion": "2025-11-25",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "race-client", "version": "0.0.0"},
+	})
+	// Drain the initialize response so the pipe doesn't stall.
+	_ = s.readResponse(t)
+
+	// Pipeline tools/list BEFORE notifications/initialized. Each
+	// spawns a handler goroutine that reads handshake.state; the
+	// notifications/initialized that follows writes handshake.state.
+	// N chosen generous enough that some goroutines are still
+	// pending at state-write time on any plausible scheduler, but
+	// strictly the race detector doesn't require overlap — just
+	// absence of a happens-before edge between the accesses.
+	const n = 32
+	for i := 2; i <= n+1; i++ {
+		s.request(i, "tools/list", nil)
+	}
+
+	// State write while N handler goroutines' reads have no
+	// happens-before edge to this write.
+	s.notify("notifications/initialized", nil)
+
+	// Drain all N responses. Their contents aren't asserted —
+	// either "not yet initialized" or a tools list is fine. Drain
+	// prevents the server's write side from stalling on pipe
+	// backpressure at test shutdown.
+	for i := 0; i < n; i++ {
+		_ = s.readResponse(t)
+	}
+}
+
 // assertResourcePayloadKind extracts data.kind from a resources/read
 // envelope and asserts it equals want. Factored out because three
 // subcases in TestServer_ResourcesRead_PrefixBoundary share the check.
