@@ -312,6 +312,44 @@ func TestSurvey_Human_IndirectBreakdown_FallbackWhenUnavailable(t *testing.T) {
 		"fallback path must not emit any of the bucket lines")
 }
 
+// TestSurvey_Human_IndirectBreakdown_RendersUnderAllToo is the
+// regression guard for the bug where --all mode skipped the
+// reachability breakdown. The breakdown belongs in BOTH modes:
+// --all means "give me the per-row detail too," not "hide the
+// summary." Pre-fix this test fails because the breakdown lines
+// are absent from --all stdout.
+func TestSurvey_Human_IndirectBreakdown_RendersUnderAllToo(t *testing.T) {
+	t.Parallel()
+	r := survey.Result{
+		Project: manifest.ProjectInfo{Ecosystem: "go", ManifestPath: "/x/go.mod"},
+		Deps: []survey.DepResult{
+			{Dep: manifest.Dep{Name: "i1", Direct: false}, Tier: survey.TierNotInStore},
+			{Dep: manifest.Dep{Name: "i2", Direct: false}, Tier: survey.TierNotInStore},
+		},
+		Summary: survey.Summary{
+			Total: 2, Indirect: 2,
+			ByTier: map[survey.Tier]int{survey.TierNotInStore: 2},
+			IndirectByReachability: survey.IndirectReachabilityBreakdown{
+				ViaResolved:   1,
+				ViaUnresolved: 1,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, printSurveyHuman(&buf, r, true)) // includeIndirect=true → --all mode
+	out := buf.String()
+
+	// Per-row list still renders.
+	assert.Contains(t, out, "i1", "per-row detail must appear under --all")
+	assert.Contains(t, out, "i2")
+
+	// AND the breakdown renders. This is the bug fix: pre-fix the
+	// breakdown was suppressed under --all.
+	assert.Contains(t, out, "1 inherit coverage from resolved directs",
+		"breakdown must appear under --all (the user expanded; they didn't ask to hide the summary)")
+	assert.Contains(t, out, "1 await an unresolved direct")
+}
+
 // TestSurvey_Human_IndirectBreakdown_OnlyNonzeroBucketsRender
 // confirms zero-count buckets are skipped — a project where
 // every indirect is OwnResolved gets a one-line breakdown, not

@@ -190,11 +190,17 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 		sw.Writeln()
 	}
 
-	// ---- Indirect deps (count by default, full list with --all) ----
+	// ---- Indirect deps (count + breakdown by default, with full
+	// per-row list under --all). The reachability breakdown
+	// renders in BOTH modes — --all is "give me the per-row
+	// detail too," not "hide the summary." A user expanding the
+	// list still benefits from seeing the buckets up front.
 	indirect := filterIndirectDeps(r.Deps)
 	if len(indirect) > 0 {
 		if includeIndirect {
 			sw.Writef("Indirect dependencies (%d)\n", len(indirect))
+			renderIndirectBreakdown(sw, r.Summary.IndirectByReachability)
+			sw.Writeln()
 			for _, d := range indirect {
 				renderDep(sw, d)
 			}
