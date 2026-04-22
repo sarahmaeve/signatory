@@ -164,31 +164,37 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		cmd.requestedVersion = resolved.Version
 		if resolved.CloneURL != "" {
 			if cmd.URL == "" {
-				cmd.URL = resolved.CloneURL
+				if cmd.Role == "synthesist" {
+					// Synthesist's TARGET_URL must carry the
+					// canonical URI WITH @V so its output's
+					// `target` field matches the analysts' outputs
+					// it's synthesizing — same entity, same store
+					// row. Without this, the synthesist would set
+					// target to the bare clone URL, ingest under
+					// the BARE URI, and the resulting analysis
+					// would live at a different entity from the
+					// security/provenance outputs the synthesist
+					// just rolled up. Surfaced by the halted
+					// /analyze testify@v1.11.1 dogfood.
+					cmd.URL = resolved.CanonicalURI
+				} else {
+					cmd.URL = resolved.CloneURL
+				}
 			}
 			// Feed the HTTPS URL form to downstream steps. This
 			// turns every accepted form — owner/repo,
 			// github.com/owner/repo, repo:github/owner/name — into
-			// the same effective target for TARGET_URL population
-			// and --clone-dir processing, closing the
-			// "--clone-dir requires a URL target" gap surfaced
-			// during the v0.1 dogfood.
+			// the same effective target for --clone-dir processing
+			// (which expects a URL git can clone, not a canonical
+			// URI). The version is preserved separately on
+			// cmd.requestedVersion for applyClone's --branch arg.
 			cmd.Target = resolved.CloneURL
 		} else if cmd.Role == "synthesist" && cmd.URL == "" {
-			// Canonical-URI fallback for the synthesist role only.
-			// The synthesist's TARGET_URL identifies the thing being
-			// synthesized; when the target is a pkg URI with no
-			// clone URL (pkg:npm/X, pkg:go/...), the canonical URI
-			// is the informative form — it's what the synthesist's
-			// output.target field should carry. Without this,
-			// {TARGET_URL} renders literal in the handoff body
-			// (surfaced by the 2026-04-21 dogfood).
-			//
-			// Scoped to synthesist because security/provenance
-			// handoffs use --network-precheck to resolve pkg →
-			// github URL and rely on cmd.URL being empty at this
-			// point so precheck can populate it. Setting it here
-			// would clobber that path.
+			// Canonical-URI fallback for the synthesist role when
+			// the target is a pkg URI with no clone URL
+			// (pkg:npm/X, pkg:go/...). Without this, {TARGET_URL}
+			// renders literal in the handoff body (surfaced by
+			// the 2026-04-21 dogfood).
 			cmd.URL = resolved.CanonicalURI
 		}
 	}
@@ -356,18 +362,31 @@ func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *G
 			cmd.Target, err))
 	}
 
-	// Plan-A canonicalization: the evidence for `pkg:npm/X@V` is
-	// indexed under `pkg:npm/X` (unversioned caller URI, per M2 D1).
-	// Try the canonical URI first; if the @V entity doesn't exist,
-	// fall back to the unversioned base. Matches the summary
-	// assembler's normalization — a versioned synthesist handoff
-	// finds its evidence regardless of which entity the /analyze
-	// run materialized.
+	// Build the lookup URI. Two complications:
+	//
+	//  1. cmd.Target was rewritten to the bare clone URL by Run()
+	//     so applyClone could feed it to git clone. That means
+	//     resolved.CanonicalURI here is the version-stripped form
+	//     (e.g., repo:github/X/Y) even when the original user
+	//     input had @V. cmd.requestedVersion still carries the
+	//     version, so we re-attach it for the lookup.
+	//  2. Different storage paths land at different URIs. Today's
+	//     ingest path stores analyst outputs at the FULL URI
+	//     (with @V); a Plan-A-canonicalized store would put them
+	//     at the BASE. Try FULL first, fall back to BASE.
+	//
+	// Without (1), versioned /analyze runs hit "no entity matches"
+	// even though the analysts' outputs are right there in the
+	// store under the versioned URI — the user's halted dogfood
+	// run on testify@v1.11.1 surfaced exactly this bug.
 	lookupURI := resolved.CanonicalURI
+	if cmd.requestedVersion != "" && !strings.Contains(lookupURI, "@") {
+		lookupURI = lookupURI + "@" + cmd.requestedVersion
+	}
 	assembler := synthesis.New(s)
 	evidence, err := assembler.Assemble(ctx, lookupURI)
 	if errors.Is(err, synthesis.ErrEntityNotFound) {
-		if baseURI, version := profile.SplitURIVersion(resolved.CanonicalURI); version != "" && baseURI != resolved.CanonicalURI {
+		if baseURI, version := profile.SplitURIVersion(lookupURI); version != "" && baseURI != lookupURI {
 			lookupURI = baseURI
 			evidence, err = assembler.Assemble(ctx, lookupURI)
 		}

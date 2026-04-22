@@ -2339,3 +2339,131 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 		args,
 		"unversioned clone must omit --branch entirely")
 }
+
+// --- Synthesist + @version: hot fix for the halted dogfood ---------------
+//
+// These tests cover the two bugs surfaced by the user's halted
+// /analyze github.com/stretchr/testify@v1.11.1 run:
+//
+//   1. assembleSynthesisEvidence re-resolved cmd.Target (which
+//      Run() had rewritten to the bare clone URL) and looked up
+//      the BASE entity URI. The analysts' outputs were at the
+//      FULL URI (with @V), so lookup missed.
+//
+//   2. The synthesist's {TARGET_URL} substitution was filled
+//      from the bare clone URL instead of the canonical URI
+//      with @V. Synthesist's output target field would land at
+//      a different entity from the analysts' outputs.
+//
+// Both fixed in the same hot-fix commit; tests live alongside.
+
+// TestHandoff_Synthesist_RepoVersionedTargetURL is the
+// regression guard for bug #2: a repo: target with @V passed to
+// the synthesist must surface the canonical URI WITH @V in the
+// rendered TARGET_URL slot, not the bare clone URL.
+//
+// Revert proof: change the synthesist branch in Run()'s
+// canonicalization to fall through to `cmd.URL = resolved.CloneURL`;
+// this test fails because the rendered handoff body would
+// contain the bare URL `https://github.com/example/repo-versioned-url`
+// instead of the canonical `repo:github/example/repo-versioned-url@v2.0.0`.
+func TestHandoff_Synthesist_RepoVersionedTargetURL(t *testing.T) {
+	const canonical = "repo:github/example/repo-versioned-url@v2.0.0"
+	// Seed analyst output at the FULL URI (matches today's ingest
+	// behavior — see normalizeTargetToCanonicalURI).
+	g := synthesisFixtureTarget(t, canonical)
+
+	outPath := filepath.Join(t.TempDir(), "synth-repo-versioned.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: "github.com/example/repo-versioned-url@v2.0.0",
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	assert.Contains(t, rendered, canonical,
+		"synthesist's TARGET_URL must be the canonical URI with @V, "+
+			"so its output's target field matches the analysts' outputs at the same entity")
+	assert.NotContains(t, rendered, "https://github.com/example/repo-versioned-url`",
+		"synthesist's TARGET_URL must NOT be the bare clone URL — "+
+			"that would put the synthesist's output at a different entity from the analysts'")
+}
+
+// TestHandoff_Synthesist_RepoVersionedEvidenceLookup is the
+// regression guard for bug #1: when the user invokes synthesist
+// with a versioned target and the analysts' outputs are at the
+// FULL URI, the evidence assembly must find them.
+//
+// Pre-fix, assembleSynthesisEvidence re-resolved cmd.Target
+// (which Run() had rewritten to bare URL) and did
+// SplitURIVersion on the result — getting "" version, no
+// fallback, "no entity matches" failure. The user halted the
+// run at exactly this point on testify@v1.11.1.
+//
+// Revert proof: drop the `cmd.requestedVersion != ""` re-attach
+// in assembleSynthesisEvidence; this test fails because lookup
+// uses the BASE URI, the FULL-URI entity is missed, and the
+// fallback split has nothing to do (already at base).
+func TestHandoff_Synthesist_RepoVersionedEvidenceLookup(t *testing.T) {
+	const canonical = "repo:github/example/repo-versioned-evidence@v1.11.1"
+	// Analyst outputs land at the FULL URI — matches what /analyze
+	// produces today before the bigger Plan-A-everywhere refactor.
+	g := synthesisFixtureTarget(t, canonical)
+
+	outPath := filepath.Join(t.TempDir(), "synth-repo-versioned-evidence.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: "github.com/example/repo-versioned-evidence@v1.11.1",
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g),
+		"synthesist must find evidence at the FULL URI when /analyze "+
+			"ingested analysts there — pre-fix this returned 'no entity matches'")
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	// Sanity: the rendered handoff actually embeds the analysts'
+	// finding (proves we found the right entity, not just any).
+	assert.Contains(t, rendered, "synthesist-fixture finding",
+		"the embedded evidence must contain the seeded conclusion's verdict text")
+}
+
+// TestHandoff_Synthesist_FallsBackToBaseWhenFullURINotFound
+// covers the converse direction: if a future Plan-A-everywhere
+// refactor stores analyst outputs at the BASE URI, the
+// synthesist must still find them via the fallback split.
+// Defends both code paths so the lookup is robust regardless of
+// which storage shape is current.
+func TestHandoff_Synthesist_FallsBackToBaseWhenFullURINotFound(t *testing.T) {
+	const baseCanonical = "repo:github/example/repo-base-fallback"
+	// Seed at the BASE URI (Plan A future state).
+	g := synthesisFixtureTarget(t, baseCanonical)
+
+	outPath := filepath.Join(t.TempDir(), "synth-repo-base-fallback.md")
+	cmd := &HandoffCmd{
+		Role: "synthesist",
+		// User input includes @V; storage has only BASE; fallback
+		// split must drop @V and find the BASE entity.
+		Target: "github.com/example/repo-base-fallback@v3.0.0",
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g),
+		"fallback to BASE URI must succeed when analyst outputs "+
+			"are stored at the unversioned form")
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	assert.Contains(t, rendered, "synthesist-fixture finding",
+		"fallback path must produce evidence containing the seeded conclusion")
+}
