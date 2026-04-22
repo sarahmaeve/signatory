@@ -67,25 +67,30 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 // .claude/skills/analyze/SKILL.md.
 var analystAgentRoles = []string{"security-analyst", "provenance-analyst"}
 
-// synthesistAgentRole is checked separately because the synthesist's
-// tooling fence is strictly tighter than the analysts: post-M6e the
-// synthesist's entire input is the evidence block in the handoff
-// body, so Read/Glob/Grep are also forbidden (no filesystem reads,
-// no prior-analysis browsing). The only tools it needs are
-// WebFetch (to retrieve the handoff) and signatory_ingest_analysis
-// (to land its v1 JSON output).
+// synthesistAgentRole is checked separately so a regression back
+// into Bash / Write / MCP-read tools surfaces clearly. The D9
+// independence rule (no prior-analysis cross-pollination) still
+// applies, but as of 2026-04-22 is enforced at the instruction
+// layer rather than the tool-capability layer.
+//
+// Read/Glob/Grep are allowed: Node's TLS stack calls
+// fs.readFileSync(NODE_EXTRA_CA_CERTS) on every HTTPS handshake,
+// and a subagent without file-read capability cannot satisfy that
+// syscall — producing the "unable to verify the first certificate"
+// failure class seen during M6 dogfood (3 of 4 runs). See
+// design/open-architecture-question.md for the hypothesis test
+// that drove this relaxation and for Option A (MCP fetch_handoff)
+// which would re-tighten this fence mechanically if invoked.
 var synthesistAgentRole = "synthesist"
 
-// forbiddenSynthesistTools extends forbiddenAnalystTools with
-// Read/Glob/Grep. The synthesist does not read any file; its
-// entire input arrives inline in the handoff body via WebFetch.
-// Allowing Read would reopen the cross-pollination attack surface
-// (synthesist could Read filestore/analysis/*.md) that M6's D9
-// fence was designed to close.
-var forbiddenSynthesistTools = append(append([]string{},
-	forbiddenAnalystTools...),
-	"Read", "Glob", "Grep",
-)
+// forbiddenSynthesistTools is currently identical to
+// forbiddenAnalystTools. The synthesist's D9 prohibition on
+// reading prior analyses survives at the prompt layer: the
+// handoff body is declared as the sole source of truth and the
+// SKILL.md prompt explicitly forbids using Read to browse
+// filestore / prior analyses. If Option A ships, Read/Glob/Grep
+// return to the forbidden list.
+var forbiddenSynthesistTools = forbiddenAnalystTools
 
 // forbiddenAnalystTools is the set of tool names that must NOT appear
 // on an analyst Agent block's allowed-tools line.
@@ -152,13 +157,14 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 	}
 }
 
-// TestSynthesistAgent_AllowedToolsMinimized enforces the post-M6e
-// synthesist tool fence: Bash, Write, Read, Glob, Grep, and every
-// signatory_* read tool are forbidden. The synthesist's entire
-// input arrives via WebFetch in the handoff body, and its output
-// lands via signatory_ingest_analysis. Any other tool grant is a
-// regression to the pre-M6 "browse filestore, shell out to
-// show-conclusions" pattern that M6 was designed to retire.
+// TestSynthesistAgent_AllowedToolsMinimized enforces the synthesist
+// tool fence: Bash, Write, and every signatory_* read MCP tool are
+// forbidden. The synthesist's evidence arrives via WebFetch in the
+// handoff body, and its output lands via signatory_ingest_analysis.
+// Read/Glob/Grep are permitted as of 2026-04-22 only so Claude
+// Code's HTTPS client can load NODE_EXTRA_CA_CERTS at TLS handshake
+// — the D9 independence rule is enforced by the prompt body rather
+// than tool capability. See design/open-architecture-question.md.
 func TestSynthesistAgent_AllowedToolsMinimized(t *testing.T) {
 	root := findModuleRoot(t)
 	skillPath := filepath.Join(root, ".claude", "skills", "analyze", "SKILL.md")

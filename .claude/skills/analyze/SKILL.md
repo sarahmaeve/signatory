@@ -338,10 +338,20 @@ Agent(synthesist):
     - The tool's response includes the output_id of your synthesis
       record. Report it in your final message so the orchestrator
       can offer `signatory posture accept <output-id>` in Step 5.
-    - Do NOT write files. Do NOT read files. Do NOT run any
-      signatory commands (you have no Bash). The MCP tool is the
-      sole transport for your output.
-  allowed-tools: WebFetch mcp__signatory__signatory_ingest_analysis
+    - Do NOT write files. Do NOT run any signatory commands (you
+      have no Bash). The MCP tool is the sole transport for your
+      output.
+    - Read/Glob/Grep are present in your toolset ONLY so Claude
+      Code's HTTPS client can load the mkcert CA file referenced
+      by NODE_EXTRA_CA_CERTS at TLS handshake time — without
+      file-read capability the WebFetch above fails with
+      "unable to verify the first certificate" (see
+      design/open-architecture-question.md). They MUST NOT be
+      used to browse filestore, prior analyses, source code, or
+      any other evidence beyond what the handoff body carries.
+      The handoff is your complete source of truth by design
+      (D9 independence rule).
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
 The synthesist's output is a v1-schema synthesis record; the
