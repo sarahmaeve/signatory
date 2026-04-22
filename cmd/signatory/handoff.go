@@ -156,6 +156,22 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 			// "--clone-dir requires a URL target" gap surfaced
 			// during the v0.1 dogfood.
 			cmd.Target = resolved.CloneURL
+		} else if cmd.Role == "synthesist" && cmd.URL == "" {
+			// Canonical-URI fallback for the synthesist role only.
+			// The synthesist's TARGET_URL identifies the thing being
+			// synthesized; when the target is a pkg URI with no
+			// clone URL (pkg:npm/X, pkg:go/...), the canonical URI
+			// is the informative form — it's what the synthesist's
+			// output.target field should carry. Without this,
+			// {TARGET_URL} renders literal in the handoff body
+			// (surfaced by the 2026-04-21 dogfood).
+			//
+			// Scoped to synthesist because security/provenance
+			// handoffs use --network-precheck to resolve pkg →
+			// github URL and rely on cmd.URL being empty at this
+			// point so precheck can populate it. Setting it here
+			// would clobber that path.
+			cmd.URL = resolved.CanonicalURI
 		}
 	}
 
@@ -321,8 +337,22 @@ func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *G
 			cmd.Target, err))
 	}
 
+	// Plan-A canonicalization: the evidence for `pkg:npm/X@V` is
+	// indexed under `pkg:npm/X` (unversioned caller URI, per M2 D1).
+	// Try the canonical URI first; if the @V entity doesn't exist,
+	// fall back to the unversioned base. Matches the summary
+	// assembler's normalization — a versioned synthesist handoff
+	// finds its evidence regardless of which entity the /analyze
+	// run materialized.
+	lookupURI := resolved.CanonicalURI
 	assembler := synthesis.New(s)
-	evidence, err := assembler.Assemble(ctx, resolved.CanonicalURI)
+	evidence, err := assembler.Assemble(ctx, lookupURI)
+	if errors.Is(err, synthesis.ErrEntityNotFound) {
+		if baseURI, version := profile.SplitURIVersion(resolved.CanonicalURI); version != "" && baseURI != resolved.CanonicalURI {
+			lookupURI = baseURI
+			evidence, err = assembler.Assemble(ctx, lookupURI)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, synthesis.ErrEntityNotFound) {
 			return "", fmt.Errorf(

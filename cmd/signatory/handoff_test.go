@@ -1949,6 +1949,67 @@ func synthesisFixtureTarget(t *testing.T, canonicalURI string) *Globals {
 	return g
 }
 
+// TestHandoff_Synthesist_FillsTargetURL_ForPkgURIs asserts that
+// {TARGET_URL} substitutes to the canonical URI when the target is
+// a pkg: URI (no CloneURL). Pre-fix, pkg-URI synthesist handoffs
+// left {TARGET_URL} as a literal because the main target-resolution
+// path only filled cmd.URL from resolved.CloneURL, and pkg URIs
+// don't have one. The literal leaked into the target header and
+// the output skeleton, confusing the synthesist into treating
+// "{TARGET_URL}" as text. See 2026-04-21 dogfood.
+func TestHandoff_Synthesist_FillsTargetURL_ForPkgURIs(t *testing.T) {
+	const canonicalURI = "pkg:npm/target-url-fallback"
+	g := synthesisFixtureTarget(t, canonicalURI)
+
+	outPath := filepath.Join(t.TempDir(), "synth.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: canonicalURI,
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	assert.NotContains(t, rendered, "{TARGET_URL}",
+		"pkg:URI synthesist handoff must not leave {TARGET_URL} as a literal placeholder")
+	assert.Contains(t, rendered, canonicalURI,
+		"TARGET_URL fallback must render the canonical URI (the identity being synthesized)")
+}
+
+// TestHandoff_Synthesist_PreservesVersionSuffix_InTargetURL: the
+// fallback must carry a @V suffix through when the caller passed
+// one. This is the user-facing half of Plan-A canonicalization:
+// the rendered handoff's target == the target the caller asked
+// about, version-scoping and all. The synthesist's output.target
+// JSON field gets populated from this, so a versioned handoff
+// yields a versioned synthesis target without inference from the
+// evidence block.
+func TestHandoff_Synthesist_PreservesVersionSuffix_InTargetURL(t *testing.T) {
+	const unversioned = "pkg:npm/target-url-versioned"
+	g := synthesisFixtureTarget(t, unversioned)
+
+	outPath := filepath.Join(t.TempDir(), "synth-versioned.md")
+	cmd := &HandoffCmd{
+		Role:   "synthesist",
+		Target: unversioned + "@3.1.4",
+		Output: outPath,
+		Quiet:  true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	body, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	rendered := string(body)
+
+	assert.NotContains(t, rendered, "{TARGET_URL}")
+	assert.Contains(t, rendered, unversioned+"@3.1.4",
+		"@V suffix must be preserved in TARGET_URL so the synthesist's output.target is versioned")
+}
+
 // TestHandoff_Synthesist_EmbedsEvidenceJSON covers the M6c contract:
 // when role=synthesist, the rendered handoff must contain the
 // evidence block substituted in place of {EVIDENCE_JSON} and carry
