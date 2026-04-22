@@ -923,6 +923,17 @@ ALTER TABLE analyst_outputs DROP COLUMN synthesis_supplement_json;
 // Indexes drop with the table and are recreated afterward. No
 // FKs in or out of citations, so no foreign_keys PRAGMA gymnastics.
 //
+// Append-only trigger ceremony: citations carries the v3 append-
+// only triggers (citations_no_update, citations_no_delete) — see
+// migrationV3Up. Both the legacy 'finding'→'conclusion' UPDATE and
+// the rebuild's DROP TABLE would be blocked by these triggers
+// (the UPDATE directly; DROP via per-row delete in some SQLite
+// versions). v9Up explicitly drops the triggers at the start, runs
+// the cleanup + rebuild, then reinstalls them on the rebuilt
+// table. The triggers cannot survive the table rebuild even if we
+// left them in place, since SQLite binds them to the table's OID
+// and DROP TABLE invalidates the OID.
+//
 // If the rebuild INSERT fails on a row whose parent_kind isn't in
 // the CHECK list (and isn't the 'finding' value we cleaned up),
 // the migration aborts its transaction and the operator keeps the
@@ -932,12 +943,19 @@ ALTER TABLE analyst_outputs DROP COLUMN synthesis_supplement_json;
 // warranted for an edge case that requires someone to have
 // inserted a non-production value into the store.
 const migrationV9Up = `
--- Defensive cleanup: pre-v5 'finding' → post-v5 'conclusion'.
+-- Step 1: Drop the v3-installed append-only triggers temporarily.
+-- They would block the legacy 'finding' UPDATE below and would not
+-- survive the table rebuild regardless (SQLite binds triggers to
+-- table OIDs; DROP TABLE invalidates the binding).
+DROP TRIGGER IF EXISTS citations_no_update;
+DROP TRIGGER IF EXISTS citations_no_delete;
+
+-- Step 2: Defensive cleanup — pre-v5 'finding' → post-v5 'conclusion'.
 -- Safe no-op on databases that never held pre-v5 data.
 UPDATE citations SET parent_kind = 'conclusion' WHERE parent_kind = 'finding';
 
--- Rebuild citations with the CHECK constraint (SQLite can't ALTER
--- TABLE ADD CONSTRAINT, so we copy through a new table).
+-- Step 3: Rebuild citations with the CHECK constraint (SQLite can't
+-- ALTER TABLE ADD CONSTRAINT, so we copy through a new table).
 CREATE TABLE citations_new (
     id              TEXT PRIMARY KEY,
     parent_kind     TEXT NOT NULL CHECK (parent_kind IN ('conclusion', 'positive_absence', 'observation')),
@@ -962,9 +980,18 @@ FROM citations;
 DROP TABLE citations;
 ALTER TABLE citations_new RENAME TO citations;
 
--- Recreate indexes (they were attached to the old table).
+-- Step 4: Recreate indexes (they were attached to the old table).
 CREATE INDEX IF NOT EXISTS idx_citations_parent ON citations(parent_kind, parent_id);
 CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
+
+-- Step 5: Reinstall the append-only triggers on the rebuilt table.
+-- Body matches the v3 originals exactly; without these the
+-- citations table would silently lose its append-only invariant
+-- after v9 lands.
+CREATE TRIGGER citations_no_update BEFORE UPDATE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
+CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
 `
 
 // migrationV9Down reverses the CHECK by rebuilding the table
@@ -974,7 +1001,16 @@ CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
 // be a foot-gun masquerading as a recovery path. Down is for
 // reverting the CHECK specifically, not for time-traveling the
 // table's contents back to before v5.
+//
+// Same trigger ceremony as v9Up: drop the append-only triggers
+// before the rebuild, reinstall on the rebuilt table afterward.
+// Without this, DROP TABLE could trip the no-delete trigger and
+// the post-rebuild table would silently lose its append-only
+// invariant.
 const migrationV9Down = `
+DROP TRIGGER IF EXISTS citations_no_update;
+DROP TRIGGER IF EXISTS citations_no_delete;
+
 CREATE TABLE citations_old (
     id              TEXT PRIMARY KEY,
     parent_kind     TEXT NOT NULL,
@@ -1001,6 +1037,11 @@ ALTER TABLE citations_old RENAME TO citations;
 
 CREATE INDEX IF NOT EXISTS idx_citations_parent ON citations(parent_kind, parent_id);
 CREATE INDEX IF NOT EXISTS idx_citations_path ON citations(path);
+
+CREATE TRIGGER citations_no_update BEFORE UPDATE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
+CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
+    BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
 `
 
 // migrate runs all pending migrations on the database. It:

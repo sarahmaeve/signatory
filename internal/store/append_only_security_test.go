@@ -247,3 +247,102 @@ func TestSecurity_CitationsCheckParentKind_AcceptsValid(t *testing.T) {
 			"INSERT with legitimate parent_kind %q must succeed", kind)
 	}
 }
+
+// TestSecurity_Citations_AppendOnlyTriggersSurviveV9 is the
+// regression guard for the v9 trigger-ceremony bug discovered
+// during dogfood install: the v9 rebuild would drop+recreate
+// the citations table, losing the v3-installed append-only
+// triggers unless v9 explicitly reinstalls them on the new table.
+//
+// A v9 that forgot to reinstall the triggers would still pass all
+// CHECK-constraint tests because those only exercise INSERT. This
+// test fires on UPDATE and DELETE, which are exactly what the
+// triggers block — and which would silently start succeeding if
+// the triggers didn't survive.
+//
+// Revert proof: delete the two `CREATE TRIGGER citations_no_...`
+// stanzas at the end of migrationV9Up; this test fails because
+// UPDATE/DELETE now succeed against a citations table that lost
+// its append-only invariant after the v9 rebuild.
+func TestSecurity_Citations_AppendOnlyTriggersSurviveV9(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// Insert a legitimate citation so there's a row to try to
+	// mutate. Goes through direct SQL (not insertCitations) because
+	// this test is specifically about the schema-level enforcement,
+	// not the Go path.
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO citations (id, parent_kind, parent_id, seq)
+		 VALUES (?, ?, ?, ?)`,
+		"cite-trigger-test", "conclusion", "parent-1", 0)
+	require.NoError(t, err)
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE citations SET parent_id = ? WHERE id = ?`, "tampered", "cite-trigger-test")
+	require.Error(t, err, "UPDATE on citations must be blocked by the append-only trigger after v9")
+	assert.Contains(t, err.Error(), "append-only",
+		"error should name the append-only invariant")
+
+	_, err = s.db.ExecContext(ctx,
+		`DELETE FROM citations WHERE id = ?`, "cite-trigger-test")
+	require.Error(t, err, "DELETE on citations must be blocked by the append-only trigger after v9")
+	assert.Contains(t, err.Error(), "append-only")
+}
+
+// TestMigration_V9_CleansLegacyFindingOnRebuild is the regression
+// guard for the v9 bug discovered during dogfood install: the
+// cleanup UPDATE (pre-v5 'finding' → post-v5 'conclusion') tripped
+// the citations append-only trigger and aborted the whole v9
+// transaction, leaving real-world DBs stuck at v8.
+//
+// Test shape: migrate fresh DB to v9, back off to v8, insert a
+// legacy 'finding' row directly (legal at v8 schema — no CHECK,
+// and INSERT isn't trigger-blocked), then re-migrate to v9. v9
+// must succeed and the row must come out the other side rewritten
+// to 'conclusion'.
+//
+// Revert proof: remove the two `DROP TRIGGER IF EXISTS` lines at
+// the start of migrationV9Up; this test fails with "constraint
+// failed: citations are append-only" when v9's cleanup UPDATE hits
+// the still-active citations_no_update trigger.
+func TestMigration_V9_CleansLegacyFindingOnRebuild(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// Back off v9 → v8 so the CHECK is gone and we can insert a
+	// 'finding' row. v9Down reinstalls the append-only triggers,
+	// but INSERT isn't trigger-blocked (only UPDATE/DELETE are).
+	require.NoError(t, migrateDown(ctx, s.db, ""))
+	version, err := getCurrentVersion(ctx, s.db)
+	require.NoError(t, err)
+	require.Equal(t, 8, version, "fixture: must be at v8 before inserting legacy data")
+
+	// Insert a citation with the pre-v5 'finding' parent_kind.
+	// This represents a row that was written before v5's
+	// Finding→Conclusion rename — exactly the shape v9's cleanup
+	// UPDATE exists to handle.
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO citations (id, parent_kind, parent_id, seq)
+		 VALUES (?, ?, ?, ?)`,
+		"cite-legacy", "finding", "parent-ancient", 0)
+	require.NoError(t, err, "INSERT with pre-v5 parent_kind must succeed at v8 schema")
+
+	// Re-migrate to v9. v9's cleanup rewrites the 'finding' row
+	// before the CHECK rebuild fires, working around the citations
+	// append-only trigger via explicit DROP/CREATE around the
+	// UPDATE. Pre-fix this failed with "citations are append-only".
+	require.NoError(t, migrate(ctx, s.db, ""),
+		"v9 must succeed even with pre-v5 legacy data in citations")
+
+	version, err = getCurrentVersion(ctx, s.db)
+	require.NoError(t, err)
+	require.Equal(t, 9, version)
+
+	var kind string
+	require.NoError(t, s.db.QueryRowContext(ctx,
+		`SELECT parent_kind FROM citations WHERE id = ?`, "cite-legacy").
+		Scan(&kind))
+	assert.Equal(t, "conclusion", kind,
+		"legacy 'finding' row must be rewritten to 'conclusion' by v9's cleanup UPDATE")
+}
