@@ -43,6 +43,22 @@ type PostureGetCmd struct {
 
 func (cmd *PostureGetCmd) Run(globals *Globals) error {
 	ctx := context.Background()
+
+	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
+	// the `pkg:npm/X` entity with the posture row's `version` column
+	// = "V". Strip any @V suffix from the target and fold it into
+	// cmd.Version so the downstream GetPosture lookup routes to the
+	// canonical storage form. The dogfood bug (2026-04-21) was
+	// precisely this: a versioned-URI query landed at the versioned
+	// entity, which has no posture rows, instead of the unversioned
+	// entity where posture accept wrote the row.
+	base, version, err := normalizeTargetForPosture(cmd.Target, cmd.Version)
+	if err != nil {
+		return NewUsageError(err)
+	}
+	cmd.Target = base
+	cmd.Version = version
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -143,6 +159,22 @@ type PostureSetCmd struct {
 
 func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	ctx := context.Background()
+
+	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
+	// the `pkg:npm/X` entity with the row's version column = "V".
+	// Strip any @V suffix from the target before entity lookup so
+	// the write routes to the canonical unversioned entity. Merges
+	// with --version flag; the two must agree or this is a usage
+	// error. See design/m6-synthesis-contract.md and the 2026-04-21
+	// dogfood where version-suffix queries missed postures stored at
+	// the unversioned form.
+	base, version, err := normalizeTargetForPosture(cmd.Target, cmd.Version)
+	if err != nil {
+		return NewUsageError(err)
+	}
+	cmd.Target = base
+	cmd.Version = version
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -153,19 +185,6 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	actor, err := identity.Current()
 	if err != nil {
 		return fmt.Errorf("resolve team identity: %w", err)
-	}
-
-	// Reconcile URI-embedded @version with the explicit --version
-	// flag. If the URI carries a version and --version is also set
-	// they must agree; otherwise the caller is stating two different
-	// things about one posture row (§3.3, agent-facing-contract.md).
-	if resolved, rerr := profile.ResolveTarget(cmd.Target); rerr == nil && resolved.Version != "" {
-		switch {
-		case cmd.Version == "":
-			cmd.Version = resolved.Version
-		case cmd.Version != resolved.Version:
-			return NewUsageError(fmt.Errorf("--version %q conflicts with target URI version %q; pass a single version or remove one of the two", cmd.Version, resolved.Version))
-		}
 	}
 
 	// Reconcile --rationale / --rationale-file. Exactly one must be
@@ -236,6 +255,40 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 			"not a specific version. Consider re-running with --version for version-specific trust decisions.")
 	}
 	return nil
+}
+
+// normalizeTargetForPosture reconciles a target string + optional
+// --version flag into the Plan-A canonical storage form: an
+// unversioned target and a version string. If the target carries a
+// `@V` suffix (pkg URIs only per v0.1 grammar), the suffix is
+// stripped and folded into the returned version. If a --version flag
+// was also passed, the two must agree or a usage error is returned.
+//
+// Under Plan A, postures for `pkg:npm/X@V` live at the `pkg:npm/X`
+// entity with the posture row's `version` column set to "V". Every
+// posture-family command (set/get/unset/accept) funnels through this
+// helper so the two input forms (`X@V` and `X --version V`) resolve
+// to the same storage row. Non-pkg URIs pass through unchanged in
+// the target position.
+//
+// Returns a usage error (not wrapped) when --version and the URI
+// suffix disagree — callers should wrap with NewUsageError so the
+// exit code reflects the caller's mistake.
+func normalizeTargetForPosture(target, flagVersion string) (baseTarget, version string, err error) {
+	base, uriVersion := profile.SplitURIVersion(target)
+	if uriVersion == "" {
+		return target, flagVersion, nil
+	}
+	switch {
+	case flagVersion == "":
+		return base, uriVersion, nil
+	case flagVersion == uriVersion:
+		return base, flagVersion, nil
+	default:
+		return "", "", fmt.Errorf(
+			"--version %q conflicts with target URI version %q; pass a single version or remove one of the two",
+			flagVersion, uriVersion)
+	}
 }
 
 // --- Shared helpers used by posture, burn, and analyze. ---
@@ -368,14 +421,16 @@ type PostureUnsetCmd struct {
 func (cmd *PostureUnsetCmd) Run(globals *Globals) error {
 	ctx := context.Background()
 
-	if resolved, rerr := profile.ResolveTarget(cmd.Target); rerr == nil && resolved.Version != "" {
-		switch {
-		case cmd.Version == "":
-			cmd.Version = resolved.Version
-		case cmd.Version != resolved.Version:
-			return NewUsageError(fmt.Errorf("--version %q conflicts with target URI version %q", cmd.Version, resolved.Version))
-		}
+	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
+	// the `pkg:npm/X` entity with the row's version column = "V".
+	// Strip any @V suffix so the WithdrawPosture lookup routes to the
+	// canonical storage form. See PostureSetCmd for the sibling fix.
+	base, version, err := normalizeTargetForPosture(cmd.Target, cmd.Version)
+	if err != nil {
+		return NewUsageError(err)
 	}
+	cmd.Target = base
+	cmd.Version = version
 
 	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
 	if err != nil {
@@ -546,11 +601,18 @@ func (cmd *PostureAcceptCmd) Run(globals *Globals) error {
 	// under (respects the M2 collected_from hop: a synthesis indexed
 	// under pkg:npm/X with collected_from=repo:github/Y produces a
 	// posture on pkg:npm/X, matching agent-facing-contract §3.2).
+	//
+	// Plan-A canonicalization: if the synthesis's target carries a
+	// @V suffix, strip it before the entity lookup so the posture
+	// lands at the unversioned entity with `version` column populated.
+	// Matches the posture set/get/unset normalization path and keeps
+	// the two URI forms (X@V vs X + --version V) interoperable.
 	synOutput, err := s.GetAnalystOutput(ctx, cmd.OutputID)
 	if err != nil {
 		return fmt.Errorf("load synthesis output: %w", err)
 	}
-	entity, err := s.FindEntityByURI(ctx, synOutput.Target)
+	baseSynTarget, _ := profile.SplitURIVersion(synOutput.Target)
+	entity, err := s.FindEntityByURI(ctx, baseSynTarget)
 	if err != nil {
 		return fmt.Errorf("locate entity for synthesis target %q: %w", synOutput.Target, err)
 	}

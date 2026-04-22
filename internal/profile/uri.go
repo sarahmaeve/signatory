@@ -238,3 +238,52 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 
 	return CanonicalRepoURI(PlatformGitHub, owner, name), owner, name, nil
 }
+
+// SplitURIVersion splits a canonical URI into (base, version). The
+// base is the URI without any `@version` suffix; the version is the
+// suffix value or empty.
+//
+// This is the Plan-A canonicalization primitive: postures for
+// `pkg:npm/X@V` are stored at the `pkg:npm/X` entity with the posture
+// row's `version` column set to "V". `posture set`, `posture get`,
+// `posture unset`, `posture accept`, and the summary assembler all
+// route URIs through this helper before touching the store, so a
+// query for `pkg:npm/X@V` and a query with `X --version V` both
+// resolve to the same row.
+//
+// Rules (v0.1 grammar):
+//   - Only pkg URIs carry version suffixes. repo:, identity:, org:,
+//     patch: URIs pass through unchanged with version="" — content-hash
+//     / SHA pinning is a v0.2+ concept (agent-facing-contract D7).
+//   - The `@` that separates name from version lives in the LAST path
+//     segment. Scoped npm packages like `pkg:npm/@types/node` have
+//     an `@` inside their name but in the FIRST path segment — the
+//     scan is deliberately anchored to the last segment so the scope
+//     `@` is not mistaken for a version separator.
+//   - Inputs that don't start with `pkg:` pass through verbatim.
+//
+// Designed to be cheap — a few indexing operations on a single
+// string, no allocations beyond the returned substrings.
+// Deliberately does NOT validate that the input is a well-formed
+// canonical URI; callers that need validation use
+// ValidateCanonicalURI first.
+func SplitURIVersion(uri string) (base, version string) {
+	if !strings.HasPrefix(uri, URISchemePackage) {
+		return uri, ""
+	}
+	lastSlash := strings.LastIndexByte(uri, '/')
+	if lastSlash < 0 {
+		// Malformed pkg URI with no path. Pass through rather than
+		// synthesize a split that the caller would have to second-
+		// guess.
+		return uri, ""
+	}
+	lastSeg := uri[lastSlash+1:]
+	at := strings.IndexByte(lastSeg, '@')
+	if at < 0 {
+		return uri, ""
+	}
+	base = uri[:lastSlash+1] + lastSeg[:at]
+	version = lastSeg[at+1:]
+	return base, version
+}

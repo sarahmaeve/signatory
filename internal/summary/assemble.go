@@ -53,7 +53,25 @@ func New(s AssemblerStore) *Assembler {
 // entity in the store. Other errors surface verbatim — failed
 // posture lookup, DB-closed, etc.
 func (a *Assembler) Assemble(ctx context.Context, targetURI string) (*Summary, error) {
+	// Plan-A canonicalization: `pkg:npm/X@V` postures live at the
+	// `pkg:npm/X` entity with version column = "V". Split the input
+	// URI so we can both fall back to the unversioned entity when
+	// the versioned one doesn't exist, AND pick the posture row
+	// whose version matches the @V suffix instead of "latest across
+	// versions." Matches the posture set/get/unset/accept command
+	// normalization. See design/m6-synthesis-contract.md and
+	// 2026-04-21 dogfood.
+	baseURI, queryVersion := profile.SplitURIVersion(targetURI)
+
 	entity, err := a.Store.FindEntityByURI(ctx, targetURI)
+	if errors.Is(err, store.ErrNotFound) && queryVersion != "" && baseURI != targetURI {
+		// Versioned entity doesn't exist; try the unversioned form
+		// so a @V query can still surface a posture stored under
+		// the canonical unversioned identity. Common when /analyze
+		// was run against unversioned input and no versioned entity
+		// was ever materialized.
+		entity, err = a.Store.FindEntityByURI(ctx, baseURI)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("%w: %q", ErrEntityNotFound, targetURI)
@@ -72,9 +90,39 @@ func (a *Assembler) Assemble(ctx context.Context, targetURI string) (*Summary, e
 	// row. GetPostures returns active rows newest-first (per the
 	// store contract), so index 0 is the active snapshot when the
 	// entity has any posture history.
+	//
+	// Plan-A canonicalization: postures for `pkg:npm/X@V` live at
+	// the `pkg:npm/X` entity with version column = "V". When the
+	// input URI carried a @V suffix, we need to check postures at
+	// BOTH the primary entity (in case of legacy versioned-entity
+	// storage) AND the unversioned entity (the canonical form). A
+	// versioned entity may exist from analyst ingestion with no
+	// posture rows of its own — the posture is at the unversioned
+	// sibling.
 	postures, err := a.Store.GetPostures(ctx, entity.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list postures: %w", err)
+	}
+	if queryVersion != "" && baseURI != entity.CanonicalURI {
+		// Primary entity is the versioned one; also query the
+		// unversioned sibling for a posture with version column
+		// matching the @V suffix. Merge into the same list so the
+		// filter + latest logic below works uniformly.
+		if baseEntity, baseErr := a.Store.FindEntityByURI(ctx, baseURI); baseErr == nil {
+			more, mErr := a.Store.GetPostures(ctx, baseEntity.ID)
+			if mErr != nil {
+				return nil, fmt.Errorf("list postures (base): %w", mErr)
+			}
+			postures = append(postures, more...)
+		}
+	}
+	if queryVersion != "" {
+		// When the input carried @V, the caller wants the posture
+		// that applies to that version — not the latest across all
+		// versions.
+		postures = slices.DeleteFunc(postures, func(p profile.Posture) bool {
+			return p.Version != queryVersion
+		})
 	}
 	if len(postures) > 0 {
 		latest := postures[0]

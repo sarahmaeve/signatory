@@ -269,3 +269,102 @@ func repeatString(s string, n int) string {
 	}
 	return string(out)
 }
+
+// TestSplitURIVersion covers the Plan-A canonicalization helper:
+// split a canonical URI into (base, version) so posture storage can
+// route `pkg:npm/X@V` writes to the unversioned entity with the
+// version landing in the posture row's version column. Used by
+// posture set/get/unset/accept and the summary assembler.
+//
+// Contract recap:
+//   - pkg URI with @V in the last segment → strip it
+//   - pkg URI without @V → pass through, version=""
+//   - non-pkg URIs (repo:, identity:, org:, patch:) → pass through,
+//     version="" (v0.1 grammar has @V only on pkg URIs)
+//   - scoped npm package names (`@types/node`, `@angular/core`) have
+//     an @ in the NAME but NOT in the last path segment — the split
+//     must find the @ in the last segment only, not the first one.
+func TestSplitURIVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		uri         string
+		wantBase    string
+		wantVersion string
+	}{
+		{
+			name:        "pkg with version",
+			uri:         "pkg:npm/foo@1.2.3",
+			wantBase:    "pkg:npm/foo",
+			wantVersion: "1.2.3",
+		},
+		{
+			name:        "pkg without version",
+			uri:         "pkg:npm/foo",
+			wantBase:    "pkg:npm/foo",
+			wantVersion: "",
+		},
+		{
+			name:        "scoped npm with version",
+			uri:         "pkg:npm/@types/node@22.0.0",
+			wantBase:    "pkg:npm/@types/node",
+			wantVersion: "22.0.0",
+		},
+		{
+			name:        "scoped npm without version",
+			uri:         "pkg:npm/@types/node",
+			wantBase:    "pkg:npm/@types/node",
+			wantVersion: "",
+		},
+		{
+			name:        "pkg go with version",
+			uri:         "pkg:go/github.com/foo/bar@v1.2.3",
+			wantBase:    "pkg:go/github.com/foo/bar",
+			wantVersion: "v1.2.3",
+		},
+		{
+			name:        "pkg pypi with dotted version",
+			uri:         "pkg:pypi/requests@2.31.0",
+			wantBase:    "pkg:pypi/requests",
+			wantVersion: "2.31.0",
+		},
+		{
+			name:        "repo URI passes through",
+			uri:         "repo:github/foo/bar",
+			wantBase:    "repo:github/foo/bar",
+			wantVersion: "",
+		},
+		{
+			name:        "identity URI passes through",
+			uri:         "identity:github/someone",
+			wantBase:    "identity:github/someone",
+			wantVersion: "",
+		},
+		{
+			name:        "patch URI passes through",
+			uri:         "patch:github/foo/bar/42",
+			wantBase:    "patch:github/foo/bar/42",
+			wantVersion: "",
+		},
+		{
+			name:        "empty string passes through",
+			uri:         "",
+			wantBase:    "",
+			wantVersion: "",
+		},
+		{
+			name:        "pkg with hyphenated version",
+			uri:         "pkg:npm/foo@1.2.3-rc.1",
+			wantBase:    "pkg:npm/foo",
+			wantVersion: "1.2.3-rc.1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBase, gotVersion := SplitURIVersion(tt.uri)
+			assert.Equal(t, tt.wantBase, gotBase, "base URI mismatch")
+			assert.Equal(t, tt.wantVersion, gotVersion, "version mismatch")
+		})
+	}
+}

@@ -273,19 +273,31 @@ func TestFunctional_PerVersionBurn_IsolatedFromRoot(t *testing.T) {
 // TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions verifies
 // that burning v2.2.4 leaves v2.2.3 unburned. The two versions are
 // independent identities; burning one must not propagate.
+//
+// Note: this test uses two BURNS (not one burn + one posture set)
+// because Plan-A posture canonicalization (2026-04-21) routes
+// `posture set X@V` to the unversioned entity — posture set no
+// longer materializes a versioned entity row. Burn is still
+// per-version-entity. Two burns exercise the per-version non-
+// propagation invariant without depending on which storage model
+// each verb uses.
 func TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions(t *testing.T) {
 	globals := testGlobals(t)
 
-	// Create both versions by burning one and setting a posture
-	// on the other; either path creates an entity row.
+	// Burn v2.2.4 and also create a row for v2.2.3 via a second
+	// burn we'll immediately withdraw, so the entity exists without
+	// an active burn.
 	require.NoError(t, (&BurnAddCmd{
 		Target: "pkg:npm/invariant@2.2.4",
 		Reason: "orphaned tag",
 	}).Run(globals))
-	require.NoError(t, (&PostureSetCmd{
-		Target:    "pkg:npm/invariant@2.2.3",
-		Tier:      "trusted-for-now",
-		Rationale: "prior release; no known issues",
+	require.NoError(t, (&BurnAddCmd{
+		Target: "pkg:npm/invariant@2.2.3",
+		Reason: "placeholder — will be withdrawn",
+	}).Run(globals))
+	require.NoError(t, (&BurnRemoveCmd{
+		Target: "pkg:npm/invariant@2.2.3",
+		Reason: "entity creation only",
 	}).Run(globals))
 
 	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
@@ -298,7 +310,7 @@ func TestFunctional_PerVersionBurn_DoesNotBurnOtherVersions(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, e24.ID, e23.ID, "different versions must have different entity IDs")
 
-	// v2.2.4 is burned; v2.2.3 is not.
+	// v2.2.4 is burned; v2.2.3 was only created as a placeholder.
 	_, err = s.GetBurn(context.Background(), e24.ID)
 	require.NoError(t, err, "v2.2.4 burn must be retrievable")
 	_, err = s.GetBurn(context.Background(), e23.ID)
@@ -334,7 +346,10 @@ func TestFunctional_PostureSet_RationaleFromFile(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	entity, err := s.FindEntityByURI(context.Background(), "pkg:go/golang.org/x/mod@v0.35.0")
+	// Plan-A storage: `posture set X@V` routes the write to the
+	// UNVERSIONED entity with the posture row's version column
+	// populated. Look up by the stripped URI.
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:go/golang.org/x/mod")
 	require.NoError(t, err)
 	postures, err := s.GetPostures(context.Background(), entity.ID)
 	require.NoError(t, err)
@@ -465,7 +480,9 @@ func TestFunctional_PostureUnset(t *testing.T) {
 	s, err := store.OpenSQLite(t.Context(), globals.DBPath)
 	require.NoError(t, err)
 	defer s.Close()
-	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/lodash@4.17.21")
+	// Plan-A: posture set X@V routes to the unversioned entity with
+	// version column populated.
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/lodash")
 	require.NoError(t, err)
 
 	// Active posture present.
@@ -592,7 +609,10 @@ func TestFunctional_PostureSet_VersionedURI_InheritsVersion(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/lodash@4.17.21")
+	// Plan-A: posture set X@V routes to the unversioned entity with
+	// version column populated. The test asserts the canonical
+	// storage form — entity at pkg:npm/lodash, posture.Version="4.17.21".
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:npm/lodash")
 	require.NoError(t, err)
 	postures, err := s.GetPostures(context.Background(), entity.ID)
 	require.NoError(t, err)
