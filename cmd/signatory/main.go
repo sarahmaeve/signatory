@@ -88,7 +88,14 @@ func main() {
 		// mocks; see functional_test.go's testGlobals helper.
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// errStatusNotRunning is a status-style sentinel: the
+		// command (ServeStatusCmd) has already written its
+		// human-readable line to stdout, so we skip the stderr
+		// echo and exit with the standard non-zero code. Other
+		// errors print to stderr as usual.
+		if !errors.Is(err, errStatusNotRunning) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(exitCodeFor(err))
 	}
 }

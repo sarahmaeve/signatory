@@ -37,6 +37,40 @@ const (
 	startProbeSeconds = 3
 )
 
+// errStatusNotRunning is returned by ServeStatusCmd when the service
+// is not running, to signal exit code 1 to shell callers without
+// main() echoing a duplicate error line to stderr. Status has
+// already written its human-readable line to stdout; a stderr
+// repeat would be noise. main.go knows this sentinel and skips
+// the stderr-print path for it.
+//
+// Replaces the prior in-command os.Exit(1) calls, which were
+// untestable through the standard CLI test path (they killed the
+// test runner) and bypassed any cleanup deferred at higher levels.
+var errStatusNotRunning = errors.New("signatory serve: not running")
+
+// killFn is the syscall.Kill seam — package-level so tests can
+// substitute a recorder without mutating real OS state. Production
+// uses syscall.Kill directly. Tests assert that destructive paths
+// (Stop, Restart) do NOT call this when the named PID is alive but
+// belongs to a process that isn't ours.
+var killFn = syscall.Kill
+
+// serviceBinaryName returns the basename of "our" binary, used by
+// isOurServiceAlive to verify a PID hasn't been recycled to an
+// unrelated process. Defaults to filepath.Base(os.Executable()).
+// As a function-typed var rather than a baked string constant,
+// tests can override it (e.g., to simulate the post-recycling
+// state where the OS has reassigned signatory's old PID to some
+// other binary).
+var serviceBinaryName = func() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "signatory"
+	}
+	return filepath.Base(exe)
+}
+
 // ServeStartCmd launches the pipeline service detached in the
 // background and returns once the port is confirmed listening.
 //
@@ -56,9 +90,13 @@ type ServeStartCmd struct {
 }
 
 func (cmd *ServeStartCmd) Run(_ *Globals) error {
-	// Refuse to clobber a live instance.
+	// Refuse to clobber a live instance. Use isOurServiceAlive (not
+	// isProcessAlive) so a recycled PID belonging to a stranger is
+	// treated as a stale pidfile and we proceed to start — otherwise
+	// signatory would refuse to start with a confusing "already
+	// running" message after the OS reassigned the freed PID.
 	existing, err := readPidFile(cmd.PidPath)
-	if err == nil && isProcessAlive(existing) {
+	if err == nil && isOurServiceAlive(existing) {
 		return fmt.Errorf("service already running (PID %d); use `signatory serve restart` or `signatory serve stop` first",
 			existing)
 	}
@@ -174,14 +212,21 @@ func (cmd *ServeStopCmd) Run(_ *Globals) error {
 	if err != nil {
 		return fmt.Errorf("read pidfile %q: %w", cmd.PidPath, err)
 	}
-	if !isProcessAlive(pid) {
-		fmt.Printf("signatory serve: pidfile named PID %d but the process is not alive; removing stale pidfile\n", pid)
+	// PID-recycling defense: isOurServiceAlive verifies the PID is
+	// alive AND belongs to a signatory binary. A live PID that's
+	// been reassigned to a stranger (editor, terminal, anything) is
+	// treated as a stale pidfile — we clean it and report not-
+	// running rather than send SIGTERM to the stranger.
+	if !isOurServiceAlive(pid) {
+		fmt.Printf("signatory serve: pidfile named PID %d but no signatory process is alive at that PID; removing stale pidfile\n", pid)
 		_ = os.Remove(cmd.PidPath)
 		return nil
 	}
 
-	// Graceful shutdown first.
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	// Graceful shutdown first. killFn is a package-level seam so
+	// tests can verify Stop never signals strangers — see
+	// serve_lifecycle_test.go.
+	if err := killFn(pid, syscall.SIGTERM); err != nil {
 		return fmt.Errorf("send SIGTERM to PID %d: %w", pid, err)
 	}
 	if waitForExit(pid, stopGraceSeconds*time.Second) {
@@ -192,7 +237,7 @@ func (cmd *ServeStopCmd) Run(_ *Globals) error {
 
 	// Escalate.
 	fmt.Fprintf(os.Stderr, "# signatory serve: PID %d did not exit within %ds, sending SIGKILL\n", pid, stopGraceSeconds)
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	if err := killFn(pid, syscall.SIGKILL); err != nil {
 		return fmt.Errorf("send SIGKILL to PID %d: %w", pid, err)
 	}
 	if !waitForExit(pid, 2*time.Second) {
@@ -204,9 +249,19 @@ func (cmd *ServeStopCmd) Run(_ *Globals) error {
 }
 
 // ServeStatusCmd reports whether the detached service is running.
-// Resolves the pidfile, verifies the named PID is alive, and prints
-// a one-line summary. Exits 0 if running, 1 if not — lets shell
-// scripts do `signatory serve status >/dev/null && echo running`.
+// Resolves the pidfile, verifies the named PID is alive AND owned
+// by a signatory binary, and prints a one-line summary. Exits 0
+// if running, 1 if not — lets shell scripts do
+// `signatory serve status >/dev/null && echo running`.
+//
+// The exit-1 path returns errStatusNotRunning rather than calling
+// os.Exit directly. main() maps the sentinel to exit code 1 and
+// suppresses the stderr echo since the human-readable status line
+// has already been printed to stdout. Returning through main's
+// standard error path also keeps Status testable via the same CLI
+// test harness as every other subcommand — pre-fix, mid-function
+// os.Exit calls killed the test binary before assertions could
+// run.
 type ServeStatusCmd struct {
 	PidPath string `help:"Path to the pidfile." default:"~/.signatory/serve.pid" type:"path"`
 	Port    int    `help:"Port to probe for listen-readiness." default:"21517"`
@@ -216,19 +271,21 @@ func (cmd *ServeStatusCmd) Run(_ *Globals) error {
 	pid, err := readPidFile(cmd.PidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Println("signatory serve: not running (no pidfile)")
-		os.Exit(1) //nolint:gocritic // status commands use exit codes to signal state to shell callers
+		return errStatusNotRunning
 	}
 	if err != nil {
 		return fmt.Errorf("read pidfile %q: %w", cmd.PidPath, err)
 	}
-	if !isProcessAlive(pid) {
+	// Same recycling defense as Stop: a live PID owned by a
+	// stranger is "not running" from signatory's perspective.
+	if !isOurServiceAlive(pid) {
 		fmt.Printf("signatory serve: not running (stale pidfile at %s named PID %d)\n", cmd.PidPath, pid)
-		os.Exit(1) //nolint:gocritic // same reason
+		return errStatusNotRunning
 	}
 
-	// Process is alive. Probe the port to distinguish "running and
-	// healthy" from "running but port-bind failed" (the Start
-	// escape hatch).
+	// Process is alive AND ours. Probe the port to distinguish
+	// "running and healthy" from "running but port-bind failed"
+	// (the Start escape hatch).
 	portHealthy := probePort(cmd.Port, 500*time.Millisecond)
 	healthStr := "listening"
 	if !portHealthy {
@@ -365,13 +422,57 @@ func writePidFile(path string, pid int) error {
 // actually deliver a signal, just checks existence and
 // permissions).
 //
-// Caveat: on systems that recycle PIDs, an unrelated process
-// with the same PID could have replaced a dead signatory. The
-// pidfile approach is structurally vulnerable to PID recycling;
-// a hardened version would also check argv / binary path. Adequate
-// for v0.1's single-developer dogfood target.
+// Liveness alone is NOT sufficient for destructive callers: an
+// unrelated process may have inherited a recycled PID. Code that
+// would signal the process (Stop, Restart) MUST go through
+// isOurServiceAlive instead, which also verifies the binary name.
+// This function remains useful only for non-destructive checks
+// where false-positives are tolerable.
 func isProcessAlive(pid int) bool {
 	return syscall.Kill(pid, syscall.Signal(0)) == nil
+}
+
+// isOurServiceAlive reports whether the named PID is alive AND
+// belongs to a "signatory" binary. This is the destructive-action
+// gate: PID-recycling is a real failure mode for any pidfile
+// scheme, and a SIGTERM aimed at a recycled PID would hit an
+// unrelated process (an editor, a terminal, anything the OS
+// reassigned the freed PID to).
+//
+// Cross-platform implementation: shells to `ps -p <pid> -o comm=`,
+// supported by both macOS and Linux ps. The comm field returns the
+// command basename (truncated to ~16 chars on some kernels;
+// "signatory" fits comfortably). False-on-error is the safe default
+// for destructive callers — better to decline-to-act than to act
+// on a misidentified PID.
+//
+// Trade-off: in environments without ps on PATH (e.g., minimal
+// containers), this returns false even for a live signatory
+// process. The resulting failure mode is "Stop becomes a no-op,"
+// which is safer than killing strangers but does mean serve stop
+// is non-functional in those environments. Acceptable for v0.1's
+// local-dogfood scope; revisit if container deployment is targeted.
+func isOurServiceAlive(pid int) bool {
+	if !isProcessAlive(pid) {
+		return false
+	}
+	return processCommandMatches(pid, serviceBinaryName())
+}
+
+// processCommandMatches reads the named process's command basename
+// via `ps` and reports whether it equals expected. The comparison
+// is on the basename only — ps comm= may include a leading path
+// component on some systems, so filepath.Base normalizes both
+// sides. Whitespace from ps's trailing newline is stripped.
+func processCommandMatches(pid int, expected string) bool {
+	//nolint:gosec // G204: argv-form exec of system "ps" with literal flags and a numeric PID; no shell interpretation
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	actual := strings.TrimSpace(string(out))
+	return filepath.Base(actual) == expected
 }
 
 // waitForExit polls isProcessAlive until the named PID is gone or
