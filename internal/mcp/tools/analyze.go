@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 
 	"github.com/sarahmaeve/signatory/internal/mcp"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -80,11 +81,11 @@ type analyzePosture struct {
 }
 
 type signalsSummary struct {
-	Vitality    map[string]any `json:"vitality,omitempty"`
-	Governance  map[string]any `json:"governance,omitempty"`
-	Criticality map[string]any `json:"criticality,omitempty"`
-	Hygiene     map[string]any `json:"hygiene,omitempty"`
-	Publication map[string]any `json:"publication,omitempty"`
+	Vitality    map[string]interface{} `json:"vitality,omitempty"`
+	Governance  map[string]interface{} `json:"governance,omitempty"`
+	Criticality map[string]interface{} `json:"criticality,omitempty"`
+	Hygiene     map[string]interface{} `json:"hygiene,omitempty"`
+	Publication map[string]interface{} `json:"publication,omitempty"`
 }
 
 func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Response {
@@ -175,35 +176,35 @@ func buildSignalsSummary(signals []profile.Signal) signalsSummary {
 		// an empty map, which is the documented shape for an unknown
 		// or unreadable value. The raw bytes remain in the store for
 		// debugging via signatory_signals.
-		var val map[string]any
+		var val map[string]interface{}
 		_ = json.Unmarshal(sig.Value, &val) //nolint:errcheck // see comment above: nil-safe summary on decode failure
 		if val == nil {
-			val = map[string]any{}
+			val = map[string]interface{}{}
 		}
 		switch sig.Group {
 		case profile.SignalGroupVitality:
 			if s.Vitality == nil {
-				s.Vitality = map[string]any{}
+				s.Vitality = map[string]interface{}{}
 			}
 			s.Vitality[sig.Type] = val
 		case profile.SignalGroupGovernance:
 			if s.Governance == nil {
-				s.Governance = map[string]any{}
+				s.Governance = map[string]interface{}{}
 			}
 			s.Governance[sig.Type] = val
 		case profile.SignalGroupCriticality:
 			if s.Criticality == nil {
-				s.Criticality = map[string]any{}
+				s.Criticality = map[string]interface{}{}
 			}
 			s.Criticality[sig.Type] = val
 		case profile.SignalGroupHygiene:
 			if s.Hygiene == nil {
-				s.Hygiene = map[string]any{}
+				s.Hygiene = map[string]interface{}{}
 			}
 			s.Hygiene[sig.Type] = val
 		case profile.SignalGroupPublication:
 			if s.Publication == nil {
-				s.Publication = map[string]any{}
+				s.Publication = map[string]interface{}{}
 			}
 			s.Publication[sig.Type] = val
 		}
@@ -211,19 +212,22 @@ func buildSignalsSummary(signals []profile.Signal) signalsSummary {
 	return s
 }
 
-// forgeryResistanceRank returns a numeric rank for ordering; higher is better.
-func forgeryResistanceRank(fr profile.ForgeryResistance) int {
+// forgeryResistanceRank returns a numeric rank for ordering (higher is better)
+// and whether the value was a known enum member. Callers must check the bool;
+// rank 0 with known==false means "skip this value" rather than "weakest."
+func forgeryResistanceRank(fr profile.ForgeryResistance) (rank int, known bool) {
 	switch fr {
 	case profile.ForgeryVeryHigh:
-		return 4
+		return 4, true
 	case profile.ForgeryHigh:
-		return 3
+		return 3, true
 	case profile.ForgeryMediumDeclining:
-		return 2
+		return 2, true
 	case profile.ForgeryLowDeclining:
-		return 1
+		return 1, true
 	}
-	return 0
+	slog.Warn("analyze: unknown forgery_resistance value", "value", string(fr))
+	return 0, false
 }
 
 // Compile-time interface checks — fail here if a tool stops satisfying mcp.Tool.
@@ -231,16 +235,25 @@ var _ mcp.Tool = (*AnalyzeTool)(nil)
 
 // dominantForgeryResistance returns the minimum (weakest) forgery resistance
 // across all signals — the overall posture is only as strong as its weakest
-// signal.
+// signal. Unknown ForgeryResistance values are skipped so that a new or
+// unrecognised enum member cannot silently drag the result to a worse tier
+// than the known signals justify. If every signal carries an unknown value,
+// "" is returned (same as the empty-signals case).
 func dominantForgeryResistance(signals []profile.Signal) string {
-	if len(signals) == 0 {
-		return ""
-	}
-	worst := signals[0].ForgeryResistance
-	for _, s := range signals[1:] {
-		if forgeryResistanceRank(s.ForgeryResistance) < forgeryResistanceRank(worst) {
+	worstRank := -1
+	var worst profile.ForgeryResistance
+	for _, s := range signals {
+		rank, known := forgeryResistanceRank(s.ForgeryResistance)
+		if !known {
+			continue
+		}
+		if worstRank < 0 || rank < worstRank {
+			worstRank = rank
 			worst = s.ForgeryResistance
 		}
+	}
+	if worstRank < 0 {
+		return ""
 	}
 	return string(worst)
 }

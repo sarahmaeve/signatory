@@ -170,6 +170,68 @@ func TestAnalyzeTool_EntityExistsNoSignals(t *testing.T) {
 	assert.Equal(t, mcp.CodeCacheMissRequiresRefresh, resp.Error.Code)
 }
 
+// TestDominantForgeryResistance exercises the helper directly, including the
+// unknown-value skip behaviour added in the TDD fix.
+func TestDominantForgeryResistance(t *testing.T) {
+	t.Parallel()
+
+	const unknownFR = profile.ForgeryResistance("fabricated-unknown")
+
+	cases := []struct {
+		name    string
+		signals []profile.Signal
+		want    string
+	}{
+		{
+			name:    "empty signals",
+			signals: []profile.Signal{},
+			want:    "",
+		},
+		{
+			name: "all known returns minimum",
+			signals: []profile.Signal{
+				{ForgeryResistance: profile.ForgeryVeryHigh},
+				{ForgeryResistance: profile.ForgeryHigh},
+				{ForgeryResistance: profile.ForgeryMediumDeclining},
+			},
+			want: string(profile.ForgeryMediumDeclining),
+		},
+		{
+			name: "known high plus unknown returns high not empty",
+			signals: []profile.Signal{
+				{ForgeryResistance: profile.ForgeryHigh},
+				{ForgeryResistance: unknownFR},
+			},
+			want: string(profile.ForgeryHigh),
+		},
+		{
+			name: "all unknown returns empty",
+			signals: []profile.Signal{
+				{ForgeryResistance: unknownFR},
+				{ForgeryResistance: profile.ForgeryResistance("another-unknown")},
+			},
+			want: "",
+		},
+		{
+			name: "high and low returns low",
+			signals: []profile.Signal{
+				{ForgeryResistance: profile.ForgeryHigh},
+				{ForgeryResistance: profile.ForgeryLowDeclining},
+			},
+			want: string(profile.ForgeryLowDeclining),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := dominantForgeryResistance(tc.signals)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestAnalyzeTool_Name(t *testing.T) {
 	t.Parallel()
 	tool := &AnalyzeTool{}
