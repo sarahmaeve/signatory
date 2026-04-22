@@ -67,7 +67,7 @@ func TestLogger_WritesToStoreAndFile(t *testing.T) {
 		assert.Equal(t, "set_posture", line.Action)
 		assert.Equal(t, "ent-1", line.Entity)
 		// Detail should be embedded as raw JSON, not a string.
-		var detail map[string]any
+		var detail map[string]interface{}
 		require.NoError(t, json.Unmarshal(line.Detail, &detail))
 		assert.Equal(t, "vetted-frozen", detail["tier"])
 	}
@@ -162,6 +162,32 @@ func TestLogger_PreservesExistingIDAndTimestamp(t *testing.T) {
 	assert.True(t, when.Equal(store.entries[0].Timestamp))
 }
 
+// TestNewID_PanicsOnRandFailure verifies that newID panics when the
+// random source fails, rather than silently returning a timestamp-based
+// fallback that risks UNIQUE-constraint collisions in the audit store.
+func TestNewID_PanicsOnRandFailure(t *testing.T) {
+	orig := randReader
+	randReader = &alwaysErrReader{err: errors.New("injected rand failure")}
+	t.Cleanup(func() { randReader = orig })
+
+	require.Panics(t, func() { newID() }, "newID must panic when rand.Read fails")
+}
+
+// TestNewID_HappyPath verifies that newID returns a non-empty hex string
+// when the random source is healthy.
+func TestNewID_HappyPath(t *testing.T) {
+	id := newID()
+	require.NotEmpty(t, id)
+	// 16 bytes → 32 hex chars.
+	require.Len(t, id, 32, "newID must return a 32-char hex string")
+}
+
+// alwaysErrReader is an io.Reader that always returns an error, used to
+// exercise the rand.Read failure branch in newID.
+type alwaysErrReader struct{ err error }
+
+func (r *alwaysErrReader) Read(_ []byte) (int, error) { return 0, r.err }
+
 func TestLogger_InvalidDetailFallsBackToEmptyObject(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "audit.log")
@@ -178,7 +204,7 @@ func TestLogger_InvalidDetailFallsBackToEmptyObject(t *testing.T) {
 	var line fileLine
 	require.NoError(t, json.Unmarshal(data[:len(data)-1], &line))
 	// Detail should be parseable as JSON (empty object fallback).
-	var detail map[string]any
+	var detail map[string]interface{}
 	require.NoError(t, json.Unmarshal(line.Detail, &detail))
 	assert.Empty(t, detail)
 }

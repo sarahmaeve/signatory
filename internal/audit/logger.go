@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,6 +32,10 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
+
+// randReader is the source of randomness for newID. Overridden in tests
+// to exercise the failure branch without touching the real crypto/rand.Reader.
+var randReader io.Reader = rand.Reader
 
 // Store is the subset of the persistence interface the audit logger
 // needs. We take this as an interface rather than the full Store type
@@ -209,13 +214,16 @@ func detailOrEmpty(detail string) string {
 // newID generates an opaque audit entry ID. 16 random bytes →
 // 32-char hex — unique with astronomical probability and fixed-width
 // for easy indexing.
+//
+// If randReader (crypto/rand.Reader by default) fails, newID panics.
+// This mirrors internal/profile.NewEntityID: a rand.Read failure is an
+// OS-level event with no meaningful fallback, and a silent timestamp-
+// based substitute risks UNIQUE-constraint collisions in the audit
+// store — which would mask the real failure behind a store error.
 func newID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// rand.Read effectively never fails on supported platforms.
-		// If it does, fall back to a time-based ID so Log() never
-		// panics on something as fundamental as ID generation.
-		return fmt.Sprintf("audit-fallback-%d", time.Now().UnixNano())
+	if _, err := randReader.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("audit: rand.Read failed: %v", err))
 	}
 	return hex.EncodeToString(b[:])
 }
