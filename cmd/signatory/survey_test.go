@@ -115,10 +115,29 @@ require (
 	assert.Contains(t, out, "github.com/alecthomas/kong")
 	assert.Contains(t, out, "gopkg.in/yaml.v3")
 
+	// not-in-store annotation — clarifies that [·] rows are "no
+	// data collected yet," distinct from [?] which is "data but
+	// no verdict." See tierSummaryAnnotation for why these two
+	// states need to be disambiguated.
+	assert.Contains(t, out, "(no data collected yet)",
+		"not-in-store tier must carry the 'no data collected yet' clarifier in the summary block")
+
+	// Vet-path footer — names the three categories of next move.
+	// Guarded on NeedsReview; these deps are all not-in-store
+	// (direct) so the footer fires.
+	assert.Contains(t, out, "To vet direct dependencies",
+		"footer must steer the user toward the actual vet-path categories")
+	assert.Contains(t, out, "/analyze <target>",
+		"footer must name /analyze (the Claude skill) as the LLM-backed review path")
+	assert.Contains(t, out, "signatory posture set",
+		"footer must name posture set as the known-verdict path")
+	assert.Contains(t, out, "signatory burn",
+		"footer must name burn as the known-bad path")
+
 	// No "Action items" / suggested-commands section. The CLI
-	// verbs survey would naturally point at (signatory analyze)
-	// only collect signals — they cannot produce the trust
-	// verdict that flips a [?] row. See the package-level doc on
+	// verbs survey previously pointed at (signatory analyze) only
+	// collect signals — they cannot produce the trust verdict
+	// that flips a [?] row. See the package-level doc on
 	// printSurveyHuman for the dropped-section rationale.
 	assert.NotContains(t, out, "Action items",
 		"survey output must not steer users to commands that don't deliver postures")
@@ -184,6 +203,15 @@ require (
 	// Posture rationales rendered.
 	assert.Contains(t, out, "strong signals")
 	assert.Contains(t, out, "abandoned project")
+
+	// unexamined annotation — this test's fixture includes
+	// unexamined/lib as a direct dep (entity seeded, no posture),
+	// so the summary block must carry the "signal data in store;
+	// no posture verdict yet" clarifier. Companion to the
+	// not-in-store annotation test in AllNotInStore; together
+	// they cover both non-resolved tiers.
+	assert.Contains(t, out, "(signal data in store; no posture verdict yet)",
+		"unexamined tier must carry the 'signal data in store' clarifier — distinguishes it from not-in-store")
 
 	// "Only unexamined deps end up in NeedsReview" — that intent
 	// is now covered structurally by internal/survey/survey_test.go

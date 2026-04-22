@@ -171,7 +171,11 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 	for _, tier := range tierOrder {
 		count := r.Summary.ByTier[tier]
 		if count > 0 {
-			sw.Writef("  %-5d %s\n", count, tier)
+			if annotation := tierSummaryAnnotation(tier); annotation != "" {
+				sw.Writef("  %-5d %-18s %s\n", count, tier, annotation)
+			} else {
+				sw.Writef("  %-5d %s\n", count, tier)
+			}
 		}
 	}
 	sw.Writeln()
@@ -205,6 +209,24 @@ func printSurveyHuman(w io.Writer, r survey.Result, includeIndirect bool) error 
 			sw.Writeln("  (use --all to list)")
 			sw.Writeln()
 		}
+	}
+
+	// ---- Vet-path footer (shown only when direct deps need review) ----
+	//
+	// Guarded on NeedsReview so a fully-vetted project gets no
+	// footer — printing navigation hints for a resolved state is
+	// noise. Names *categories* of next move rather than specific
+	// verbatim commands: /analyze (the Claude skill, not the CLI
+	// verb) for an LLM-backed review, posture set for a verdict
+	// the user already holds, burn for a known-bad. Replaces the
+	// prior "Action items" section that rendered commands which
+	// didn't produce postures — see package-level doc.
+	if len(r.Summary.NeedsReview) > 0 {
+		sw.Writeln("To vet direct dependencies:")
+		sw.Writeln("  /analyze <target>             — LLM-backed analyst review (Claude session + signatory MCP)")
+		sw.Writeln("  signatory posture set ...     — record a verdict you already hold")
+		sw.Writeln("  signatory burn ...            — flag as compromised or known-bad")
+		sw.Writeln()
 	}
 
 	return sw.Err()
@@ -280,6 +302,34 @@ func tierIcon(t survey.Tier) string {
 	default:
 		return "[·]"
 	}
+}
+
+// tierSummaryAnnotation returns a parenthetical clarifier for the
+// two "needs attention" tiers, so the user can distinguish the
+// two very different states they represent:
+//
+//   - unexamined: the store HAS an entity and Layer 1 signal data
+//     for this dep, but no posture verdict has been recorded. The
+//     next move is either /analyze (for an agent-produced verdict)
+//     or posture set (for a user-held verdict).
+//
+//   - not-in-store: the store has NO record at all for this dep.
+//     The next move is the same, but runs cold — no cached signals
+//     to build on.
+//
+// All other tiers (vetted-frozen, trusted-for-now, rejected, burned,
+// local-replace, unknown-provenance) are resolved states and return
+// empty. They don't need clarification in the summary block; the
+// per-row direct-deps table carries their rationale / burn reason
+// inline.
+func tierSummaryAnnotation(t survey.Tier) string {
+	switch t {
+	case survey.TierUnexamined:
+		return "(signal data in store; no posture verdict yet)"
+	case survey.TierNotInStore:
+		return "(no data collected yet)"
+	}
+	return ""
 }
 
 // formatIndirectSummary produces a compact one-line summary of
