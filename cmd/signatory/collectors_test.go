@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -324,4 +326,177 @@ func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, collectors,
 		"pypi entity without URL gets zero collectors — pypi isn't wired yet, and there's no github URL to clone")
+}
+
+// --- gitCloneFull / validateExistingClone env-sanitization tests ------------
+//
+// These tests guard the env-var stripping on the analyze-path git
+// subprocesses (cmd/signatory/collectors.go), which is the second git-
+// clone site in the binary. The first site, runGitClone in handoff.go,
+// has been env-sanitized via safeGitEnv since the Go-security adversarial
+// pass; the analyze-path additions (gitCloneFull, validateExistingClone)
+// landed later and inherited the full os.Environ() including the same
+// dangerous vars handoff already strips. The two-Opus 2026-04-22 review
+// flagged the drift in both passes — this is the regression guard.
+//
+// Threat: a hostile parent environment sets GIT_SSH_COMMAND or
+// GIT_CONFIG_KEY_*/VALUE_* to attacker-controlled values; without the
+// stripping, the git subprocess invokes the attacker binary or applies
+// the injected config (e.g. core.sshCommand) — same RCE class as the
+// handoff-path threat the existing safeGitEnv tests cover.
+//
+// Approach: PATH-shim a fake `git` that dumps its env to a file and
+// exits 0. After the parent calls gitCloneFull / validateExistingClone,
+// the test reads the dumped env and asserts the dangerous vars are
+// absent. Validates the actual subprocess boundary (cmd.Env), not just
+// safeGitEnv()'s output — the bug was specifically that cmd.Env wasn't
+// being assigned, so a test of safeGitEnv() in isolation wouldn't catch it.
+
+// installFakeGitEnvDump writes a POSIX shim named "git" into a fresh
+// temp dir, dumps that dir at the head of PATH for the test's lifetime,
+// and returns the path to which the shim writes its environment. The
+// shim exits 0 unconditionally so the caller's gitCloneFull /
+// validateExistingClone returns nil and the test can read the dump.
+//
+// Cleanup is automatic: t.TempDir for the shim and dump locations,
+// t.Setenv for the PATH override.
+func installFakeGitEnvDump(t *testing.T) string {
+	t.Helper()
+	shimDir := t.TempDir()
+	envDump := filepath.Join(t.TempDir(), "env-dump")
+	fakeGit := filepath.Join(shimDir, "git")
+	// `env` is POSIX. Quote envDump in case the temp path contains
+	// spaces; the shell substitution is safe because we control the
+	// path (it's a t.TempDir under the test runner's tmp root).
+	script := fmt.Sprintf("#!/bin/sh\nenv > %q\nexit 0\n", envDump)
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return envDump
+}
+
+// readEnvDump reads the env-dump file written by the fake git shim and
+// returns a key→value map for assertion. Fails the test if the dump
+// is missing — that indicates the parent never spawned the subprocess,
+// which is itself a regression worth surfacing.
+func readEnvDump(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoErrorf(t, err, "fake git must have produced env dump at %s", path)
+	out := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.IndexByte(line, '=')
+		if idx < 0 {
+			continue
+		}
+		out[line[:idx]] = line[idx+1:]
+	}
+	return out
+}
+
+// TestGitCloneFull_StripsDangerousEnv is the RED test for the analyze-
+// path env-sanitization drift. Before the fix, gitCloneFull called
+// exec.CommandContext without setting cmd.Env, so the subprocess
+// inherited the full parent env including GIT_SSH_COMMAND and the
+// bulk-injection GIT_CONFIG_* vars. After the fix, cmd.Env =
+// safeGitEnv() strips them at the boundary.
+//
+// Revert proof: delete the `cmd.Env = safeGitEnv()` line from
+// gitCloneFull; this test fails because GIT_SSH_COMMAND appears in
+// the env dump.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
+// sequential.
+func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
+	envDump := installFakeGitEnvDump(t)
+
+	// Hostile parent env — a representative sample of the vars
+	// safeGitEnv strips. Full coverage of the strip set lives in
+	// TestSafeGitEnv_StripsDangerousVars in handoff_test.go; here we
+	// just need enough to prove the boundary is enforced.
+	t.Setenv("GIT_SSH_COMMAND", "evil-binary --steal-credentials")
+	t.Setenv("GIT_PROXY_COMMAND", "evil-proxy")
+	t.Setenv("GIT_EXEC_PATH", "/tmp/attacker-bin")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+	t.Setenv("GIT_CONFIG_VALUE_0", "evil")
+
+	// Dest doesn't need to exist; the fake git ignores its args. URL
+	// is a synthetic-but-validatable form (file:// passes
+	// safeGitCloneURL — though gitCloneFull's caller-asserts comment
+	// notes validation happens upstream, gitCloneFull itself doesn't
+	// re-validate).
+	dest := filepath.Join(t.TempDir(), "clone-dest")
+	require.NoError(t,
+		gitCloneFull(context.Background(), "https://example.invalid/repo.git", dest),
+		"fake git must exit 0 — non-zero indicates the shim wasn't picked up via PATH")
+
+	env := readEnvDump(t, envDump)
+	for _, key := range []string{
+		"GIT_SSH_COMMAND",
+		"GIT_PROXY_COMMAND",
+		"GIT_EXEC_PATH",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_VALUE_0",
+	} {
+		_, present := env[key]
+		assert.Falsef(t, present,
+			"%s must not leak from parent env into git subprocess (gitCloneFull)", key)
+	}
+	// PATH must survive — the child needs it to locate ssh, helpers,
+	// etc. Verifies safeGitEnv didn't accidentally strip too much.
+	assert.NotEmpty(t, env["PATH"], "PATH must be preserved in child env")
+	// GIT_TERMINAL_PROMPT is force-set to 0 by safeGitEnv to prevent
+	// the child from blocking on a credential prompt.
+	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
+		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
+}
+
+// TestValidateExistingClone_StripsDangerousEnv covers the second git-
+// subprocess site in collectors.go. validateExistingClone runs
+// `git -C <path> remote get-url origin` to verify the clone matches
+// the declared entity. Even though it's a read-only operation, env-
+// based config injection (GIT_CONFIG_KEY_* setting e.g. include.path
+// to a hostile config) can still subvert it. Same fix, same boundary.
+//
+// Revert proof: delete the `cmd.Env = safeGitEnv()` line in
+// validateExistingClone; this test fails because GIT_CONFIG_KEY_0
+// appears in the dump.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
+// sequential.
+func TestValidateExistingClone_StripsDangerousEnv(t *testing.T) {
+	envDump := installFakeGitEnvDump(t)
+
+	t.Setenv("GIT_SSH_COMMAND", "evil-binary")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "include.path")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/tmp/attacker.gitconfig")
+
+	// validateExistingClone wants a directory containing a `.git`
+	// child to satisfy its os.Stat check before invoking git. The
+	// fake git doesn't care what's actually in there.
+	clone := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(clone, ".git"), 0o755))
+
+	// expectedURI just needs to be syntactically valid; the fake git
+	// outputs nothing to stdout, so origin parsing will fail and
+	// validateExistingClone returns an error — but the env dump
+	// happens before that, which is all we're testing.
+	_ = validateExistingClone(context.Background(), clone, "repo:github/owner/repo")
+
+	env := readEnvDump(t, envDump)
+	for _, key := range []string{
+		"GIT_SSH_COMMAND",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_VALUE_0",
+	} {
+		_, present := env[key]
+		assert.Falsef(t, present,
+			"%s must not leak from parent env into git subprocess (validateExistingClone)", key)
+	}
+	assert.NotEmpty(t, env["PATH"], "PATH must be preserved in child env")
+	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
+		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
 }

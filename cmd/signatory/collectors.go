@@ -203,14 +203,20 @@ func ensurePathEmptyOrMissing(path string) error {
 // entity but computed over a different repo's history. That's a
 // trust-model violation (attribution without grounding), not a
 // stylistic issue.
+//
+// Env inheritance is stripped to a vetted set by safeGitEnv (defined
+// in handoff.go) so GIT_CONFIG_KEY_*/VALUE_*, GIT_DIR, and the other
+// transport/config-injection vars can't subvert the origin lookup.
+// Symmetric with the runGitClone / gitCloneFull sites in this binary.
 func validateExistingClone(ctx context.Context, path, expectedURI string) error {
 	info, err := os.Stat(filepath.Join(path, ".git"))
 	if err != nil || info == nil {
 		return fmt.Errorf("%w: %q", ErrPathNotAClone, path)
 	}
 
-	//nolint:gosec // G204: argv-form exec of "git"; path is operator-supplied
+	//nolint:gosec // G204: argv-form exec of "git"; path is operator-supplied; env sanitized by safeGitEnv
 	cmd := exec.CommandContext(ctx, "git", "-C", path, "remote", "get-url", "origin")
+	cmd.Env = safeGitEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -243,9 +249,15 @@ func validateExistingClone(ctx context.Context, path, expectedURI string) error 
 //
 // Caller must have validated url via safeGitCloneURL and dest via
 // ensurePathEmptyOrMissing before invoking this.
+//
+// Env inheritance is stripped to a vetted set by safeGitEnv (defined
+// in handoff.go) so GIT_SSH_COMMAND / GIT_PROXY_COMMAND / GIT_EXEC_PATH
+// / GIT_CONFIG_* can't redirect the clone or invoke an attacker-
+// controlled helper. Symmetric with the runGitClone site in handoff.go.
 func gitCloneFull(ctx context.Context, url, dest string) error {
-	//nolint:gosec // G204: argv-form exec of "git"; url pre-validated by safeGitCloneURL, dest pre-validated by ensurePathEmptyOrMissing
+	//nolint:gosec // G204: argv-form exec of "git"; url pre-validated by safeGitCloneURL, dest pre-validated by ensurePathEmptyOrMissing; env sanitized by safeGitEnv
 	cmd := exec.CommandContext(ctx, "git", "clone", url, dest)
+	cmd.Env = safeGitEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
