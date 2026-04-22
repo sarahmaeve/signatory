@@ -46,6 +46,10 @@ Seven of eight milestones shipped (M1, M5, M4, M3, M2, M7, M6 — see Shipped se
 
 - **PyPI ecosystem provider.** `requirements.txt`, `setup.py`, `pyproject.toml` parsers. PyPI registry client + source resolution. Second-highest-risk ecosystem after npm. Can ship in parallel with contract milestones — different file tree.
 
+### Reliability investigations (dogfood-surfaced)
+
+- **Synthesist WebFetch TLS flake.** 2 of 4 synthesist agent dispatches since M6c hit a TLS verification failure on the WebFetch to `https://127.0.0.1:21517/api/sessions/.../messages?role=synthesist&type=handoff&format=raw`, even though the security and provenance analysts' WebFetch calls against the same pipeline service succeeded minutes earlier in the same session. The orchestrator's curl-and-inline fallback masks the failure at runtime but is per-invocation hand-coded and won't be there for callers outside Claude Code. Dogfood targets affected: postcss-place (pre-M6 binary, probably unrelated), @sindresorhus/is (2026-04-22, current binary). Unaffected: stripe-react-native. Suspects to investigate: (a) `NODE_EXTRA_CA_CERTS` not inheriting into the synthesist subagent dispatch reliably, (b) mkcert cert state or TLS session cache differing between the analyst and synthesist phases, (c) timing interaction with the parallel-dispatch parent state. Load-bearing for v0.1 reliability because the synthesist is a hard dependency of the /analyze pipeline's terminal step. See `sync/KAIZEN.md` 2026-04-22 entry for per-run detail.
+
 ### Packaging / polish
 
 These are nice-to-have and may slip to v0.1.1 if the contract milestones take longer than estimated:

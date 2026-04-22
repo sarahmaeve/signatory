@@ -1,10 +1,11 @@
 # Analysis Economics — When is a signatory run worth the tokens?
 
-**Status:** Draft recorded 2026-04-22 from dogfood data (two targets).
-Not a design decision — a market/usage observation. Answers the
-question "at what target size does signatory analysis start to be
-cheaper than rewriting the target?" and what that means for where
-signatory is economically rational.
+**Status:** Draft recorded 2026-04-22 from dogfood data (three
+targets, updated 2026-04-22 with @sindresorhus/is). Not a design
+decision — a market/usage observation. Answers the question "at
+what target size does signatory analysis start to be cheaper than
+rewriting the target?" and what that means for where signatory is
+economically rational.
 
 **Scope:** Token-cost economics of `/analyze` against real targets,
 circa Claude Opus 4.7 pricing. Out of scope: Claude API pricing
@@ -22,11 +23,12 @@ Cross-references:
 
 ## 1. Observed data
 
-Two `/analyze` runs, recorded in the KAIZEN log:
+Three `/analyze` runs, recorded in the KAIZEN log:
 
 | Target | LOC (roughly) | Tokens | Think level |
 |---|---|---|---|
 | pkg:npm/postcss-place@11.0.0 | ~55 (logic) | ~203k | high |
+| pkg:npm/@sindresorhus/is | ~500-1,000 | ~190k | high |
 | pkg:npm/@stripe/stripe-react-native | ~50,000-100,000 | ~360k (~300k excluding a 60k re-dispatch) | x-high |
 
 **Key observation:** analysis token cost is roughly **bounded, not
@@ -39,14 +41,24 @@ analyst reasoning. The code volume contributes modestly to
 provenance's registry/CI survey and to security's target-area
 sampling, but not proportionally.
 
-**Floor:** ~200k tokens per target regardless of size, at high-or-
-above think levels.
+**Floor:** ~190-210k tokens per target at high think level, across
+tiny (~55 LOC) and small (~500-1000 LOC) targets. Confirms the
+floor is a **pipeline fixed cost**, not think-level-specific — the
+high-think @sindresorhus/is run landed in the same range as the
+high-think postcss-place run.
 
-**Caveat:** two data points. A third (ideally a Go module or a
-Python package) would strengthen or disturb the floor estimate. A
-tiny x-high run (e.g., `pkg:npm/@sindresorhus/is`) would tell us
-whether the 200k floor is think-level-dependent or fundamental to
-the pipeline's fixed cost.
+**Think-level effect:** x-high buys reasoning depth that pays off
+on larger/harder targets. The tiny and small high-think runs
+produced synthesis quality comparable to the large x-high run
+(multi-paragraph tier justification, forgery-resistance weighting,
+calibration hedges) — suggesting x-high matters most when there's
+genuine disambiguation work (contradictions, complex trade-offs,
+competing signals). For targets with clean evidence and no
+contradictions, high think is sufficient and cheaper.
+
+**Caveat:** three data points, all npm. A Go module or Python
+package run would test whether the floor is npm-pipeline-specific
+or genuinely universal.
 
 ## 2. Cost model: rewrite scales linearly
 
@@ -260,6 +272,34 @@ amortized across 50 projects is $0.01/project, at which point even
 small utilities become worth analyzing. Named in
 [`ROADMAP.md`](ROADMAP.md) V0.2 — worth returning to this doc when
 those amortization assumptions become concrete.
+
+### Per-publisher trust profile
+
+Surfaced by the @sindresorhus/is synthesist on 2026-04-22: a lot
+of the provenance evidence for one sindresorhus package
+(maintainer identity, npm publish chain shape, commit-signing
+distribution, CI pinning patterns) would be structurally identical
+for every other sindresorhus package. Redoing the provenance
+assessment per-package re-pays the same tokens across a family.
+
+A per-publisher cache — "what do we know about this npm
+maintainer's publish posture?" — would let the provenance analyst
+short-circuit the shared signals and focus on package-specific
+evidence. Most applicable to the long tail of single-maintainer
+utility packages that cluster under the same npm account
+(sindresorhus, substack, feross, etc.); less applicable to
+corporate-maintained packages where the publisher is an org with
+wide membership.
+
+Shape (sketch): a new `publishers` table keyed on (ecosystem,
+maintainer_id) carrying provenance snapshot + timestamp. The
+provenance analyst's handoff pre-loads the current snapshot as
+context; the analyst's output updates it. Amortization then
+applies within a maintainer-namespace in addition to across
+projects (§Amortization model above).
+
+Not scoped for v0.1. Would want more dogfood data (5-10 packages
+from the same maintainer) before committing to the abstraction.
 
 ## 9. Data gaps worth closing
 
