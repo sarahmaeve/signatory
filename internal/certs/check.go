@@ -16,8 +16,8 @@ import (
 // worse off than no preflight at all.
 type CheckResult struct {
 	OK      bool
-	Env     string   // raw NODE_EXTRA_CA_CERTS value as seen by this process
-	CAPath  string   // expanded/absolute resolution of Env (empty if Env was empty)
+	Env     string // raw NODE_EXTRA_CA_CERTS value as seen by this process
+	CAPath  string // expanded/absolute resolution of Env (empty if Env was empty)
 	Code    FailCode
 	Message string // one-line status (OK or concrete failure)
 	Fix     string // remediation hint; empty when OK

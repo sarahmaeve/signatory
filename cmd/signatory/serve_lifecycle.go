@@ -87,9 +87,9 @@ var serviceBinaryName = func() string {
 type ServeStartCmd struct {
 	ServeRunCmd // Embed so `--port`, `--tls-cert`, etc. are available.
 
-	PidPath        string `help:"Path to the pidfile used for lifecycle management." default:"~/.signatory/serve.pid" type:"path"`
-	LogPath        string `help:"Path to the service log file (appended on restart)." default:"~/.signatory/logs/serve.log" type:"path"`
-	SkipPreflight  bool   `help:"Skip the NODE_EXTRA_CA_CERTS preflight check. For debugging only — agents will fail to WebFetch the service over TLS if the env var is unset." name:"skip-preflight"`
+	PidPath       string `help:"Path to the pidfile used for lifecycle management." default:"~/.signatory/serve.pid" type:"path"`
+	LogPath       string `help:"Path to the service log file (appended on restart)." default:"~/.signatory/logs/serve.log" type:"path"`
+	SkipPreflight bool   `help:"Skip the NODE_EXTRA_CA_CERTS preflight check. For debugging only — agents will fail to WebFetch the service over TLS if the env var is unset." name:"skip-preflight"`
 }
 
 func (cmd *ServeStartCmd) Run(_ *Globals) error {

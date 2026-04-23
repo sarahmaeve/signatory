@@ -176,7 +176,7 @@ func countForOutputs(ctx context.Context, db *sql.DB, table, column string, outp
 		return 0, nil
 	}
 	placeholders := strings.Repeat("?,", len(outputIDs))
-	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+	placeholders = placeholders[:len(placeholders)-1]                                         // trim trailing comma
 	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s IN (%s)`, table, column, placeholders) //nolint:gosec // G201: table/column names are package constants
 	args := make([]any, len(outputIDs))
 	for i, id := range outputIDs {
@@ -373,7 +373,10 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 
 	// Level 5: children of conclusions / absences / observations /
 	// methodology patterns.
-	for _, spec := range []struct{ table, column string; ids []string }{
+	for _, spec := range []struct {
+		table, column string
+		ids           []string
+	}{
 		{"conclusion_severity_contexts", "conclusion_id", conclusionIDs},
 		{"conclusion_supersedes", "conclusion_id", conclusionIDs},
 		{"conclusion_prerequisites", "conclusion_id", conclusionIDs},
@@ -388,7 +391,10 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 	}
 
 	// Citations (parented by kind + id — three passes, one per kind).
-	for _, spec := range []struct{ kind string; ids []string }{
+	for _, spec := range []struct {
+		kind string
+		ids  []string
+	}{
 		{"conclusion", conclusionIDs},
 		{"positive_absence", absenceIDs},
 		{"observation", observationIDs},
@@ -431,7 +437,10 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 	}
 
 	// Level 4: children of analyst_outputs.
-	for _, spec := range []struct{ table string; ids []string }{
+	for _, spec := range []struct {
+		table string
+		ids   []string
+	}{
 		{"conclusions", outputIDs},
 		{"positive_absences", outputIDs},
 		{"observations", outputIDs},

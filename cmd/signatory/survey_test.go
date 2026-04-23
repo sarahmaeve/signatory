@@ -448,7 +448,7 @@ func TestSurvey_Human_IndirectRow_AwaitsTagUnderAll(t *testing.T) {
 		Summary: survey.Summary{
 			Total: 2, Direct: 1, Indirect: 1,
 			ByTier: map[survey.Tier]int{
-				survey.TierUnexamined:  1,
+				survey.TierUnexamined: 1,
 				survey.TierNotInStore: 1,
 			},
 			IndirectByReachability: survey.IndirectReachabilityBreakdown{

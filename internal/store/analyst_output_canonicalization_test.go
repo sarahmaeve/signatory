@@ -43,11 +43,11 @@ func minimalAnalystOutput(target string) *exchange.AnalystOutput {
 		Target: target,
 		Conclusions: []exchange.Conclusion{
 			{
-				ID:       "F001",
-				Verdict:  "test",
+				ID:        "F001",
+				Verdict:   "test",
 				Rationale: "test rationale",
-				Severity: exchange.Severity{Default: exchange.SeverityLow},
-				Category: "test",
+				Severity:  exchange.Severity{Default: exchange.SeverityLow},
+				Category:  "test",
 				Citations: []exchange.Citation{
 					{Path: "src/x.go", LineStart: &lineStart},
 				},

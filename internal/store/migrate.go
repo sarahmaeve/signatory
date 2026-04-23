@@ -1077,7 +1077,7 @@ CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
 //     rows derive it via profile.SplitURIVersion on the fallback
 //     target. New rows carry both fields explicitly.
 //
-// NOT NULL with DEFAULT '' so existing append-only queries and JOINs
+// NOT NULL with DEFAULT ” so existing append-only queries and JOINs
 // don't need rewrites for the new columns, and so the column can be
 // safely added without a separate NOT NULL CHECK rebuild. The empty
 // default matches the "no version specified" wire shape.
