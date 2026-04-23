@@ -251,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v10 → v9. Drops the analyst_outputs.target +
+	// First rollback: v11 → v10. Drops analysis_sessions table and
+	// the analyst_outputs.analysis_session_id FK column. Seed data
+	// has no analysis_sessions rows, so the drop is a no-op on data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 10, version)
+
+	// Second rollback: v10 → v9. Drops the analyst_outputs.target +
 	// .target_version columns. Seed data has no analyst_outputs rows,
 	// so the drop is a no-op on data.
 	err = migrateDown(t.Context(), db, path)
@@ -552,7 +562,19 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v9 (drops analyst_outputs.target + .target_version). ---
+	// --- Down: vN → v10 (drops analysis_sessions + FK column). ---
+	// The v11 migration added the analysis_sessions table and the
+	// analyst_outputs.analysis_session_id FK column. This fixture
+	// has no analysis_sessions rows so the teardown is a no-op on
+	// data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 10, version)
+
+	// --- Down: v10 → v9 (drops analyst_outputs.target + .target_version). ---
 	// The v10 migration added two TEXT NOT NULL DEFAULT '' columns
 	// to analyst_outputs for Plan-A canonicalization bookkeeping.
 	// Dropping them is safe — analyst_outputs is empty in this

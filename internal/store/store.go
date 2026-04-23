@@ -87,6 +87,55 @@ type Store interface {
 	ListVersionedEntities(ctx context.Context) ([]string, error)
 	ListOrphanEntities(ctx context.Context) ([]string, error)
 
+	// Analysis session operations — the durable audit identity for
+	// each /analyze run. Link analyst outputs to a session by
+	// passing WithAnalysisSession to IngestAnalystOutput; the
+	// session is closed via CloseAnalysisSession (one-way, enforced
+	// by a store-layer terminal-state guard).
+	//
+	// Design rationale: design/phase3-plan.md.
+	//
+	// Errors: CreateAnalysisSession and CloseAnalysisSession wrap
+	// ErrNilInput for missing required fields. GetAnalysisSession
+	// and CloseAnalysisSession return ErrNotFound when the id is
+	// unknown. CloseAnalysisSession returns a non-sentinel error
+	// when the session is already terminal.
+	CreateAnalysisSession(ctx context.Context, session *profile.AnalysisSession) error
+	GetAnalysisSession(ctx context.Context, id string) (*profile.AnalysisSession, error)
+	ListAnalysisSessions(ctx context.Context, filter AnalysisSessionFilter) ([]profile.AnalysisSession, error)
+	CloseAnalysisSession(ctx context.Context, id string, params profile.AnalysisSessionCloseParams) error
+	ListOutputsForSession(ctx context.Context, sessionID string) ([]AnalystOutputSummary, error)
+
 	// Close releases database resources.
 	Close() error
+}
+
+// AnalysisSessionFilter narrows ListAnalysisSessions. Each field
+// is optional; zero-value means "no filter on this dimension."
+// Combined conjunctively (AND) when more than one is set.
+type AnalysisSessionFilter struct {
+	// EntityID limits to sessions targeting one entity. Use the
+	// unversioned entity ID; TargetVersion filters separately.
+	EntityID string
+
+	// TargetVersion limits to sessions whose caller-supplied @V
+	// matched this string. Use "" to match only unversioned runs;
+	// leave zero (the empty-string) to disable the filter — the
+	// store treats a zero-value filter as "don't apply this clause."
+	TargetVersion string
+
+	// Status limits to sessions in the named lifecycle state.
+	// Common query: Status=AnalysisSessionInProgress to find
+	// stragglers.
+	Status profile.AnalysisSessionStatus
+
+	// Since returns only sessions that started on or after this
+	// instant. Zero-value means no lower bound. Used by the skill
+	// to answer "show me today's runs."
+	Since time.Time
+
+	// Limit caps the returned row count. 0 means unbounded;
+	// callers rendering tables should set a reasonable ceiling
+	// (50 is the CLI default) to keep output tractable.
+	Limit int
 }

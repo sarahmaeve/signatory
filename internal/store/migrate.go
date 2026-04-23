@@ -84,6 +84,12 @@ var migrations = []Migration{
 		Up:          migrationV10Up,
 		Down:        migrationV10Down,
 	},
+	{
+		Version:     11,
+		Description: "analysis_sessions + analyst_outputs.analysis_session_id: durable audit identity for each /analyze run so timing, attribution, and expected-vs-landed can be answered from the store; decoupled from the ephemeral pipeline_sessions relay (WebFetch-GET-only architecture — see memory/architecture_webfetch_constraint.md)",
+		Up:          migrationV11Up,
+		Down:        migrationV11Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -1095,6 +1101,63 @@ ALTER TABLE analyst_outputs ADD COLUMN target_version TEXT NOT NULL DEFAULT '';
 const migrationV10Down = `
 ALTER TABLE analyst_outputs DROP COLUMN target_version;
 ALTER TABLE analyst_outputs DROP COLUMN target;
+`
+
+// migrationV11Up creates analysis_sessions (durable audit identity
+// for /analyze runs) and adds analyst_outputs.analysis_session_id.
+// Design rationale: design/phase3-plan.md.
+//
+// Schema notes:
+//
+//   - status: CHECK-constrained to the four AnalysisSessionStatus
+//     values. Terminal transitions are one-way, enforced in Go by
+//     CloseAnalysisSession (SQLite CHECKs can't reference OLD).
+//
+//   - ended_at: empty-string sentinel until close, then RFC3339.
+//     House convention for optional time-like columns; matches the
+//     domain layer's *time.Time representation.
+//
+//   - synthesis_output_id, analyst_outputs.analysis_session_id:
+//     both are nullable FKs with ON DELETE SET NULL. Pruning either
+//     side of the relationship leaves the other row intact with a
+//     dangling-nullified pointer. The FK cascade only fires through
+//     prune (append-only triggers otherwise block deletes).
+const migrationV11Up = `
+CREATE TABLE analysis_sessions (
+    id                    TEXT PRIMARY KEY,
+    entity_id             TEXT NOT NULL REFERENCES entities(id),
+    target_uri            TEXT NOT NULL,
+    target_version        TEXT NOT NULL DEFAULT '',
+    invoked_by            TEXT NOT NULL,
+    pipeline_session_id   TEXT NOT NULL DEFAULT '',
+    expected_analysts     TEXT NOT NULL DEFAULT '',
+    started_at            TEXT NOT NULL,
+    ended_at              TEXT NOT NULL DEFAULT '',
+    status                TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed', 'partial')),
+    synthesis_output_id   TEXT REFERENCES analyst_outputs(id) ON DELETE SET NULL,
+    notes                 TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_sessions_entity ON analysis_sessions(entity_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analysis_sessions_status ON analysis_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_analysis_sessions_pipeline ON analysis_sessions(pipeline_session_id);
+
+ALTER TABLE analyst_outputs ADD COLUMN analysis_session_id TEXT REFERENCES analysis_sessions(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_analyst_outputs_session ON analyst_outputs(analysis_session_id);
+`
+
+// migrationV11Down drops the FK column and the table. Order matters:
+// drop the index that names the column BEFORE DROP COLUMN — SQLite
+// rejects DROP COLUMN when an index references it with an
+// "error in index" complaint. Then drop the column, the session
+// table's own indexes, and finally the table itself.
+const migrationV11Down = `
+DROP INDEX IF EXISTS idx_analyst_outputs_session;
+ALTER TABLE analyst_outputs DROP COLUMN analysis_session_id;
+DROP INDEX IF EXISTS idx_analysis_sessions_entity;
+DROP INDEX IF EXISTS idx_analysis_sessions_status;
+DROP INDEX IF EXISTS idx_analysis_sessions_pipeline;
+DROP TABLE IF EXISTS analysis_sessions;
 `
 
 // migrate runs all pending migrations on the database. It:

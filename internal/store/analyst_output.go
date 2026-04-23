@@ -53,6 +53,12 @@ type ingestOpts struct {
 	// becomes collected_from_entity_id. When empty (default), the
 	// pre-M2 behavior is preserved: out.Target is the only identity.
 	primaryTarget string
+
+	// analysisSessionID links this output to a prior-created
+	// analysis_sessions row. Empty (default) leaves the column NULL
+	// — outputs ingested outside a session still land; the
+	// session linkage is purely additive.
+	analysisSessionID string
 }
 
 // IngestOption configures IngestAnalystOutput. Variadic to keep the
@@ -73,6 +79,19 @@ type IngestOption func(*ingestOpts)
 // row has collected_from_entity_id = NULL.
 func WithPrimaryTarget(target string) IngestOption {
 	return func(o *ingestOpts) { o.primaryTarget = target }
+}
+
+// WithAnalysisSession stamps analyst_outputs.analysis_session_id
+// on the ingested row. The caller is responsible for ensuring
+// sessionID names an existing analysis_sessions row — the FK
+// constraint (ON DELETE SET NULL) surfaces a clear error otherwise.
+//
+// Set at INSERT time rather than UPDATE'd after the fact so we
+// don't need to suspend the v3 append-only trigger. Soft-cut
+// contract: ingests without this option still succeed; the
+// column simply stays NULL.
+func WithAnalysisSession(sessionID string) IngestOption {
+	return func(o *ingestOpts) { o.analysisSessionID = sessionID }
 }
 
 // IngestAnalystOutput stores an exchange.AnalystOutput in the
@@ -176,13 +195,9 @@ func (s *SQLite) IngestAnalystOutput(
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+	defer tx.Rollback() //nolint:errcheck // rollback-after-commit is a no-op
 
-	if err = insertAnalystOutputRow(ctx, tx, outputID, rowResolution, collectedFromEntityID, out, sourcePath, hash, now); err != nil {
+	if err = insertAnalystOutputRow(ctx, tx, outputID, rowResolution, collectedFromEntityID, options.analysisSessionID, out, sourcePath, hash, now); err != nil {
 		return nil, err
 	}
 	if err = insertConclusions(ctx, tx, outputID, out.Conclusions); err != nil {
@@ -503,15 +518,14 @@ func insertAnalystOutputRow(
 	outputID string,
 	resolution *entityResolution,
 	collectedFromEntityID string,
+	analysisSessionID string,
 	out *exchange.AnalystOutput,
 	sourcePath, contentHash, ingestedAt string,
 ) error {
-	// Normalize empty collected_from to SQL NULL so the FK
-	// constraint doesn't try to resolve it against entities(id).
-	var collectedFrom any
-	if collectedFromEntityID != "" {
-		collectedFrom = collectedFromEntityID
-	}
+	// Normalize empty FK-optional strings to SQL NULL so the FK
+	// constraints don't try to resolve "".
+	collectedFrom := nullableString(collectedFromEntityID)
+	sessionArg := nullableString(analysisSessionID)
 
 	// M6a: if the output carries a SynthesisSupplement, serialize
 	// the full supplement to JSON and denormalize the proposed
@@ -528,14 +542,16 @@ func insertAnalystOutputRow(
 	// unversioned URI under Plan-A canonicalization). The row is the
 	// one place "what did this analyst claim to be analyzing" can be
 	// answered after the fact — entity rows are shared across versions.
+	// v11: analysis_session_id links the output to the /analyze run
+	// that produced it (nullable — ingests without a session still land).
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO analyst_outputs
 		 (id, entity_id, analyst_id, model, prompt_version, invoked_at,
 		  ingested_at, round, target_commit, round_notes, source_path,
 		  content_hash, collected_from_entity_id,
 		  synthesis_supplement_json, proposed_tier, proposed_version_scope,
-		  target, target_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  target, target_version, analysis_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		outputID, resolution.EntityID,
 		out.Attribution.AnalystID, out.Attribution.Model,
 		out.Attribution.PromptVersion, out.Attribution.InvokedAt,
@@ -543,7 +559,7 @@ func insertAnalystOutputRow(
 		out.TargetCommit, out.RoundNotes, sourcePath, contentHash,
 		collectedFrom,
 		supplementJSON, proposedTier, proposedVersionScope,
-		resolution.FullURI, resolution.Version)
+		resolution.FullURI, resolution.Version, sessionArg)
 	if err != nil {
 		return fmt.Errorf("insert analyst_outputs: %w", err)
 	}
