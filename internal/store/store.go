@@ -76,6 +76,17 @@ type Store interface {
 	// isn't a synthesis (both cases mean "no proposal to accept").
 	GetSynthesisProposal(ctx context.Context, outputID string) (*exchange.ProposedPosture, error)
 
+	// Prune operations — destructive cleanup paths. Each plan call
+	// is read-only and suitable for rendering a dry-run preview;
+	// the apply call executes the plan inside a single transaction
+	// with append-only triggers temporarily suspended. Intended to
+	// run only behind an explicit operator action (`signatory
+	// prune …`).
+	PlanPruneEntities(ctx context.Context, entityIDs []string) (*PruneReport, error)
+	PruneEntities(ctx context.Context, entityIDs []string) (*PruneReport, error)
+	ListVersionedEntities(ctx context.Context) ([]string, error)
+	ListOrphanEntities(ctx context.Context) ([]string, error)
+
 	// Close releases database resources.
 	Close() error
 }

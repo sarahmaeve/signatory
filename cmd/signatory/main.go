@@ -36,6 +36,7 @@ type CLI struct {
 	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
 	Serve           ServeCmd           `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)."`
 	Certs           CertsCmd           `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS) so Claude Code's WebFetch can reach the pipeline service over HTTPS."`
+	Prune           PruneCmd           `cmd:"" help:"Delete entities and their child rows from the store. Destructive; use with --yes."`
 	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 

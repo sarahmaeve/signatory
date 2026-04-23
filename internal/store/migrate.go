@@ -1060,33 +1060,33 @@ CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
 // Columns:
 //
 //   - target: the full caller-supplied canonical URI, including any
-//     @V suffix. Backfilled from entity.canonical_uri for existing
-//     rows — under the pre-v10 model the entity URI was the caller's
-//     target verbatim, so the backfill is lossless.
+//     @V suffix. Empty-string default on existing rows — callers
+//     route through GetAnalystOutput, which falls back to the
+//     joined entity's canonical_uri when target is empty. Lossless
+//     under the pre-v10 model where entity URI WAS the caller's
+//     target verbatim.
 //
 //   - target_version: the @V suffix extracted from target, or empty.
-//     NOT backfilled here; defaults to '' on existing rows. Readers
-//     that need the version for old rows derive it via
-//     profile.SplitURIVersion on target. New rows carry both fields
-//     explicitly from the ingest path.
+//     Empty-string default; readers needing the version for pre-v10
+//     rows derive it via profile.SplitURIVersion on the fallback
+//     target. New rows carry both fields explicitly.
 //
 // NOT NULL with DEFAULT '' so existing append-only queries and JOINs
 // don't need rewrites for the new columns, and so the column can be
 // safely added without a separate NOT NULL CHECK rebuild. The empty
 // default matches the "no version specified" wire shape.
 //
-// Backfill is a correlated subquery wrapped in the same migration
-// transaction as the ALTERs; if the transaction rolls back, nothing
-// was touched. Tested on DBs with a few thousand analyst_output rows
-// at v0.1 scale the subquery is fast (O(n) with the entity_id index)
-// — revisit if ingest volume grows an order of magnitude.
+// No UPDATE backfill: the append-only trigger on analyst_outputs
+// (installed in v3) would RAISE on an UPDATE inside the migration
+// transaction. Dropping and recreating the trigger around the
+// backfill is possible but buys little — empty-string target on old
+// rows is handled cleanly by the read-path fallback, so the
+// complexity would be work without payoff. The 2026-04-22 dogfood
+// caught this on the live DB; tests had empty analyst_outputs and
+// never exercised the backfill's trigger interaction.
 const migrationV10Up = `
 ALTER TABLE analyst_outputs ADD COLUMN target         TEXT NOT NULL DEFAULT '';
 ALTER TABLE analyst_outputs ADD COLUMN target_version TEXT NOT NULL DEFAULT '';
-
-UPDATE analyst_outputs
-   SET target = (SELECT canonical_uri FROM entities WHERE entities.id = analyst_outputs.entity_id)
- WHERE target = '';
 `
 
 // migrationV10Down drops the two columns. SQLite's modern ALTER
