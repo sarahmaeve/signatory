@@ -1,14 +1,47 @@
 # Improve provenance signals — move mechanical work to signatory
 
-Last updated: 2026-04-23.
+Last updated: 2026-04-23 (post-Phase-1).
 
 ## Status
 
-Planning → implementation. Direction and key design decisions are settled
-from the 2026-04-23 dogfood session on `github.com/alecthomas/kong`; this
-document is the execution plan. Work lands incrementally on `main`
-(single-developer project); each phase is validated by a dogfood run
-against `kong` before the next begins.
+Implementation in progress. Direction and key design decisions are
+settled from the 2026-04-23 dogfood session on `github.com/alecthomas/kong`;
+this document is the execution plan. Work lands incrementally on `main`
+(single-developer project).
+
+**Phase progress:**
+
+| Phase | Commit | Status |
+|-------|--------|--------|
+| 1. Inline Layer-1 signals into handoff body | `8bcd634` | **Shipped (measurement deferred)** |
+| 2. Repo-hygiene collector (SECURITY.md, CODEOWNERS, .mailmap, CHANGELOG, CONTRIBUTING) | — | Not started |
+| 3. CI pinning collector (parse .github/workflows, SHA-vs-tag) | — | Not started |
+| 4. Tool-reproducibility collector (hermit, nvmrc, tool-versions, ...) | — | Not started |
+| 5. Identity cross-reference (owner ↔ commit-email domain) | — | Not started |
+| 6. Orphan-tag detection (cross-reference tags with releases) | — | Not started |
+| 7. Registry ↔ source SHA match (Go proxy; npm later) | — | Not started |
+| 8. GHSA advisories collector | — | Not started |
+| 9. Handoff rewrite — judgment-over-brief | — | Not started |
+
+**Dogfood-measurement status.** The plan originally called for a
+per-phase dogfood run on `kong` to measure token / tool-use delta
+against the Phase-0 baseline (51,699 tokens / 26 tool_uses / 5-of-8
+rederivations). Phase 1 proved the cadence is not currently
+sustainable: subagent-dispatched tool calls (WebFetch against
+`api.github.com` / `proxy.golang.org`, Read/Glob/Grep against
+`filestore/clones/**`) aren't in the project's persistent allowlist,
+so each dogfood run requires tens of permission clicks. Phase 1's
+correctness was instead verified by unit tests (5 passing) and
+payload inspection (the rendered kong provenance handoff grew
+22,510 → 31,103 bytes, with the inlined signals block carrying all
+four key fields the agent was re-deriving).
+
+Rather than block each phase on permission resolution, the plan is
+amended: **correctness continues to be unit-test-driven per phase;
+token-delta measurement is consolidated into a single cumulative
+dogfood after Phase 5 (or at any earlier natural pause).** The
+permission friction itself is tracked as a separate concern in
+`sync/KAIZEN.md` and not within scope of this provenance arc.
 
 ## Problem
 
@@ -141,7 +174,7 @@ the input to "proceed to next phase."
 | 8 | `signal: ghsa-advisories collector` | Querying the advisory DB as a positive-absence check. |
 | 9 | `provenance: rewrite handoff as judgment-over-brief; document tools as follow-up-only` | Prompt now matches the bar: thinking + optional follow-up. |
 
-### Phase 1 — Foundation
+### Phase 1 — Foundation (shipped `8bcd634`)
 
 Add a `{LAYER_1_SIGNALS}` placeholder to the provenance handoff
 template. `signatory handoff provenance` opens the store at render
@@ -157,12 +190,32 @@ Graceful fallback: if the target has no cached signals, substitute a
 clearly-marked "no cached signals — collect from scratch per
 Standard Methodology" message. Agent keeps working; no hard error.
 
-New tests:
-- Signals present → rendered handoff contains the JSON block with
-  known top-level keys.
-- Signals absent → rendered handoff contains the fallback text.
-- End-to-end: render → deposit → WebFetch retrieval yields a body
-  with the inlined signals.
+**Implementation notes** (what actually landed vs. the original plan):
+
+- Signal-composer extraction. `buildSignalsSummary` / `signalsSummary`
+  were package-private in `internal/mcp/tools/analyze.go`; extracted
+  to `internal/profile/summary.go` as exported `Summarize` +
+  `SignalsSummary`. The MCP tool and the handoff renderer now share
+  one composer. Prerequisite no other phase has to repeat.
+- Graceful-degrade broadened. Any error in signal assembly —
+  store open failure, resolve failure, entity-not-found, signal
+  query error, no signals cached — returns the fallback marker
+  rather than erroring. The signals block is an optimization, not
+  a prerequisite; handoff render is the primary obligation. This
+  meant no existing tests needed store-setup updates.
+- Envelope shape: `{collected_for: "<canonical URI>", signals: {...}}`.
+  The URI lets the agent flag if the caller-asked target and the
+  cache URI diverge (diagnostic; unusual).
+
+Tests shipped (5 passing):
+- `InlinesCachedSignals` — seeded store → all 5 signal groups in rendered block.
+- `FallbackWhenNoCache` — empty store → fallback marker.
+- `SignalsBlockIsValidJSON` — fenced JSON parses back into the envelope type.
+- `UnresolvableTargetFallsBackCleanly` — unknown entity → fallback.
+- `Security_NoSignalsBlock` — security-role handoffs unaffected.
+
+Phase 1 correctness is verified; token-delta measurement vs. baseline
+is deferred per §Status above.
 
 ### Phase 2 — Repo hygiene files
 
