@@ -314,13 +314,28 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// that turns the synthesist from a store-browsing agent into a
 	// self-contained one (agent-facing-contract §3.5). Other roles
 	// don't need store access; leaving the map untouched keeps the
-	// security/provenance handoff paths offline.
+	// security handoff path offline.
 	if cmd.Role == "synthesist" {
 		evidenceJSON, err := cmd.assembleSynthesisEvidence(context.Background(), globals)
 		if err != nil {
 			return err
 		}
 		subs["EVIDENCE_JSON"] = evidenceJSON
+	}
+
+	// Provenance role receives the cached Layer-1 signals block as
+	// ground truth, to eliminate the re-derivation antipattern
+	// (design/ImproveProvSignals.md §Phase 1). Unlike synthesist's
+	// evidence, signal absence is a soft case — a fresh target with
+	// no cached signals gets a fallback marker instead of a hard
+	// error so the agent can fall back to collecting from scratch
+	// against the clone.
+	if cmd.Role == "provenance" {
+		signalsBlock, err := cmd.assembleProvenanceSignals(context.Background(), globals)
+		if err != nil {
+			return err
+		}
+		subs["LAYER_1_SIGNALS"] = signalsBlock
 	}
 
 	rendered, unfilled := config.RenderTemplate(raw, subs)
@@ -499,6 +514,110 @@ func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *G
 	raw, err := json.MarshalIndent(evidence, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal synthesis evidence: %w", err)
+	}
+	return string(raw), nil
+}
+
+// provenanceSignalsFallback is the placeholder text substituted for
+// {LAYER_1_SIGNALS} when the store has nothing cached for this target
+// — a fresh target, or a target whose entity exists but has no
+// signals yet. Written as a markdown-formatted note so it reads
+// clearly in the handoff body. Kept as a package-level const so the
+// tests can assert on it without duplicating the string.
+const provenanceSignalsFallback = "_No cached Layer-1 signals for this target — collect from scratch per Standard Methodology. This is expected for a fresh target signatory hasn't analyzed before._"
+
+// assembleProvenanceSignals returns a JSON-formatted block of the
+// cached Layer-1 signals for cmd.Target, ready to substitute into the
+// provenance handoff's {LAYER_1_SIGNALS} placeholder. Wraps the
+// signal payload in a `{"signals": ..., "collected_for": "<uri>"}`
+// envelope so the agent can cite both the facts and the URI they
+// were cached under.
+//
+// Signal absence is a soft case. Unlike assembleSynthesisEvidence
+// (which errors when the store has nothing, because the synthesist
+// has no alternative path), provenance falls back to a marked-up
+// text message that tells the agent "no cache; collect yourself."
+// The agent still has the clone on disk + network access for
+// non-cached sources. Errors are reserved for cases where the store
+// access itself fails (open failure, scan error) — those genuinely
+// need to surface.
+//
+// Target resolution mirrors assembleSynthesisEvidence's handling:
+// resolve through profile.ResolveTarget, tolerate failure (fall back
+// gracefully), attempt lookup at the canonical URI, fall back to the
+// version-stripped base URI if the versioned form isn't in the
+// store.
+func (cmd *HandoffCmd) assembleProvenanceSignals(ctx context.Context, globals *Globals) (string, error) {
+	// Graceful-degrade philosophy: the signals block is an
+	// optimization that eliminates re-derivation by the agent, not
+	// a prerequisite for a correct handoff. Any failure path below
+	// (store unreachable, entity missing, no signals cached, URI
+	// unresolvable) returns the fallback marker — the agent sees a
+	// clearly-labeled "no cached signals" note and falls back to
+	// collecting from scratch per the Standard Methodology. Only
+	// truly programmer-error conditions (JSON marshal failure of a
+	// structure we just built) propagate as errors.
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return provenanceSignalsFallback, nil
+	}
+	defer s.Close() //nolint:errcheck // store close on function exit; errors not actionable
+
+	resolved, rerr := profile.ResolveTarget(cmd.Target)
+	if rerr != nil {
+		// Non-URI / non-shorthand targets (bare paths etc.) don't
+		// resolve to a canonical URI and therefore have no entity
+		// to look up.
+		return provenanceSignalsFallback, nil
+	}
+
+	lookupURI := resolved.CanonicalURI
+	if cmd.requestedVersion != "" && !strings.Contains(lookupURI, "@") {
+		lookupURI = lookupURI + "@" + cmd.requestedVersion
+	}
+
+	entity, err := s.FindEntityByURI(ctx, lookupURI)
+	if errors.Is(err, store.ErrNotFound) {
+		// Try the version-stripped form. Signals are collected per
+		// entity, and a pkg:npm/X@V with nothing at the versioned
+		// URI may have signals at pkg:npm/X (the unversioned
+		// canonical form). Mirrors the Plan-A fallback in
+		// assembleSynthesisEvidence.
+		if baseURI, version := profile.SplitURIVersion(lookupURI); version != "" && baseURI != lookupURI {
+			entity, err = s.FindEntityByURI(ctx, baseURI)
+			if errors.Is(err, store.ErrNotFound) {
+				return provenanceSignalsFallback, nil
+			}
+		} else {
+			return provenanceSignalsFallback, nil
+		}
+	}
+	if err != nil {
+		// Non-ErrNotFound lookup error (DB closed mid-query, scan
+		// error, etc.) — degrade silently. The next /analyze run
+		// will retry cleanly; the current handoff stays valid.
+		return provenanceSignalsFallback, nil
+	}
+
+	signals, err := s.GetLatestSignals(ctx, entity.ID)
+	if err != nil || len(signals) == 0 {
+		return provenanceSignalsFallback, nil
+	}
+
+	// Envelope: the signal summary plus the URI the cache was
+	// looked up under. The URI is informational — lets the agent
+	// note discrepancies if the caller-asked target and the cache
+	// URI diverge (unusual, but a diagnostic worth surfacing).
+	envelope := struct {
+		CollectedFor string                 `json:"collected_for"`
+		Signals      profile.SignalsSummary `json:"signals"`
+	}{
+		CollectedFor: entity.CanonicalURI,
+		Signals:      profile.Summarize(signals),
+	}
+	raw, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal provenance signals: %w", err)
 	}
 	return string(raw), nil
 }

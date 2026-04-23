@@ -61,10 +61,10 @@ type analyzeInput struct {
 
 // analyzeData is the output payload for signatory_analyze.
 type analyzeData struct {
-	Entity            analyzeEntity  `json:"entity"`
-	SignalsSummary    signalsSummary `json:"signals_summary"`
-	Anomalies         []string       `json:"anomalies"`
-	ForgeryResistance string         `json:"forgery_resistance"`
+	Entity            analyzeEntity          `json:"entity"`
+	SignalsSummary    profile.SignalsSummary `json:"signals_summary"`
+	Anomalies         []string               `json:"anomalies"`
+	ForgeryResistance string                 `json:"forgery_resistance"`
 }
 
 type analyzeEntity struct {
@@ -78,14 +78,6 @@ type analyzeEntity struct {
 type analyzePosture struct {
 	Tier  string `json:"tier"`
 	SetAt string `json:"set_at"`
-}
-
-type signalsSummary struct {
-	Vitality    map[string]interface{} `json:"vitality,omitempty"`
-	Governance  map[string]interface{} `json:"governance,omitempty"`
-	Criticality map[string]interface{} `json:"criticality,omitempty"`
-	Hygiene     map[string]interface{} `json:"hygiene,omitempty"`
-	Publication map[string]interface{} `json:"publication,omitempty"`
 }
 
 func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Response {
@@ -152,7 +144,7 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 		}
 	}
 
-	summary := buildSignalsSummary(signals)
+	summary := profile.Summarize(signals)
 	forgery := dominantForgeryResistance(signals)
 
 	data := analyzeData{
@@ -162,54 +154,6 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 		ForgeryResistance: forgery,
 	}
 	return mcp.OK(data).WithCacheHit(true)
-}
-
-// buildSignalsSummary groups the latest signals by group and collapses
-// each signal's JSON value into the per-group map so the caller gets a
-// flattened summary keyed by signal type.
-func buildSignalsSummary(signals []profile.Signal) signalsSummary {
-	s := signalsSummary{}
-	for _, sig := range signals {
-		// Summary-path unmarshal: a corrupt Signal.Value for one
-		// signal should not drop the whole summary. On decode failure
-		// val stays nil and the explicit nil-guard below substitutes
-		// an empty map, which is the documented shape for an unknown
-		// or unreadable value. The raw bytes remain in the store for
-		// debugging via signatory_signals.
-		var val map[string]interface{}
-		_ = json.Unmarshal(sig.Value, &val) //nolint:errcheck // see comment above: nil-safe summary on decode failure
-		if val == nil {
-			val = map[string]interface{}{}
-		}
-		switch sig.Group {
-		case profile.SignalGroupVitality:
-			if s.Vitality == nil {
-				s.Vitality = map[string]interface{}{}
-			}
-			s.Vitality[sig.Type] = val
-		case profile.SignalGroupGovernance:
-			if s.Governance == nil {
-				s.Governance = map[string]interface{}{}
-			}
-			s.Governance[sig.Type] = val
-		case profile.SignalGroupCriticality:
-			if s.Criticality == nil {
-				s.Criticality = map[string]interface{}{}
-			}
-			s.Criticality[sig.Type] = val
-		case profile.SignalGroupHygiene:
-			if s.Hygiene == nil {
-				s.Hygiene = map[string]interface{}{}
-			}
-			s.Hygiene[sig.Type] = val
-		case profile.SignalGroupPublication:
-			if s.Publication == nil {
-				s.Publication = map[string]interface{}{}
-			}
-			s.Publication[sig.Type] = val
-		}
-	}
-	return s
 }
 
 // forgeryResistanceRank returns a numeric rank for ordering (higher is better)

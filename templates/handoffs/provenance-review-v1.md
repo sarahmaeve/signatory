@@ -48,6 +48,48 @@ documented below.
 - **GitHub URL**: `{TARGET_URL}`
 - **Notes from the user**: {INTAKE_QUESTION}
 
+## Pre-collected signals (trust as ground truth)
+
+Signatory's mechanical collectors have already gathered the
+Layer-1 signals below and cached them in the store. **Treat the
+values as ground truth.** They come from the same sources you
+would query (GitHub API, registry metadata, git history) but
+collected once, at cache time, and shared across analyst runs.
+
+Rules for using this block:
+
+- **Cite values directly.** A conclusion about commit-signing
+  ratio should reference the `governance.commit_signing.ratio`
+  field below, not a fresh `WebFetch` against the GitHub commits
+  endpoint.
+- **Do NOT use WebFetch to re-derive facts already in this
+  block.** Every such re-derivation is wasted tokens + wasted
+  rate budget + a divergence risk (your re-fetch may disagree
+  with what the synthesist sees in its own copy).
+- **Do follow up when a signal surprises you.** If something in
+  the block looks anomalous or contradicts what the source tree
+  suggests, investigate — read the relevant files in the clone,
+  or WebFetch the specific corroborating record. Follow-up is a
+  legitimate use of your tools; routine re-collection is not.
+- **When the block is empty** (fallback marker shown instead
+  of JSON): signatory has no cached signals for this target.
+  Fall back to collecting yourself per the Standard Methodology
+  below. This is expected on fresh targets.
+
+```json
+{LAYER_1_SIGNALS}
+```
+
+Your job is to apply judgment to this brief AND investigate the
+aspects the mechanical collectors can't see: CI workflow pinning,
+repo-root hygiene files (SECURITY.md / CODEOWNERS / .mailmap /
+CHANGELOG), tool-pinning for reproducibility, registry ↔ source
+SHA match, owner-email ↔ commit-email domain consistency, open
+advisories, orphan-tag / publish-pipeline defects, dep-tree
+health, and the ecosystem-specific patterns below. Produce v1-
+schema conclusions that weigh the facts in the block + what you
+find on top of them.
+
 ## Independence rule
 
 Previous reports do not corroborate new conclusions — only evidence does. Cite only source code you read, registry data you queried, or git history you inspected. Code comparison with other projects is fine; reading other analysts' conclusions is not — skip `filestore/analysis/` and `design/`.
