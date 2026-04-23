@@ -2,21 +2,52 @@
 set -euo pipefail
 
 echo "=== pre-commit: gofmt ==="
-# Scope to TRACKED .go files. git ls-files respects .gitignore
-# automatically, so gitignored directories like filestore/clones/
-# (analyze --clone output — external source we don't own) are
-# excluded without having to enumerate paths. A naive `find .` would
-# walk into them and falsely fail on external code.
-TRACKED_GO=$(git ls-files '*.go')
-if [ -n "$TRACKED_GO" ]; then
-    UNFMT=$(gofmt -l $TRACKED_GO)
-    if [ -n "$UNFMT" ]; then
-        echo "ERROR: The following files are not formatted:"
-        echo "$UNFMT"
-        echo "Run: gofmt -w \$file"
-        exit 1
-    fi
+
+# Staged .go files only (Added/Copied/Modified/Renamed — not Deleted).
+# -z + read -d handles spaces/newlines in filenames safely.
+STAGED_GO=()
+while IFS= read -r -d '' f; do
+    STAGED_GO+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.go')
+
+if [ ${#STAGED_GO[@]} -eq 0 ]; then
+    echo "OK (no staged .go files)"
+    exit 0
 fi
+
+# Check staged *content*, not the working tree. A file can be staged
+# formatted and then edited to be unformatted — we want to pass on
+# what's actually being committed.
+FAIL=0
+UNFMT=()
+for f in "${STAGED_GO[@]}"; do
+    # git show :path reads the staged blob
+    if ! git show ":$f" | gofmt -l > /dev/null 2>&1; then
+        # gofmt exits non-zero on parse errors — capture and report
+        ERR=$(git show ":$f" | gofmt -l 2>&1 >/dev/null)
+        echo "ERROR: $f failed to parse:"
+        echo "$ERR"
+        FAIL=1
+        continue
+    fi
+    # gofmt -l prints the filename (here "<standard input>") if unformatted
+    if [ -n "$(git show ":$f" | gofmt -l)" ]; then
+        UNFMT+=("$f")
+    fi
+done
+
+if [ ${#UNFMT[@]} -gt 0 ]; then
+    echo "ERROR: The following staged files are not gofmt'd:"
+    printf '  %s\n' "${UNFMT[@]}"
+    echo "Run: gofmt -w ${UNFMT[*]}"
+    echo "Then: git add <files> && git commit"
+    FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+    exit 1
+fi
+
 echo "OK"
 
 echo "=== pre-commit: go vet ==="
