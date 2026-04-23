@@ -62,7 +62,11 @@ type AnalystOutputFilter struct {
 	EntityURI string
 
 	// AnalystID matches analyst_outputs.analyst_id (e.g.
-	// "external-sec-v1", "signatory-provenance").
+	// "signatory-security-v1", "signatory-provenance-v1",
+	// "signatory-synthesis-v1"). Convention: signatory-<function>-v<N>
+	// for outputs produced by signatory's own pipeline; other prefixes
+	// reserved for human reviews, external scanners, and third-party
+	// tools.
 	AnalystID string
 
 	// Since limits results to outputs ingested at or after this

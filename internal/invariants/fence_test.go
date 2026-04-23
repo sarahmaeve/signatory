@@ -65,7 +65,7 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 // analystAgentRoles enumerates the reasoning-agent roles that must
 // be denied Bash, Write, and MCP read tools in
 // .claude/skills/analyze/SKILL.md.
-var analystAgentRoles = []string{"security-analyst", "provenance-analyst"}
+var analystAgentRoles = []string{"signatory-security", "signatory-provenance"}
 
 // synthesistAgentRole is checked separately so a regression back
 // into Bash / Write / MCP-read tools surfaces clearly. The D9
@@ -81,7 +81,7 @@ var analystAgentRoles = []string{"security-analyst", "provenance-analyst"}
 // design/open-architecture-question.md for the hypothesis test
 // that drove this relaxation and for Option A (MCP fetch_handoff)
 // which would re-tighten this fence mechanically if invoked.
-var synthesistAgentRole = "synthesist"
+var synthesistAgentRole = "signatory-synthesis"
 
 // forbiddenSynthesistTools is currently identical to
 // forbiddenAnalystTools. The synthesist's D9 prohibition on

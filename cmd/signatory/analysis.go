@@ -61,7 +61,7 @@ type AnalysisBeginCmd struct {
 	Target string `arg:"" help:"Target URI (canonical or URL form)."`
 
 	Version           string   `help:"Target version to record (e.g. 1.2.3). Conflicts with a @V suffix on the target — pass one or the other." optional:""`
-	ExpectedAnalysts  []string `name:"expected-analyst" help:"Analyst role ID the skill plans to dispatch (e.g. external-sec-v1). Repeatable; order is preserved." optional:""`
+	ExpectedAnalysts  []string `name:"expected-analyst" help:"Analyst role ID the skill plans to dispatch (e.g. signatory-security-v1). Repeatable; order is preserved." optional:""`
 	PipelineSessionID string   `name:"pipeline-session-id" help:"Pipeline-service session ID to correlate this run with pipeline logs. Optional." optional:""`
 	Notes             string   `help:"Free-form operator commentary recorded at begin-time." optional:""`
 	InvokedBy         string   `name:"invoked-by" help:"Override the team identity resolved by identity.Current. Only use when scripting across identities." optional:""`

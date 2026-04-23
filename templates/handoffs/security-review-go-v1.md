@@ -87,7 +87,7 @@ example and translation rules at the end of this section.
 At the top of your file, include these key: value lines:
 
 ```
-Analyst: external-sec-v1
+Analyst: signatory-security-v1
 Model: (your model name)
 Round: 1
 Target-commit: (the HEAD SHA you analyzed)
@@ -159,7 +159,7 @@ v1 JSON envelope. Shape:
 ```json
 {
   "attribution": {
-    "analyst_id": "<your role id>",
+    "analyst_id": "signatory-security-v1",
     "model": "<your model>",
     "invoked_at": "<RFC3339 timestamp>",
     "round": 1
@@ -217,7 +217,7 @@ Call shape:
 ```
 signatory_ingest_analysis:
   analyst_output: <the JSON envelope above>
-  source:         "mcp:<your-role>"   (optional; defaults to "mcp")
+  source:         "mcp:signatory-security"   (optional; defaults to "mcp")
 ```
 
 The validator runs before the write. On validation failure the

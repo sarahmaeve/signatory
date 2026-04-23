@@ -132,8 +132,8 @@ echo "Pipeline session: $SESSION_ID"
 # rollups afterwards. --pipeline-session-id threads the transport
 # session id onto the audit row for cross-correlation if needed.
 ANALYSIS_SID=$(signatory analysis begin "$TARGET" \
-  --expected-analyst external-sec-v1 \
-  --expected-analyst signatory-provenance \
+  --expected-analyst signatory-security-v1 \
+  --expected-analyst signatory-provenance-v1 \
   --expected-analyst signatory-synthesis-v1 \
   --pipeline-session-id "$SESSION_ID")
 echo "Analysis session: $ANALYSIS_SID"
@@ -222,7 +222,7 @@ The `format=raw` parameter returns plain text (not JSON), which is
 what the agent needs.
 
 ```
-Agent(security-analyst):
+Agent(signatory-security):
   prompt: |
     You are a security analyst for signatory's trust analysis pipeline.
 
@@ -237,7 +237,7 @@ Agent(security-analyst):
       example envelope).
     - Land your output by calling the signatory_ingest_analysis MCP tool:
         analyst_output:      <your v1 JSON object>
-        source:              "mcp:security-analyst"
+        source:              "mcp:signatory-security"
         collected_from:      "{TARGET}"
         analysis_session_id: "{ANALYSIS_SID}"
     - `collected_from` is the URI the caller originally asked about
@@ -260,7 +260,7 @@ Agent(security-analyst):
       transport for your output.
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 
-Agent(provenance-analyst):
+Agent(signatory-provenance):
   prompt: |
     You are a provenance analyst for signatory's trust analysis pipeline.
 
@@ -275,7 +275,7 @@ Agent(provenance-analyst):
       example envelope).
     - Land your output by calling the signatory_ingest_analysis MCP tool:
         analyst_output:      <your v1 JSON object>
-        source:              "mcp:provenance-analyst"
+        source:              "mcp:signatory-provenance"
         collected_from:      "{TARGET}"
         analysis_session_id: "{ANALYSIS_SID}"
     - `collected_from` is the URI the caller originally asked about
@@ -374,7 +374,7 @@ analyst output. Re-dispatch the missing analyst role(s) before
 continuing.
 
 ```
-Agent(synthesist):
+Agent(signatory-synthesis):
   prompt: |
     You are a synthesist for signatory's trust analysis pipeline.
 
@@ -400,7 +400,7 @@ Agent(synthesist):
       synthesis output that carries them.
     - Land your output by calling signatory_ingest_analysis:
         analyst_output:      <your v1 JSON object>
-        source:              "mcp:synthesist"
+        source:              "mcp:signatory-synthesis"
         analysis_session_id: "{ANALYSIS_SID}"
     - Do NOT pass collected_from — the synthesist inherits the
       caller-identity indexing from the analyses it is

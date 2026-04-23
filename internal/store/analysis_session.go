@@ -13,7 +13,7 @@ import (
 
 // analystIDSeparator joins ExpectedAnalysts for storage in the
 // single-column expected_analysts field. Chosen because analyst
-// role IDs are kebab-case identifiers (e.g. "external-sec-v1")
+// role IDs are kebab-case identifiers (e.g. "signatory-security-v1")
 // that do not contain commas — splitting on "," round-trips
 // without ambiguity.
 const analystIDSeparator = ","

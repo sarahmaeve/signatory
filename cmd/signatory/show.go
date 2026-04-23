@@ -19,7 +19,7 @@ import (
 // URL or canonical URI and see what's been ingested.
 type ShowAnalysesCmd struct {
 	Target  string `arg:"" optional:"" help:"Optional target URI (canonical or URL form). When set, lists only outputs for that entity."`
-	Analyst string `help:"Filter by analyst_id (e.g. signatory-provenance, external-sec-v1)."`
+	Analyst string `help:"Filter by analyst_id (e.g. signatory-security-v1, signatory-provenance-v1, signatory-synthesis-v1)."`
 	Limit   int    `help:"Maximum number of rows to return. 0 = no limit." default:"0"`
 }
 
