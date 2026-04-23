@@ -328,31 +328,34 @@ func TestPostureAccept_DryRun_DoesNotWrite(t *testing.T) {
 	assert.Equal(t, 0, count, "dry-run must not write an audit row")
 }
 
-// TestPostureAccept_VersionedEntityTarget is the 2026-04-22 dogfood
-// regression: a synthesis whose `target` carries an `@V` suffix
-// ingests to an entity row whose canonical_uri ALSO carries `@V`
-// (current `ensureEntityForTarget` behavior — the unversioned-entity
-// cleanup is tracked separately). The earlier `posture accept`
-// implementation reconstructed the entity URI from the synthesis
-// target, then ran SplitURIVersion on it before lookup — which fails
-// here because the stripped base URI doesn't match any entity. The
-// fix routes the accept verb through the analyst_output.entity_id
-// FK directly, so the lookup can't drift from the row the synthesis
-// was actually indexed under.
+// TestPostureAccept_VersionedEntityTarget_pkg is the 2026-04-22
+// testify dogfood regression: `signatory posture accept <id> --yes`
+// on a synthesis whose target carries `@V`. The original bug was
+// that the accept verb re-derived the entity URI from the synthesis
+// target, stripped `@V` via SplitURIVersion, and then FindEntityByURI
+// missed — because `ensureEntityForTarget` of the day preserved `@V`
+// on the entity row. The fix routes accept through the
+// analyst_output.entity_id FK (commit 79c2833); this test locks it
+// down so subsequent refactors can't reintroduce the URI round-trip.
 //
-// User report:
+// Post-v10 (Plan-A canonicalization), `ensureEntityForTarget` strips
+// @V on ingest, so the entity row lives at the unversioned URI and
+// the versioned form is preserved on analyst_outputs.target. That
+// makes the accept path's FK walk the right semantic: the FK points
+// at the unversioned entity, which is exactly where posture rows
+// belong under Plan A.
 //
-//	signatory posture accept <id> --yes
-//	locate entity for synthesis target "pkg:golang/...@v1.11.1": not found
-//
-// This test reproduces the exact scenario with a pkg: URI. A matching
-// repo: regression lives below — repo: URIs have a distinct parser
-// in SplitURIVersion, so we lock both shapes in.
+// Observable post-conditions:
+//   - Entity exists at `pkg:npm/accept-versioned` (unversioned).
+//   - No entity at `pkg:npm/accept-versioned@1.2.3` (stripped).
+//   - Posture for (entity, version="1.2.3") lands on the unversioned
+//     entity — matches `posture set pkg:npm/accept-versioned@1.2.3`
+//     storage shape, keeping the two entry paths on one row.
 func TestPostureAccept_VersionedEntityTarget_pkg(t *testing.T) {
 	g := newTestGlobals(t)
 
-	// Target carries `@1.2.3` — this is the form the /analyze
-	// synthesist emitted in the testify@v1.11.1 dogfood run.
+	// Target carries `@1.2.3` — the form the /analyze synthesist
+	// emitted in the testify@v1.11.1 dogfood run.
 	out := synthesisForAccept()
 	out.Target = "pkg:npm/accept-versioned@1.2.3"
 	outputID := ingestSynthesisForAccept(t, g, out)
@@ -364,15 +367,20 @@ func TestPostureAccept_VersionedEntityTarget_pkg(t *testing.T) {
 	require.NoError(t, cmd.Run(g),
 		"posture accept on a versioned synthesis target must route through the entity FK, not re-derive via URI stripping")
 
-	// Posture must land on the entity the synthesis was indexed
-	// under (the versioned URI under the current model) with the
-	// proposal's version_scope in the posture.version column.
 	ctx := t.Context()
 	s, err := g.OpenStore(ctx)
 	require.NoError(t, err)
 	defer s.Close() //nolint:errcheck // test cleanup
-	entity, err := s.FindEntityByURI(ctx, "pkg:npm/accept-versioned@1.2.3")
-	require.NoError(t, err, "entity must still exist at the versioned URI")
+
+	// Post-v10: entity is at the unversioned URI, and the versioned
+	// form is recorded on analyst_outputs.target (verified indirectly
+	// via posture landing on the unversioned entity).
+	entity, err := s.FindEntityByURI(ctx, "pkg:npm/accept-versioned")
+	require.NoError(t, err, "entity must exist at the unversioned URI (Plan-A canonicalization)")
+	_, err = s.FindEntityByURI(ctx, "pkg:npm/accept-versioned@1.2.3")
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"versioned entity must NOT exist — ingest strips @V under Plan A")
+
 	posture, err := s.GetPosture(ctx, entity.ID, "1.2.3")
 	require.NoError(t, err)
 	assert.Equal(t, profile.PostureTier("trusted-for-now"), posture.Tier)
@@ -380,10 +388,11 @@ func TestPostureAccept_VersionedEntityTarget_pkg(t *testing.T) {
 }
 
 // TestPostureAccept_VersionedEntityTarget_repo is the repo:-scheme
-// half of the versioned-target regression. The 2026-04-22 dogfood
-// also produced `repo:github/stretchr/testify@v1.11.1`; signatory
-// must accept postures against synthesis outputs indexed under that
-// shape too.
+// half of the versioned-target regression. repo: URIs have their
+// own shape in SplitURIVersion (distinct from pkg:), so we exercise
+// both independently — post-v10 behavior is unified (both end up at
+// unversioned entity), but that's a property worth asserting rather
+// than assuming.
 func TestPostureAccept_VersionedEntityTarget_repo(t *testing.T) {
 	g := newTestGlobals(t)
 
@@ -402,8 +411,13 @@ func TestPostureAccept_VersionedEntityTarget_repo(t *testing.T) {
 	s, err := g.OpenStore(ctx)
 	require.NoError(t, err)
 	defer s.Close() //nolint:errcheck // test cleanup
-	entity, err := s.FindEntityByURI(ctx, "repo:github/example/proj@v1.11.1")
-	require.NoError(t, err)
+
+	entity, err := s.FindEntityByURI(ctx, "repo:github/example/proj")
+	require.NoError(t, err, "entity must exist at the unversioned repo URI")
+	_, err = s.FindEntityByURI(ctx, "repo:github/example/proj@v1.11.1")
+	assert.ErrorIs(t, err, store.ErrNotFound,
+		"versioned repo entity must NOT exist — ingest strips @V for repo: URIs too")
+
 	posture, err := s.GetPosture(ctx, entity.ID, "v1.11.1")
 	require.NoError(t, err)
 	assert.Equal(t, profile.PostureTier("trusted-for-now"), posture.Tier)

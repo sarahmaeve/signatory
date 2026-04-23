@@ -251,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v9 → v8. Drops the citations.parent_kind CHECK
+	// First rollback: v10 → v9. Drops the analyst_outputs.target +
+	// .target_version columns. Seed data has no analyst_outputs rows,
+	// so the drop is a no-op on data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 9, version)
+
+	// Second rollback: v9 → v8. Drops the citations.parent_kind CHECK
 	// constraint by rebuilding the table without it. citations is
 	// empty in our seed data so the rebuild is a no-op on rows.
 	err = migrateDown(t.Context(), db, path)
@@ -542,7 +552,19 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v8 (drops citations.parent_kind CHECK; rebuilds table). ---
+	// --- Down: vN → v9 (drops analyst_outputs.target + .target_version). ---
+	// The v10 migration added two TEXT NOT NULL DEFAULT '' columns
+	// to analyst_outputs for Plan-A canonicalization bookkeeping.
+	// Dropping them is safe — analyst_outputs is empty in this
+	// fixture so there's nothing to lose on the data side.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 9, version)
+
+	// --- Down: v9 → v8 (drops citations.parent_kind CHECK; rebuilds table). ---
 	// The v9 migration installed a CHECK constraint via the
 	// rebuild-through-new-table ceremony. Down reverses the
 	// rebuild without the CHECK; the pre-v5 'finding' → 'conclusion'

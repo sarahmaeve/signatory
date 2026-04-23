@@ -598,19 +598,20 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 	}
 
 	out := &exchange.AnalystOutput{}
-	var ignoredEntityID, ignoredHash, ignoredIngestedAt, ignoredSourcePath string
+	var entityID, ignoredHash, ignoredIngestedAt, ignoredSourcePath string
 	var supplementJSON sql.NullString
+	var rowTarget string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT entity_id, analyst_id, model, prompt_version, invoked_at,
 		        ingested_at, round, target_commit, round_notes, source_path,
-		        content_hash, synthesis_supplement_json
+		        content_hash, synthesis_supplement_json, target
 		 FROM analyst_outputs WHERE id = ?`, outputID).Scan(
-		&ignoredEntityID,
+		&entityID,
 		&out.Attribution.AnalystID, &out.Attribution.Model,
 		&out.Attribution.PromptVersion, &out.Attribution.InvokedAt,
 		&ignoredIngestedAt, &out.Attribution.Round,
 		&out.TargetCommit, &out.RoundNotes, &ignoredSourcePath, &ignoredHash,
-		&supplementJSON,
+		&supplementJSON, &rowTarget,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -618,14 +619,28 @@ func (s *SQLite) GetAnalystOutput(ctx context.Context, outputID string) (*exchan
 	if err != nil {
 		return nil, fmt.Errorf("load analyst_output: %w", err)
 	}
-	// Resolve target via the joined entity's canonical_uri.
-	var targetURI string
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT canonical_uri FROM entities WHERE id = ?`,
-		ignoredEntityID).Scan(&targetURI); err != nil {
-		return nil, fmt.Errorf("load target URI: %w", err)
+	// Reconstruct out.Target from the row's target column (v10+) —
+	// it carries the caller-supplied identity (including @V if any),
+	// which is the faithful answer to "what was this analyst
+	// analyzing?" even after Plan-A canonicalization moved the entity
+	// row itself to an unversioned URI.
+	//
+	// Fallback for pre-v10 rows: target is empty-string defaulted by
+	// the v10 migration but a mis-applied migration could leave old
+	// rows with target=''; in that case the entity's canonical_uri
+	// is the lossless answer (pre-v10 entity canonical_uri == the
+	// caller's target verbatim).
+	if rowTarget != "" {
+		out.Target = rowTarget
+	} else {
+		var entityURI string
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT canonical_uri FROM entities WHERE id = ?`,
+			entityID).Scan(&entityURI); err != nil {
+			return nil, fmt.Errorf("load target URI: %w", err)
+		}
+		out.Target = entityURI
 	}
-	out.Target = targetURI
 
 	// M6a: reconstruct the synthesis supplement from the JSON column
 	// when present. Non-synthesist outputs have supplement_json = NULL

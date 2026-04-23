@@ -144,23 +144,28 @@ func (s *SQLite) IngestAnalystOutput(
 	// optionally override with the caller's identity from options.
 	// Both routes go through ensureEntityForTarget so the canonical
 	// URI and entity type are consistent.
-	analystEntityID, err := s.ensureEntityForTarget(ctx, out.Target)
+	analystResolution, err := s.ensureEntityForTarget(ctx, out.Target)
 	if err != nil {
 		return nil, err
 	}
-	entityID := analystEntityID
+	// The row's entity_id is whichever identity we ultimately index
+	// under (see M2 collected_from semantics below); the row's target
+	// columns always reflect the ANALYST'S caller-supplied target so
+	// "what was this output analyzing?" stays answerable from the row
+	// alone.
+	rowResolution := analystResolution
 	var collectedFromEntityID string
 	if options.primaryTarget != "" {
-		primaryEntityID, err := s.ensureEntityForTarget(ctx, options.primaryTarget)
+		primaryResolution, err := s.ensureEntityForTarget(ctx, options.primaryTarget)
 		if err != nil {
 			return nil, fmt.Errorf("resolve primary target %q: %w", options.primaryTarget, err)
 		}
 		// Only record the resolution hop when the two identities
 		// actually differ. Same-identity passthrough (pre-M2 default
 		// behavior) keeps the row's collected_from column NULL.
-		if primaryEntityID != analystEntityID {
-			entityID = primaryEntityID
-			collectedFromEntityID = analystEntityID
+		if primaryResolution.EntityID != analystResolution.EntityID {
+			rowResolution = primaryResolution
+			collectedFromEntityID = analystResolution.EntityID
 		}
 	}
 
@@ -177,7 +182,7 @@ func (s *SQLite) IngestAnalystOutput(
 		}
 	}()
 
-	if err = insertAnalystOutputRow(ctx, tx, outputID, entityID, collectedFromEntityID, out, sourcePath, hash, now); err != nil {
+	if err = insertAnalystOutputRow(ctx, tx, outputID, rowResolution, collectedFromEntityID, out, sourcePath, hash, now); err != nil {
 		return nil, err
 	}
 	if err = insertConclusions(ctx, tx, outputID, out.Conclusions); err != nil {
@@ -205,7 +210,7 @@ func (s *SQLite) IngestAnalystOutput(
 
 	return &IngestResult{
 		OutputID:              outputID,
-		EntityID:              entityID,
+		EntityID:              rowResolution.EntityID,
 		CollectedFromEntityID: collectedFromEntityID,
 		Idempotent:            false,
 	}, nil
@@ -249,69 +254,138 @@ func (s *SQLite) lookupOutputEntity(ctx context.Context, outputID string) (strin
 	return id, nil
 }
 
-// ensureEntityForTarget finds an existing entity whose canonical_uri
-// matches `target`, or creates a new one with EntityProject type as
-// default.
+// resolvedTarget is the ingest-side split of a caller-supplied
+// target into (entity URI, original canonical URI, version scope).
+// The three forms answer different questions and live in different
+// columns:
+//
+//   - EntityURI is the UNVERSIONED canonical URI — what the entity
+//     row is keyed under (Plan-A canonicalization). `pkg:npm/X@V`
+//     resolves to entity at `pkg:npm/X`; `repo:github/O/R@v1` to
+//     entity at `repo:github/O/R`.
+//
+//   - FullURI is the caller's target as first normalized — includes
+//     the @V if present. Persisted on analyst_outputs.target for
+//     audit (answer to "what did the analyst say it was analyzing?").
+//
+//   - Version is the @V suffix alone, or "" when absent. Persisted
+//     on analyst_outputs.target_version for cheap version-scoped
+//     queries without re-parsing.
+//
+// Under the pre-v10 model these three collapsed to a single URI
+// (FullURI == EntityURI); post-v10 they diverge for versioned
+// targets so the entity row can be shared across versions.
+type resolvedTarget struct {
+	EntityURI string
+	FullURI   string
+	Version   string
+}
+
+// resolveIngestTarget normalizes a caller-supplied target string
+// into the three forms above. Pure function — no I/O, no store
+// access; the caller decides whether to lookup-or-create the entity
+// at EntityURI. Exported via the package-internal ensureEntityForTarget.
+//
+// Error shape matches ensureEntityForTarget's previous contract:
+// empty input and malformed targets both surface early so the ingest
+// caller can fail fast.
+func resolveIngestTarget(target string) (*resolvedTarget, error) {
+	if target == "" {
+		return nil, fmt.Errorf("%w: AnalystOutput.Target is empty", ErrNilInput)
+	}
+	full, err := normalizeTargetToCanonicalURI(target)
+	if err != nil {
+		return nil, err
+	}
+	base, version := profile.SplitURIVersion(full)
+	return &resolvedTarget{
+		EntityURI: base,
+		FullURI:   full,
+		Version:   version,
+	}, nil
+}
+
+// ensureEntityForTarget finds or creates the entity for an ingest
+// target, returning the resolved target triple so the caller can
+// persist the caller-supplied URI + version on the analyst_outputs
+// row while the entity row lives at the unversioned URI.
+//
+// Plan-A canonicalization: versioned purl/repo URIs (`pkg:X@V`,
+// `repo:O/R@v1`) are split; the entity is keyed by the UNVERSIONED
+// base, and the @V goes on the analyst_outputs row's version column.
+// This keeps analyses across different versions of the same package
+// on a single entity row (so posture/burn/summary queries don't
+// fragment by version) and aligns the ingest path with the pre-
+// existing posture-set behavior (see normalizeTargetForPosture in
+// cmd/signatory/posture.go).
 //
 // The target string from an AnalystOutput might be a canonical URI
-// (`pkg:cargo/atuin`) or a recognizable URL (`https://github.com/owner/repo`)
-// that signatory's URI scheme normalizes. We normalize URL forms to
-// canonical URIs before lookup/insert so that two analyst outputs
-// using different surface forms (one URL, one purl) for the same
-// project resolve to the same entity row.
-//
-// Normalization rules currently supported:
-//   - Already-canonical URIs (pkg:..., repo:..., identity:..., org:...,
-//     patch:...) pass through unchanged
-//   - GitHub URLs in any of the standard forms get normalized via
-//     profile.NormalizeGitHubRepoInput → `repo:github/owner/name`
-//   - Anything else fails ValidateCanonicalURI and returns an error
+// (`pkg:cargo/atuin`), a recognizable URL (`https://github.com/owner/repo`),
+// or a versioned form (`pkg:golang/github.com/stretchr/testify@v1.11.1`).
+// Surface-form normalization (URL → purl, percent-decode scope
+// markers, etc.) is handled by normalizeTargetToCanonicalURI;
+// version stripping is handled by profile.SplitURIVersion.
 //
 // Default fields for newly-created entities:
 //   - type: EntityProject (most analyst outputs target a project)
-//   - short_name: derived from the canonical URI (last path segment)
-//   - description: empty (filled by later signal collection)
-//   - ecosystem: derived from URI prefix when possible (pkg:cargo →
-//     "cargo", pkg:npm → "npm", pkg:pypi → "pypi"); empty otherwise
-//   - url: original target if it was an http(s) URL; empty otherwise
+//   - short_name: derived from the UNVERSIONED canonical URI — so
+//     a versioned ingest produces "testify", not "testify@v1.11.1"
+//   - ecosystem: derived from URI prefix (pkg:cargo → "cargo", etc.)
+//   - url: original http(s) URL target, else empty
 //
 // Existing entities are returned untouched — ingestion does not
-// mutate entity metadata. The signal collectors are the right path
-// for entity enrichment.
-func (s *SQLite) ensureEntityForTarget(ctx context.Context, target string) (string, error) {
-	if target == "" {
-		return "", fmt.Errorf("%w: AnalystOutput.Target is empty", ErrNilInput)
-	}
-
-	canonicalURI, err := normalizeTargetToCanonicalURI(target)
+// mutate entity metadata. Signal collectors are the enrichment path.
+func (s *SQLite) ensureEntityForTarget(ctx context.Context, target string) (*entityResolution, error) {
+	resolved, err := resolveIngestTarget(target)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	existing, err := s.FindEntityByURI(ctx, canonicalURI)
+	existing, err := s.FindEntityByURI(ctx, resolved.EntityURI)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		return "", fmt.Errorf("lookup entity: %w", err)
+		return nil, fmt.Errorf("lookup entity: %w", err)
 	}
 	if existing != nil {
-		return existing.ID, nil
+		return &entityResolution{
+			EntityID:       existing.ID,
+			resolvedTarget: *resolved,
+		}, nil
 	}
 
 	id := uuid.NewString()
 	now := time.Now().UTC()
 	entity := &profile.Entity{
 		ID:           id,
-		CanonicalURI: canonicalURI,
+		CanonicalURI: resolved.EntityURI,
 		Type:         profile.EntityProject,
-		ShortName:    deriveShortName(canonicalURI),
-		Ecosystem:    deriveEcosystem(canonicalURI),
-		URL:          deriveURL(target), // preserve original URL if http(s)
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		// Derive the short name from the unversioned base so
+		// "pkg:npm/X@1.2.3" produces "X", not "X@1.2.3". Matters
+		// for CLI rendering — `signatory summary` etc. pull
+		// short_name verbatim, and a version-glued short name was
+		// the ugly-render symptom in the 2026-04-22 dogfood.
+		ShortName: deriveShortName(resolved.EntityURI),
+		Ecosystem: deriveEcosystem(resolved.EntityURI),
+		URL:       deriveURL(target), // preserve original URL if http(s)
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := s.PutEntity(ctx, entity); err != nil {
-		return "", fmt.Errorf("create entity for target %q: %w", target, err)
+		return nil, fmt.Errorf("create entity for target %q: %w", target, err)
 	}
-	return id, nil
+	return &entityResolution{
+		EntityID:       id,
+		resolvedTarget: *resolved,
+	}, nil
+}
+
+// entityResolution bundles the entity-id result with the resolved
+// target triple that the caller needs to persist on the
+// analyst_outputs row. Kept private to the store package — callers
+// outside get the URI-normalization behavior via
+// IngestAnalystOutput's contract, not by poking at this struct.
+type entityResolution struct {
+	EntityID string
+	resolvedTarget
 }
 
 // normalizeTargetToCanonicalURI converts an ingest-side target
@@ -426,7 +500,9 @@ func deriveURL(target string) string {
 func insertAnalystOutputRow(
 	ctx context.Context,
 	tx *sql.Tx,
-	outputID, entityID, collectedFromEntityID string,
+	outputID string,
+	resolution *entityResolution,
+	collectedFromEntityID string,
 	out *exchange.AnalystOutput,
 	sourcePath, contentHash, ingestedAt string,
 ) error {
@@ -447,20 +523,27 @@ func insertAnalystOutputRow(
 		return err
 	}
 
+	// v10: target + target_version capture the caller's identity
+	// independent of the entity row (which may now be keyed at an
+	// unversioned URI under Plan-A canonicalization). The row is the
+	// one place "what did this analyst claim to be analyzing" can be
+	// answered after the fact — entity rows are shared across versions.
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO analyst_outputs
 		 (id, entity_id, analyst_id, model, prompt_version, invoked_at,
 		  ingested_at, round, target_commit, round_notes, source_path,
 		  content_hash, collected_from_entity_id,
-		  synthesis_supplement_json, proposed_tier, proposed_version_scope)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		outputID, entityID,
+		  synthesis_supplement_json, proposed_tier, proposed_version_scope,
+		  target, target_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		outputID, resolution.EntityID,
 		out.Attribution.AnalystID, out.Attribution.Model,
 		out.Attribution.PromptVersion, out.Attribution.InvokedAt,
 		ingestedAt, out.Attribution.Round,
 		out.TargetCommit, out.RoundNotes, sourcePath, contentHash,
 		collectedFrom,
-		supplementJSON, proposedTier, proposedVersionScope)
+		supplementJSON, proposedTier, proposedVersionScope,
+		resolution.FullURI, resolution.Version)
 	if err != nil {
 		return fmt.Errorf("insert analyst_outputs: %w", err)
 	}

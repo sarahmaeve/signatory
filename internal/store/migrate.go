@@ -78,6 +78,12 @@ var migrations = []Migration{
 		Up:          migrationV9Up,
 		Down:        migrationV9Down,
 	},
+	{
+		Version:     10,
+		Description: "analyst_outputs.target + .target_version: preserve caller-supplied target identity so ingest can normalize entity URIs to the unversioned Plan-A form without losing the @V scope (closes the 2026-04-22 testify dogfood entity-fragmentation)",
+		Up:          migrationV10Up,
+		Down:        migrationV10Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -1042,6 +1048,53 @@ CREATE TRIGGER citations_no_update BEFORE UPDATE ON citations
     BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
 CREATE TRIGGER citations_no_delete BEFORE DELETE ON citations
     BEGIN SELECT RAISE(ABORT, 'citations are append-only'); END;
+`
+
+// migrationV10Up adds two columns to analyst_outputs so the row can
+// carry its own identity independent of the entity it's indexed
+// under. Plan-A canonicalization wants entities at the unversioned
+// URI (pkg:X not pkg:X@V); without a per-row target field we'd lose
+// the original scope information and be unable to tell which version
+// an analysis covered.
+//
+// Columns:
+//
+//   - target: the full caller-supplied canonical URI, including any
+//     @V suffix. Backfilled from entity.canonical_uri for existing
+//     rows — under the pre-v10 model the entity URI was the caller's
+//     target verbatim, so the backfill is lossless.
+//
+//   - target_version: the @V suffix extracted from target, or empty.
+//     NOT backfilled here; defaults to '' on existing rows. Readers
+//     that need the version for old rows derive it via
+//     profile.SplitURIVersion on target. New rows carry both fields
+//     explicitly from the ingest path.
+//
+// NOT NULL with DEFAULT '' so existing append-only queries and JOINs
+// don't need rewrites for the new columns, and so the column can be
+// safely added without a separate NOT NULL CHECK rebuild. The empty
+// default matches the "no version specified" wire shape.
+//
+// Backfill is a correlated subquery wrapped in the same migration
+// transaction as the ALTERs; if the transaction rolls back, nothing
+// was touched. Tested on DBs with a few thousand analyst_output rows
+// at v0.1 scale the subquery is fast (O(n) with the entity_id index)
+// — revisit if ingest volume grows an order of magnitude.
+const migrationV10Up = `
+ALTER TABLE analyst_outputs ADD COLUMN target         TEXT NOT NULL DEFAULT '';
+ALTER TABLE analyst_outputs ADD COLUMN target_version TEXT NOT NULL DEFAULT '';
+
+UPDATE analyst_outputs
+   SET target = (SELECT canonical_uri FROM entities WHERE entities.id = analyst_outputs.entity_id)
+ WHERE target = '';
+`
+
+// migrationV10Down drops the two columns. SQLite's modern ALTER
+// TABLE DROP COLUMN handles the rewrite cleanly — we don't need the
+// rebuild-through-new-table ceremony v9 used for CHECK constraints.
+const migrationV10Down = `
+ALTER TABLE analyst_outputs DROP COLUMN target_version;
+ALTER TABLE analyst_outputs DROP COLUMN target;
 `
 
 // migrate runs all pending migrations on the database. It:

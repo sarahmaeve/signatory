@@ -310,10 +310,17 @@ func TestMigration_V9_CleansLegacyFindingOnRebuild(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 
-	// Back off v9 → v8 so the CHECK is gone and we can insert a
+	// Back off to v8 so the CHECK is gone and we can insert a
 	// 'finding' row. v9Down reinstalls the append-only triggers,
 	// but INSERT isn't trigger-blocked (only UPDATE/DELETE are).
-	require.NoError(t, migrateDown(ctx, s.db, ""))
+	// Walk down step-by-step from the latest version — currently
+	// v10, previously v9. The loop keeps this test robust when new
+	// migrations land above v9 without changing v9's cleanup
+	// semantics, which is what this regression is protecting.
+	for i := len(migrations); i > 8; i-- {
+		require.NoError(t, migrateDown(ctx, s.db, ""),
+			"rollback from v%d must succeed to reach v8", i)
+	}
 	version, err := getCurrentVersion(ctx, s.db)
 	require.NoError(t, err)
 	require.Equal(t, 8, version, "fixture: must be at v8 before inserting legacy data")
@@ -328,16 +335,20 @@ func TestMigration_V9_CleansLegacyFindingOnRebuild(t *testing.T) {
 		"cite-legacy", "finding", "parent-ancient", 0)
 	require.NoError(t, err, "INSERT with pre-v5 parent_kind must succeed at v8 schema")
 
-	// Re-migrate to v9. v9's cleanup rewrites the 'finding' row
+	// Re-migrate forward. v9's cleanup rewrites the 'finding' row
 	// before the CHECK rebuild fires, working around the citations
 	// append-only trigger via explicit DROP/CREATE around the
 	// UPDATE. Pre-fix this failed with "citations are append-only".
+	// Re-migrate lands us on whatever latest is (v10+ as new
+	// migrations arrive); the important post-condition is that the
+	// legacy row survived v9's rewrite.
 	require.NoError(t, migrate(ctx, s.db, ""),
 		"v9 must succeed even with pre-v5 legacy data in citations")
 
 	version, err = getCurrentVersion(ctx, s.db)
 	require.NoError(t, err)
-	require.Equal(t, 9, version)
+	require.Equal(t, len(migrations), version,
+		"should land at latest after full re-migration")
 
 	var kind string
 	require.NoError(t, s.db.QueryRowContext(ctx,
