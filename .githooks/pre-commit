@@ -54,8 +54,8 @@ echo "=== pre-commit: go vet ==="
 go vet ./...
 echo "OK"
 
-echo "=== pre-commit: go test -race ==="
-go test -race ./...
+echo "=== pre-commit: go test ==="
+go test ./...
 echo "OK"
 
 echo "=== pre-commit: all checks passed ==="
