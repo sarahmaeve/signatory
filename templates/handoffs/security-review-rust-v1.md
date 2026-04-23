@@ -155,6 +155,38 @@ Security review focused on: unsafe usage, FFI boundaries,
 command execution, filesystem access. Two medium conclusions...
 ```
 
+### Schema precision — validator traps
+
+The validator rejects shapes that mostly-look-right. Copy values
+verbatim rather than inventing alternatives from memory.
+
+**Enum values (match exactly):**
+
+- `severity.default`: one of `critical`, `high`, `medium`, `low`,
+  `informational`, `positive`.
+- `positive_absences[].confidence`: one of `exhaustive`,
+  `thoroughly_reviewed`, `spot_checked`. NOT severity's
+  `high`/`medium`/`low` — different enum, different field.
+- `citations[].scope.kind`: one of `file`, `dir`, `tree`,
+  `workspace`, `crate`. Not `api_response`, `path_glob`, or any
+  other plausible-sounding kind.
+
+**Shape traps:**
+
+- `severity` is an object, NOT a bare string. `"severity": "medium"`
+  is rejected; use `"severity": {"default": "medium"}`.
+- Citation quote field is `quoted`, NOT `quote`.
+- Citations are line-based OR scope-based, never both. Line-based:
+  `line_start` (≥ 1), optional `line_end` (≥ `line_start`),
+  optional `quoted`. Scope-based: `scope: {kind, path}`, NO line
+  fields.
+- Line numbers start at 1, not 0. `"line_start": 0` is rejected.
+- `methodology_trace` is optional — OMIT the field if you have no
+  patterns. `[]` (wrong type — expected object) and
+  `{"patterns": []}` (missing required `source`) are both rejected.
+  If you have patterns: `{"source": {"analyst_id": "...",
+  "model": "...", "invoked_at": "..."}, "patterns": [...]}`.
+
 ### Ingesting via signatory_ingest_analysis
 
 At the end of your analysis, call the MCP tool exactly once with a

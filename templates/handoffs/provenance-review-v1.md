@@ -200,6 +200,41 @@ require git CLI access (deferred to v0.2). Conclusions about
 signing are based on GitHub API verification flags only.
 ```
 
+### Schema precision — validator traps
+
+The validator rejects shapes that mostly-look-right. Copy values
+verbatim rather than inventing alternatives from memory. Dogfood
+observation (2026-04-23 gin run): the provenance analyst iterated
+four times to converge on valid JSON — every retry was on one of
+these traps.
+
+**Enum values (match exactly):**
+
+- `severity.default`: one of `critical`, `high`, `medium`, `low`,
+  `informational`, `positive`.
+- `positive_absences[].confidence`: one of `exhaustive`,
+  `thoroughly_reviewed`, `spot_checked`. NOT severity's
+  `high`/`medium`/`low` — different enum, different field.
+- `citations[].scope.kind`: one of `file`, `dir`, `tree`,
+  `workspace`, `crate`. Not `api_response`, `path_glob`, or any
+  other plausible-sounding kind.
+
+**Shape traps:**
+
+- `severity` is an object, NOT a bare string. `"severity": "medium"`
+  is rejected; use `"severity": {"default": "medium"}`.
+- Citation quote field is `quoted`, NOT `quote`.
+- Citations are line-based OR scope-based, never both. Line-based:
+  `line_start` (≥ 1), optional `line_end` (≥ `line_start`),
+  optional `quoted`. Scope-based: `scope: {kind, path}`, NO line
+  fields.
+- Line numbers start at 1, not 0. `"line_start": 0` is rejected.
+- `methodology_trace` is optional — OMIT the field if you have no
+  patterns. `[]` (wrong type — expected object) and
+  `{"patterns": []}` (missing required `source`) are both rejected.
+  If you have patterns: `{"source": {"analyst_id": "...",
+  "model": "...", "invoked_at": "..."}, "patterns": [...]}`.
+
 ### Ingesting via signatory_ingest_analysis
 
 At the end of your analysis, call the MCP tool exactly once with a
@@ -245,9 +280,6 @@ v1 JSON envelope. Shape:
     {"id": "O001", "title": "<one-line>", "body": "<markdown>",
      "category": "<slug>"}
   ],
-  "methodology_trace": {
-    "patterns": []
-  },
   "round_notes": "<short summary of this round>"
 }
 ```
