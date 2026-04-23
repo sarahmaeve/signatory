@@ -226,82 +226,48 @@ Agent(signatory-security):
   prompt: |
     You are a security analyst for signatory's trust analysis pipeline.
 
-    FIRST: Retrieve your full handoff instructions using WebFetch:
+    Retrieve your handoff via WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
 
-    Follow those instructions exactly.
+    Follow the handoff exactly. It specifies your analyst_id, the v1
+    JSON envelope, the signatory_ingest_analysis call shape, and the
+    analysis_session_id you must include in your ingest call.
 
-    OUTPUT INSTRUCTIONS:
-    - Produce your output as v1-schema JSON (see internal/exchange/types.go
-      for the shape; the handoff's "Output format" section carries an
-      example envelope).
-    - Land your output by calling the signatory_ingest_analysis MCP tool:
-        analyst_output:      <your v1 JSON object>
-        source:              "mcp:signatory-security"
-        collected_from:      "{TARGET}"
-        analysis_session_id: "{ANALYSIS_SID}"
-    - `collected_from` is the URI the caller originally asked about
-      ("{TARGET}"). When it resolves to a different canonical URI than
-      analyst_output.target (e.g. caller asked pkg:npm/foo, analyst
-      analyzed repo:github/bar), the store indexes the analysis under
-      the caller's identity and captures analyst_output.target as the
-      resolved source. Pass it verbatim; the tool handles the
-      same-URI case as a no-op.
-    - `analysis_session_id` links your output to the orchestrator's
-      session record so `signatory analysis show|timing
-      <session-id>` surfaces it afterwards. The handoff body also
-      carries a linkage block naming the same id; the two must
-      agree. Pass "{ANALYSIS_SID}" verbatim.
-    - The tool validates your payload. If validation fails, the error
-      names the first offending field — fix the JSON and retry in the
-      same turn. Do NOT drop fields to get past validation.
-    - Do NOT write files. Do NOT produce markdown as output. Do NOT run
-      signatory commands (you have no Bash). The MCP tool is the sole
-      transport for your output.
+    One orchestrator-supplied field the handoff does not set:
+        collected_from: "{TARGET}"
+    Pass it verbatim. If the caller-asked URI resolves to the same
+    canonical URI as analyst_output.target the MCP tool treats this
+    as a no-op; otherwise it indexes the analysis under the caller's
+    identity (agent-facing-contract §3.2).
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 
 Agent(signatory-provenance):
   prompt: |
     You are a provenance analyst for signatory's trust analysis pipeline.
 
-    FIRST: Retrieve your full handoff instructions using WebFetch:
+    Retrieve your handoff via WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
 
-    Follow those instructions exactly.
+    Follow the handoff exactly. It specifies your analyst_id, the v1
+    JSON envelope, the signatory_ingest_analysis call shape, and the
+    analysis_session_id you must include in your ingest call.
 
-    OUTPUT INSTRUCTIONS:
-    - Produce your output as v1-schema JSON (see internal/exchange/types.go
-      for the shape; the handoff's "Output format" section carries an
-      example envelope).
-    - Land your output by calling the signatory_ingest_analysis MCP tool:
-        analyst_output:      <your v1 JSON object>
-        source:              "mcp:signatory-provenance"
-        collected_from:      "{TARGET}"
-        analysis_session_id: "{ANALYSIS_SID}"
-    - `collected_from` is the URI the caller originally asked about
-      ("{TARGET}"). When it resolves to a different canonical URI than
-      analyst_output.target (e.g. caller asked pkg:npm/foo, analyst
-      analyzed repo:github/bar), the store indexes the analysis under
-      the caller's identity and captures analyst_output.target as the
-      resolved source. Pass it verbatim; the tool handles the
-      same-URI case as a no-op.
-    - `analysis_session_id` links your output to the orchestrator's
-      session record. The handoff body carries a linkage block
-      naming the same id; pass "{ANALYSIS_SID}" verbatim.
-    - The tool validates your payload. If validation fails, the error
-      names the first offending field — fix the JSON and retry in the
-      same turn. Do NOT drop fields to get past validation.
-    - Do NOT write files. Do NOT produce markdown as output. Do NOT run
-      signatory commands (you have no Bash). The MCP tool is the sole
-      transport for your output.
+    One orchestrator-supplied field the handoff does not set:
+        collected_from: "{TARGET}"
+    Pass it verbatim. If the caller-asked URI resolves to the same
+    canonical URI as analyst_output.target the MCP tool treats this
+    as a no-op; otherwise it indexes the analysis under the caller's
+    identity (agent-facing-contract §3.2).
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
-Substitute `{SESSION_ID}`, `{TARGET}`, and `{ANALYSIS_SID}` into
-each prompt before dispatching. `{TARGET}` is the original
-`$TARGET` value the user supplied to the skill (unresolved; the
-MCP tool canonicalizes). `{ANALYSIS_SID}` is the audit-session
-id captured in Step 1.
+Substitute `{SESSION_ID}` and `{TARGET}` into each prompt before
+dispatching. `{TARGET}` is the original `$TARGET` value the user
+supplied to the skill (unresolved; the MCP tool canonicalizes).
+The audit session id is embedded in the handoff body (via the
+handoff's SESSION_INSTRUCTION block) — the agent reads it from
+WebFetch and forwards it unchanged, so the dispatch prompt doesn't
+need to carry it.
 
 Wait for BOTH agents to complete before proceeding.
 
@@ -376,58 +342,35 @@ continuing.
 ```
 Agent(signatory-synthesis):
   prompt: |
-    You are a synthesist for signatory's trust analysis pipeline.
+    You are the synthesist for signatory's trust analysis pipeline.
 
-    FIRST: Retrieve your full handoff instructions using WebFetch:
+    Retrieve your handoff via WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=synthesist&type=handoff&format=raw
 
-    The handoff body contains every analyst conclusion you need
-    as an inlined JSON block. It is your entire source of truth;
-    you have no other tools to read prior analyses, and there is
-    no fallback path that would let you browse the store.
+    Follow the handoff exactly. It inlines every analyst conclusion
+    you need, specifies your analyst_id, the v1 synthesis_supplement
+    shape, the signatory_ingest_analysis call, and the
+    analysis_session_id you must include.
 
-    OUTPUT INSTRUCTIONS:
-    - Produce v1-schema JSON (see internal/exchange/types.go for
-      the shape). Your output is an AnalystOutput whose
-      attribution.analyst_id is "signatory-synthesis-v1" and whose
-      synthesis_supplement field carries proposed_posture,
-      reasoning, summary, concordance_strengths,
-      contradictions_detected, key_conclusion_refs, gaps,
-      action_items, and optional notes.
-    - Do NOT populate conclusions / positive_absences /
-      observations / methodology_trace. Those are Layer-2 analyst
-      artifacts; you are Layer-3. The validator rejects a
-      synthesis output that carries them.
-    - Land your output by calling signatory_ingest_analysis:
-        analyst_output:      <your v1 JSON object>
-        source:              "mcp:signatory-synthesis"
-        analysis_session_id: "{ANALYSIS_SID}"
-    - Do NOT pass collected_from — the synthesist inherits the
-      caller-identity indexing from the analyses it is
-      synthesizing.
-    - `analysis_session_id` links this synthesis to the /analyze
-      run it caps. Pass "{ANALYSIS_SID}" verbatim; the handoff
-      body also carries the same id in its linkage block.
-    - The tool validates your payload. If validation fails, the
-      error names the first offending field; fix the JSON and
-      retry in the same turn. Do NOT drop fields to get past
-      validation.
-    - The tool's response includes the output_id of your synthesis
-      record. Report it in your final message so the orchestrator
-      can offer `signatory posture accept <output-id>` in Step 5.
-    - Do NOT write files. Do NOT run any signatory commands (you
-      have no Bash). The MCP tool is the sole transport for your
-      output.
-    - Read/Glob/Grep are present in your toolset ONLY so Claude
-      Code's HTTPS client can load the mkcert CA file referenced
-      by NODE_EXTRA_CA_CERTS at TLS handshake time — without
-      file-read capability the WebFetch above fails with
-      "unable to verify the first certificate" (see
-      design/open-architecture-question.md). They MUST NOT be
-      used to browse filestore, prior analyses, source code, or
-      any other evidence beyond what the handoff body carries.
-      The handoff is your complete source of truth by design
-      (D9 independence rule).
+    Two orchestrator-level rules not in the handoff:
+
+    1. Do NOT pass `collected_from` to signatory_ingest_analysis —
+       the synthesist inherits caller-identity indexing from the
+       analyses it synthesizes. (Only the analyst roles supply it.)
+
+    2. Report the `output_id` that signatory_ingest_analysis returns
+       in your final message. The orchestrator reads it to offer
+       `signatory posture accept <output-id>` in Step 5; without it
+       the pipeline stalls.
+
+    D9 tool-capability note: Read/Glob/Grep are in your toolset
+    ONLY so Claude Code's HTTPS client can load the mkcert CA file
+    referenced by NODE_EXTRA_CA_CERTS at TLS handshake time —
+    without file-read capability the WebFetch above fails with
+    "unable to verify the first certificate"
+    (see design/open-architecture-question.md). You MUST NOT use
+    them to browse filestore, prior analyses, source code, or any
+    other evidence beyond what the handoff body carries.
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
