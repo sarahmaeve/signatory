@@ -44,7 +44,7 @@ sync/
 # .idea/
 # .vscode/
 .DS_Store
-.claude
+.claude/settings.local.json
 
 # Filestore — analysis output, clones, and ingested data.
 # This directory is project-local working state, not source.
