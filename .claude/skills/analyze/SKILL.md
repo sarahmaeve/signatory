@@ -99,11 +99,18 @@ signatory certs init --write-profile
 # then: restart your terminal so NODE_EXTRA_CA_CERTS is exported
 ```
 
-## Step 1 — Start pipeline service + create session + generate handoffs
+## Step 1 — Start pipeline service + create sessions + generate handoffs
 
-The pipeline message service eliminates /tmp files and context-window
-pressure. Agents retrieve their instructions via WebFetch from a
-localhost URL instead of having 500 lines inlined in their prompt.
+Two session concepts, both needed:
+
+1. **Pipeline session** (`$SESSION_ID`): transport-layer. Holds
+   handoff messages the agents retrieve via WebFetch.
+2. **Analysis session** (`$ANALYSIS_SID`): audit identity for this
+   /analyze run. Lives in the main signatory store. Every analyst
+   output the dispatched agents land will carry this id via the
+   `analysis_session_id` FK, so `signatory analysis show|timing
+   <id>` afterwards surfaces the linked outputs with per-analyst
+   wall-clock decomposition.
 
 ```bash
 # Ensure the pipeline service is running. `signatory serve status`
@@ -114,19 +121,38 @@ localhost URL instead of having 500 lines inlined in their prompt.
 # cleanly. Prefer these over `pgrep` / `lsof` / `nohup & disown`.
 signatory serve status >/dev/null 2>&1 || signatory serve start
 
-# Create a session for this pipeline run.
+# Create the pipeline (transport) session.
 SESSION_ID=$(curl -sk -X POST https://127.0.0.1:21517/api/sessions \
   -H "Content-Type: application/json" \
   -d "{\"target\":\"$TARGET\"}" | jq -r .id)
-echo "Session: $SESSION_ID"
+echo "Pipeline session: $SESSION_ID"
+
+# Create the analysis (audit) session. --expected-analyst lets
+# `signatory analysis show <id>` surface expected-vs-landed
+# rollups afterwards. --pipeline-session-id threads the transport
+# session id onto the audit row for cross-correlation if needed.
+ANALYSIS_SID=$(signatory analysis begin "$TARGET" \
+  --expected-analyst external-sec-v1 \
+  --expected-analyst signatory-provenance \
+  --expected-analyst signatory-synthesis-v1 \
+  --pipeline-session-id "$SESSION_ID")
+echo "Analysis session: $ANALYSIS_SID"
 ```
 
-Generate both handoff prompts and deposit them in the session.
-`signatory handoff` handles target resolution (accepts every form
-`signatory analyze` accepts: owner/repo shorthand, github.com URL,
-https:// URL, `repo:` canonical URI), language/ecosystem detection,
-and shallow-cloning — you do NOT need to call `gh api` or `git clone`
-yourself.
+Generate both handoff prompts and deposit them in the pipeline
+session. `signatory handoff` handles target resolution (accepts
+every form `signatory analyze` accepts: owner/repo shorthand,
+github.com URL, https:// URL, `repo:` canonical URI),
+language/ecosystem detection, shallow-cloning — you do NOT need
+to call `gh api` or `git clone` yourself.
+
+`--analysis-session-id "$ANALYSIS_SID"` tells the handoff renderer
+to embed the session linkage instruction in the rendered prompt.
+The dispatched analyst reads the handoff, sees the block, and
+includes `analysis_session_id: "$ANALYSIS_SID"` in its
+`signatory_ingest_analysis` call. Handoff validates the session
+exists and is still in_progress before rendering — typos fail
+here rather than inside a dispatched subagent.
 
 Use `--json` on the handoff emission so its output is already a
 JSON-escaped string; the outer POST body can interpolate it
@@ -137,6 +163,7 @@ analysis text with literal newlines (synthesis handoffs especially).
 ```bash
 # Security handoff — clones the repo into filestore/clones/.
 SECURITY_HANDOFF_JSON=$(signatory handoff security "$TARGET" \
+  --analysis-session-id "$ANALYSIS_SID" \
   --network-precheck --clone-dir filestore/clones/ --json 2>/dev/null)
 
 # Deposit in the pipeline service. $SECURITY_HANDOFF_JSON is
@@ -151,6 +178,7 @@ curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
 # every accepted target form (owner/repo, URL, canonical URI).
 TARGET_NAME=$(basename "$TARGET" .git)
 PROVENANCE_HANDOFF_JSON=$(signatory handoff provenance "$TARGET" \
+  --analysis-session-id "$ANALYSIS_SID" \
   --network-precheck --path "filestore/clones/$TARGET_NAME" --json 2>/dev/null)
 
 curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
@@ -208,9 +236,10 @@ Agent(security-analyst):
       for the shape; the handoff's "Output format" section carries an
       example envelope).
     - Land your output by calling the signatory_ingest_analysis MCP tool:
-        analyst_output:  <your v1 JSON object>
-        source:          "mcp:security-analyst"
-        collected_from:  "{TARGET}"
+        analyst_output:      <your v1 JSON object>
+        source:              "mcp:security-analyst"
+        collected_from:      "{TARGET}"
+        analysis_session_id: "{ANALYSIS_SID}"
     - `collected_from` is the URI the caller originally asked about
       ("{TARGET}"). When it resolves to a different canonical URI than
       analyst_output.target (e.g. caller asked pkg:npm/foo, analyst
@@ -218,6 +247,11 @@ Agent(security-analyst):
       the caller's identity and captures analyst_output.target as the
       resolved source. Pass it verbatim; the tool handles the
       same-URI case as a no-op.
+    - `analysis_session_id` links your output to the orchestrator's
+      session record so `signatory analysis show|timing
+      <session-id>` surfaces it afterwards. The handoff body also
+      carries a linkage block naming the same id; the two must
+      agree. Pass "{ANALYSIS_SID}" verbatim.
     - The tool validates your payload. If validation fails, the error
       names the first offending field — fix the JSON and retry in the
       same turn. Do NOT drop fields to get past validation.
@@ -240,9 +274,10 @@ Agent(provenance-analyst):
       for the shape; the handoff's "Output format" section carries an
       example envelope).
     - Land your output by calling the signatory_ingest_analysis MCP tool:
-        analyst_output:  <your v1 JSON object>
-        source:          "mcp:provenance-analyst"
-        collected_from:  "{TARGET}"
+        analyst_output:      <your v1 JSON object>
+        source:              "mcp:provenance-analyst"
+        collected_from:      "{TARGET}"
+        analysis_session_id: "{ANALYSIS_SID}"
     - `collected_from` is the URI the caller originally asked about
       ("{TARGET}"). When it resolves to a different canonical URI than
       analyst_output.target (e.g. caller asked pkg:npm/foo, analyst
@@ -250,6 +285,9 @@ Agent(provenance-analyst):
       the caller's identity and captures analyst_output.target as the
       resolved source. Pass it verbatim; the tool handles the
       same-URI case as a no-op.
+    - `analysis_session_id` links your output to the orchestrator's
+      session record. The handoff body carries a linkage block
+      naming the same id; pass "{ANALYSIS_SID}" verbatim.
     - The tool validates your payload. If validation fails, the error
       names the first offending field — fix the JSON and retry in the
       same turn. Do NOT drop fields to get past validation.
@@ -259,9 +297,11 @@ Agent(provenance-analyst):
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 ```
 
-Substitute `{SESSION_ID}` and `{TARGET}` into each prompt before
-dispatching — `{TARGET}` is the original `$TARGET` value the user
-supplied to the skill (unresolved; the MCP tool canonicalizes).
+Substitute `{SESSION_ID}`, `{TARGET}`, and `{ANALYSIS_SID}` into
+each prompt before dispatching. `{TARGET}` is the original
+`$TARGET` value the user supplied to the skill (unresolved; the
+MCP tool canonicalizes). `{ANALYSIS_SID}` is the audit-session
+id captured in Step 1.
 
 Wait for BOTH agents to complete before proceeding.
 
@@ -272,20 +312,32 @@ has nothing to convert or ingest — just confirm that both analyses
 are present in the store before moving to synthesis.
 
 ```bash
+# Primary view — every output ever landed for this target.
 signatory show-analyses "$TARGET"
+
+# Session-scoped view — only outputs linked to this run via the
+# analysis_session_id FK. Faster to read than show-analyses when
+# the target has prior rounds; also surfaces the "expected-vs-
+# landed" rollup so missing analysts are obvious.
+signatory analysis show "$ANALYSIS_SID"
 ```
 
-Query with `$TARGET` (the original caller URI), not the resolved
-repo URI. Because each analyst passed `collected_from: $TARGET`,
-M2 indexes the analysis under the caller's identity; the
-analyst-stated target is captured as the resolved source and the
-cross-URI walk surfaces it from either direction.
+Query `show-analyses` with `$TARGET` (the original caller URI),
+not the resolved repo URI. Because each analyst passed
+`collected_from: $TARGET`, M2 indexes the analysis under the
+caller's identity; the analyst-stated target is captured as the
+resolved source and the cross-URI walk surfaces it from either
+direction.
 
 Expected: two rows, one per analyst role. If only one row shows
 up, the missing analyst either failed silently, skipped the
-ingest call, or omitted `collected_from`. Re-dispatch the missing
-role with explicit guidance to call signatory_ingest_analysis
-with both `source` and `collected_from` set, at the end of its turn.
+ingest call, or omitted `collected_from` / `analysis_session_id`.
+Re-dispatch the missing role with explicit guidance to call
+signatory_ingest_analysis with `source`, `collected_from`, and
+`analysis_session_id` all set, at the end of its turn.
+
+`signatory analysis show` names the missing analyst directly in
+its "missing:" line — the most direct signal of who didn't land.
 
 If an agent's own report indicates a v1 schema-validation error
 from signatory_ingest_analysis and the agent couldn't fix it in
@@ -308,7 +360,8 @@ arrives via WebFetch.
 # contains literal newlines. Without --json the raw emission
 # would trip downstream jq -Rs on "control characters must be
 # escaped."
-SYNTHESIS_HANDOFF_JSON=$(signatory handoff synthesist "$TARGET" --json 2>/dev/null)
+SYNTHESIS_HANDOFF_JSON=$(signatory handoff synthesist "$TARGET" \
+  --analysis-session-id "$ANALYSIS_SID" --json 2>/dev/null)
 
 curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
   -H "Content-Type: application/json" \
@@ -346,11 +399,15 @@ Agent(synthesist):
       artifacts; you are Layer-3. The validator rejects a
       synthesis output that carries them.
     - Land your output by calling signatory_ingest_analysis:
-        analyst_output:  <your v1 JSON object>
-        source:          "mcp:synthesist"
+        analyst_output:      <your v1 JSON object>
+        source:              "mcp:synthesist"
+        analysis_session_id: "{ANALYSIS_SID}"
     - Do NOT pass collected_from — the synthesist inherits the
       caller-identity indexing from the analyses it is
       synthesizing.
+    - `analysis_session_id` links this synthesis to the /analyze
+      run it caps. Pass "{ANALYSIS_SID}" verbatim; the handoff
+      body also carries the same id in its linkage block.
     - The tool validates your payload. If validation fails, the
       error names the first offending field; fix the JSON and
       retry in the same turn. Do NOT drop fields to get past
@@ -421,6 +478,35 @@ signatory posture set --tier "$TIER" \
 "Analysis only — no posture recorded" is a valid terminal state for
 non-dependency targets. Preview with `--dry-run` on either verb
 before the real write.
+
+## Step 6 — Close the analysis session
+
+After the posture decision is recorded (or explicitly declined), mark
+the analysis session terminal so `signatory analysis list` no longer
+shows it as in_progress and `signatory analysis timing` surfaces the
+wall-clock total with a proper `ended_at` stamp.
+
+```bash
+# Typical close: the run reached synthesis successfully and posture
+# was recorded. --synthesis-output-id threads the synthesis row's
+# id into the session for one-query audit-trail lookups.
+signatory analysis end "$ANALYSIS_SID" \
+  --status completed \
+  --synthesis-output-id "$SYNTHESIS_OUTPUT_ID"
+```
+
+Alternative terminal statuses when things went sideways:
+
+- `--status failed`: a required step broke (e.g. an analyst never
+  ingested and couldn't be re-dispatched, synthesis refused the
+  evidence, handoff validation kept failing). Records the fact of
+  the run without claiming its conclusions.
+- `--status partial`: some analysts landed, others didn't, and the
+  user accepted the partial result rather than re-running. Use
+  when the synthesis output exists but skipped a dimension.
+
+The close is one-way — once terminal, the session stays terminal.
+A re-run of /analyze on the same target begins a fresh session.
 
 ## Important constraints
 

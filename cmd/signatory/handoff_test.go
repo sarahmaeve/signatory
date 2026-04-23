@@ -325,6 +325,106 @@ func TestHandoff_UnknownTargetFailsClearly(t *testing.T) {
 	assert.Contains(t, err.Error(), "TARGET_NAME")
 }
 
+// TestHandoff_AnalysisSessionID_RendersInstructionBlock covers the
+// happy path: --analysis-session-id with a real session id results
+// in the rendered handoff containing the session-linkage prose +
+// the session id the agent needs to pass through to ingest.
+func TestHandoff_AnalysisSessionID_RendersInstructionBlock(t *testing.T) {
+	g := newTestGlobals(t)
+	sessionID := beginSessionViaCmd(t, g, "https://github.com/nvbn/thefuck")
+
+	cmd := &HandoffCmd{
+		Role:              "security",
+		Target:            "https://github.com/nvbn/thefuck",
+		Path:              "/tmp/thefuck-clone",
+		Language:          "python",
+		AnalysisSessionID: sessionID,
+		Quiet:             true,
+	}
+	stdout := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(g))
+	})
+	assert.Contains(t, stdout, "Session linkage",
+		"rendered handoff must surface the session-linkage block")
+	assert.Contains(t, stdout, sessionID,
+		"rendered handoff must embed the session id so the agent sees it verbatim")
+	assert.Contains(t, stdout, "analysis_session_id",
+		"rendered block must name the exact field the agent passes to signatory_ingest_analysis")
+}
+
+// TestHandoff_AnalysisSessionID_UnknownFailsAtHandoff is the
+// validation regression anchor. A bogus session id must fail at
+// handoff render time — NOT silently embed the id in a prompt that
+// a downstream subagent would only discover is broken when its
+// FK-checked ingest bounces off the store.
+func TestHandoff_AnalysisSessionID_UnknownFailsAtHandoff(t *testing.T) {
+	g := newTestGlobals(t)
+
+	cmd := &HandoffCmd{
+		Role:              "security",
+		Target:            "https://github.com/nvbn/thefuck",
+		Path:              "/tmp/thefuck-clone",
+		Language:          "python",
+		AnalysisSessionID: "00000000-0000-0000-0000-000000000000",
+		Quiet:             true,
+	}
+	err := cmd.Run(g)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUsage,
+		"unknown analysis session id is a user-input mistake; must surface as a usage error, not an internal error")
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestHandoff_AnalysisSessionID_TerminalFailsAtHandoff — the same
+// validation path rejects a session that exists but has already
+// been closed. Reopening terminal sessions is intentionally
+// impossible (store-layer guard); handoff catches the case early so
+// the operator sees the error before dispatching a subagent whose
+// ingest would be refused.
+func TestHandoff_AnalysisSessionID_TerminalFailsAtHandoff(t *testing.T) {
+	g := newTestGlobals(t)
+	sessionID := beginSessionViaCmd(t, g, "https://github.com/nvbn/thefuck")
+	require.NoError(t, (&AnalysisEndCmd{
+		SessionID: sessionID,
+		Status:    "completed",
+	}).Run(g))
+
+	cmd := &HandoffCmd{
+		Role:              "security",
+		Target:            "https://github.com/nvbn/thefuck",
+		Path:              "/tmp/thefuck-clone",
+		Language:          "python",
+		AnalysisSessionID: sessionID,
+		Quiet:             true,
+	}
+	err := cmd.Run(g)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUsage)
+	assert.Contains(t, err.Error(), "terminal",
+		"error must name the terminal state so the operator understands why the session was rejected")
+}
+
+// TestHandoff_NoAnalysisSessionID_NoInstructionBlock — the default
+// path (no --analysis-session-id flag). The SESSION_INSTRUCTION
+// placeholder resolves to empty, so the rendered handoff carries
+// neither the prose block nor the literal placeholder.
+func TestHandoff_NoAnalysisSessionID_NoInstructionBlock(t *testing.T) {
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck",
+		Path:     "/tmp/thefuck-clone",
+		Language: "python",
+		Quiet:    true,
+	}
+	stdout := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+	assert.NotContains(t, stdout, "{SESSION_INSTRUCTION}",
+		"empty AnalysisSessionID must not leak literal placeholder into the handoff body")
+	assert.NotContains(t, stdout, "Session linkage",
+		"no session flag → no linkage block in the rendered prompt")
+}
+
 func TestHandoff_InferTemplateName(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -2241,17 +2341,17 @@ func TestClone_RejectsUnsafeVersion(t *testing.T) {
 // release/1.0), and full ref paths (refs/tags/v1.0.0).
 func TestSafeGitVersion_AcceptsCleanRefs(t *testing.T) {
 	cleanRefs := []string{
-		"",                      // empty = HEAD-of-default-branch
-		"v1.2.3",                // Go / tag-style
-		"1.2.3",                 // npm-style
-		"v1.0.0-alpha.1",        // semver pre-release
-		"1.0.0+build.meta",      // semver build metadata
+		"",                                 // empty = HEAD-of-default-branch
+		"v1.2.3",                           // Go / tag-style
+		"1.2.3",                            // npm-style
+		"v1.0.0-alpha.1",                   // semver pre-release
+		"1.0.0+build.meta",                 // semver build metadata
 		"v0.0.0-20230101000000-abcdef0123", // Go pseudo-version
-		"2026.04.15",            // calendar version
-		"main",                  // branch
-		"release/1.0",           // slashed branch
-		"refs/tags/v1.0.0",      // full refspec path
-		"feature_branch",        // underscore
+		"2026.04.15",                       // calendar version
+		"main",                             // branch
+		"release/1.0",                      // slashed branch
+		"refs/tags/v1.0.0",                 // full refspec path
+		"feature_branch",                   // underscore
 	}
 	for _, v := range cleanRefs {
 		t.Run(v, func(t *testing.T) {

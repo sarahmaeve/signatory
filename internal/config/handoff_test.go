@@ -247,6 +247,40 @@ func TestHandoffSubstitutions_VersionFallbackWhenEmpty(t *testing.T) {
 		"empty Version must produce an explicit fallback string, not literal {TARGET_VERSION}")
 }
 
+// TestHandoffSubstitutions_SessionInstructionSetWhenPresent covers
+// the /analyze session-linkage path: an AnalysisSessionID override
+// surfaces as a SESSION_INSTRUCTION placeholder containing the
+// agent-facing prose block (with the session id embedded so the
+// subagent can paste it into its signatory_ingest_analysis call).
+func TestHandoffSubstitutions_SessionInstructionSetWhenPresent(t *testing.T) {
+	const sid = "7d1f0d0e-1a5f-4b22-9a1f-0b8c6a9d9d1a"
+	subs, err := HandoffSubstitutions("https://github.com/X/Y", HandoffOverrides{
+		AnalysisSessionID: sid,
+	})
+	require.NoError(t, err)
+	block := subs["SESSION_INSTRUCTION"]
+	assert.NotEmpty(t, block, "SESSION_INSTRUCTION must render content when a session id is supplied")
+	assert.Contains(t, block, sid,
+		"rendered block must embed the session id so the agent passes it through verbatim")
+	assert.Contains(t, block, "analysis_session_id",
+		"block must tell the agent exactly which field to include in its ingest call")
+}
+
+// TestHandoffSubstitutions_SessionInstructionEmptyWhenAbsent
+// guards the non-session case — SESSION_INSTRUCTION must be present
+// in the subs map (so the placeholder resolves to nothing rather
+// than leaking as literal `{SESSION_INSTRUCTION}`), but its value
+// is empty so the rendered handoff has no visible session-linkage
+// block.
+func TestHandoffSubstitutions_SessionInstructionEmptyWhenAbsent(t *testing.T) {
+	subs, err := HandoffSubstitutions("https://github.com/X/Y", HandoffOverrides{})
+	require.NoError(t, err)
+	val, ok := subs["SESSION_INSTRUCTION"]
+	assert.True(t, ok,
+		"SESSION_INSTRUCTION must be set (to empty) so the placeholder renders to nothing instead of leaking the literal")
+	assert.Empty(t, val)
+}
+
 func TestHandoffSubstitutions_RejectsUninferrableName(t *testing.T) {
 	// Bare string with no URL/path shape AND no --name override ⇒
 	// error, because TARGET_NAME would land as the empty string and

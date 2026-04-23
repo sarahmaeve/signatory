@@ -1,5 +1,6 @@
 # Synthesis for `{TARGET_NAME}` — signatory v1
 
+{SESSION_INSTRUCTION}
 > **Template usage:** The `signatory handoff synthesist <target>`
 > command renders this with `{EVIDENCE_JSON}` filled from the
 > signatory store and `{TARGET_NAME}` / `{TARGET_URL}` substituted.

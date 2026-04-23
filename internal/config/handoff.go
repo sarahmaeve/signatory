@@ -224,6 +224,14 @@ func HandoffSubstitutions(target string, overrides HandoffOverrides) (map[string
 		subs["TARGET_VERSION"] = "(HEAD of default branch)"
 	}
 
+	// SESSION_INSTRUCTION is always set (never absent) so the
+	// placeholder resolves even in the common "no session" case.
+	// Non-empty id → a prose block the agent reads at the top of
+	// the handoff telling it to pass analysis_session_id through to
+	// signatory_ingest_analysis. Empty id → empty string (blank
+	// line in the rendered prompt, no literal placeholder leak).
+	subs["SESSION_INSTRUCTION"] = buildSessionInstruction(overrides.AnalysisSessionID)
+
 	// Name is the universal placeholder — if we couldn't derive one
 	// and the user didn't supply one, error out so the render doesn't
 	// produce a handoff with `{TARGET_NAME}` as an agent-visible
@@ -240,6 +248,27 @@ func setIfPresent(m map[string]string, key, val string) {
 	if val != "" {
 		m[key] = val
 	}
+}
+
+// buildSessionInstruction returns the prose block the handoff
+// template injects at its top when the run is part of an /analyze
+// session. Empty id → empty string so the placeholder resolves to
+// nothing and the template's subsequent content starts cleanly.
+//
+// Formatted as a blockquote so it's visually distinct from the
+// template body and parses cleanly as Markdown when the dispatched
+// subagent reads the handoff.
+func buildSessionInstruction(analysisSessionID string) string {
+	if analysisSessionID == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"> **Session linkage.** This run is part of analysis session `%s`.\n"+
+			"> When you call `signatory_ingest_analysis`, include the top-level\n"+
+			"> field `analysis_session_id: \"%s\"` so your output links to the\n"+
+			"> session record. `signatory analysis show|timing %s` surfaces\n"+
+			"> the linked outputs afterwards.\n",
+		analysisSessionID, analysisSessionID, analysisSessionID)
 }
 
 // HandoffOverrides carries explicit placeholder values from CLI flags.
@@ -264,6 +293,16 @@ type HandoffOverrides struct {
 	// cloned. Empty signals HEAD-of-default-branch and renders
 	// as "(HEAD of default branch)" in the template body.
 	Version string
+
+	// AnalysisSessionID, when set, is the analysis_sessions.id the
+	// dispatched agent should include in its signatory_ingest_analysis
+	// call so the resulting row links back to the /analyze run that
+	// produced it. Threads through the handoff template via the
+	// SESSION_INSTRUCTION placeholder (always set by
+	// HandoffSubstitutions — empty string when this is empty, full
+	// instruction block when non-empty). The skill's dispatch step
+	// gets the id from `signatory analysis begin`.
+	AnalysisSessionID string
 }
 
 // expandTilde converts a leading "~" or "~/" into the caller's home

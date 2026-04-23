@@ -19,6 +19,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
+	"github.com/sarahmaeve/signatory/internal/store"
 	"github.com/sarahmaeve/signatory/internal/synthesis"
 )
 
@@ -77,6 +78,8 @@ type HandoffCmd struct {
 
 	NetworkPrecheck bool   `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the GitHub API (requires a github.com target). Offline by default; this is the opt-in that authorizes network calls."`
 	CloneDir        string `name:"clone-dir" help:"Shallow-clone the target URL into CLONE_DIR/<repo-name>/ and use that path for TARGET_PATH. Uses 'git clone --depth=1'. Skipped if the destination already exists. Requires target to be a URL." type:"path"`
+
+	AnalysisSessionID string `name:"analysis-session-id" help:"Link the handoff (and the analyst's resulting ingest) to an analysis_sessions.id. Get the id from 'signatory analysis begin'. Validated before render — unknown or already-terminal ids fail here rather than being discovered by the dispatched subagent."`
 
 	Output string `short:"o" help:"Write rendered handoff to this file instead of stdout."`
 	Force  bool   `help:"Overwrite --output if it exists."`
@@ -259,14 +262,27 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		return fmt.Errorf("read template %s: %w", source, err)
 	}
 
+	// Validate --analysis-session-id BEFORE we open anything else
+	// or invoke network precheck side-effects — a typo'd session id
+	// should fail cheaply. The subsequent HandoffSubstitutions call
+	// simply threads the id through into the SESSION_INSTRUCTION
+	// placeholder; this block is the place where correctness is
+	// enforced.
+	if cmd.AnalysisSessionID != "" {
+		if err := cmd.validateAnalysisSession(context.Background(), globals); err != nil {
+			return err
+		}
+	}
+
 	subs, err := config.HandoffSubstitutions(cmd.Target, config.HandoffOverrides{
-		Name:      cmd.Name,
-		URL:       cmd.URL,
-		Path:      cmd.Path,
-		Role:      cmd.TargetRole,
-		Ecosystem: cmd.Ecosystem,
-		Intake:    cmd.Intake,
-		Version:   cmd.requestedVersion,
+		Name:              cmd.Name,
+		URL:               cmd.URL,
+		Path:              cmd.Path,
+		Role:              cmd.TargetRole,
+		Ecosystem:         cmd.Ecosystem,
+		Intake:            cmd.Intake,
+		Version:           cmd.requestedVersion,
+		AnalysisSessionID: cmd.AnalysisSessionID,
 	})
 	if err != nil {
 		return err
@@ -348,6 +364,39 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 // WebFetch to the synthesist agent; compact JSON saves bytes but
 // hurts token-level attention across a multi-kilobyte evidence
 // block.
+// validateAnalysisSession opens the store and confirms
+// cmd.AnalysisSessionID names a session that exists and is still
+// in_progress. Fails at handoff time so that typos / already-closed
+// ids surface here rather than getting threaded into a handoff body
+// that the dispatched subagent only discovers is broken when its
+// signatory_ingest_analysis call bounces off the FK constraint.
+//
+// Wraps with NewUsageError so the exit code reflects the
+// caller-input nature of the mistake.
+func (cmd *HandoffCmd) validateAnalysisSession(ctx context.Context, globals *Globals) error {
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open store for session validation: %w", err)
+	}
+	defer s.Close() //nolint:errcheck // store close on function exit; errors not actionable
+
+	sess, err := s.GetAnalysisSession(ctx, cmd.AnalysisSessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return NewUsageError(fmt.Errorf(
+			"analysis session %q not found; run `signatory analysis begin` to create one",
+			cmd.AnalysisSessionID))
+	}
+	if err != nil {
+		return fmt.Errorf("look up analysis session: %w", err)
+	}
+	if sess.Status.IsTerminal() {
+		return NewUsageError(fmt.Errorf(
+			"analysis session %q is already %s (terminal); begin a new session for a re-run",
+			cmd.AnalysisSessionID, sess.Status))
+	}
+	return nil
+}
+
 func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *Globals) (string, error) {
 	s, err := globals.OpenStore(ctx)
 	if err != nil {

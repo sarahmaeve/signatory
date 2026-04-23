@@ -1,5 +1,6 @@
 # Provenance review for `{TARGET_NAME}` — signatory format v1
 
+{SESSION_INSTRUCTION}
 > **Template usage:** Substitute `{TARGET_NAME}`, `{TARGET_URL}`,
 > `{TARGET_PATH}`, `{ECOSYSTEM}`, and `{INTAKE_QUESTION}` before
 > handing this to a fresh agent. The `{ECOSYSTEM}` value drives

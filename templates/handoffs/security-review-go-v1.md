@@ -1,5 +1,6 @@
 # Security review for `{TARGET_NAME}` — signatory format v1
 
+{SESSION_INSTRUCTION}
 > **Template usage:** Substitute `{TARGET_NAME}`, `{TARGET_URL}`,
 > `{TARGET_PATH}`, and `{INTAKE_QUESTION}` before handing this to
 > a fresh agent. This is the Go-flavored variant; the shared
