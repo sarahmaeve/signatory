@@ -174,7 +174,18 @@ func computeSessionTiming(
 		case invErr != nil:
 			row.WallNotes = fmt.Sprintf("invoked_at %q unparseable; agent_wall unavailable", o.InvokedAt)
 		case invoked.After(ingested):
+			// Clock skew or fabricated forward-dated timestamp.
 			row.WallNotes = "invoked_at > ingested_at (clock skew or bogus agent timestamp)"
+		case invoked.Before(sess.StartedAt):
+			// Physically impossible — an agent can't have been
+			// invoked before the session that dispatched it.
+			// Agents sometimes self-report a round wall-clock
+			// timestamp from hours or days ago rather than the
+			// actual dispatch time; computing agent_wall against
+			// that yields nonsense (seen in the 2026-04-23 gin
+			// dogfood: 3h and 15h "agent_wall" values on
+			// 18-minute session). Drop and flag.
+			row.WallNotes = "invoked_at < session.started_at (agent self-reported timestamp is fabricated or stale)"
 		default:
 			row.AgentWallMS = ptrMS(ingested.Sub(invoked))
 		}

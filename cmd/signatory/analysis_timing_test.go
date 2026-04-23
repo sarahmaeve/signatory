@@ -150,6 +150,40 @@ func TestComputeSessionTiming_ClockSkew(t *testing.T) {
 	assert.Contains(t, got.Analysts[0].WallNotes, "clock skew")
 }
 
+// TestComputeSessionTiming_InvokedAtBeforeSessionStart is the
+// regression anchor for the 2026-04-23 gin dogfood finding:
+// agents self-reported invoked_at with round wall-clock timestamps
+// from hours earlier, producing physically-impossible agent_wall
+// values (3h, 15h) on an 18-minute session. The fix drops
+// agent_wall + flags when invoked_at predates session.started_at,
+// since a dispatched agent cannot have been invoked before the
+// session that dispatched it.
+//
+// session_wall is unaffected — ingested_at is server-stamped and
+// therefore trustworthy, so the operator's wait time still
+// computes correctly.
+func TestComputeSessionTiming_InvokedAtBeforeSessionStart(t *testing.T) {
+	started := mustParseTime(t, "2026-04-23T15:00:00Z")
+	sess := buildSession("s-fabricated", started, nil, nil)
+	outputs := []store.AnalystOutputSummary{
+		buildOutput("external-sec-v1", "o1",
+			"2026-04-23T12:00:00Z", // THREE HOURS before session started
+			"2026-04-23T15:02:00Z"),
+	}
+
+	got := computeSessionTiming(sess, outputs)
+	require.Len(t, got.Analysts, 1)
+	assert.Nil(t, got.Analysts[0].AgentWallMS,
+		"agent_wall must be nil when invoked_at predates session start")
+	assert.Contains(t, got.Analysts[0].WallNotes, "session.started_at",
+		"wall_notes must name the violated invariant so the operator knows why agent_wall is missing")
+	// session_wall uses server-stamped ingested_at → still
+	// trustworthy, still computed (2m = 120000ms).
+	require.NotNil(t, got.Analysts[0].SessionWallMS,
+		"session_wall must still compute — ingested_at is server-stamped")
+	assert.Equal(t, int64(120_000), *got.Analysts[0].SessionWallMS)
+}
+
 func TestComputeSessionTiming_UnparseableIngestedAt(t *testing.T) {
 	// ingested_at is server-stamped so this shouldn't happen, but
 	// defensive coverage keeps the pure function from panicking on
