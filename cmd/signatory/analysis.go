@@ -36,10 +36,11 @@ import (
 // skill does NOT need a pipeline-service round-trip to manage
 // sessions, because WebFetch is GET-only and can't POST updates.
 type AnalysisCmd struct {
-	Begin AnalysisBeginCmd `cmd:"" help:"Start a new analysis session. Prints the session ID on stdout."`
-	End   AnalysisEndCmd   `cmd:"" help:"Close an in-progress session with a terminal status."`
-	List  AnalysisListCmd  `cmd:"" help:"List analysis sessions, newest first, optionally filtered."`
-	Show  AnalysisShowCmd  `cmd:"" help:"Show one session with its linked analyst outputs."`
+	Begin  AnalysisBeginCmd  `cmd:"" help:"Start a new analysis session. Prints the session ID on stdout."`
+	End    AnalysisEndCmd    `cmd:"" help:"Close an in-progress session with a terminal status."`
+	List   AnalysisListCmd   `cmd:"" help:"List analysis sessions, newest first, optionally filtered."`
+	Show   AnalysisShowCmd   `cmd:"" help:"Show one session with its linked analyst outputs."`
+	Timing AnalysisTimingCmd `cmd:"" help:"Decompose the wall-clock of one session: per-analyst and phase-level latency."`
 }
 
 // --- analysis begin ---------------------------------------------------------
@@ -407,9 +408,14 @@ func parseSinceFlag(raw string) (time.Time, error) {
 
 // diffAnalysts compares the expected-analyst list against the landed
 // outputs, returning (missing, unexpected) as sorted-unique strings.
-// Missing = expected but not landed; unexpected = landed but not
-// expected (often a synthesis role that the skill didn't list
-// because it's auto-appended).
+//
+// Missing = expected but not landed.
+//
+// Unexpected = landed but not expected, EXCEPT synthesis roles. The
+// orchestrator auto-appends synthesis as a capping step regardless of
+// the operator's --expected-analyst list, so surfacing it as
+// "unexpected" is noise that buries genuinely-surprising landings.
+// See exchange.SynthesistAnalystIDPrefix for the detection contract.
 func diffAnalysts(expected []string, outputs []store.AnalystOutputSummary) (missing, unexpected []string) {
 	expectedSet := make(map[string]struct{}, len(expected))
 	for _, e := range expected {
@@ -425,9 +431,13 @@ func diffAnalysts(expected []string, outputs []store.AnalystOutputSummary) (miss
 		}
 	}
 	for l := range landedSet {
-		if _, ok := expectedSet[l]; !ok {
-			unexpected = append(unexpected, l)
+		if _, ok := expectedSet[l]; ok {
+			continue
 		}
+		if isSynthesisAnalyst(l) {
+			continue
+		}
+		unexpected = append(unexpected, l)
 	}
 	slices.Sort(missing)
 	slices.Sort(unexpected)
