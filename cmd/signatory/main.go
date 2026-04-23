@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/sarahmaeve/signatory/internal/audit"
+	"github.com/sarahmaeve/signatory/internal/pipeline"
 	sig "github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -35,6 +36,7 @@ type CLI struct {
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
 	ShowSynthesis   ShowSynthesisCmd   `cmd:"show-synthesis" help:"Render a synthesis output (analyst_id signatory-synthesis-*) as markdown. Writes to stdout; the store row is canonical."`
 	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
+	Pipeline        PipelineCmd        `cmd:"" help:"Interact with the local pipeline message service (sessions, messages)."`
 	Serve           ServeCmd           `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)."`
 	Certs           CertsCmd           `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS) so Claude Code's WebFetch can reach the pipeline service over HTTPS."`
 	Prune           PruneCmd           `cmd:"" help:"Delete entities and their child rows from the store. Destructive; use with --yes."`
@@ -65,8 +67,9 @@ func main() {
 		kong.Description("Supply chain trust analysis tool."),
 		kong.UsageOnError(),
 		kong.Vars{
-			"version": version,
-			"commit":  commit,
+			"version":     version,
+			"commit":      commit,
+			"pipelineURL": pipeline.DefaultURL,
 		},
 	)
 

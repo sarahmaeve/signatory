@@ -5,10 +5,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// ErrSessionNotFound is returned by DepositMessage when the session
+// referenced by Message.SessionID does not exist. Callers use
+// errors.Is to branch: the server maps this to a 400 with a useful
+// "session %q not found" message, rather than letting the raw FK
+// constraint failure surface as an opaque "internal error."
+//
+// The error exists at the store layer (rather than being string-
+// matched at the server layer) so the same check composes into
+// future consumers — a test harness asserting "rejected the insert,"
+// a new endpoint with its own error-mapping — without each caller
+// re-sniffing SQLite driver error text.
+var ErrSessionNotFound = errors.New("pipeline session not found")
 
 // Store provides persistence for pipeline sessions and messages.
 // It operates on the same SQLite database as the main signatory
@@ -111,7 +125,18 @@ func (s *Store) UpdateSessionStatus(ctx context.Context, id, status string) erro
 	return nil
 }
 
-// DepositMessage stores a message in a session.
+// DepositMessage stores a message in a session. Returns
+// ErrSessionNotFound (wrapped) when the SessionID does not name an
+// existing pipeline_sessions row — the FK constraint in the schema
+// catches the miss at INSERT time, and this method translates the
+// driver-level error into a domain sentinel so callers don't have
+// to sniff for it themselves.
+//
+// The INSERT-first-then-translate shape (vs. pre-SELECT) is
+// deliberate: it collapses two round-trips to one on the happy
+// path, and an INSERT racing against a DELETE of the target session
+// still produces ErrSessionNotFound (the pre-SELECT shape would
+// race through the gap and surface the constraint error unclassified).
 func (s *Store) DepositMessage(ctx context.Context, msg *Message) (*Message, error) {
 	msg.CreatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx,
@@ -121,11 +146,37 @@ func (s *Store) DepositMessage(ctx context.Context, msg *Message) (*Message, err
 		msg.CreatedAt.Format(time.RFC3339), msg.Metadata,
 	)
 	if err != nil {
+		if isForeignKeyFailure(err) {
+			return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, msg.SessionID)
+		}
 		return nil, fmt.Errorf("deposit message: %w", err)
 	}
 	id, _ := res.LastInsertId()
 	msg.ID = id
 	return msg, nil
+}
+
+// isForeignKeyFailure reports whether err is SQLite's
+// "FOREIGN KEY constraint failed" error. String-matching the driver
+// error text is fragile in the abstract — but this particular
+// message is stable across SQLite versions and every Go SQLite
+// driver (modernc.org/sqlite, mattn/go-sqlite3) carries it
+// verbatim, because it comes from the SQLite library's own
+// sqlite3ErrStr() table where it's been unchanged since the FK
+// enforcement feature landed.
+//
+// Alternative approaches considered:
+//   - Driver-specific error types (modernc.org/sqlite.Error with
+//     code 787): requires importing the driver into the store
+//     package, which otherwise uses only database/sql. Couples the
+//     store to a specific driver choice.
+//   - A pre-check SELECT for session existence: adds a round-trip on
+//     every deposit and still races against concurrent delete.
+//
+// String-matching a contained, stable driver message is the
+// pragmatic middle path.
+func isForeignKeyFailure(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
 
 // GetMessages retrieves messages matching the filter.

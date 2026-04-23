@@ -53,6 +53,21 @@ const DefaultCertDir = "~/.signatory/certs"
 // installs.
 const CAFileName = "rootCA.pem"
 
+// DefaultCAPath returns the absolute path of the canonical CA anchor
+// signatory manages: DefaultCertDir + CAFileName with `~/` expanded
+// to the user's home directory. This is the single file all
+// signatory-managed clients load to trust the local pipeline service's
+// TLS cert; see design/tls-trust.md for the full trust architecture.
+//
+// Returns an error only if the user has no HOME — an exceptional
+// environment in which almost nothing else would work either.
+// Callers that can proceed without the anchor (e.g., Go clients that
+// fall back to the system root pool) should tolerate the error by
+// skipping the load rather than aborting.
+func DefaultCAPath() (string, error) {
+	return expandHome(DefaultCertDir + "/" + CAFileName)
+}
+
 // DefaultShellProfile is the target for --write-profile when no
 // explicit --shell-profile-path is passed. zshrc is the interactive-
 // shell entry point on macOS and matches how Claude Code is

@@ -17,6 +17,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/config"
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
+	"github.com/sarahmaeve/signatory/internal/pipeline"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -84,7 +85,9 @@ type HandoffCmd struct {
 	Output string `short:"o" help:"Write rendered handoff to this file instead of stdout."`
 	Force  bool   `help:"Overwrite --output if it exists."`
 	Quiet  bool   `help:"Suppress the stderr report (template source, unfilled placeholders)." short:"q"`
-	JSON   bool   `name:"json" help:"Emit the rendered handoff as a JSON-escaped string (with surrounding quotes) instead of raw text. Use when piping into another tool that embeds the handoff as a JSON value — removes the need for downstream 'jq -Rs' wrapping and avoids control-character errors when the handoff body contains stored analysis text with newlines."`
+
+	DepositTo   string `name:"deposit-to" help:"Deposit the rendered handoff into the named pipeline session (UUID from 'signatory pipeline session create'). Conflicts with --output — deposit replaces file/stdout as the destination."`
+	PipelineURL string `name:"pipeline-url" help:"Override the pipeline service base URL used by --deposit-to. Ignored when --deposit-to is not set." default:"${pipelineURL}"`
 
 	// PrecheckSource overrides the GitHub-backed ecosystem.Source used
 	// by --network-precheck. nil → fall through to
@@ -132,6 +135,17 @@ type HandoffCmd struct {
 // (template source, unfilled placeholders, embedded-fallback notice)
 // is informational and goes out independently of Success/failure.
 func (cmd *HandoffCmd) Run(globals *Globals) error {
+	// Single-destination rule: --output (file), stdout (default), and
+	// --deposit-to (pipeline service) are the three mutually exclusive
+	// sinks a rendered handoff can go to. Two of them together is a
+	// user-input mistake, caught here rather than after clone/render
+	// work has happened. --output vs stdout was already single-sink via
+	// writeHandoff's logic; this adds --deposit-to to the same rule.
+	if cmd.DepositTo != "" && cmd.Output != "" {
+		return NewUsageError(fmt.Errorf(
+			"--deposit-to and --output are mutually exclusive; choose one destination"))
+	}
+
 	// Reconcile --intake / --intake-file (§3.4 agent-facing-contract).
 	// Intake is optional — the template falls back to an embedded
 	// default — so an empty result is fine; the readFreeText helper
@@ -311,24 +325,21 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 
 	rendered, unfilled := config.RenderTemplate(raw, subs)
 
-	// --json wraps the rendered bytes as a JSON string literal
-	// (with surrounding quotes and all control chars escaped).
-	// Downstream shell pipelines that embed the handoff into a
-	// larger JSON payload can then use $(signatory handoff
-	// --json ...) directly instead of piping through `jq -Rs`.
-	// Raw bytes contain literal newlines + other control chars
-	// from stored analysis text, so the escape is load-bearing.
-	emitted := rendered
-	if cmd.JSON {
-		encoded, err := json.Marshal(string(rendered))
-		if err != nil {
-			return fmt.Errorf("json-encode handoff body: %w", err)
+	// Destination fork. Three mutually exclusive sinks, already
+	// validated up top:
+	//
+	//   --deposit-to SID  → POST to the pipeline service as a
+	//                       'handoff' message on that session.
+	//   --output FILE     → write rendered bytes to a file.
+	//   (neither)         → write rendered bytes to stdout.
+	if cmd.DepositTo != "" {
+		if err := cmd.depositRendered(rendered); err != nil {
+			return err
 		}
-		emitted = encoded
-	}
-
-	if err := writeHandoff(cmd.Output, cmd.Force, emitted); err != nil {
-		return err
+	} else {
+		if err := writeHandoff(cmd.Output, cmd.Force, rendered); err != nil {
+			return err
+		}
 	}
 
 	if !cmd.Quiet {
@@ -339,6 +350,31 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		if cloneReport != "" {
 			fmt.Fprint(os.Stderr, cloneReport)
 		}
+		if cmd.DepositTo != "" {
+			fmt.Fprintf(os.Stderr, "# deposited: session=%s role=%s bytes=%d\n",
+				cmd.DepositTo, cmd.Role, len(rendered))
+		}
+	}
+	return nil
+}
+
+// depositRendered POSTs the rendered handoff to the pipeline service
+// as a 'handoff' message on the named session. Role comes from the
+// already-validated cmd.Role positional (kong's enum tag ensures it's
+// one of security / provenance / synthesist).
+//
+// Builds a fresh pipeline client per invocation — handoff commands
+// are short-lived (one per skill step), so client reuse buys nothing
+// and a per-call construction keeps the signature simple.
+func (cmd *HandoffCmd) depositRendered(rendered []byte) error {
+	client, err := pipeline.NewClient(cmd.PipelineURL)
+	if err != nil {
+		return fmt.Errorf("open pipeline client: %w", err)
+	}
+	_, err = client.DepositMessage(context.Background(),
+		cmd.DepositTo, cmd.Role, "handoff", string(rendered), "")
+	if err != nil {
+		return fmt.Errorf("handoff deposit: %w", err)
 	}
 	return nil
 }

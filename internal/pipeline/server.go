@@ -255,6 +255,18 @@ func (s *Server) handleDepositMessage(w http.ResponseWriter, r *http.Request) {
 	msg, err := s.store.DepositMessage(r.Context(), msg)
 	if err != nil {
 		s.logger.Error("deposit message", "session", sessionID, "error", err)
+		if errors.Is(err, ErrSessionNotFound) {
+			// Client-side input problem — a typo'd or stale session
+			// id. Mirror the other input-validation errors in this
+			// handler (invalid role, content required, etc.) which
+			// also use 400. Status code is secondary here; the
+			// useful bit is the error body naming the session so
+			// the user can fix their input.
+			writeError(w, http.StatusBadRequest,
+				"session %q not found; run `signatory pipeline session create` first",
+				sessionID)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

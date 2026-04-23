@@ -9,6 +9,8 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/pipeline"
 )
 
 // parseCLI is a test helper that parses args into the CLI struct and returns the parsed context.
@@ -22,8 +24,9 @@ func parseCLI(t *testing.T, args ...string) (*kong.Context, *CLI) {
 		kong.Exit(func(int) {}), // Prevent os.Exit in tests
 		kong.Writers(new(bytes.Buffer), new(bytes.Buffer)),
 		kong.Vars{
-			"version": "test",
-			"commit":  "abc123",
+			"version":     "test",
+			"commit":      "abc123",
+			"pipelineURL": pipeline.DefaultURL,
 		},
 	)
 	require.NoError(t, err)
@@ -46,8 +49,9 @@ func parseCLIExpectError(t *testing.T, args ...string) error {
 		kong.Exit(func(int) {}),
 		kong.Writers(new(bytes.Buffer), new(bytes.Buffer)),
 		kong.Vars{
-			"version": "test",
-			"commit":  "abc123",
+			"version":     "test",
+			"commit":      "abc123",
+			"pipelineURL": pipeline.DefaultURL,
 		},
 	)
 	require.NoError(t, err)
@@ -68,8 +72,9 @@ func getHelpOutput(t *testing.T) string {
 		kong.Exit(func(int) {}),
 		kong.Writers(&buf, &buf),
 		kong.Vars{
-			"version": "test",
-			"commit":  "abc123",
+			"version":     "test",
+			"commit":      "abc123",
+			"pipelineURL": pipeline.DefaultURL,
 		},
 	)
 	require.NoError(t, err)

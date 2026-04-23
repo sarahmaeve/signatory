@@ -11,7 +11,7 @@ Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-fac
 - **go.mod manifest parser.** Dependency enumeration for Go projects.
 - **MCP server.** 8 read-only tools (`signatory_analyze`, `signatory_signals`, `signatory_detail`, `signatory_show_analyses`, `signatory_show_conclusions`, `signatory_show_methodology`, `signatory_survey`, `signatory_ingest_analysis`) and 6 resources. Shape differs from the original scoping — mutations are CLI-side, reads are MCP-side, reflecting what dogfood actually needed.
 - **`signatory serve`.** Pipeline message service with start/stop/status/restart/logs subcommands.
-- **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm + Go aware via M3), `--clone-dir`, `--json`.
+- **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm + Go aware via M3), `--clone-dir`, `--deposit-to` (posts rendered handoff directly into a pipeline session, replacing the former `--json` + curl shell-glue path).
 - **`signatory ingest` + `format-check`.** Analyst output validation and ingestion.
 - **`/analyze` skill.** LLM-orchestrated pipeline: session → handoff → parallel analyst dispatch → verify → synthesize. Candidate for retirement in M8 (see below).
 - **Git signal collector.** Identity signals (mailmap, domain, concentration), commit-signing, tag-signing, first-commit-date.

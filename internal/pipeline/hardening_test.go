@@ -85,7 +85,20 @@ func TestHardening_ErrorSanitization(t *testing.T) {
 
 	// Deposit a message to a nonexistent session. With FK enforcement on,
 	// this triggers a FOREIGN KEY constraint error inside SQLite. The
-	// HTTP response must not leak internal details.
+	// HTTP response must:
+	//
+	//   1. Not leak SQLite driver internals (file paths, goroutine
+	//      dumps, "FOREIGN KEY" phrasing, etc.) — the hardening core.
+	//   2. Be actionable: the caller's input was bad (session id
+	//      doesn't exist), so they need a "session not found" message
+	//      naming the id, not an opaque "internal error." This is the
+	//      domain-layer translation the store does via
+	//      ErrSessionNotFound, surfaced by the handler as a 400.
+	//
+	// Before that translation existed, the handler collapsed every
+	// store error to "internal error" at 500 — which protected against
+	// leaks but also hid actionable problems. The current shape gives
+	// us both.
 	body := `{"role":"security","msg_type":"handoff","content":"trigger FK violation"}`
 	resp, err := doPost(t, client,
 		ts.URL+"/api/sessions/nonexistent-session-id/messages",
@@ -97,10 +110,13 @@ func TestHardening_ErrorSanitization(t *testing.T) {
 	require.NoError(t, err)
 	bodyStr := string(respBody)
 
-	// Must be a 500 (internal error), not a 201 or 400.
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	// Status code is cosmetic for the single Go client that consumes
+	// this API; the assertion is here to catch regressions in the
+	// "input validation → 400" pattern the rest of the handler uses.
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
+		"unknown session is caller-input error, consistent with other 400s in this handler")
 
-	// Must NOT leak SQLite internals.
+	// Core hardening contract: no driver / OS / runtime internals.
 	forbiddenTokens := []string{
 		"sqlite", "SQLITE",
 		"FOREIGN KEY", "foreign key",
@@ -114,8 +130,12 @@ func TestHardening_ErrorSanitization(t *testing.T) {
 			"response body must not contain %q", tok)
 	}
 
-	// Must contain the generic error message.
-	assert.Contains(t, bodyStr, "internal error")
+	// Actionable-message contract: response names the missing session
+	// so the caller can fix the typo or re-run `pipeline session create`.
+	assert.Contains(t, bodyStr, "nonexistent-session-id",
+		"response must name the bogus session id so the caller sees their mistake")
+	assert.Contains(t, bodyStr, "not found",
+		"response must use the actionable phrasing, not 'internal error'")
 }
 
 // ---------------------------------------------------------------------------

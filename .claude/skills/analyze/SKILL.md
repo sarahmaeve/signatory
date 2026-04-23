@@ -122,9 +122,7 @@ Two session concepts, both needed:
 signatory serve status >/dev/null 2>&1 || signatory serve start
 
 # Create the pipeline (transport) session.
-SESSION_ID=$(curl -sk -X POST https://127.0.0.1:21517/api/sessions \
-  -H "Content-Type: application/json" \
-  -d "{\"target\":\"$TARGET\"}" | jq -r .id)
+SESSION_ID=$(signatory pipeline session create "$TARGET")
 echo "Pipeline session: $SESSION_ID"
 
 # Create the analysis (audit) session. --expected-analyst lets
@@ -154,39 +152,32 @@ includes `analysis_session_id: "$ANALYSIS_SID"` in its
 exists and is still in_progress before rendering — typos fail
 here rather than inside a dispatched subagent.
 
-Use `--json` on the handoff emission so its output is already a
-JSON-escaped string; the outer POST body can interpolate it
-directly without piping through `jq -Rs`. This avoids the
-control-character pitfalls when the handoff body includes stored
-analysis text with literal newlines (synthesis handoffs especially).
+`--deposit-to "$SESSION_ID"` posts the rendered handoff into the
+pipeline session in one Go process. The rendered bytes never cross
+a shell boundary, so control characters in stored analysis text
+(literal newlines, quotes) reach the pipeline unchanged.
 
 ```bash
-# Security handoff — clones the repo into filestore/clones/.
-SECURITY_HANDOFF_JSON=$(signatory handoff security "$TARGET" \
+# Security handoff — clones the repo into filestore/clones/ and
+# deposits the rendered prompt into the pipeline session.
+signatory handoff security "$TARGET" \
   --analysis-session-id "$ANALYSIS_SID" \
-  --network-precheck --clone-dir filestore/clones/ --json 2>/dev/null)
-
-# Deposit in the pipeline service. $SECURITY_HANDOFF_JSON is
-# already a JSON string (including surrounding quotes), so
-# interpolating directly into the outer object is safe.
-curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
-  -H "Content-Type: application/json" \
-  --data-binary "{\"role\":\"security\",\"msg_type\":\"handoff\",\"content\":$SECURITY_HANDOFF_JSON}"
+  --network-precheck --clone-dir filestore/clones/ \
+  --deposit-to "$SESSION_ID"
 
 # Provenance handoff — reuses the same clone. basename on the
 # target gives the short name the clone-dir step wrote to, for
 # every accepted target form (owner/repo, URL, canonical URI).
 TARGET_NAME=$(basename "$TARGET" .git)
-PROVENANCE_HANDOFF_JSON=$(signatory handoff provenance "$TARGET" \
+signatory handoff provenance "$TARGET" \
   --analysis-session-id "$ANALYSIS_SID" \
-  --network-precheck --path "filestore/clones/$TARGET_NAME" --json 2>/dev/null)
-
-curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
-  -H "Content-Type: application/json" \
-  --data-binary "{\"role\":\"provenance\",\"msg_type\":\"handoff\",\"content\":$PROVENANCE_HANDOFF_JSON}"
+  --network-precheck --path "filestore/clones/$TARGET_NAME" \
+  --deposit-to "$SESSION_ID"
 ```
 
-If a handoff command fails, remove `2>/dev/null` and check stderr.
+If a handoff command fails, its stderr carries the diagnostic
+(template source, unfilled placeholders, any deposit error naming
+the session id) — no `2>/dev/null` redirect to peel off.
 
 **Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_ROLE`) are
 expected and acceptable. Do NOT stop to fill them. Proceed.
@@ -321,17 +312,13 @@ store, read filestore, or run CLI commands; its entire input
 arrives via WebFetch.
 
 ```bash
-# --json is especially important here: the synthesis handoff
-# embeds stored analysis text (verdicts, rationales) which
-# contains literal newlines. Without --json the raw emission
-# would trip downstream jq -Rs on "control characters must be
-# escaped."
-SYNTHESIS_HANDOFF_JSON=$(signatory handoff synthesist "$TARGET" \
-  --analysis-session-id "$ANALYSIS_SID" --json 2>/dev/null)
-
-curl -s -X POST "https://127.0.0.1:21517/api/sessions/$SESSION_ID/messages" \
-  -H "Content-Type: application/json" \
-  --data-binary "{\"role\":\"synthesist\",\"msg_type\":\"handoff\",\"content\":$SYNTHESIS_HANDOFF_JSON}"
+# The synthesis handoff embeds stored analysis text (verdicts,
+# rationales) with literal newlines and quotes. --deposit-to routes
+# the rendered bytes Go → HTTP → Go so that content reaches the
+# session verbatim.
+signatory handoff synthesist "$TARGET" \
+  --analysis-session-id "$ANALYSIS_SID" \
+  --deposit-to "$SESSION_ID"
 ```
 
 If the handoff command fails with "no entity matches" or "no
