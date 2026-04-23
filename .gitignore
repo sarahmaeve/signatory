@@ -51,6 +51,14 @@ sync/
 # signatory.config.toml; .gitignore covers the default.
 filestore/
 
+# Per-user signatory state (DB, certs, logs, pidfile).
+# Normally lives at ~/.signatory/ and is out of the repo, but a
+# misconfigured --cert-dir, accidental `signatory init`, or a
+# symlinked home could land it here. Ignoring proactively keeps
+# private key material (certs/*.key), cert bundles, and DB
+# contents from ever entering git.
+.signatory/
+
 # Built binaries at the repo root.
 # Anchored with leading slash so each pattern matches ONLY the root-level
 # binary, not the cmd/<name>/ source directory (which previously got

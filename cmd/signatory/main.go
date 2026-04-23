@@ -35,6 +35,7 @@ type CLI struct {
 	ShowSynthesis   ShowSynthesisCmd   `cmd:"show-synthesis" help:"Render a synthesis output (analyst_id signatory-synthesis-*) as markdown. Writes to stdout; the store row is canonical."`
 	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
 	Serve           ServeCmd           `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)."`
+	Certs           CertsCmd           `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS) so Claude Code's WebFetch can reach the pipeline service over HTTPS."`
 	Version         VersionCmd         `cmd:"" help:"Print version information."`
 }
 
@@ -88,12 +89,16 @@ func main() {
 		// mocks; see functional_test.go's testGlobals helper.
 	})
 	if err != nil {
-		// errStatusNotRunning is a status-style sentinel: the
-		// command (ServeStatusCmd) has already written its
-		// human-readable line to stdout, so we skip the stderr
-		// echo and exit with the standard non-zero code. Other
-		// errors print to stderr as usual.
-		if !errors.Is(err, errStatusNotRunning) {
+		// Some commands print their own human-readable diagnostic
+		// to stdout and return a sentinel purely to drive a non-
+		// zero exit. For those, we skip the stderr echo that would
+		// otherwise duplicate content the user already saw.
+		//
+		//   errStatusNotRunning — signatory serve status
+		//   errSilentFailure    — signatory certs doctor (and future
+		//                         diagnostic-style commands)
+		if !errors.Is(err, errStatusNotRunning) &&
+			!errors.Is(err, errSilentFailure) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		os.Exit(exitCodeFor(err))

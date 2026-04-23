@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/certs"
 )
 
 // Default paths for service lifecycle state. Each can be overridden
@@ -85,11 +87,29 @@ var serviceBinaryName = func() string {
 type ServeStartCmd struct {
 	ServeRunCmd // Embed so `--port`, `--tls-cert`, etc. are available.
 
-	PidPath string `help:"Path to the pidfile used for lifecycle management." default:"~/.signatory/serve.pid" type:"path"`
-	LogPath string `help:"Path to the service log file (appended on restart)." default:"~/.signatory/logs/serve.log" type:"path"`
+	PidPath        string `help:"Path to the pidfile used for lifecycle management." default:"~/.signatory/serve.pid" type:"path"`
+	LogPath        string `help:"Path to the service log file (appended on restart)." default:"~/.signatory/logs/serve.log" type:"path"`
+	SkipPreflight  bool   `help:"Skip the NODE_EXTRA_CA_CERTS preflight check. For debugging only — agents will fail to WebFetch the service over TLS if the env var is unset." name:"skip-preflight"`
 }
 
 func (cmd *ServeStartCmd) Run(_ *Globals) error {
+	// Preflight the TLS trust env before starting. Without
+	// NODE_EXTRA_CA_CERTS set to a valid CA, the service will
+	// listen fine but Claude Code's WebFetch cannot verify its
+	// cert — agents fail with "unable to verify the first
+	// certificate," which is what drove this preflight into
+	// existence. Fail fast so the user sees the real problem
+	// before spending time debugging the pipeline.
+	//
+	// --skip-preflight is the escape hatch (e.g., --no-tls, or
+	// debugging with curl -k): skipping is explicit and logged.
+	if !cmd.NoTLS && !cmd.SkipPreflight {
+		if r := certs.Check(); !r.OK {
+			return fmt.Errorf("cert preflight failed: %s\nfix: %s\n(override with --skip-preflight if you know what you're doing)",
+				r.Message, r.Fix)
+		}
+	}
+
 	// Refuse to clobber a live instance. Use isOurServiceAlive (not
 	// isProcessAlive) so a recycled PID belonging to a stranger is
 	// treated as a stale pidfile and we proceed to start — otherwise

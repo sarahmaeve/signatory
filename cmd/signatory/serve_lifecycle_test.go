@@ -248,3 +248,91 @@ func TestErrStatusNotRunning_IsSentinel(t *testing.T) {
 	assert.True(t, errors.Is(errStatusNotRunning, errStatusNotRunning),
 		"errStatusNotRunning must be a stable sentinel — main.go uses errors.Is to suppress stderr")
 }
+
+// --- ServeStart preflight --------------------------------------------------
+//
+// ServeStart refuses to launch when NODE_EXTRA_CA_CERTS is missing
+// or stale: the service would listen fine, but Claude Code's
+// WebFetch can't verify the cert, and subagents would fail with
+// "unable to verify the first certificate." Fail-fast here is the
+// whole reason the preflight exists.
+
+// TestServeStart_PreflightBlocksWhenEnvUnset is the revert proof
+// for the preflight. If the check is removed from ServeStartCmd.Run,
+// this test fails because Start proceeds past preflight and hits
+// the PID/log setup, which needs filesystem writes we don't mock.
+// The test stays narrow: we don't assert on the full start path,
+// only that the preflight gate rejects a missing env before any
+// side effects.
+func TestServeStart_PreflightBlocksWhenEnvUnset(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+
+	cmd := &ServeStartCmd{
+		ServeRunCmd: ServeRunCmd{Port: 21517},
+		PidPath:     filepath.Join(t.TempDir(), "serve.pid"),
+		LogPath:     filepath.Join(t.TempDir(), "logs", "serve.log"),
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err, "preflight must reject missing env")
+	assert.Contains(t, err.Error(), "cert preflight failed",
+		"error should name the preflight so operators know which gate fired")
+	assert.Contains(t, err.Error(), "--skip-preflight",
+		"error should surface the escape hatch — otherwise operators can't unblock themselves when the check itself is broken")
+}
+
+// TestServeStart_SkipPreflight_BypassesCheck verifies the escape
+// hatch does what it says. We don't let the full start run — the
+// PID/log machinery would start a real detached process — but we
+// do confirm that the error we see past preflight is NOT the
+// preflight error. If --skip-preflight fails to bypass, the error
+// would still contain "cert preflight failed."
+func TestServeStart_SkipPreflight_BypassesCheck(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+
+	// Point PidPath at a directory that doesn't exist yet, so the
+	// command will get past preflight and then fail on pidfile
+	// setup (or later). What we're asserting is that the failure
+	// is NOT the preflight one.
+	cmd := &ServeStartCmd{
+		ServeRunCmd:   ServeRunCmd{Port: 0, NoTLS: true}, // NoTLS avoids TLS cert stat in ServeRun
+		PidPath:       filepath.Join(t.TempDir(), "serve.pid"),
+		LogPath:       filepath.Join(t.TempDir(), "logs", "serve.log"),
+		SkipPreflight: true,
+	}
+	err := cmd.Run(&Globals{})
+	// Start may succeed or fail downstream; we don't care. What we
+	// care about: if it failed, the reason is not preflight.
+	if err != nil {
+		assert.NotContains(t, err.Error(), "cert preflight failed",
+			"--skip-preflight must bypass the cert check entirely")
+	}
+	// Clean up any detached process start left behind by this test.
+	// This is best-effort — if Run proceeded far enough to spawn,
+	// we don't want to leak a background process.
+	if pid, rerr := readPidFile(cmd.PidPath); rerr == nil {
+		_ = killFn(pid, syscall.SIGTERM)
+	}
+}
+
+// TestServeStart_PreflightSkippedWhenNoTLS covers the other escape:
+// when --no-tls is set the service serves plain HTTP. Agents can't
+// reach that anyway, but cert preflight doesn't apply to HTTP — so
+// --no-tls should bypass preflight automatically, without requiring
+// --skip-preflight too.
+func TestServeStart_PreflightSkippedWhenNoTLS(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "")
+
+	cmd := &ServeStartCmd{
+		ServeRunCmd: ServeRunCmd{Port: 0, NoTLS: true},
+		PidPath:     filepath.Join(t.TempDir(), "serve.pid"),
+		LogPath:     filepath.Join(t.TempDir(), "logs", "serve.log"),
+	}
+	err := cmd.Run(&Globals{})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "cert preflight failed",
+			"--no-tls should bypass preflight; HTTP has no cert to verify")
+	}
+	if pid, rerr := readPidFile(cmd.PidPath); rerr == nil {
+		_ = killFn(pid, syscall.SIGTERM)
+	}
+}

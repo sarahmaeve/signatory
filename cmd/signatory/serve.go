@@ -43,10 +43,14 @@ type ServeCmd struct {
 //
 //	brew install mkcert
 //	mkcert -install
-//	mkdir -p ~/.signatory/certs
-//	cd ~/.signatory/certs && mkcert 127.0.0.1 localhost
-//	# Add to shell profile:
-//	export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+//	signatory certs init --write-profile
+//	# then restart your terminal so NODE_EXTRA_CA_CERTS is exported
+//
+// `serve start` preflights the NODE_EXTRA_CA_CERTS env var before
+// launching, since a service that listens but whose cert Claude Code
+// can't verify is the flakiness source this package was built to
+// close. `serve run` (foreground) does not preflight — it's the
+// raw-server path tests and lifecycle-launch paths use.
 //
 // Without TLS (plain HTTP, for debugging only via curl), pass
 // --no-tls. Agents cannot reach the plain HTTP variant.

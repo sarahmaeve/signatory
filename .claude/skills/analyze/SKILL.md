@@ -57,27 +57,47 @@ echo "exit: $?"
   argument, not `--target`), missing `~/.signatory/signatory.db`
   (run `signatory init` first), or a corrupted database file.
 
-## Prerequisite — one-time TLS setup
+## Step 0a — Preflight the TLS trust env
 
-The pipeline service uses HTTPS because Claude Code's WebFetch
-tool forces HTTPS on all URLs. One-time setup with mkcert:
+The pipeline service uses HTTPS because Claude Code's WebFetch tool
+forces HTTPS on all URLs. Claude Code's Node TLS stack consults the
+`NODE_EXTRA_CA_CERTS` env var at every handshake to load the local
+(mkcert-issued) CA. When that env var is missing or stale — which
+happens silently after terminal restarts, GUI launches, or fresh
+shells — synthesist WebFetches fail with "unable to verify the
+first certificate" and the run halts mid-pipeline.
+
+**Always preflight before dispatching agents:**
+
+```bash
+signatory certs check
+```
+
+- **Exit 0**: env is set and points to a valid CA. Proceed to Step 1.
+- **Non-zero**: the command's stderr carries the specific failure
+  and a remediation hint. The most common fix is:
+  ```bash
+  signatory certs init --write-profile
+  ```
+  Then restart your terminal (or `source ~/.zshrc`) and retry.
+
+`signatory certs init` copies the mkcert root CA into a stable,
+signatory-owned path (`~/.signatory/certs/rootCA.pem`) and with
+`--write-profile` appends a managed `export NODE_EXTRA_CA_CERTS=...`
+block to `~/.zshrc`. Re-running is idempotent; the block is replaced
+in place rather than duplicated.
+
+Override the default cert dir with `--cert-dir PATH` and the default
+shell profile with `--shell-profile-path PATH`.
+
+First-time machine setup (only needed once, not per-run):
 
 ```bash
 brew install mkcert
-mkcert -install  # installs local CA; needs sudo password
-mkdir -p ~/.signatory/certs
-cd ~/.signatory/certs && mkcert 127.0.0.1 localhost
+mkcert -install                 # installs local CA in system trust
+signatory certs init --write-profile
+# then: restart your terminal so NODE_EXTRA_CA_CERTS is exported
 ```
-
-Then add to your shell profile so Claude Code's HTTP client
-trusts the mkcert CA:
-
-```bash
-export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
-```
-
-Restart Claude Code for the env var to take effect. This setup
-is one-time — subsequent pipeline runs just use the service.
 
 ## Step 1 — Start pipeline service + create session + generate handoffs
 
