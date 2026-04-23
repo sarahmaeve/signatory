@@ -613,19 +613,30 @@ func (cmd *PostureAcceptCmd) Run(globals *Globals) error {
 	// under pkg:npm/X with collected_from=repo:github/Y produces a
 	// posture on pkg:npm/X, matching agent-facing-contract §3.2).
 	//
-	// Plan-A canonicalization: if the synthesis's target carries a
-	// @V suffix, strip it before the entity lookup so the posture
-	// lands at the unversioned entity with `version` column populated.
-	// Matches the posture set/get/unset normalization path and keeps
-	// the two URI forms (X@V vs X + --version V) interoperable.
-	synOutput, err := s.GetAnalystOutput(ctx, cmd.OutputID)
+	// Walk the analyst_output.entity_id FK directly instead of
+	// reconstructing the entity URI and looking it up by string.
+	// String re-derivation was the 2026-04-22 dogfood bug: for a
+	// synthesis ingested with target `pkg:golang/...@v1.11.1`, the
+	// entity lives at that exact versioned URI (current
+	// ensureEntityForTarget preserves @V), but the prior accept-path
+	// ran SplitURIVersion before FindEntityByURI and looked up a
+	// stripped form that wasn't in the store. Going through the FK
+	// is schema-tight: there's exactly one entity per output row and
+	// no shape to mistranslate.
+	//
+	// Upstream entity-model cleanup (ingest normalizing @V off the
+	// entity URI so repeat analyses across versions share a row, per
+	// the Plan-A canonicalization doc in profile/uri.go) is tracked
+	// separately. The FK walk is correct under either model.
+	entity, err := s.GetOutputEntity(ctx, cmd.OutputID)
 	if err != nil {
-		return fmt.Errorf("load synthesis output: %w", err)
-	}
-	baseSynTarget, _ := profile.SplitURIVersion(synOutput.Target)
-	entity, err := s.FindEntityByURI(ctx, baseSynTarget)
-	if err != nil {
-		return fmt.Errorf("locate entity for synthesis target %q: %w", synOutput.Target, err)
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf(
+				"no entity found for synthesis output %q — the analyst_output row has no entity_id or the entity was deleted; "+
+					"re-ingest the synthesis or run `signatory show-analyses` to verify the output id",
+				cmd.OutputID)
+		}
+		return fmt.Errorf("load synthesis entity for output %q: %w", cmd.OutputID, err)
 	}
 
 	if cmd.DryRun {

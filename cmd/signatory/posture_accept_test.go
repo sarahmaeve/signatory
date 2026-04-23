@@ -328,6 +328,88 @@ func TestPostureAccept_DryRun_DoesNotWrite(t *testing.T) {
 	assert.Equal(t, 0, count, "dry-run must not write an audit row")
 }
 
+// TestPostureAccept_VersionedEntityTarget is the 2026-04-22 dogfood
+// regression: a synthesis whose `target` carries an `@V` suffix
+// ingests to an entity row whose canonical_uri ALSO carries `@V`
+// (current `ensureEntityForTarget` behavior — the unversioned-entity
+// cleanup is tracked separately). The earlier `posture accept`
+// implementation reconstructed the entity URI from the synthesis
+// target, then ran SplitURIVersion on it before lookup — which fails
+// here because the stripped base URI doesn't match any entity. The
+// fix routes the accept verb through the analyst_output.entity_id
+// FK directly, so the lookup can't drift from the row the synthesis
+// was actually indexed under.
+//
+// User report:
+//
+//	signatory posture accept <id> --yes
+//	locate entity for synthesis target "pkg:golang/...@v1.11.1": not found
+//
+// This test reproduces the exact scenario with a pkg: URI. A matching
+// repo: regression lives below — repo: URIs have a distinct parser
+// in SplitURIVersion, so we lock both shapes in.
+func TestPostureAccept_VersionedEntityTarget_pkg(t *testing.T) {
+	g := newTestGlobals(t)
+
+	// Target carries `@1.2.3` — this is the form the /analyze
+	// synthesist emitted in the testify@v1.11.1 dogfood run.
+	out := synthesisForAccept()
+	out.Target = "pkg:npm/accept-versioned@1.2.3"
+	outputID := ingestSynthesisForAccept(t, g, out)
+
+	cmd := &PostureAcceptCmd{
+		OutputID: outputID,
+		Yes:      true,
+	}
+	require.NoError(t, cmd.Run(g),
+		"posture accept on a versioned synthesis target must route through the entity FK, not re-derive via URI stripping")
+
+	// Posture must land on the entity the synthesis was indexed
+	// under (the versioned URI under the current model) with the
+	// proposal's version_scope in the posture.version column.
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	entity, err := s.FindEntityByURI(ctx, "pkg:npm/accept-versioned@1.2.3")
+	require.NoError(t, err, "entity must still exist at the versioned URI")
+	posture, err := s.GetPosture(ctx, entity.ID, "1.2.3")
+	require.NoError(t, err)
+	assert.Equal(t, profile.PostureTier("trusted-for-now"), posture.Tier)
+	assert.Equal(t, "1.2.3", posture.Version)
+}
+
+// TestPostureAccept_VersionedEntityTarget_repo is the repo:-scheme
+// half of the versioned-target regression. The 2026-04-22 dogfood
+// also produced `repo:github/stretchr/testify@v1.11.1`; signatory
+// must accept postures against synthesis outputs indexed under that
+// shape too.
+func TestPostureAccept_VersionedEntityTarget_repo(t *testing.T) {
+	g := newTestGlobals(t)
+
+	out := synthesisForAccept()
+	out.Target = "repo:github/example/proj@v1.11.1"
+	out.SynthesisSupplement.ProposedPosture.VersionScope = "v1.11.1"
+	outputID := ingestSynthesisForAccept(t, g, out)
+
+	cmd := &PostureAcceptCmd{
+		OutputID: outputID,
+		Yes:      true,
+	}
+	require.NoError(t, cmd.Run(g))
+
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	entity, err := s.FindEntityByURI(ctx, "repo:github/example/proj@v1.11.1")
+	require.NoError(t, err)
+	posture, err := s.GetPosture(ctx, entity.ID, "v1.11.1")
+	require.NoError(t, err)
+	assert.Equal(t, profile.PostureTier("trusted-for-now"), posture.Tier)
+	assert.Equal(t, "v1.11.1", posture.Version)
+}
+
 // TestPostureAccept_NonInteractiveWithoutYes_Errors asserts the CLI
 // refuses to prompt without --yes when stdin is not a terminal.
 // Simulates non-TTY via the IsTTY injection hook so the test

@@ -188,6 +188,32 @@ func (s *SQLite) FindEntityByURI(ctx context.Context, canonicalURI string) (*pro
 	return scanEntity(row)
 }
 
+// GetOutputEntity returns the entity that an analyst_output was
+// indexed under — the FK-walking shortcut `posture accept` uses so
+// it doesn't have to re-derive the target URI and risk a string-vs-
+// stored-URI drift.
+//
+// Written as a single JOIN so callers don't pay two round trips for
+// what is always a 1:1 relationship, and so the "row missing" /
+// "entity missing" cases collapse to the same ErrNotFound — either
+// way, there's no entity to act on. Returns ErrNotFound when
+// outputID doesn't exist; any other error is an integrity signal
+// (e.g. FK pointing at a deleted entity).
+func (s *SQLite) GetOutputEntity(ctx context.Context, outputID string) (*profile.Entity, error) {
+	if outputID == "" {
+		return nil, fmt.Errorf("%w: outputID required", ErrNilInput)
+	}
+	// Prefix each selected column with `e.` so the JOIN is unambiguous
+	// and scanEntity keeps reading the same columns in the same order.
+	row := s.db.QueryRowContext(ctx,
+		`SELECT e.id, e.canonical_uri, e.type, e.short_name,
+		        e.description, e.ecosystem, e.url, e.created_at, e.updated_at
+		   FROM analyst_outputs ao
+		   INNER JOIN entities e ON e.id = ao.entity_id
+		  WHERE ao.id = ?`, outputID)
+	return scanEntity(row)
+}
+
 // PutEntity inserts or updates an entity. On INSERT conflict on id, the
 // canonical_uri, type, short_name, description, ecosystem, url, and
 // updated_at fields are updated. created_at and id are immutable after
