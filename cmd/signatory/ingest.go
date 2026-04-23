@@ -22,10 +22,11 @@ import (
 // run format-check first as a pre-flight, but ingest re-validates
 // at the store layer regardless (defense in depth).
 type IngestCmd struct {
-	File   string `arg:"" help:"Path to a JSON or markdown analyst output file." type:"existingfile"`
-	Format string `help:"Input format: json, markdown, or auto (detect from extension/content)." default:"auto" enum:"json,markdown,auto"`
-	As     string `help:"Record the analysis under this target URI as the primary identity, with the analyst output's own target captured as collected_from. Use when the caller asked about a pkg:<eco>/<name> URI but the analysis was run against the resolved source repo. See agent-facing-contract §3.2."`
-	Quiet  bool   `help:"Suppress success summary; errors still print." short:"q"`
+	File              string `arg:"" help:"Path to a JSON or markdown analyst output file." type:"existingfile"`
+	Format            string `help:"Input format: json, markdown, or auto (detect from extension/content)." default:"auto" enum:"json,markdown,auto"`
+	As                string `help:"Record the analysis under this target URI as the primary identity, with the analyst output's own target captured as collected_from. Use when the caller asked about a pkg:<eco>/<name> URI but the analysis was run against the resolved source repo. See agent-facing-contract §3.2."`
+	AnalysisSessionID string `name:"analysis-session-id" help:"Link the ingested row to an analysis_sessions.id via the analyst_outputs.analysis_session_id FK. Get the id from 'signatory analysis begin'. Unknown ids fail at ingest time." optional:""`
+	Quiet             bool   `help:"Suppress success summary; errors still print." short:"q"`
 }
 
 func (cmd *IngestCmd) Run(globals *Globals) error {
@@ -65,6 +66,9 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 	var ingestOpts []store.IngestOption
 	if cmd.As != "" {
 		ingestOpts = append(ingestOpts, store.WithPrimaryTarget(cmd.As))
+	}
+	if cmd.AnalysisSessionID != "" {
+		ingestOpts = append(ingestOpts, store.WithAnalysisSession(cmd.AnalysisSessionID))
 	}
 
 	result, err := db.IngestAnalystOutput(ctx, out, cmd.File, ingestOpts...)

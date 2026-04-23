@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -317,4 +319,76 @@ func TestIngestAnalysisTool_MetadataShape(t *testing.T) {
 		"analyst_output must appear under properties")
 	assert.Contains(t, props, "source",
 		"source must appear under properties (optional but schema-known)")
+	assert.Contains(t, props, "analysis_session_id",
+		"analysis_session_id must appear under properties so agents can discover the session-linkage contract from the schema")
+}
+
+// TestIngestAnalysisTool_WithAnalysisSession exercises the Phase 3
+// session linkage: an ingest carrying analysis_session_id stamps
+// the FK at INSERT time, making the output queryable via the
+// session surface. This is the critical path — the /analyze skill
+// relies on this field to tie analyst outputs back to the
+// originating dispatch.
+func TestIngestAnalysisTool_WithAnalysisSession(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+
+	// Create the entity + session that the ingest will link against.
+	entity := seedEntity(t, s, "pkg:test/widget", "widget")
+	session := &profile.AnalysisSession{
+		ID:        profile.NewEntityID(), // reuse the UUID helper; session IDs are plain UUIDs
+		EntityID:  entity.ID,
+		TargetURI: "pkg:test/widget",
+		InvokedBy: "test-actor",
+		StartedAt: time.Now().UTC(),
+		Status:    profile.AnalysisSessionInProgress,
+	}
+	require.NoError(t, s.CreateAnalysisSession(context.Background(), session))
+
+	tool := &IngestAnalysisTool{Store: s}
+	payload := minimalValidAnalystOutputJSON(t)
+
+	envelope := map[string]any{
+		"analyst_output":      json.RawMessage(payload),
+		"analysis_session_id": session.ID,
+	}
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), raw)
+	require.Equal(t, "ok", resp.Status, "expected ok, got %+v", resp.Error)
+	data := resp.Data.(ingestAnalysisData)
+
+	// Verify the FK landed: ListOutputsForSession should surface
+	// this output under the session we linked to.
+	outputs, err := s.ListOutputsForSession(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1,
+		"output must surface under the session it was ingested with")
+	assert.Equal(t, data.OutputID, outputs[0].OutputID)
+}
+
+// TestIngestAnalysisTool_WithAnalysisSession_UnknownID confirms
+// that passing a bogus session id fails cleanly rather than
+// silently dropping the linkage. The FK constraint catches it at
+// the store layer; the MCP surface relays the failure.
+func TestIngestAnalysisTool_WithAnalysisSession_UnknownID(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+	payload := minimalValidAnalystOutputJSON(t)
+
+	envelope := map[string]any{
+		"analyst_output":      json.RawMessage(payload),
+		"analysis_session_id": profile.NewEntityID(), // never created
+	}
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), raw)
+	assert.NotEqual(t, "ok", resp.Status,
+		"unknown analysis_session_id must surface as an error — FK constraint enforces linkage integrity")
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "ingest failed",
+		"error message should identify the ingest phase so callers can retry with a corrected id")
 }

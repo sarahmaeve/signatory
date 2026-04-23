@@ -63,6 +63,10 @@ func (t *IngestAnalysisTool) InputSchema() json.RawMessage {
 			"collected_from": {
 				"type": "string",
 				"description": "Optional primary-identity override: the target URI the original caller asked about. When set and it resolves to a different canonical URI than analyst_output.target, the analysis is indexed under collected_from with analyst_output.target captured as the resolved source. Use when the caller asked about pkg:<eco>/<name> but the analysis was performed against the resolved github source repo. See agent-facing-contract §3.2."
+			},
+			"analysis_session_id": {
+				"type": "string",
+				"description": "Optional analysis_sessions.id to link this output to. When set, the ingested row's analysis_session_id FK is stamped at INSERT, making the output visible under 'signatory analysis show|timing <session-id>'. Get the session id from 'signatory analysis begin' (the skill's dispatch step). Unknown ids surface as an ingest failure (FK constraint). Omit when ingesting outside a session; the column stays NULL and the ingest still succeeds."
 			}
 		},
 		"required": ["analyst_output"],
@@ -85,6 +89,13 @@ type ingestAnalysisInput struct {
 	// primary identity; analyst_output.target becomes the
 	// collected_from link. Agent-facing-contract §3.2.
 	CollectedFrom string `json:"collected_from,omitempty"`
+
+	// AnalysisSessionID, when non-empty, stamps the
+	// analyst_outputs.analysis_session_id FK on the new row. The
+	// skill's /analyze dispatch calls `signatory analysis begin` to
+	// get the id and substitutes it into each analyst's handoff
+	// template; the analyst passes it through verbatim here.
+	AnalysisSessionID string `json:"analysis_session_id,omitempty"`
 }
 
 // ingestAnalysisData is the result payload.
@@ -150,6 +161,9 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 	var ingestOpts []store.IngestOption
 	if in.CollectedFrom != "" {
 		ingestOpts = append(ingestOpts, store.WithPrimaryTarget(in.CollectedFrom))
+	}
+	if in.AnalysisSessionID != "" {
+		ingestOpts = append(ingestOpts, store.WithAnalysisSession(in.AnalysisSessionID))
 	}
 
 	result, err := t.Store.IngestAnalystOutput(ctx, &out, source, ingestOpts...)
