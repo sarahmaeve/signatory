@@ -10,11 +10,8 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
 
-func TestSignalTypesResource_URIPattern(t *testing.T) {
-	t.Parallel()
-	r := &resources.SignalTypesResource{}
-	assert.Equal(t, "signatory://signal-types", r.URIPattern())
-}
+// URIPattern() is covered by the registration contract test in
+// cmd/signatory (TestMCPRegistration_Contract).
 
 func TestSignalTypesResource_HappyPath(t *testing.T) {
 	t.Parallel()

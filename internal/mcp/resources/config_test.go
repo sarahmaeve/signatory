@@ -9,11 +9,8 @@ import (
 	"github.com/sarahmaeve/signatory/internal/mcp/resources"
 )
 
-func TestConfigResource_URIPattern(t *testing.T) {
-	t.Parallel()
-	r := &resources.ConfigResource{}
-	assert.Equal(t, "signatory://config", r.URIPattern())
-}
+// URIPattern() is covered by the registration contract test in
+// cmd/signatory (TestMCPRegistration_Contract).
 
 func TestConfigResource_HappyPath(t *testing.T) {
 	t.Parallel()
@@ -130,10 +127,23 @@ func TestConfigResource_MutationVerify_DBPathReflectsConstructorValue(t *testing
 	assert.Equal(t, "/path/to/db-b", d2.DBPath)
 }
 
-// TestConfigResource_URIIgnored verifies the uri argument is ignored.
+// TestConfigResource_URIIgnored verifies the URI argument has no effect
+// on the response payload. Two Reads with different query strings must
+// produce byte-identical Data — a regression that started routing
+// config content by query param would fail the equality check.
 func TestConfigResource_URIIgnored(t *testing.T) {
 	t.Parallel()
-	r := &resources.ConfigResource{}
-	resp := r.Read(t.Context(), "signatory://config?any=param")
-	assert.Equal(t, "ok", resp.Status)
+	r := &resources.ConfigResource{
+		DBPath:  "/tmp/test.db",
+		Version: "0.1.0-test",
+	}
+
+	respA := r.Read(t.Context(), "signatory://config")
+	respB := r.Read(t.Context(), "signatory://config?any=param&another=x")
+
+	require.Equal(t, "ok", respA.Status)
+	require.Equal(t, "ok", respB.Status)
+
+	assert.Equal(t, mustMarshal(t, respA.Data), mustMarshal(t, respB.Data),
+		"ConfigResource.Read must produce identical Data regardless of URI query params")
 }

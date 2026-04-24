@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"sync"
 )
 
@@ -118,6 +119,37 @@ func (s *Server) RegisterResource(r Resource) {
 // the handshake completes.
 func (s *Server) ClientInfo() clientInfo {
 	return s.shake.ClientInfo()
+}
+
+// RegisteredToolNames returns the sorted names of every tool currently
+// registered on the server. Intended for contract tests that pin the
+// externally-observable tool set and for diagnostic tooling that wants
+// to list capabilities without going through the JSON-RPC handshake.
+//
+// The returned slice is a fresh copy; callers may mutate it freely.
+func (s *Server) RegisteredToolNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.tools))
+	for name := range s.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// RegisteredResourcePatterns returns the sorted URI patterns of every
+// resource currently registered on the server. Companion to
+// RegisteredToolNames; see that method's doc for the intended use.
+func (s *Server) RegisteredResourcePatterns() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	patterns := make([]string, 0, len(s.resources))
+	for p := range s.resources {
+		patterns = append(patterns, p)
+	}
+	sort.Strings(patterns)
+	return patterns
 }
 
 // Serve reads JSON-RPC messages from r, dispatches them, and writes

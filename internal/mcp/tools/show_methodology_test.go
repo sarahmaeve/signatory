@@ -108,8 +108,4 @@ func TestShowMethodologyTool_ValidHitOnTarget_Miss(t *testing.T) {
 	assert.Equal(t, "ok", resp.Status)
 }
 
-func TestShowMethodologyTool_Name(t *testing.T) {
-	t.Parallel()
-	tool := &ShowMethodologyTool{}
-	assert.Equal(t, "signatory_show_methodology", tool.Name())
-}
+// Name() is covered by the registration contract test in cmd/signatory.

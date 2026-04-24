@@ -58,40 +58,7 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 	// version would default to "0.0.0-unset" inside NewServer, so we
 	// forward whatever main.go has (dev builds pass "dev").
 	srv := mcp.NewServer(version)
-
-	// Register read-only resources (Phase 1).
-	// HelpResource carries the orientation guide (question→tool map,
-	// concept glossary, failure-mode notes). It's companion to the
-	// initialize response's Instructions field — the latter is pushed
-	// on every handshake, this is pulled on demand for deeper context.
-	srv.RegisterResource(&resources.HelpResource{})
-	srv.RegisterResource(&resources.ConfigResource{
-		DBPath:  dbPath,
-		Version: version,
-	})
-	srv.RegisterResource(&resources.SignalTypesResource{})
-	srv.RegisterResource(&resources.BurnsResource{Store: s})
-	srv.RegisterResource(&resources.PostureResource{Store: s})
-	srv.RegisterResource(&resources.UnexaminedResource{Store: s})
-	srv.RegisterResource(&resources.AnalysesResource{Store: s})
-
-	// Register tools. Read-only surface plus the first mutating tool
-	// (signatory_ingest_analysis) — see
-	// design/v0.1-invariants.md §"Invariant 3" for why ingest is
-	// intentionally the first write path and why audit-logging /
-	// confirmation-metadata for other mutating tools (burn, posture)
-	// still defers to a later phase.
-	srv.Register(&tools.AnalyzeTool{Store: s})
-	srv.Register(&tools.SummaryTool{Store: s})
-	srv.Register(&tools.DetailTool{Store: s})
-	srv.Register(&tools.SignalsTool{Store: s})
-	srv.Register(&tools.ShowAnalysesTool{Store: s})
-	srv.Register(&tools.ShowConclusionsTool{Store: s})
-	srv.Register(&tools.ShowMethodologyTool{Store: s})
-	srv.Register(&tools.IngestAnalysisTool{Store: s})
-	// SurveyTool is a pure read-only dispatcher in Phase 1: it wraps
-	// AnalyzeTool across a project's dep tree. No store field required.
-	srv.Register(&tools.SurveyTool{})
+	registerMCPHandlers(srv, s, dbPath, version)
 
 	// Diagnostic line on stderr so a human watching the session knows
 	// the server is up. stdout is reserved for protocol traffic.
@@ -109,4 +76,45 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 		return fmt.Errorf("mcp serve: %w", err)
 	}
 	return nil
+}
+
+// registerMCPHandlers wires the Phase 1 read-only tool and resource
+// surface onto srv. Extracted from Run so the registration list is the
+// single source of truth for both production startup and the
+// TestMCPRegistration_Contract test in mcp_contract_test.go — adding a
+// new handler without updating the contract test's expected set fails
+// the test, which is the point.
+//
+// See design/v0.1-invariants.md §"Invariant 3" for why
+// signatory_ingest_analysis is the first mutating tool and why burn /
+// posture mutation tools (which need audit-logging and confirmation
+// metadata) defer to a later phase.
+func registerMCPHandlers(srv *mcp.Server, s *store.SQLite, dbPath, version string) {
+	// Resources. HelpResource is companion to the initialize response's
+	// Instructions field — the latter is pushed on every handshake, this
+	// is pulled on demand for deeper context (question→tool map, concept
+	// glossary, failure-mode notes).
+	srv.RegisterResource(&resources.HelpResource{})
+	srv.RegisterResource(&resources.ConfigResource{
+		DBPath:  dbPath,
+		Version: version,
+	})
+	srv.RegisterResource(&resources.SignalTypesResource{})
+	srv.RegisterResource(&resources.BurnsResource{Store: s})
+	srv.RegisterResource(&resources.PostureResource{Store: s})
+	srv.RegisterResource(&resources.UnexaminedResource{Store: s})
+	srv.RegisterResource(&resources.AnalysesResource{Store: s})
+
+	// Tools. Read-only surface plus signatory_ingest_analysis (the first
+	// mutating tool). SurveyTool is a pure read-only dispatcher in Phase 1
+	// that wraps AnalyzeTool across a project's dep tree — no store field.
+	srv.Register(&tools.AnalyzeTool{Store: s})
+	srv.Register(&tools.SummaryTool{Store: s})
+	srv.Register(&tools.DetailTool{Store: s})
+	srv.Register(&tools.SignalsTool{Store: s})
+	srv.Register(&tools.ShowAnalysesTool{Store: s})
+	srv.Register(&tools.ShowConclusionsTool{Store: s})
+	srv.Register(&tools.ShowMethodologyTool{Store: s})
+	srv.Register(&tools.IngestAnalysisTool{Store: s})
+	srv.Register(&tools.SurveyTool{})
 }

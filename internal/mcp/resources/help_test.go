@@ -10,14 +10,10 @@ import (
 	"github.com/sarahmaeve/signatory/internal/mcp/resources"
 )
 
-// TestHelpResource_URIPattern locks in the literal URI. Changing it
-// breaks every client that has it in their workflow — treat this
-// string like a schema commitment.
-func TestHelpResource_URIPattern(t *testing.T) {
-	t.Parallel()
-	r := &resources.HelpResource{}
-	assert.Equal(t, "signatory://help", r.URIPattern())
-}
+// URIPattern() is covered by the registration contract test in
+// cmd/signatory (TestMCPRegistration_Contract) — the URI is verified
+// as a live member of the resources/list output, which is a stronger
+// contract than this isolated tautology was.
 
 // TestHelpResource_HappyPath verifies that Read returns a successful
 // response with a non-empty content string. We deliberately don't
@@ -72,12 +68,26 @@ func TestHelpResource_Description(t *testing.T) {
 		"help description must carry an explicit affordance, not just be reference prose")
 }
 
-// TestHelpResource_URIIgnored verifies the literal uri argument is
-// ignored — HelpResource is a static resource, so the URI passed in
-// should have no effect on the response.
+// TestHelpResource_URIIgnored verifies the URI argument has no effect on
+// the response payload — HelpResource is static. Two Reads with
+// deliberately different query strings must produce byte-identical Data.
+// A regression that started routing content by query param would fail
+// the equality check; the previous single-call form (status == "ok")
+// would not have caught that.
 func TestHelpResource_URIIgnored(t *testing.T) {
 	t.Parallel()
 	r := &resources.HelpResource{}
-	resp := r.Read(t.Context(), "signatory://help?anything=junk")
-	assert.Equal(t, "ok", resp.Status)
+
+	respA := r.Read(t.Context(), "signatory://help")
+	respB := r.Read(t.Context(), "signatory://help?anything=junk&other=value")
+
+	require.Equal(t, "ok", respA.Status)
+	require.Equal(t, "ok", respB.Status)
+
+	// Byte-level comparison of the serialized Data payload. Comparing
+	// the `any`-typed Data directly with reflect.DeepEqual would also
+	// work, but marshalling makes the failure message human-readable
+	// if the invariant breaks.
+	assert.Equal(t, mustMarshal(t, respA.Data), mustMarshal(t, respB.Data),
+		"HelpResource.Read must produce identical Data regardless of URI query params")
 }

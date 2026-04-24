@@ -103,8 +103,4 @@ func TestShowConclusionsTool_DesignIntent(t *testing.T) {
 	assert.Equal(t, 0, data["count"])
 }
 
-func TestShowConclusionsTool_Name(t *testing.T) {
-	t.Parallel()
-	tool := &ShowConclusionsTool{}
-	assert.Equal(t, "signatory_show_conclusions", tool.Name())
-}
+// Name() is covered by the registration contract test in cmd/signatory.

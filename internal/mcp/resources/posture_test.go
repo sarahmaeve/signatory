@@ -139,15 +139,25 @@ func TestPostureResource_MultiTier(t *testing.T) {
 	assert.Equal(t, 1, decoded.ByTier[string(profile.PostureUnknownProvenance)])
 }
 
-// TestPostureResource_URIIgnored verifies that the literal uri argument
-// is ignored (static resource — URI always = "signatory://posture").
+// TestPostureResource_URIIgnored verifies that the URI argument has no
+// effect on the response payload. Two Reads with different query strings
+// against the same (unchanged) store must produce byte-identical Data —
+// a regression that started filtering by query param would fail the
+// equality check; the previous single-call form only proved the response
+// was "ok" regardless of URI, which is weaker.
 func TestPostureResource_URIIgnored(t *testing.T) {
 	t.Parallel()
 	s := openTestDB(t)
 	r := &resources.PostureResource{Store: s}
 
-	resp := r.Read(t.Context(), "signatory://posture?some=junk")
-	assert.Equal(t, "ok", resp.Status)
+	respA := r.Read(t.Context(), "signatory://posture")
+	respB := r.Read(t.Context(), "signatory://posture?some=junk&tier=trusted-for-now")
+
+	require.Equal(t, "ok", respA.Status)
+	require.Equal(t, "ok", respB.Status)
+
+	assert.Equal(t, mustMarshal(t, respA.Data), mustMarshal(t, respB.Data),
+		"PostureResource.Read must produce identical Data regardless of URI query params")
 }
 
 // TestPostureResource_MutationVerify_TotalReflectsDeletion is the

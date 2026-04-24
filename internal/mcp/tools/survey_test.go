@@ -76,14 +76,5 @@ func TestSurveyTool_PackageJSON_NotImplemented(t *testing.T) {
 	assert.Equal(t, mcp.CodeNotFound, resp.Error.Code)
 }
 
-func TestSurveyTool_Name(t *testing.T) {
-	t.Parallel()
-	tool := &SurveyTool{}
-	assert.Equal(t, "signatory_survey", tool.Name())
-}
-
-func TestSurveyTool_InputSchemaValid(t *testing.T) {
-	t.Parallel()
-	tool := &SurveyTool{}
-	assert.True(t, json.Valid(tool.InputSchema()))
-}
+// Name() and InputSchema() validity are covered by the registration
+// contract test in cmd/signatory (TestMCPRegistration_Contract).

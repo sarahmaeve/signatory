@@ -28,11 +28,8 @@ func loadAnalystFixture(t *testing.T) *exchange.AnalystOutput {
 	return &out
 }
 
-func TestAnalysesResource_URIPattern(t *testing.T) {
-	t.Parallel()
-	r := &resources.AnalysesResource{}
-	assert.Equal(t, "signatory://analyses", r.URIPattern())
-}
+// URIPattern() is covered by the registration contract test in
+// cmd/signatory (TestMCPRegistration_Contract).
 
 func TestAnalysesResource_EmptyStore(t *testing.T) {
 	t.Parallel()

@@ -223,7 +223,6 @@ func TestDominantForgeryResistance(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := dominantForgeryResistance(tc.signals)
@@ -232,15 +231,9 @@ func TestDominantForgeryResistance(t *testing.T) {
 	}
 }
 
-func TestAnalyzeTool_Name(t *testing.T) {
-	t.Parallel()
-	tool := &AnalyzeTool{}
-	assert.Equal(t, "signatory_analyze", tool.Name())
-}
-
-func TestAnalyzeTool_InputSchemaValid(t *testing.T) {
-	t.Parallel()
-	tool := &AnalyzeTool{}
-	schema := tool.InputSchema()
-	assert.True(t, json.Valid(schema), "InputSchema must be valid JSON")
-}
+// Name() and InputSchema() validity are covered by the registration
+// contract test in cmd/signatory (TestMCPRegistration_Contract). The
+// server's Register() call panics on an InputSchema that isn't valid
+// JSON or doesn't set additionalProperties:false, so any tool that
+// successfully wires into the production server has already passed
+// both checks — re-asserting them per-tool was tautological.
