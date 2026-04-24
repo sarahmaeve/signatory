@@ -9,7 +9,6 @@
 | Tool | Purpose | License |
 |---|---|---|
 | Sigstore (cosign, rekor, fulcio) | Supply chain signing | Apache 2.0 |
-| OpenSSF Scorecard | Security scoring | Apache 2.0 |
 | Trivy | Vulnerability scanner | Apache 2.0 |
 | Syft | SBOM generation | Apache 2.0 |
 | Grype | Vulnerability scanner | Apache 2.0 |

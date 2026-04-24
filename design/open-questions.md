@@ -6,7 +6,7 @@ Questions that need resolution before or during implementation. Grouped by area.
 
 ### Freshness strategy
 
-Querying GitHub APIs, package registries, and OpenSSF for every dependency on
+Querying GitHub APIs and package registries for every dependency on
 every run won't scale. Options:
 
 - Local cache with configurable TTLs per signal type
@@ -19,7 +19,7 @@ every run won't scale. Options:
 ### Rate limiting
 
 GitHub API has rate limits (5,000 req/hr authenticated, 60 unauthenticated).
-OpenSSF Scorecard API has its own limits. Package registries vary.
+Package registries vary.
 
 How do we handle this gracefully? Priority queuing? Parallel with backoff?
 Persistent token management?
@@ -256,14 +256,13 @@ temporal era classification. See [signals-v01.md] for the complete set.
 2. npm ecosystem provider (manifest parsing, registry API)
 3. GitHub signal collector (repo metadata, contributor info, commit signing)
 4. npm registry signal collector (publish metadata, version history)
-5. OpenSSF Scorecard integration
-6. Entity profile construction (project + identity + package)
-7. Dependency posture tracking (vetted/trusted/unexamined/unknown tiers)
-8. Burn list management (local, with import capability)
-9. Temporal era classification
-10. Structured JSON output
-11. Local caching with configurable TTLs
-12. Proof-of-concept scanner that populates profiles on demand
+5. Entity profile construction (project + identity + package)
+6. Dependency posture tracking (vetted/trusted/unexamined/unknown tiers)
+7. Burn list management (local, with import capability)
+8. Temporal era classification
+9. Structured JSON output
+10. Local caching with configurable TTLs
+11. Proof-of-concept scanner that populates profiles on demand
 
 PyPI as the second ecosystem provider follows once the npm provider and
 interfaces are proven.

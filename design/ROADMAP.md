@@ -56,7 +56,6 @@ These are nice-to-have and may slip to v0.1.1 if the contract milestones take lo
 
 - Signal TTL/expiry — cache works but doesn't auto-expire
 - Docker packaging — `go install` works but Docker is the stated MVP target
-- OpenSSF Scorecard integration — additive signal source
 
 ## V0.2 — Planned
 

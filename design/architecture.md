@@ -40,7 +40,6 @@ signatory CLI / MCP Server
 │   ├── Signal Collectors
 │   │   ├── GitHub (repo metadata, commit signing, contributor info)
 │   │   ├── Package Registries (npm, PyPI, ...)
-│   │   ├── OpenSSF Scorecard
 │   │   ├── Existing signing/attestation (GPG, Sigstore, etc.)
 │   │   └── [Extensible: additional signal sources]
 │   └── Ecosystem Providers
@@ -179,7 +178,6 @@ signatory/
 │   ├── profile/                # Entity profile construction and management
 │   ├── signal/                 # Signal collector interface + implementations
 │   │   ├── github/
-│   │   ├── scorecard/          # OpenSSF Scorecard
 │   │   └── registry/           # Package registry metadata
 │   ├── ecosystem/              # Ecosystem provider interface + implementations
 │   │   ├── npm/
@@ -218,14 +216,13 @@ signatory/
 2. npm ecosystem provider (manifest parsing, registry API)
 3. GitHub signal collector (repo metadata, contributor info, commit signing)
 4. npm registry signal collector (publish metadata, version history)
-5. OpenSSF Scorecard integration
-6. Entity profile construction (project + identity + package)
-7. Dependency posture tracking (vetted/trusted/unexamined/unknown tiers)
-8. Burn list management (local, with import capability)
-9. Temporal era classification
-10. Structured JSON output
-11. Local caching with configurable TTLs
-12. Proof-of-concept scanner that populates profiles on demand
+5. Entity profile construction (project + identity + package)
+6. Dependency posture tracking (vetted/trusted/unexamined/unknown tiers)
+7. Burn list management (local, with import capability)
+8. Temporal era classification
+9. Structured JSON output
+10. Local caching with configurable TTLs
+11. Proof-of-concept scanner that populates profiles on demand
 
 Signal set details: [signals-v01.md]
 

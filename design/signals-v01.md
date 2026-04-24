@@ -68,7 +68,6 @@ any weakness in the identity-verification axis.
 | Signal | Source | Notes |
 |--------|--------|-------|
 | CI configuration present | GitHub API | Actions, Travis, CircleCI, etc. |
-| OpenSSF Scorecard | Scorecard API | Consumed as a composite signal source |
 | Linter/formatter config present | GitHub API | File existence check in repo root |
 
 ### "What's the consumer's posture?" (Self-Assessment)
