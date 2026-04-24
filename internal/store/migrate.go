@@ -90,6 +90,12 @@ var migrations = []Migration{
 		Up:          migrationV11Up,
 		Down:        migrationV11Down,
 	},
+	{
+		Version:     12,
+		Description: "signal_resolutions.entity_id REFERENCES entities(id): close the sole unenforced entity_id FK (orphan-prevention audit; see design/orphanage.md)",
+		Up:          migrationV12Up,
+		Down:        migrationV12Down,
+	},
 }
 
 // initialSchema is the v1 schema, extracted from the original
@@ -1158,6 +1164,129 @@ DROP INDEX IF EXISTS idx_analysis_sessions_entity;
 DROP INDEX IF EXISTS idx_analysis_sessions_status;
 DROP INDEX IF EXISTS idx_analysis_sessions_pipeline;
 DROP TABLE IF EXISTS analysis_sessions;
+`
+
+// migrationV12Up closes the orphan-prevention gap documented in
+// design/orphanage.md §"Phase 2 findings": signal_resolutions.entity_id
+// was the sole entity_id column in the schema without REFERENCES
+// entities(id), and AppendResolution performed no Go-side existence
+// check. The append-only trigger (v3) meant any orphan landed would
+// be permanent. Phase 3's TDD test captured the failure shape;
+// Phase 5 (this migration + the Go-side validation in sqlite.go's
+// AppendResolution + the prune.go cleanup addition) lands the fix.
+//
+// SQLite can't ALTER TABLE ADD CONSTRAINT, so the FK is installed
+// via the same rebuild-through-new-table ceremony v9 used for the
+// citations CHECK constraint. Signal_resolutions carries the v3
+// append-only triggers (signal_resolutions_no_update/no_delete);
+// they must be dropped before the rebuild (DROP TABLE would trip
+// the no-delete trigger under some SQLite versions, and DROP TABLE
+// invalidates the trigger-to-table OID binding regardless) and
+// reinstalled after on the rebuilt table.
+//
+// Existing-orphan handling: the copy filters orphan rows via
+// WHERE entity_id IN (SELECT id FROM entities). Any row whose
+// entity_id doesn't resolve is silently dropped. Per the audit,
+// AppendResolution has no production callers (the function is
+// implemented and tested but not wired to any CLI or MCP surface),
+// so dogfood stores in practice hold zero signal_resolutions rows,
+// let alone orphans. The filter exists to make the migration safe
+// against hypothetical test-leftover rows and to document the
+// chosen orphan-handling stance: drop-on-migrate, preserving the
+// operator's ability to re-run the migration without manual
+// intervention. No log line is emitted since SQL migrations have
+// no stderr channel; the orphan count is observable pre-migration
+// via SELECT COUNT(*) FROM signal_resolutions sr WHERE sr.entity_id
+// NOT IN (SELECT id FROM entities).
+//
+// FK enforcement and transactions: migrate.go runs each Up inside
+// a transaction (migrate.go:1234). SQLite silently ignores
+// PRAGMA foreign_keys toggles inside a transaction, so we cannot
+// disable FK enforcement during the rebuild. The filtering WHERE
+// clause ensures the INSERT succeeds without relying on
+// PRAGMA manipulation.
+const migrationV12Up = `
+-- Step 1: Drop the v3-installed append-only triggers temporarily.
+-- DROP TABLE below would trip no-delete under some SQLite versions,
+-- and the triggers' binding to the table OID is invalidated by the
+-- rebuild regardless.
+DROP TRIGGER IF EXISTS signal_resolutions_no_update;
+DROP TRIGGER IF EXISTS signal_resolutions_no_delete;
+
+-- Step 2: Rebuild signal_resolutions with REFERENCES entities(id)
+-- on entity_id. The two signal-FKs (kept_signal_id,
+-- superseded_signal_id) already existed in v1; preserved verbatim.
+CREATE TABLE signal_resolutions_new (
+    id                   TEXT PRIMARY KEY,
+    entity_id            TEXT NOT NULL REFERENCES entities(id),
+    signal_type          TEXT NOT NULL,
+    kept_signal_id       TEXT NOT NULL REFERENCES signals(id),
+    superseded_signal_id TEXT NOT NULL REFERENCES signals(id),
+    action               TEXT NOT NULL,
+    resolved_by          TEXT NOT NULL,
+    resolved_at          TEXT NOT NULL
+);
+
+-- Step 3: Copy rows whose entity_id resolves to a real entity;
+-- orphans silently dropped per the comment above.
+INSERT INTO signal_resolutions_new
+    (id, entity_id, signal_type, kept_signal_id, superseded_signal_id,
+     action, resolved_by, resolved_at)
+SELECT sr.id, sr.entity_id, sr.signal_type, sr.kept_signal_id,
+       sr.superseded_signal_id, sr.action, sr.resolved_by, sr.resolved_at
+FROM signal_resolutions sr
+WHERE sr.entity_id IN (SELECT id FROM entities);
+
+DROP TABLE signal_resolutions;
+ALTER TABLE signal_resolutions_new RENAME TO signal_resolutions;
+
+-- Step 4: Recreate the index (attached to the old table; gone).
+CREATE INDEX IF NOT EXISTS idx_resolutions_entity ON signal_resolutions(entity_id);
+
+-- Step 5: Reinstall the append-only triggers on the rebuilt table.
+-- Body matches the v3 originals exactly.
+CREATE TRIGGER signal_resolutions_no_update BEFORE UPDATE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
+CREATE TRIGGER signal_resolutions_no_delete BEFORE DELETE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
+`
+
+// migrationV12Down reverses the FK addition by rebuilding the table
+// without REFERENCES entities(id). Same trigger ceremony: drop
+// append-only triggers, rebuild, reinstall. No orphan concern on
+// the way down (pre-v12 schema didn't enforce the FK, so all rows
+// already satisfied the pre-v12 rules by construction).
+const migrationV12Down = `
+DROP TRIGGER IF EXISTS signal_resolutions_no_update;
+DROP TRIGGER IF EXISTS signal_resolutions_no_delete;
+
+CREATE TABLE signal_resolutions_old (
+    id                   TEXT PRIMARY KEY,
+    entity_id            TEXT NOT NULL,
+    signal_type          TEXT NOT NULL,
+    kept_signal_id       TEXT NOT NULL REFERENCES signals(id),
+    superseded_signal_id TEXT NOT NULL REFERENCES signals(id),
+    action               TEXT NOT NULL,
+    resolved_by          TEXT NOT NULL,
+    resolved_at          TEXT NOT NULL
+);
+
+INSERT INTO signal_resolutions_old
+    (id, entity_id, signal_type, kept_signal_id, superseded_signal_id,
+     action, resolved_by, resolved_at)
+SELECT id, entity_id, signal_type, kept_signal_id,
+       superseded_signal_id, action, resolved_by, resolved_at
+FROM signal_resolutions;
+
+DROP TABLE signal_resolutions;
+ALTER TABLE signal_resolutions_old RENAME TO signal_resolutions;
+
+CREATE INDEX IF NOT EXISTS idx_resolutions_entity ON signal_resolutions(entity_id);
+
+CREATE TRIGGER signal_resolutions_no_update BEFORE UPDATE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
+CREATE TRIGGER signal_resolutions_no_delete BEFORE DELETE ON signal_resolutions
+    BEGIN SELECT RAISE(ABORT, 'signal_resolutions are append-only'); END;
 `
 
 // migrate runs all pending migrations on the database. It:

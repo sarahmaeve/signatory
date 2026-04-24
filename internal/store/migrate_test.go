@@ -251,7 +251,17 @@ func TestMigration_RollbackDown(t *testing.T) {
 		 VALUES ('roll-1', 'pkg:npm/rollback-test', 'package', 'rollback-test', '', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
 	require.NoError(t, err)
 
-	// First rollback: v11 → v10. Drops analysis_sessions table and
+	// First rollback: v12 → v11. Rebuilds signal_resolutions without
+	// the REFERENCES entities(id) FK on entity_id. Seed data has no
+	// signal_resolutions rows, so the rebuild is a no-op on data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 11, version)
+
+	// Second rollback: v11 → v10. Drops analysis_sessions table and
 	// the analyst_outputs.analysis_session_id FK column. Seed data
 	// has no analysis_sessions rows, so the drop is a no-op on data.
 	err = migrateDown(t.Context(), db, path)
@@ -261,7 +271,7 @@ func TestMigration_RollbackDown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 10, version)
 
-	// Second rollback: v10 → v9. Drops the analyst_outputs.target +
+	// Third rollback: v10 → v9. Drops the analyst_outputs.target +
 	// .target_version columns. Seed data has no analyst_outputs rows,
 	// so the drop is a no-op on data.
 	err = migrateDown(t.Context(), db, path)
@@ -562,7 +572,19 @@ func TestMigration_V2DataRoundTrip(t *testing.T) {
 		Scan(&postureCount))
 	assert.Equal(t, 1, postureCount)
 
-	// --- Down: vN → v10 (drops analysis_sessions + FK column). ---
+	// --- Down: vN → v11 (rebuilds signal_resolutions without FK). ---
+	// The v12 migration added REFERENCES entities(id) on
+	// signal_resolutions.entity_id (orphan-prevention audit). Down
+	// rebuilds the table without the FK. This fixture has no
+	// signal_resolutions rows so the rebuild is a no-op on data.
+	err = migrateDown(t.Context(), db, path)
+	require.NoError(t, err)
+
+	version, err = getCurrentVersion(t.Context(), db)
+	require.NoError(t, err)
+	assert.Equal(t, 11, version)
+
+	// --- Down: v11 → v10 (drops analysis_sessions + FK column). ---
 	// The v11 migration added the analysis_sessions table and the
 	// analyst_outputs.analysis_session_id FK column. This fixture
 	// has no analysis_sessions rows so the teardown is a no-op on

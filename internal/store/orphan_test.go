@@ -43,8 +43,6 @@ import (
 // at which point this test passes through the fix's validation
 // + FK enforcement.
 func TestOrphan_AppendResolution_EntityID(t *testing.T) {
-	t.Skip("pending orphan audit Phase 5 fix — see design/orphanage.md §\"Phase 3 findings\"")
-
 	t.Parallel()
 	ctx := context.Background()
 	s := newTestDB(t)

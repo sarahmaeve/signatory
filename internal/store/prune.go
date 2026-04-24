@@ -478,12 +478,23 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 	}
 
 	// Level 2: direct children of entities.
+	//
+	// signal_resolutions gains an entity_id sweep from v12 (orphan-
+	// prevention audit; design/orphanage.md). Without it, pruning
+	// entity X would leave signal_resolutions rows whose entity_id=X
+	// but whose signal_id doesn't belong to X's signals (possible
+	// under the cross-entity-consistency gap documented by
+	// sqlite_security_test.go), and the subsequent DELETE FROM
+	// entities would fail the new FK constraint. The Level-3 sweep
+	// above already removes rows by signal_id — this sweep is the
+	// belt-and-suspenders pass catching the cross-entity case.
 	directChildren := []struct{ table, column string }{
 		{"analyst_outputs", "entity_id"},
 		{"analyst_outputs", "collected_from_entity_id"},
 		{"postures", "entity_id"},
 		{"burns", "entity_id"},
 		{"signals", "entity_id"},
+		{"signal_resolutions", "entity_id"},
 		{"dependency_observations", "project_id"},
 		{"audit_log", "entity_id"},
 	}

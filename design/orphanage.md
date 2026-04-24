@@ -646,6 +646,164 @@ flipping `analysis_sessions.pipeline_session_id` from `NOT NULL
 DEFAULT ''` to `DEFAULT NULL`. Per Phase 2's lean: fold in
 because we're touching migrations anyway.
 
+## Phase 4 + 5 findings (2026-04-24)
+
+Phase 4 was a one-line design call (Class B: reject-on-write + FK)
+already made in the Phase 3 commit's message. Phase 5 is the
+actual fix. Landing together in one commit because the test
+transitions red → green through this same commit, and splitting
+would leave a mid-state where the test was live but the fix
+partial.
+
+### Class B decision, confirmed
+
+`AppendResolution` describes a resolution between conflicting
+signals for a specific entity. There's no legitimate
+"auto-materialize entity from a resolution" story — if the entity
+doesn't exist, neither do its signals, so there's nothing to
+resolve. Reject-on-write is correct. Class A (auto-create
+parent) was never viable.
+
+### What landed
+
+**Schema (v12 migration, `internal/store/migrate.go`):** adds
+`REFERENCES entities(id)` to `signal_resolutions.entity_id` via
+the v9-style rebuild ceremony:
+
+1. Drop the v3 append-only triggers on signal_resolutions.
+2. Create `signal_resolutions_new` with the FK.
+3. Copy rows via `INSERT … SELECT … WHERE entity_id IN (SELECT
+   id FROM entities)` — orphan-filter in the WHERE clause; any
+   orphan rows silently dropped.
+4. DROP old, RENAME new.
+5. Recreate `idx_resolutions_entity`.
+6. Reinstall the append-only triggers on the rebuilt table.
+
+Down migration reverses by rebuilding without the FK, same
+trigger ceremony.
+
+**Why silent-drop for orphans:** per Phase 2, `AppendResolution`
+has no production callers; any orphan rows in any store would be
+test-leftover or manual-poke data, not legitimate application
+state. The alternative (abort migration on orphan) would block
+operators with no recourse beyond manual SQL surgery — a bad
+trade for a pattern that shouldn't arise in practice. A
+pre-migration operator can count orphans themselves with
+`SELECT COUNT(*) FROM signal_resolutions sr WHERE sr.entity_id
+NOT IN (SELECT id FROM entities)` if they want visibility before
+running.
+
+**FK enforcement and transactions:** `migrate.go` runs each Up
+inside a transaction, and SQLite silently ignores `PRAGMA
+foreign_keys` toggles inside a transaction — we cannot disable
+FK enforcement during the rebuild. The orphan-filter WHERE
+clause is the mechanism that makes the INSERT succeed without
+needing PRAGMA manipulation.
+
+**Code (`internal/store/sqlite.go`):** `AppendResolution` gains
+a pre-INSERT entity existence check. On miss, returns
+`fmt.Errorf("%w: entity_id=%q", ErrOrphanedEntity, r.EntityID)`.
+This is the UX-clean layer — callers get a typed error with
+readable context, not a raw SQL constraint violation.
+
+**Prune side-effect fix (`internal/store/prune.go`):** adds
+`{"signal_resolutions", "entity_id"}` to the directChildren
+sweep at Level 2. Without this, pruning an entity X whose
+entity_id appears in a signal_resolutions row — but whose
+signal_ids don't belong to X — would fail the new FK on the
+subsequent `DELETE FROM entities`. The cross-entity case is
+theoretical today (the cross-entity-consistency gap is
+documented in sqlite_security_test.go but not exercised), but
+the fix is one line and closes the edge case at the same time.
+
+**Test transition:** `t.Skip` removed from
+`TestOrphan_AppendResolution_EntityID`. Same test body that
+was captured red in Phase 3 now passes — both assertions
+(`require.Error` + `assert.ErrorIs(ErrOrphanedEntity)`) fire,
+and the observable-row COUNT == 0 check confirms the FK
+rejected the INSERT even if the code check somehow didn't.
+
+**Migration-test updates:** `TestMigration_RollbackDown` and
+`TestMigration_V2DataRoundTrip` each walk migrations down
+step-by-step and expected the downward journey to start at
+v11. Added one more rollback step at the top (v12 → v11)
+plus a matching numbering correction for the existing
+follow-on comments.
+
+### Captured green state (post-fix, 2026-04-24)
+
+```
+$ go test -count=1 -run "TestOrphan_AppendResolution_EntityID|TestMigration_RollbackDown|TestMigration_V2DataRoundTrip" -v ./internal/store/...
+=== RUN   TestMigration_RollbackDown
+--- PASS: TestMigration_RollbackDown (0.18s)
+=== RUN   TestMigration_V2DataRoundTrip
+--- PASS: TestMigration_V2DataRoundTrip (0.25s)
+=== RUN   TestOrphan_AppendResolution_EntityID
+=== PAUSE TestOrphan_AppendResolution_EntityID
+=== CONT  TestOrphan_AppendResolution_EntityID
+--- PASS: TestOrphan_AppendResolution_EntityID (0.07s)
+PASS
+ok  	github.com/sarahmaeve/signatory/internal/store	0.911s
+```
+
+Full tree (`go test -p 1 ./...`) passes in ~55s, every package
+green.
+
+### Audit status after this commit
+
+| Column | Audit status |
+|---|---|
+| `signal_resolutions.entity_id` | **CLOSED** — schema FK + Go validation + prune fix |
+| `dependency_observations.survey_id` | Closed in Phase 2 (reclassified `legit-freeform`) |
+| `analysis_sessions.pipeline_session_id` | Closed in Phase 2 (reclassified `legit-freeform`); style-cleanup sidecar deferred |
+| `citations.parent_id` | Closed in Phase 2 (reclassified `legit-polymorphic`) |
+
+All 4 originally-flagged columns resolved. The audit is
+complete for v0.1.
+
+### Deferred follow-ups (post-audit)
+
+1. **`analysis_sessions.pipeline_session_id` NULL-vs-empty-string
+   migration.** Phase 2 recommended folding this in; on closer
+   inspection, it requires Go-side `sql.NullString` handling in
+   `scanAnalysisSession` and wherever the field is read, which
+   grows the commit meaningfully. Deferred to a separate narrow
+   commit. Audit-independent — pure style consistency.
+2. **Cross-entity-consistency validation in `AppendResolution`**
+   (entity_id's signals match the kept/superseded signal_ids'
+   entity_id). Documented limitation in
+   `sqlite_security_test.go`; distinct integrity gap from this
+   audit's scope.
+3. **SQL trigger on citation INSERT validating
+   `(parent_kind, parent_id)` pair.** Belt-and-suspenders
+   hardening against a future refactor that splits citation
+   ingest across transactions. Currently structurally safe;
+   trigger makes it safe even under refactoring. Defer to v0.2.
+
+### Lessons from the audit
+
+- **Schema alone is misleading.** Phase 1's 4 suspicious
+  columns collapsed to 1 in Phase 2 once write-paths were
+  traced. A schema-only audit would have produced three
+  unnecessary migrations — specifically one for
+  `pipeline_session_id` that would have broken `scanAnalysisSession`
+  until follow-up code landed.
+- **Parallel investigation pays off when subjects are
+  independent.** Phase 2's four agents finished in ~80s each
+  vs. the ~4 hours a single-threaded investigation would have
+  taken, because the four columns had no overlap in their
+  write-path surfaces.
+- **TDD ordering works under pre-commit constraints.** The
+  `t.Skip` + prose-evidence pattern preserved the red → green
+  TDD cycle without breaking CI between commits. The captured
+  failure output in Phase 3's doc became the audit trail
+  confirming the bug was real.
+- **Append-only plus missing FK is a trap.** A normal
+  (mutable) table's orphan is correctable post-hoc. An
+  append-only table's orphan is permanent. Future audits
+  should treat append-only tables with missing FKs as
+  higher-severity than mutable ones.
+
 ## Phase 3: Reproduce with failing tests (~1 session)
 
 Per `MEMORY.md` §"TDD for security fixes": write the failing

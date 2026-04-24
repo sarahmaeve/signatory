@@ -694,9 +694,27 @@ func (s *SQLite) AppendAuditEntry(ctx context.Context, entry *profile.AuditEntry
 // --- Signal resolutions (append-only) ---
 
 // AppendResolution writes a conflict resolution record. The referenced
-// kept_signal_id and superseded_signal_id must exist in the signals
-// table (enforced by FK). Once superseded, a signal is excluded from
-// GetLatestSignals but remains in GetSignals for history.
+// entity_id, kept_signal_id, and superseded_signal_id must all exist
+// in their respective tables; all three are enforced by FK since v12
+// (see design/orphanage.md for the audit trail). Once superseded, a
+// signal is excluded from GetLatestSignals but remains in GetSignals
+// for history.
+//
+// Two-layer validation on entity_id:
+//
+//  1. Go-side pre-INSERT existence check against entities. On miss,
+//     returns ErrOrphanedEntity with the offending URI in the error
+//     message — callers like ingest paths and dry-run checks can
+//     programmatically distinguish this rejection from other failures
+//     via errors.Is.
+//  2. Schema-level REFERENCES entities(id) as defense-in-depth. Even
+//     if the code check were bypassed (e.g., race with an entity
+//     delete — not possible today under SetMaxOpenConns(1) but
+//     conceptually), SQLite rejects the INSERT.
+//
+// The Go-side check is the UX-clean layer (typed error, readable
+// message); the schema-level FK is the correctness floor. Both
+// exist because either alone is weaker than both together.
 func (s *SQLite) AppendResolution(ctx context.Context, r *profile.SignalResolution) error {
 	if r == nil {
 		return ErrNilInput
@@ -704,6 +722,17 @@ func (s *SQLite) AppendResolution(ctx context.Context, r *profile.SignalResoluti
 	if r.ID == "" || r.EntityID == "" || r.KeptSignalID == "" || r.SupersededSignalID == "" || r.Action == "" {
 		return fmt.Errorf("%w: resolution requires ID, entity_id, kept_signal_id, superseded_signal_id, and action", ErrNilInput)
 	}
+
+	// Pre-INSERT entity existence check. See type-level doc above.
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM entities WHERE id = ?`, r.EntityID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: entity_id=%q", ErrOrphanedEntity, r.EntityID)
+		}
+		return fmt.Errorf("check entity %q: %w", r.EntityID, err)
+	}
+
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO signal_resolutions (id, entity_id, signal_type, kept_signal_id, superseded_signal_id, action, resolved_by, resolved_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
