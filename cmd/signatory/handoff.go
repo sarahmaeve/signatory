@@ -988,11 +988,31 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	// surprising and potentially unsafe (new commits since last analysis
 	// would silently change the reviewed surface).
 	//
+	// Lstat (not Stat) is load-bearing: os.Stat follows symlinks, so a
+	// pre-existing symlink at destClean pointing outside parent (planted
+	// by a prior-compromise attacker, a crashed earlier run, or a shared
+	// /tmp with loose permissions) would satisfy IsDir() and be silently
+	// returned as "the verified clone". The caller would then propagate
+	// that symlink path to TARGET_PATH and analyst agents would operate
+	// on the attacker's tree instead of a real clone of the target —
+	// attribution without grounding. The string-based filepath.Rel
+	// containment check above cannot see that a symlink resolves outside
+	// parent, which is why this guard exists here rather than being
+	// subsumed by Rel. Refusing loudly is the right outcome; the
+	// operator can inspect and remove the symlink if it was legitimate.
+	//
 	// The reuse note is returned through the report channel (gated by
 	// --quiet upstream), not written directly to stderr — consistent
 	// with the rest of the precheck/clone reporting.
-	if fi, err := os.Stat(destClean); err == nil && fi.IsDir() {
-		return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
+	if fi, err := os.Lstat(destClean); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf(
+				"refuse to reuse clone destination %q: path is a symlink; remove it or pick a different --clone-dir",
+				destClean)
+		}
+		if fi.IsDir() {
+			return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
+		}
 	}
 
 	// Shallow clone with a 2-minute timeout. Use a child context so the
@@ -1036,6 +1056,26 @@ func looksLikeGitHubURL(target string) bool {
 		strings.HasPrefix(lower, "http://github.com/")
 }
 
+// allowedCloneSchemes is the scheme whitelist safeGitCloneURL enforces.
+// Empty scheme is admitted because git clone accepts bare local paths
+// (e.g., "/var/folders/xx/.../src-repo") and the analyze-path
+// integration tests rely on that form — TestCollectorsFor_CloneHappyPath
+// uses a t.TempDir() path as the entity URL to avoid network
+// dependencies.
+//
+// ssh:// is deliberately absent. Signatory's production paths normalize
+// targets through NormalizeGitHubRepoInput which yields https URLs;
+// ssh only arrives here via an adversarial or misconfigured caller,
+// and its conventional `git@host` form already collides with the
+// embedded-credentials rule. The narrower whitelist keeps the attack
+// surface small without regressing any real flow.
+var allowedCloneSchemes = map[string]bool{
+	"":      true, // bare local path
+	"http":  true,
+	"https": true,
+	"git":   true,
+}
+
 // safeGitCloneURL validates that raw is safe to pass as a `git clone` URL
 // argument. It parses the URL and rejects any form that could be
 // misinterpreted by git or that carries unexpected data:
@@ -1047,6 +1087,10 @@ func looksLikeGitHubURL(target string) bool {
 //   - Userinfo (@user:pass) — credentials should never be embedded in
 //     URLs passed to git; they belong in netrc or the credential store.
 //   - Null bytes in any component — always a path-injection signal.
+//   - Non-whitelisted schemes — file://, javascript:, data:, etc.
+//     file:// in particular would clone from an arbitrary local path,
+//     bypassing --path's vetting. See allowedCloneSchemes for the
+//     admitted set and its rationale.
 //
 // safeGitCloneURL is a belt-and-suspenders check: it does NOT replace
 // looksLikeGitHubURL or the ClassifyTarget guard; it fires on the same
@@ -1071,6 +1115,11 @@ func safeGitCloneURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("clone URL must not embed credentials; use git's credential store instead")
+	}
+	if !allowedCloneSchemes[strings.ToLower(u.Scheme)] {
+		return fmt.Errorf(
+			"clone URL scheme %q is not allowed; expected one of https, http, git, or a bare local path",
+			u.Scheme)
 	}
 	return nil
 }

@@ -1782,6 +1782,131 @@ func TestClone_RejectsEmbeddedCredentials(t *testing.T) {
 	assert.False(t, gotCalled, "RunGitClone must not be invoked for credential-bearing URLs")
 }
 
+// TestSafeGitCloneURL_RejectsDisallowedSchemes is the adversarial-review
+// follow-up for H3. The pre-fix validator accepted any scheme `url.Parse`
+// could parse, including file:// (clone from an arbitrary local path,
+// bypassing --path's vetting) and browser-pasted schemes like
+// javascript: and data: (URL-parse artifacts of accidentally pasted
+// content — never a valid git transport). A mis-resolved pkg metadata
+// field, a hostile resolver, or a fat-finger paste could put such a
+// URL in front of `git clone`.
+//
+// The fix is a scheme whitelist: empty (bare local path, which the
+// TestCollectorsFor_CloneHappyPath analyze-path flow exercises),
+// https, http, ssh, git, git+ssh. Anything else is rejected by name.
+//
+// Revert proof: change the whitelist to accept all schemes (or
+// remove the switch); this test fails because file:// passes.
+func TestSafeGitCloneURL_RejectsDisallowedSchemes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		url    string
+		scheme string // expected in the error message so the user can correct
+	}{
+		{"file:///tmp/attacker-controlled", "file"},
+		{"file://localhost/etc/passwd-shaped-dir", "file"},
+		{"javascript:alert(1)", "javascript"},
+		{"data:text/plain,attacker-payload", "data"},
+		{"vbscript:msgbox", "vbscript"},
+		// Uppercase form — the check lower-cases the scheme so
+		// FILE:// is still rejected.
+		{"FILE:///tmp/x", "FILE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			err := safeGitCloneURL(tc.url)
+			require.Errorf(t, err, "scheme %q must be rejected", tc.scheme)
+			assert.Contains(t, err.Error(), "scheme",
+				"error must name the scheme problem so the user can correct the URL")
+		})
+	}
+}
+
+// TestSafeGitCloneURL_AcceptsNetworkAndLocalSchemes verifies the
+// corresponding positive cases for the whitelist: the network schemes
+// signatory legitimately uses AND the empty-scheme form used for bare
+// local paths (which the analyze-path tests rely on via
+// TestCollectorsFor_CloneHappyPath).
+//
+// ssh://git@... is deliberately NOT in the whitelist. Every signatory
+// production path that reaches safeGitCloneURL goes through
+// NormalizeGitHubRepoInput first, which produces https-form URLs — so
+// ssh:// would only appear here via an operator who bypassed the
+// normalizer or a mis-configured resolver, and the existing
+// "no embedded credentials" rule already rejects ssh's conventional
+// `git@host` userinfo form anyway. Keeping ssh out of the whitelist
+// is the simpler, stricter choice.
+//
+// Revert proof: narrow the whitelist to https-only; this test fails
+// on the git:// and bare-path cases.
+func TestSafeGitCloneURL_AcceptsNetworkAndLocalSchemes(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"https://github.com/foo/bar",
+		"http://github.com/foo/bar",
+		"git://github.com/foo/bar",
+		// Bare local path — no scheme. The analyze-path
+		// TestCollectorsFor_CloneHappyPath uses `URL: src` where
+		// src is a filesystem path from t.TempDir().
+		"/var/folders/xy/abc/src-repo",
+		"/tmp/whatever/repo",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			assert.NoError(t, safeGitCloneURL(u),
+				"whitelisted form %q must pass safeGitCloneURL", u)
+		})
+	}
+}
+
+// TestApplyClone_RefusesSymlinkAtReuseDestination is the TDD test for
+// H2 from the adversarial review. Before the fix, applyClone's
+// "skip-if-exists" branch used os.Stat on destClean, which follows
+// symlinks. A pre-existing symlink at destClean pointing at an
+// attacker-chosen directory (planted by a prior compromise, a
+// crashed earlier run, or a shared /tmp) would satisfy the
+// IsDir() check and be returned as the verified clone — with
+// TARGET_PATH then propagated to analyst agents that operate on
+// the attacker's tree rather than the real clone.
+//
+// Fix: os.Lstat in the reuse branch; refuse to reuse if the
+// destination path is a symlink. The loud-fail protects the
+// clone's trust-model invariant (the path we tell the agents
+// about matches what git actually cloned).
+//
+// Revert proof: change os.Lstat back to os.Stat in applyClone's
+// skip-if-exists branch; this test fails because the symlink is
+// silently reused.
+func TestApplyClone_RefusesSymlinkAtReuseDestination(t *testing.T) {
+	parent := t.TempDir()
+	victim := t.TempDir() // a real dir the attacker wants to substitute
+	// Plant a symlink at what InferNameFromURL("https://github.com/foo/bar")
+	// would derive ("bar") inside parent, pointing at victim.
+	linkDest := filepath.Join(parent, "bar")
+	require.NoError(t, os.Symlink(victim, linkDest))
+
+	gotCloneCalled := false
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/foo/bar",
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true,
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
+			gotCloneCalled = true
+			return nil
+		},
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err,
+		"a symlink at the reuse destination must not be accepted silently")
+	assert.Contains(t, strings.ToLower(err.Error()), "symlink",
+		"error must identify symlink as the problem so the operator can investigate")
+	assert.False(t, gotCloneCalled,
+		"RunGitClone must not be invoked — refusal is the right outcome, not a fresh clone over a symlinked destination")
+}
+
 // TestPrecheck_ErrorDoesNotLeakToken is a regression test for token leakage
 // in the --network-precheck error path. When a source error message
 // accidentally contains the token string (e.g., from a misconfigured proxy
