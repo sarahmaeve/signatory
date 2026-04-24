@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,15 +209,39 @@ func TestCollector_ContextCancelled_PropagatesError(t *testing.T) {
 	result, err := c.Collect(ctx, &profile.Entity{ID: "cancelled"})
 	require.NoError(t, err, "Collect itself should not error on context cancel; individual signals fail")
 
-	// Expect failures, not successful signals, on the two signing types.
-	failureTypes := map[string]bool{}
+	// The per_developer_commit_signing_ratio collector uses runGit,
+	// which bails fast on ctx.Err(); its signing failure is the
+	// canonical outcome we're checking for. Without this assertion
+	// an unrelated future failure (e.g., a panic in another collector)
+	// would silently satisfy a "len(Failures) > 0" check and mask
+	// a regression in the cancellation-propagation path itself.
+	require.NotEmpty(t, result.Failures,
+		"cancelled context must produce at least one failure")
+
+	signingFailed := false
+	sawCancellationShape := false
 	for _, f := range result.Failures {
-		failureTypes[f.SignalType] = true
+		if f.SignalType == "per_developer_commit_signing_ratio" {
+			signingFailed = true
+		}
+		// CollectionError.Reason is a sanitized string (see
+		// internal/signal/errors.go), not a wrapped error, so
+		// errors.Is is unavailable. The runGit error for a
+		// pre-cancelled ctx is "git [...]: context canceled"
+		// (from context.Canceled.Error()); the sanitize pass
+		// only replaces the clone path with "<clone>", leaving
+		// the "context canceled" substring intact.
+		if strings.Contains(strings.ToLower(f.Reason), "canceled") ||
+			strings.Contains(strings.ToLower(f.Reason), "cancelled") {
+			sawCancellationShape = true
+		}
 	}
-	assert.True(t,
-		failureTypes["per_developer_commit_signing_ratio"] ||
-			len(result.Failures) > 0,
-		"cancelled context should produce at least one failure")
+	assert.True(t, signingFailed,
+		"per_developer_commit_signing_ratio (runGit-backed) must fail on a pre-cancelled context")
+	assert.True(t, sawCancellationShape,
+		"at least one failure's Reason must name cancellation; "+
+			"an unrelated failure would indicate the cancellation "+
+			"wasn't actually the cause")
 }
 
 // ---- helpers (test-only) ----

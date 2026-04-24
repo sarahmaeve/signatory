@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -115,11 +116,11 @@ func TestAnalyze_GitCollector_FunctionalTwoSourcesLand(t *testing.T) {
 		}
 		// Absence records carry Type="absence:<name>"; a real signal
 		// carries Type="<name>". Normalize to the underlying name.
-		t := sig.Type
-		if len(t) > len("absence:") && t[:len("absence:")] == "absence:" {
-			t = t[len("absence:"):]
-		}
-		gitTypesPresent[t] = true
+		// Don't name the local `t` — the surrounding function's
+		// `t *testing.T` would shadow, and any later assert.* inside
+		// this loop would then compile against the wrong `t`.
+		typeName := strings.TrimPrefix(sig.Type, "absence:")
+		gitTypesPresent[typeName] = true
 	}
 	for _, typeName := range expectGitTypes {
 		assert.True(t, gitTypesPresent[typeName],

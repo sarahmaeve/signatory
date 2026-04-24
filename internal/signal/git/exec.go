@@ -49,7 +49,7 @@ func runGit(ctx context.Context, repoPath string, args ...string) ([]byte, error
 	// to completion before the kill signal arrives. Checking ctx.Err()
 	// here makes cancellation deterministic.
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("git %v: %w", args, err)
+		return nil, gitError(args, err, nil)
 	}
 
 	full := make([]string, 0, len(args)+2)
@@ -65,8 +65,26 @@ func runGit(ctx context.Context, repoPath string, args ...string) ([]byte, error
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %v: %w: %s",
-			args, err, bytes.TrimSpace(stderr.Bytes()))
+		return nil, gitError(args, err, stderr.Bytes())
 	}
 	return stdout.Bytes(), nil
+}
+
+// gitError formats runGit's two failure paths (pre-exec context
+// cancellation and post-Run subprocess failure) into one consistent
+// shape so callers aggregating log lines or string-matching against
+// f.Reason in collector failures see the same format regardless of
+// which path produced the error:
+//
+//	"git [args]: <err>"                 when stderr is empty
+//	"git [args]: <err>: <trimmed stderr>"  otherwise
+//
+// The %w verb preserves errors.Is/As identity for the underlying
+// cause (context.Canceled, *exec.ExitError, etc.) in both paths.
+func gitError(args []string, err error, stderr []byte) error {
+	s := bytes.TrimSpace(stderr)
+	if len(s) == 0 {
+		return fmt.Errorf("git %v: %w", args, err)
+	}
+	return fmt.Errorf("git %v: %w: %s", args, err, s)
 }

@@ -376,13 +376,26 @@ func installFakeGitEnvDump(t *testing.T) string {
 	shimDir := t.TempDir()
 	envDump := filepath.Join(t.TempDir(), "env-dump")
 	fakeGit := filepath.Join(shimDir, "git")
-	// `env` is POSIX. Quote envDump in case the temp path contains
-	// spaces; the shell substitution is safe because we control the
-	// path (it's a t.TempDir under the test runner's tmp root).
-	script := fmt.Sprintf("#!/bin/sh\nenv > %q\nexit 0\n", envDump)
+	// `env` is POSIX. Single-quote the path so the shell doesn't
+	// expand $VAR, $(...), or `...` if a future t.TempDir ever lands
+	// on a path with those characters. %q would use double quotes,
+	// inside which sh still performs variable/command substitution —
+	// cheap to avoid by switching to single-quote escaping now.
+	// Embedded single quotes in the path get the canonical POSIX
+	// close-escape-reopen treatment (see shellSingleQuote below).
+	script := fmt.Sprintf("#!/bin/sh\nenv > %s\nexit 0\n", shellSingleQuote(envDump))
 	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o755))
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return envDump
+}
+
+// shellSingleQuote wraps s in POSIX-sh single quotes. Embedded single
+// quotes are escaped by the canonical 4-character idiom: close the
+// quoted run, emit a backslash-escaped single quote, reopen. Safe
+// even if s contains $, `, \, or other shell metacharacters — single-
+// quoted strings in POSIX sh perform no substitution of any kind.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // readEnvDump reads the env-dump file written by the fake git shim and
