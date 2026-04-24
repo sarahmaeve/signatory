@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,8 +285,12 @@ func commitAs(t *testing.T, repo, name, email, msg string) {
 	// rely on.
 	full := []string{"-C", repo, "commit", "--allow-empty", "-m", msg}
 	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.Command("git", full...)
-	cmd.Env = append(cmd.Environ(),
+	cmd := exec.CommandContext(t.Context(), "git", full...)
+	// Start from gitenv.SafeEnv() — strip dangerous inherited
+	// vars — then append the identity overrides. Inheriting from
+	// cmd.Environ() would leak GIT_DIR / GIT_CONFIG_* and risk
+	// writes against the shared worktree config.
+	cmd.Env = append(gitenv.SafeEnv(),
 		"GIT_AUTHOR_NAME="+name,
 		"GIT_AUTHOR_EMAIL="+email,
 		"GIT_COMMITTER_NAME="+name,

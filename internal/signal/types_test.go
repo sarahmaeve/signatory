@@ -106,6 +106,35 @@ func TestRegistry_GitCollectorTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_RepofilesCollectorTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types the repofiles
+// collector (internal/signal/repofiles/) emits. Matches the coupling
+// contract of the sibling git / github tests: registry drift and
+// collector intent must stay aligned, caught in a single place.
+func TestRegistry_RepofilesCollectorTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"repo_files", profile.SignalGroupHygiene, profile.ForgeryLowDeclining},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — repofiles collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match repofiles collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match repofiles collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.

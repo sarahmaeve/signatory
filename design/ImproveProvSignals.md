@@ -1,6 +1,6 @@
 # Improve provenance signals — move mechanical work to signatory
 
-Last updated: 2026-04-23 (post-Phase-1).
+Last updated: 2026-04-24 (post-Phase-2).
 
 ## Status
 
@@ -14,7 +14,7 @@ this document is the execution plan. Work lands incrementally on `main`
 | Phase | Commit | Status |
 |-------|--------|--------|
 | 1. Inline Layer-1 signals into handoff body | `8bcd634` | **Shipped (measurement deferred)** |
-| 2. Repo-hygiene collector (SECURITY.md, CODEOWNERS, .mailmap, CHANGELOG, CONTRIBUTING) | — | Not started |
+| 2. Repo-hygiene collector (README, SECURITY, CODEOWNERS, .mailmap, CHANGELOG, CONTRIBUTING, AUTHORS, MAINTAINERS, GOVERNANCE) | pending | **Shipped (measurement deferred)** |
 | 3. CI pinning collector (parse .github/workflows, SHA-vs-tag) | — | Not started |
 | 4. Tool-reproducibility collector (hermit, nvmrc, tool-versions, ...) | — | Not started |
 | 5. Identity cross-reference (owner ↔ commit-email domain) | — | Not started |
@@ -165,7 +165,7 @@ the input to "proceed to next phase."
 | # | Commit | What the agent stops doing |
 |---|--------|---------------------------|
 | 1 | `provenance: inline Layer-1 signals into handoff body` | Re-deriving commit-signing ratio, contributor list, owner-profile age, go_dependencies, tag/star counts, last-push date. Recovers the 5/8 rederivations from kong. |
-| 2 | `signal: repo-files collector (SECURITY.md / CODEOWNERS / .mailmap / CHANGELOG / CONTRIBUTING)` | Observing "missing SECURITY.md etc." — it's a signal now. |
+| 2 | `signal: repo-files collector (README / SECURITY / CODEOWNERS / .mailmap / CHANGELOG / CONTRIBUTING / AUTHORS / MAINTAINERS / GOVERNANCE)` | Observing "missing SECURITY.md etc." — it's a signal now. README / AUTHORS / MAINTAINERS / GOVERNANCE added during planning as free additions under the detect-vs-rank scaffold. |
 | 3 | `signal: ci-pinning collector (parse .github/workflows/*.yml, SHA-vs-tag)` | Reading workflow YAML to report pinning shape. |
 | 4 | `signal: tool-pinning collector (hermit / nvmrc / tool-versions / python-version)` | Noticing "Hermit bin/ pinning" as an agent observation. |
 | 5 | `signal: owner↔commit-email domain cross-reference` | Cross-checking "does alec@swapoff.org align with the profile blog URL?" |
@@ -217,19 +217,110 @@ Tests shipped (5 passing):
 Phase 1 correctness is verified; token-delta measurement vs. baseline
 is deferred per §Status above.
 
-### Phase 2 — Repo hygiene files
+### Phase 2 — Repo hygiene files (shipped)
 
-New collector `internal/signal/repofiles/` (or similar) invoked by
-`signatory collect`. Stats against the clone for:
+New collector `internal/signal/repofiles/` wired into
+`cmd/signatory/collectors.go`'s `collectorsFor` alongside the github
+and git collectors. Emits one compound signal of type `repo_files`
+under `hygiene`; the handoff-body composer (from Phase 1) picks it
+up automatically.
 
-- `SECURITY.md`, `SECURITY.rst`, `SECURITY.txt` (case-insensitive)
-- `CODEOWNERS` at repo root, `.github/CODEOWNERS`, `docs/CODEOWNERS`
-- `.mailmap` at repo root
-- `CHANGELOG.md`, `CHANGELOG.rst`, `CHANGELOG.txt`, `CHANGES`
-- `CONTRIBUTING.md`, `CONTRIBUTING.rst`
+**Deviations from the original plan**, recorded so future phases
+inherit the right defaults:
 
-Emits signal group `hygiene.repo_files` with a boolean presence map
-plus the located path(s) for anything found.
+1. **No new CLI verb.** Original plan called for `signatory collect
+   --target <T> --clone <path>` between `handoff security` and
+   `handoff provenance`. For one collector, the scaffolding cost of a
+   new verb (flag surface, entity resolution, store-write path, new
+   test suite) was not justified — `collectorsFor` already dispatches
+   against the clone path. The new verb remains a future option if
+   collector count grows and a dedicated entry point is clearly
+   needed; revisit no earlier than Phase 4.
+
+2. **Family list expanded from 5 to 9.** The original list covered
+   SECURITY, CODEOWNERS, .mailmap, CHANGELOG, CONTRIBUTING. Phase 2
+   shipped adds **README, AUTHORS, MAINTAINERS, GOVERNANCE**. README
+   is arguably the single most important hygiene file and the design
+   doc's omission was an oversight; the other three are real hygiene
+   cues from past analyses (especially MAINTAINERS in
+   organizationally-backed projects). The two-phase detect/rank
+   architecture made additions one-struct-literal cheap.
+
+3. **Two-phase detection architecture.** Instead of an enumerated
+   list of exact filenames (original approach), Phase 2 separates:
+
+   - **Scanner** (permissive): each family declares a case-insensitive
+     anchored regex. `stemWithExt(stem)` matches `<stem>` or
+     `<stem>.<ext>` with single-extension tolerance (`[^.]+`, not
+     `.+`, so backups like `README.md.bak` don't match). `exact(name)`
+     matches the literal name — used by `.mailmap`. Host filesystem
+     case-sensitivity (Linux sensitive, macOS default insensitive)
+     cannot shift whether a signal is emitted.
+
+   - **Evaluator** (opinionated): each family declares a `Preferred`
+     list of canonical filenames in precedence order. Ranking walks
+     Preferred (exact case → case-insensitive), first hit wins. When
+     no Preferred entry matches, first scanner-sorted entry wins the
+     canonical slot. Non-canonical matches surface in `alt_paths` for
+     analyst review.
+
+   This shape is intentionally generalizable: future phases that
+   detect file presence (Phase 4 tool-pinning, per-ecosystem checks)
+   can extract scanner + evaluator to a shared `filematcher` package
+   if the second use case materializes. **We did not generalize yet.**
+   Premature abstraction before a second use case produces the wrong
+   shape; refinement after two real callers is the plan.
+
+4. **Value shape per family:**
+   ```json
+   { "present": true, "path": "README.md", "alt_paths": ["README"] }
+   ```
+   `path` / `alt_paths` omitted when `present` is false or the
+   relevant slot is empty. Map key is the family name — so the
+   `Family` field on the `Result` struct is tagged `json:"-"` to
+   avoid double-encoding.
+
+5. **Filtering rules:**
+   - Zero-byte files → reported absent. A placeholder stub is the
+     cheapest form of fake hygiene; rejecting it raises the
+     adversarial bar for a minimal cost.
+   - Directories matching a family regex → rejected. Families are
+     file-shaped; a `SECURITY/` sub-dir is not the disclosure doc.
+   - Symlinks → resolved via `filepath.EvalSymlinks`; the recorded
+     path is the resolved target, not the link. Symlinks whose
+     target escapes the clone root are rejected (we refuse to emit
+     absolute host paths into the signal store). Broken symlinks
+     are absent by construction.
+   - Multi-dot filenames → rejected by the single-extension regex.
+
+6. **ForgeryResistance: `ForgeryLowDeclining`** (matches `license`).
+   These files are trivially added; presence indicates hygiene-
+   consciousness, not maintainer legitimacy. Zero-byte rejection and
+   symlink-escape rejection are the small anti-forgery levers;
+   strong forgery resistance is not claimed.
+
+7. **Graceful partial failure.** Missing `.github/` or `docs/`
+   sub-dirs are silently skipped — the common case for most repos is
+   not an anomaly. Missing clone root surfaces as `ErrNoClone`
+   (consistent with `git.ErrNoClone`) for fail-loudly orchestration.
+
+**Test coverage** (all passing):
+
+- `families_test.go` — detector regex matrix, declaration
+  stability, immutability of `Families()` return.
+- `scanner_test.go` — happy path across all 9 families, case
+  variants, zero-byte rejection, directory rejection, multi-dot
+  rejection, missing sub-dirs, symlink target resolution, broken
+  symlinks, escape symlinks, sorted-output determinism.
+- `evaluator_test.go` — absent-family shape, canonical ranking,
+  case-insensitive fallback, non-Preferred fallthrough, multi-family
+  iteration order preservation, sub-dir path handling.
+- `collector_test.go` — compound signal shape, registry coupling
+  (Group + ForgeryResistance), JSON `Family` elision,
+  composer (`profile.Summarize`) round-trip into `hygiene.repo_files`,
+  TTL lock-in, `signal.Collector` interface satisfaction.
+- `internal/signal/types_test.go` — registry coupling test in the
+  same form as git / github collectors.
 
 ### Phase 3 — CI pinning
 

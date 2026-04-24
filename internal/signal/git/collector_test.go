@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/stretchr/testify/assert"
@@ -37,11 +39,25 @@ func initRepo(t *testing.T) string {
 // mustRunGit runs `git -C repo <args...>` and fails the test on any
 // non-zero exit. Used for setup steps where any failure is a bug
 // in the test, not an assertion target.
+//
+// Uses gitenv.SafeEnv() to strip GIT_DIR, GIT_CONFIG_*, and the
+// other config-injection / redirection env vars from the inherited
+// environment. Without that, an ambient GIT_DIR (set by a git hook
+// or IDE integration) would cause `git -C <tempdir>` to still
+// resolve writes against the inherited config path — which for a
+// git worktree is the shared main repo's config. The postmortem
+// for the 2026-04-24 worktree corruption traced to exactly that
+// mechanism; every exec.Command("git", ...) in tests must set
+// cmd.Env = gitenv.SafeEnv() before running.
 func mustRunGit(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
+	// t.Context() ties the subprocess lifetime to the test's — if
+	// the test times out or is cancelled, pending git invocations
+	// get killed instead of orphaned. Go 1.24+.
 	//nolint:gosec // G204: test helper; binary is "git" literal, args are test-controlled
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
+	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -155,8 +171,13 @@ func TestCollector_WindowExcludesOldCommits(t *testing.T) {
 
 	// Backdated commit — outside any reasonable window.
 	backdate := "2020-01-01T00:00:00Z"
-	oldCmd := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "ancient") //nolint:gosec // G204: test helper
-	oldCmd.Env = append(oldCmd.Environ(),
+	//nolint:gosec // G204: test helper
+	oldCmd := exec.CommandContext(t.Context(), "git", "-C", repo, "commit", "--allow-empty", "-m", "ancient")
+	// Start from gitenv.SafeEnv() — strip dangerous inherited
+	// vars — then append the backdating overrides. Inheriting
+	// from cmd.Environ() would leak GIT_DIR / GIT_CONFIG_* and
+	// risk writes against the shared worktree config.
+	oldCmd.Env = append(gitenv.SafeEnv(),
 		"GIT_AUTHOR_DATE="+backdate,
 		"GIT_COMMITTER_DATE="+backdate,
 	)
@@ -192,15 +213,39 @@ func TestCollector_ContextCancelled_PropagatesError(t *testing.T) {
 	result, err := c.Collect(ctx, &profile.Entity{ID: "cancelled"})
 	require.NoError(t, err, "Collect itself should not error on context cancel; individual signals fail")
 
-	// Expect failures, not successful signals, on the two signing types.
-	failureTypes := map[string]bool{}
+	// The per_developer_commit_signing_ratio collector uses runGit,
+	// which bails fast on ctx.Err(); its signing failure is the
+	// canonical outcome we're checking for. Without this assertion
+	// an unrelated future failure (e.g., a panic in another collector)
+	// would silently satisfy a "len(Failures) > 0" check and mask
+	// a regression in the cancellation-propagation path itself.
+	require.NotEmpty(t, result.Failures,
+		"cancelled context must produce at least one failure")
+
+	signingFailed := false
+	sawCancellationShape := false
 	for _, f := range result.Failures {
-		failureTypes[f.SignalType] = true
+		if f.SignalType == "per_developer_commit_signing_ratio" {
+			signingFailed = true
+		}
+		// CollectionError.Reason is a sanitized string (see
+		// internal/signal/errors.go), not a wrapped error, so
+		// errors.Is is unavailable. The runGit error for a
+		// pre-cancelled ctx is "git [...]: context canceled"
+		// (from context.Canceled.Error()); the sanitize pass
+		// only replaces the clone path with "<clone>", leaving
+		// the "context canceled" substring intact.
+		if strings.Contains(strings.ToLower(f.Reason), "canceled") ||
+			strings.Contains(strings.ToLower(f.Reason), "cancelled") {
+			sawCancellationShape = true
+		}
 	}
-	assert.True(t,
-		failureTypes["per_developer_commit_signing_ratio"] ||
-			len(result.Failures) > 0,
-		"cancelled context should produce at least one failure")
+	assert.True(t, signingFailed,
+		"per_developer_commit_signing_ratio (runGit-backed) must fail on a pre-cancelled context")
+	assert.True(t, sawCancellationShape,
+		"at least one failure's Reason must name cancellation; "+
+			"an unrelated failure would indicate the cancellation "+
+			"wasn't actually the cause")
 }
 
 // ---- helpers (test-only) ----

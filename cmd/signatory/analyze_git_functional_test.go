@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -114,11 +116,11 @@ func TestAnalyze_GitCollector_FunctionalTwoSourcesLand(t *testing.T) {
 		}
 		// Absence records carry Type="absence:<name>"; a real signal
 		// carries Type="<name>". Normalize to the underlying name.
-		t := sig.Type
-		if len(t) > len("absence:") && t[:len("absence:")] == "absence:" {
-			t = t[len("absence:"):]
-		}
-		gitTypesPresent[t] = true
+		// Don't name the local `t` — the surrounding function's
+		// `t *testing.T` would shadow, and any later assert.* inside
+		// this loop would then compile against the wrong `t`.
+		typeName := strings.TrimPrefix(sig.Type, "absence:")
+		gitTypesPresent[typeName] = true
 	}
 	for _, typeName := range expectGitTypes {
 		assert.True(t, gitTypesPresent[typeName],
@@ -217,11 +219,18 @@ func initGitFixtureRepo(t *testing.T, originURL string) string {
 // runGitInFunctional is a local copy of the cross-package git
 // helper. We can't import test-only symbols from
 // internal/signal/git/, so this small helper lives here.
+//
+// Uses gitenv.SafeEnv() to strip GIT_DIR / GIT_CONFIG_* / other
+// config-injection env vars from the inherited environment. Without
+// that, an ambient GIT_DIR would redirect writes to the shared
+// worktree config — the mechanism behind the 2026-04-24 main-worktree
+// config corruption.
 func runGitInFunctional(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
 	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
+	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

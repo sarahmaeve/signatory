@@ -17,6 +17,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/config"
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/pipeline"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
@@ -102,7 +103,7 @@ type HandoffCmd struct {
 
 	// RunGitClone overrides the git subprocess invocation for
 	// --clone-dir. nil → fall through to defaultGitClone (exec.CommandContext
-	// with safeGitEnv). Same rationale as PrecheckSource: parallel-safe
+	// with gitenv.SafeEnv). Same rationale as PrecheckSource: parallel-safe
 	// injection, visible dependency.
 	//
 	// version is the git ref (tag/branch) to check out, or empty
@@ -803,7 +804,7 @@ func defaultGitClone(ctx context.Context, url, dest, version string) error {
 	// parent) and by safeCloneRepoName; version is validated by
 	// safeGitVersion (rejects leading -, shell metacharacters,
 	// path traversal). Env inheritance is stripped to a vetted set
-	// by safeGitEnv so GIT_SSH_COMMAND / GIT_PROXY_COMMAND /
+	// by gitenv.SafeEnv so GIT_SSH_COMMAND / GIT_PROXY_COMMAND /
 	// GIT_CONFIG_* can't redirect the clone.
 	args := []string{"clone", "--depth=1"}
 	if version != "" {
@@ -815,8 +816,8 @@ func defaultGitClone(ctx context.Context, url, dest, version string) error {
 		args = append(args, "--branch", version)
 	}
 	args = append(args, url, dest)
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; url/dest/version pre-validated; env sanitized by safeGitEnv
-	cmd.Env = safeGitEnv()
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; url/dest/version pre-validated; env sanitized by gitenv.SafeEnv
+	cmd.Env = gitenv.SafeEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))
@@ -876,76 +877,6 @@ func safeGitVersion(v string) error {
 		}
 	}
 	return nil
-}
-
-// safeGitEnv returns a copy of os.Environ() with dangerous git-specific
-// environment variables removed. These vars can redirect git's transport,
-// invoke arbitrary helper programs, or override config options in ways
-// that bypass the URL validation we performed before calling git clone.
-//
-// Stripped variables and their threat vectors:
-//
-//   - GIT_TERMINAL_PROMPT: if "1", git prompts for credentials on stdin —
-//     useful interactively but a hang risk in a non-terminal context and a
-//     signal that the environment may be adversarially configured.
-//   - GIT_SSH_COMMAND / GIT_SSH: override the SSH binary/wrapper used for
-//     ssh:// transports; an attacker-controlled value achieves RCE.
-//   - GIT_PROXY_COMMAND: overrides the proxy command for non-standard
-//     transports; same RCE risk as GIT_SSH_COMMAND.
-//   - GIT_EXEC_PATH: overrides the directory git searches for sub-commands
-//     (git-clone, git-fetch, etc.); an attacker can inject malicious binaries.
-//   - GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_*: the bulk
-//     config-injection interface added in git 2.31; can override any config
-//     option including core.sshCommand, http.proxy, etc.
-//   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM: redirect the config file paths
-//     that git reads, allowing wholesale config replacement.
-//   - GIT_DIR / GIT_WORK_TREE: redefine what git considers its repository and
-//     work tree; with GIT_DIR set to an existing .git elsewhere on the system,
-//     a clone can be made to operate on the wrong repository.
-//   - GIT_ASKPASS: program to invoke for credential prompts; overrides the
-//     OS credential helper and can capture credentials mid-operation.
-//
-// We do NOT strip PATH, HOME, USER, SSH_AUTH_SOCK, SSL_CERT_FILE,
-// REQUESTS_CA_BUNDLE, or XDG_* because legitimate git operations depend on them.
-func safeGitEnv() []string {
-	// Variables whose mere presence (regardless of value) is dangerous.
-	deny := map[string]bool{
-		"GIT_TERMINAL_PROMPT": true,
-		"GIT_SSH_COMMAND":     true,
-		"GIT_SSH":             true,
-		"GIT_PROXY_COMMAND":   true,
-		"GIT_EXEC_PATH":       true,
-		"GIT_CONFIG_GLOBAL":   true,
-		"GIT_CONFIG_SYSTEM":   true,
-		"GIT_DIR":             true,
-		"GIT_WORK_TREE":       true,
-		"GIT_ASKPASS":         true,
-		"SSH_ASKPASS":         true,
-		"SSH_ASKPASS_REQUIRE": true,
-	}
-	raw := os.Environ()
-	safe := make([]string, 0, len(raw))
-	for _, kv := range raw {
-		key := kv
-		if idx := strings.IndexByte(kv, '='); idx >= 0 {
-			key = kv[:idx]
-		}
-		// Strip GIT_CONFIG_COUNT and GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_*
-		// (bulk injection interface). The prefix check covers all numbered
-		// variants without enumerating them.
-		if deny[key] ||
-			strings.HasPrefix(key, "GIT_CONFIG_COUNT") ||
-			strings.HasPrefix(key, "GIT_CONFIG_KEY_") ||
-			strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
-			continue
-		}
-		safe = append(safe, kv)
-	}
-	// Force-disable terminal prompts regardless of whether the var was
-	// already present. This guarantees non-interactive behavior even if
-	// the original env had a value we didn't strip.
-	safe = append(safe, "GIT_TERMINAL_PROMPT=0")
-	return safe
 }
 
 // applyClone shallow-clones the target URL into CloneDir/<repo-name>/
@@ -1057,11 +988,31 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	// surprising and potentially unsafe (new commits since last analysis
 	// would silently change the reviewed surface).
 	//
+	// Lstat (not Stat) is load-bearing: os.Stat follows symlinks, so a
+	// pre-existing symlink at destClean pointing outside parent (planted
+	// by a prior-compromise attacker, a crashed earlier run, or a shared
+	// /tmp with loose permissions) would satisfy IsDir() and be silently
+	// returned as "the verified clone". The caller would then propagate
+	// that symlink path to TARGET_PATH and analyst agents would operate
+	// on the attacker's tree instead of a real clone of the target —
+	// attribution without grounding. The string-based filepath.Rel
+	// containment check above cannot see that a symlink resolves outside
+	// parent, which is why this guard exists here rather than being
+	// subsumed by Rel. Refusing loudly is the right outcome; the
+	// operator can inspect and remove the symlink if it was legitimate.
+	//
 	// The reuse note is returned through the report channel (gated by
 	// --quiet upstream), not written directly to stderr — consistent
 	// with the rest of the precheck/clone reporting.
-	if fi, err := os.Stat(destClean); err == nil && fi.IsDir() {
-		return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
+	if fi, err := os.Lstat(destClean); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf(
+				"refuse to reuse clone destination %q: path is a symlink; remove it or pick a different --clone-dir",
+				destClean)
+		}
+		if fi.IsDir() {
+			return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
+		}
 	}
 
 	// Shallow clone with a 2-minute timeout. Use a child context so the
@@ -1105,6 +1056,26 @@ func looksLikeGitHubURL(target string) bool {
 		strings.HasPrefix(lower, "http://github.com/")
 }
 
+// allowedCloneSchemes is the scheme whitelist safeGitCloneURL enforces.
+// Empty scheme is admitted because git clone accepts bare local paths
+// (e.g., "/var/folders/xx/.../src-repo") and the analyze-path
+// integration tests rely on that form — TestCollectorsFor_CloneHappyPath
+// uses a t.TempDir() path as the entity URL to avoid network
+// dependencies.
+//
+// ssh:// is deliberately absent. Signatory's production paths normalize
+// targets through NormalizeGitHubRepoInput which yields https URLs;
+// ssh only arrives here via an adversarial or misconfigured caller,
+// and its conventional `git@host` form already collides with the
+// embedded-credentials rule. The narrower whitelist keeps the attack
+// surface small without regressing any real flow.
+var allowedCloneSchemes = map[string]bool{
+	"":      true, // bare local path
+	"http":  true,
+	"https": true,
+	"git":   true,
+}
+
 // safeGitCloneURL validates that raw is safe to pass as a `git clone` URL
 // argument. It parses the URL and rejects any form that could be
 // misinterpreted by git or that carries unexpected data:
@@ -1116,6 +1087,10 @@ func looksLikeGitHubURL(target string) bool {
 //   - Userinfo (@user:pass) — credentials should never be embedded in
 //     URLs passed to git; they belong in netrc or the credential store.
 //   - Null bytes in any component — always a path-injection signal.
+//   - Non-whitelisted schemes — file://, javascript:, data:, etc.
+//     file:// in particular would clone from an arbitrary local path,
+//     bypassing --path's vetting. See allowedCloneSchemes for the
+//     admitted set and its rationale.
 //
 // safeGitCloneURL is a belt-and-suspenders check: it does NOT replace
 // looksLikeGitHubURL or the ClassifyTarget guard; it fires on the same
@@ -1140,6 +1115,11 @@ func safeGitCloneURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("clone URL must not embed credentials; use git's credential store instead")
+	}
+	if !allowedCloneSchemes[strings.ToLower(u.Scheme)] {
+		return fmt.Errorf(
+			"clone URL scheme %q is not allowed; expected one of https, http, git, or a bare local path",
+			u.Scheme)
 	}
 	return nil
 }
