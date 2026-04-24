@@ -451,6 +451,19 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"some projects declare a license in README without a LICENSE file or vice versa",
 		},
 	},
+	"repo_files": {
+		Type:              "repo_files",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryLowDeclining,
+		Description:       "Presence of conventional project-hygiene files at standard repo paths (README, SECURITY, CODEOWNERS, .mailmap, CHANGELOG, CONTRIBUTING, AUTHORS, MAINTAINERS, GOVERNANCE).",
+		Caveats: []string{
+			"presence indicates project hygiene, not maintainer legitimacy — these files can be added or removed without contributor review",
+			"zero-byte files are reported as absent — a placeholder stub is the cheapest form of fake hygiene and is not counted",
+			"CODEOWNERS presence reports the file exists at one of the three locations GitHub's parser reads from; casing drift (e.g. lowercased 'codeowners') means GitHub won't actually gate reviews on it — inspect the reported path to judge",
+			"when multiple variants of a family exist (e.g. README.md alongside a bare README), the canonical spelling is surfaced in path; the rest appear in alt_paths for analyst review",
+			"symlinks are resolved to their targets; the recorded path is the resolved file, not the link itself",
+		},
+	},
 	"ci_cd": {
 		Type:              "ci_cd",
 		Group:             profile.SignalGroupHygiene,

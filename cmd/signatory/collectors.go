@@ -15,6 +15,7 @@ import (
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
+	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
 )
 
 // CollectOpts carries per-invocation options from AnalyzeCmd's
@@ -94,6 +95,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		collectors = append(collectors,
 			ghcollector.NewCollector(),
 			gitcollector.NewCollector(clonePath),
+			repofilescollector.NewCollector(clonePath),
 		)
 	}
 
