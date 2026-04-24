@@ -100,8 +100,10 @@ func TestResolveTarget_NpmjsURLs(t *testing.T) {
 		// /package/ with no name.
 		{"package no name", "https://www.npmjs.com/package/"},
 		{"package empty scope", "https://www.npmjs.com/package/@/name"},
-		// Other hosts entirely.
-		{"pypi url", "https://pypi.org/project/requests/"},
+		// Other hosts entirely. pypi.org moved to its own accept/
+		// reject coverage in TestResolveTarget_PyPIURLs once the
+		// parsePyPIURL branch landed; crates.io stays rejected
+		// until a crates provider ships.
 		{"crates url", "https://crates.io/crates/atuin"},
 	}
 	for _, tc := range rejected {
@@ -207,6 +209,169 @@ func TestResolveTarget_NpmjsURL_VersionedPage(t *testing.T) {
 			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
 			assert.Equal(t, tc.wantURI, got.CanonicalURI)
 			assert.Equal(t, tc.wantVersion, got.Version)
+		})
+	}
+}
+
+// TestResolveTarget_PyPIURLs covers the pypi.org URL acceptance
+// shape. Structurally parallels TestResolveTarget_NpmjsURLs, with
+// two PyPI-specific twists:
+//
+//  1. PEP 503 name normalization is applied before URI emission,
+//     so `/project/Requests/` and `/project/requests/` produce the
+//     same canonical URI. This is an asymmetry with npm (where
+//     case is preserved) that reflects the ecosystems' native
+//     identity semantics.
+//  2. Versions follow the name directly in the path
+//     (`/project/<name>/<version>/`) rather than via a `/v/`
+//     segment like npmjs.com. The URL grammar is simpler here.
+func TestResolveTarget_PyPIURLs(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in      string
+		wantURI string
+	}{
+		// Basic shape — with/without trailing slash.
+		{"https://pypi.org/project/requests/", "pkg:pypi/requests"},
+		{"https://pypi.org/project/requests", "pkg:pypi/requests"},
+		// With www. prefix.
+		{"https://www.pypi.org/project/requests/", "pkg:pypi/requests"},
+		// http:// rather than https://.
+		{"http://pypi.org/project/requests/", "pkg:pypi/requests"},
+		// PEP 503 normalization: case fold.
+		{"https://pypi.org/project/Requests/", "pkg:pypi/requests"},
+		{"https://pypi.org/project/REQUESTS/", "pkg:pypi/requests"},
+		// PEP 503 normalization: separator conversion.
+		{"https://pypi.org/project/python_dotenv/", "pkg:pypi/python-dotenv"},
+		{"https://pypi.org/project/python.dotenv/", "pkg:pypi/python-dotenv"},
+		{"https://pypi.org/project/python-dotenv/", "pkg:pypi/python-dotenv"},
+		// Versioned page — version follows name directly.
+		{"https://pypi.org/project/requests/2.31.0/", "pkg:pypi/requests@2.31.0"},
+		{"https://pypi.org/project/requests/2.31.0", "pkg:pypi/requests@2.31.0"},
+		// Normalization + version combined.
+		{"https://pypi.org/project/Requests/2.31.0/", "pkg:pypi/requests@2.31.0"},
+		{"https://pypi.org/project/python_dotenv/1.0.0/", "pkg:pypi/python-dotenv@1.0.0"},
+		// Query strings + fragments are UI state; strip.
+		{"https://pypi.org/project/requests/?activeTab=history", "pkg:pypi/requests"},
+		{"https://pypi.org/project/requests/#history", "pkg:pypi/requests"},
+		// PEP 440 version shapes pass through verbatim — the grammar
+		// accepts whatever the ecosystem considers a version string.
+		{"https://pypi.org/project/requests/2.31.0rc1/", "pkg:pypi/requests@2.31.0rc1"},
+		{"https://pypi.org/project/requests/1.0.0.post1/", "pkg:pypi/requests@1.0.0.post1"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, "pkg", got.Scheme)
+			assert.Equal(t, "pypi", got.Ecosystem)
+		})
+	}
+
+	rejected := []struct {
+		name string
+		in   string
+	}{
+		// Lookalike host: must not be accepted as a "pypi.org URL."
+		// Host-anchoring rejects because "pypi.org.attacker.com/"
+		// doesn't match "pypi.org/" exactly.
+		{"lookalike host", "https://pypi.org.attacker.com/project/requests/"},
+		{"lookalike host no path", "https://pypi.org.attacker.com/project/x"},
+		{"lookalike host with www", "https://www.pypi.org.attacker.com/project/x"},
+		// Wrong path prefix (not /project/).
+		{"user path", "https://pypi.org/user/some-user/"},
+		{"help path", "https://pypi.org/help/"},
+		{"root", "https://pypi.org/"},
+		// /project/ with no name.
+		{"project no name", "https://pypi.org/project/"},
+		{"project empty name with version", "https://pypi.org/project//2.0.0/"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+		})
+	}
+}
+
+// TestResolveTarget_PyPICanonicalURIs covers the normalization path
+// for already-canonical `pkg:pypi/...` inputs: names that aren't in
+// PEP 503 canonical form get rebuilt with the normalized name, so
+// hand-typed or manifest-parsed inputs like `pkg:pypi/Requests`
+// produce the same CanonicalURI as `pkg:pypi/requests`.
+//
+// This is the storage-fragmentation guard. Without it, a posture
+// set against `pkg:pypi/Requests@2.31.0` would land under a
+// different entity row than a burn recorded against
+// `pkg:pypi/requests@2.31.0` — both referring to the same package
+// per PyPI's own identity semantics.
+func TestResolveTarget_PyPICanonicalURIs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in          string
+		wantURI     string
+		wantName    string
+		wantVersion string
+	}{
+		// Already normalized: pass through.
+		{"pkg:pypi/requests", "pkg:pypi/requests", "requests", ""},
+		{"pkg:pypi/python-dotenv", "pkg:pypi/python-dotenv", "python-dotenv", ""},
+		// Case normalization.
+		{"pkg:pypi/Requests", "pkg:pypi/requests", "requests", ""},
+		{"pkg:pypi/REQUESTS", "pkg:pypi/requests", "requests", ""},
+		{"pkg:pypi/PyYAML", "pkg:pypi/pyyaml", "pyyaml", ""},
+		// Separator normalization.
+		{"pkg:pypi/python_dotenv", "pkg:pypi/python-dotenv", "python-dotenv", ""},
+		{"pkg:pypi/python.dotenv", "pkg:pypi/python-dotenv", "python-dotenv", ""},
+		// Normalization + version: name normalizes, version passes through.
+		{"pkg:pypi/Requests@2.31.0", "pkg:pypi/requests@2.31.0", "requests", "2.31.0"},
+		{"pkg:pypi/python_dotenv@1.0.0", "pkg:pypi/python-dotenv@1.0.0", "python-dotenv", "1.0.0"},
+		// PEP 440 version forms pass through verbatim.
+		{"pkg:pypi/requests@2.31.0rc1", "pkg:pypi/requests@2.31.0rc1", "requests", "2.31.0rc1"},
+		{"pkg:pypi/requests@1.0.0.post1", "pkg:pypi/requests@1.0.0.post1", "requests", "1.0.0.post1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI, "canonical URI must be PEP 503-normalized")
+			assert.Equal(t, tc.wantName, got.ShortName, "ShortName must be normalized")
+			assert.Equal(t, tc.wantVersion, got.Version, "Version must be preserved verbatim")
+			assert.Equal(t, "pypi", got.Ecosystem)
+		})
+	}
+}
+
+// TestResolveTarget_NpmCasePreserved is the regression guard for
+// the asymmetric normalization policy: npm is case-sensitive at
+// the registry level, so `pkg:npm/Express` and `pkg:npm/express`
+// are DIFFERENT packages and must produce different canonical
+// URIs. This guards against a future refactor that accidentally
+// applies PEP 503-style normalization across ecosystems.
+func TestResolveTarget_NpmCasePreserved(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in      string
+		wantURI string
+	}{
+		{"pkg:npm/Express", "pkg:npm/Express"},
+		{"pkg:npm/EXPRESS", "pkg:npm/EXPRESS"},
+		{"pkg:npm/@Types/Node", "pkg:npm/@Types/Node"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI,
+				"npm case must be preserved; normalization is PyPI-only")
 		})
 	}
 }

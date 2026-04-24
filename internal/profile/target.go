@@ -128,6 +128,21 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return resolveCanonicalURI(uri)
 	}
 
+	// pypi.org project URLs: same copy-paste-from-browser workflow
+	// for Python packages. Names are PEP 503-normalized inside
+	// parsePyPIURL before URI construction, so `/project/Requests/`
+	// and `/project/requests/` both produce `pkg:pypi/requests`.
+	// Unlike npm, which preserves case because the npm registry is
+	// case-sensitive, PyPI's registry canonicalizes on lookup and
+	// our canonical URI must match.
+	if pypiName, pypiVersion, ok := parsePyPIURL(s); ok {
+		uri := "pkg:pypi/" + pypiName
+		if pypiVersion != "" {
+			uri += "@" + pypiVersion
+		}
+		return resolveCanonicalURI(uri)
+	}
+
 	// Guard against non-github URLs sneaking through
 	// NormalizeGitHubRepoInput's prefix-strip pipeline.
 	//
@@ -142,7 +157,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// wrong canonical form.
 	if strings.Contains(s, "://") && !isGitHubURL(s) {
 		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com or npmjs.com URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com, npmjs.com, or pypi.org URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
@@ -313,6 +328,93 @@ func parseNpmjsURL(input string) (name, version string, ok bool) {
 	return nameOut, "", true
 }
 
+// parsePyPIURL recognizes pypi.org project URLs and extracts the
+// package name (PEP 503-normalized) plus an optional version from
+// `/project/<name>/<version>/` paths. Returns (name, version, true)
+// on a match; version is "" when the URL has no version segment.
+// Returns ("", "", false) on anything that isn't a well-formed
+// pypi.org/project/<name> URL.
+//
+// Accepted shapes:
+//
+//	https://pypi.org/project/requests/               → ("requests", "", true)
+//	https://pypi.org/project/requests                → ("requests", "", true)
+//	https://www.pypi.org/project/requests/           → ("requests", "", true)
+//	http://pypi.org/project/requests/                → ("requests", "", true)
+//	https://pypi.org/project/Requests/               → ("requests", "", true)   (normalized)
+//	https://pypi.org/project/python_dotenv/          → ("python-dotenv", "", true) (normalized)
+//	https://pypi.org/project/requests/2.31.0/        → ("requests", "2.31.0", true)
+//	https://pypi.org/project/Requests/2.31.0/        → ("requests", "2.31.0", true)
+//	https://pypi.org/project/requests/?activeTab=x   → ("requests", "", true)
+//	https://pypi.org/project/requests/#history       → ("requests", "", true)
+//
+// Host-anchoring: the check rejects lookalike hosts like
+// `pypi.org.attacker.com/project/x` by requiring an exact match on
+// "pypi.org/" after the optional www./scheme strip. Same trick
+// parseNpmjsURL and isGitHubURL use.
+//
+// Unlike parseNpmjsURL, this function applies PEP 503 name
+// normalization before returning — the caller sees the already-
+// normalized form so there's no opportunity for accidental
+// non-normalized storage. Version is returned verbatim; PEP 440
+// version normalization is not attempted here.
+//
+// Does NOT validate the extracted name against PEP 508's name
+// grammar — that's Layer 4's job via a future pypi.ValidatePackageName
+// analogous to npm's. This function's contract is "did the URL shape
+// match pypi.org/project/<something>" plus "normalize the <something>
+// per PEP 503," not "is <something> a syntactically legal PyPI name."
+func parsePyPIURL(input string) (name, version string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+
+	// Host anchoring: must be EXACTLY "pypi.org/" at this point.
+	rest, hostOK := strings.CutPrefix(s, "pypi.org/")
+	if !hostOK {
+		return "", "", false
+	}
+
+	// Path must start with "project/".
+	rest, pathOK := strings.CutPrefix(rest, "project/")
+	if !pathOK || rest == "" {
+		return "", "", false
+	}
+
+	// Drop fragment and query — PyPI's UI adds these for tabs,
+	// history anchors, etc., and they're not part of the package
+	// identifier.
+	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
+		rest = before
+	}
+	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
+		rest = before
+	}
+
+	// PyPI URL shape: project/<name>[/<version>][/].
+	// Split on / and trim trailing empty segments so "requests/"
+	// and "requests/2.31.0/" both parse cleanly.
+	segs := strings.Split(rest, "/")
+	for len(segs) > 0 && segs[len(segs)-1] == "" {
+		segs = segs[:len(segs)-1]
+	}
+	if len(segs) == 0 || segs[0] == "" {
+		return "", "", false
+	}
+
+	rawName := segs[0]
+	rawVersion := ""
+	if len(segs) >= 2 && segs[1] != "" {
+		rawVersion = segs[1]
+	}
+	// Any additional segments (segs[2:]) are tolerated and ignored.
+	// PyPI's UI doesn't produce them for copy-paste cases, but a
+	// permissive parse is cheaper than a false-reject on a
+	// harmlessly-extra trailing element.
+
+	return NormalizePyPIName(rawName), rawVersion, true
+}
+
 // isGitHubURL returns true when input is an http(s) URL whose host
 // (after scheme strip) starts with "github.com". Accepts forms like
 // `https://github.com/owner/repo`, `http://github.com/...`, and the
@@ -429,6 +531,25 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 			out.Version = version
 		} else {
 			out.ShortName = lastSeg
+		}
+
+		// PEP 503 name normalization for PyPI. Unlike npm (case-
+		// sensitive) and Go (path-preserving), PyPI's registry
+		// canonicalizes names on lookup — `Requests`, `requests`,
+		// and `python_dotenv` all map to the same identity. The
+		// canonical URI must match, or storage fragments across
+		// identities the registry considers the same. See pypi.go
+		// for the normalization spec. No-op when the extracted name
+		// is already in canonical form.
+		if out.Ecosystem == "pypi" {
+			normalized := NormalizePyPIName(out.ShortName)
+			if normalized != out.ShortName {
+				out.ShortName = normalized
+				out.CanonicalURI = "pkg:pypi/" + normalized
+				if out.Version != "" {
+					out.CanonicalURI += "@" + out.Version
+				}
+			}
 		}
 
 	case "identity", "org":

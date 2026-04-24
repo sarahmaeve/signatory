@@ -304,6 +304,115 @@ func TestPostureSet_MalformedVersion_Rejected(t *testing.T) {
 	}
 }
 
+// TestPostureSet_PyPINameNormalized_RoundTrip is the end-to-end
+// guard for PyPI's PEP 503 name normalization: a posture written
+// against any case/separator variant of a PyPI package name must
+// be findable under every equivalent variant, because the
+// registry considers them the same identity.
+//
+// Unlike the versioned-URI canonicalization tests above (which
+// exercise SplitURIVersion's entity/posture split), this test
+// exercises the ResolveTarget-side name normalization: the write
+// input and the read input are different surface strings that
+// must resolve to the same canonical URI before any storage
+// operation happens.
+//
+// Without this, a future refactor that bypasses ResolveTarget on
+// a write path — stamping a non-normalized URI directly onto an
+// entity — would silently fragment storage across identities the
+// PyPI registry considers equivalent, and no unit test in
+// internal/profile/ would catch it because the bug lives above
+// that layer.
+func TestPostureSet_PyPINameNormalized_RoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		writeURI  string
+		readURI   string
+		rationale string
+	}{
+		{
+			name:      "case fold",
+			writeURI:  "pkg:pypi/Requests@2.31.0",
+			readURI:   "pkg:pypi/requests@2.31.0",
+			rationale: "PyPI normalization: case fold guard",
+		},
+		{
+			name:      "underscore to dash",
+			writeURI:  "pkg:pypi/python_dotenv@1.0.0",
+			readURI:   "pkg:pypi/python-dotenv@1.0.0",
+			rationale: "PyPI normalization: separator conversion guard",
+		},
+		{
+			name:      "dot to dash plus case",
+			writeURI:  "pkg:pypi/Python.Dotenv@1.0.0",
+			readURI:   "pkg:pypi/python-dotenv@1.0.0",
+			rationale: "PyPI normalization: combined case + separator guard",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newTestGlobals(t)
+
+			setCmd := &PostureSetCmd{
+				Target:    tc.writeURI,
+				Tier:      "trusted-for-now",
+				Rationale: tc.rationale,
+			}
+			require.NoError(t, setCmd.Run(g),
+				"posture set against %q must succeed", tc.writeURI)
+
+			getCmd := &PostureGetCmd{Target: tc.readURI}
+			stdout := captureStdout(t, func() {
+				require.NoError(t, getCmd.Run(g),
+					"posture get against the equivalent URI %q must succeed", tc.readURI)
+			})
+
+			assert.Contains(t, stdout, "trusted-for-now",
+				"get via %q must find the posture written via %q (same PyPI identity per PEP 503)",
+				tc.readURI, tc.writeURI)
+			assert.Contains(t, stdout, tc.rationale,
+				"the posture's rationale must round-trip via the equivalent URI")
+			assert.NotContains(t, stdout, "No posture recorded",
+				"the PEP 503-equivalent read URI must not report absence")
+		})
+	}
+}
+
+// TestPostureSet_NpmCaseNotNormalized is the asymmetric-policy
+// regression guard: the PyPI normalization in PostureSet_PyPI...
+// must NOT apply to npm, because npm names are case-sensitive at
+// the registry level. A posture against pkg:npm/Express must not
+// leak into a posture query for pkg:npm/express.
+//
+// If this ever starts failing, the fix is NOT "apply normalization
+// to npm." The fix is "restore the ecosystem-specific normalization
+// gate in resolveCanonicalURI" — a refactor that accidentally made
+// normalization cross-ecosystem must be reverted.
+func TestPostureSet_NpmCaseNotNormalized(t *testing.T) {
+	g := newTestGlobals(t)
+
+	// Write against one casing.
+	setUpper := &PostureSetCmd{
+		Target:    "pkg:npm/Express@4.18.2",
+		Tier:      "trusted-for-now",
+		Rationale: "uppercase input",
+	}
+	require.NoError(t, setUpper.Run(g))
+
+	// Read against the different casing. npm is case-sensitive:
+	// this should NOT find the posture above. The store must
+	// report absence (soft), not a hit.
+	getLower := &PostureGetCmd{Target: "pkg:npm/express@4.18.2"}
+	stdout := captureStdout(t, func() {
+		require.NoError(t, getLower.Run(g),
+			"soft-absence read against a non-existent npm entity must not error")
+	})
+
+	assert.NotContains(t, stdout, "uppercase input",
+		"npm must NOT cross-match casing; pkg:npm/Express and pkg:npm/express "+
+			"are distinct identities per the registry's case-sensitive lookup")
+}
+
 // TestPostureSet_CleanVersion_Accepted is the positive-companion:
 // confirms the reject tests above aren't simply "posture set is
 // broken" — legitimate version strings still pass through and
