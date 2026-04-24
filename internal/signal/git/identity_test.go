@@ -285,7 +285,7 @@ func commitAs(t *testing.T, repo, name, email, msg string) {
 	// rely on.
 	full := []string{"-C", repo, "commit", "--allow-empty", "-m", msg}
 	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
 	// Start from gitenv.SafeEnv() — strip dangerous inherited
 	// vars — then append the identity overrides. Inheriting from
 	// cmd.Environ() would leak GIT_DIR / GIT_CONFIG_* and risk

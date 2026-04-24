@@ -192,8 +192,5 @@ func isDenied(key string) bool {
 			return true
 		}
 	}
-	if denyExactLower[strings.ToLower(key)] {
-		return true
-	}
-	return false
+	return denyExactLower[strings.ToLower(key)]
 }

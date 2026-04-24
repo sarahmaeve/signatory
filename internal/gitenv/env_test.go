@@ -270,17 +270,25 @@ func TestSafeEnv_ForceTerminalPromptZero(t *testing.T) {
 
 // TestSafeEnv_ReturnsIndependentSlice verifies that callers can
 // append to the returned slice without affecting subsequent calls —
-// i.e., SafeEnv doesn't alias os.Environ()'s backing array.
-// Matters because helpers like commitAs / the backdated-commit site
-// do `cmd.Env = append(SafeEnv(), "GIT_AUTHOR_NAME=...")` and must
-// not corrupt the parent process env.
+// i.e., SafeEnv doesn't cache a shared slice that later callers
+// observe post-mutation. Matters because helpers like commitAs /
+// the backdated-commit site do
+// `cmd.Env = append(SafeEnv(), "GIT_AUTHOR_NAME=...")` and must not
+// corrupt a parallel caller's view.
 //
-// Revert proof: have SafeEnv return os.Environ() directly without
-// copying; this test fails because appends to the returned slice
-// either alter the parent env or conflict with later SafeEnv calls.
+// Revert proof: have SafeEnv return a package-level cached slice
+// (e.g. `var cached = computeOnce(); return cached`) with nonzero
+// spare capacity; this test fails because the append writes into
+// the shared backing array and env2 observes APPEND_TEST.
 func TestSafeEnv_ReturnsIndependentSlice(t *testing.T) {
 	env1 := SafeEnv()
 	env1 = append(env1, "APPEND_TEST=first-call-value")
+	// Read env1 after the append so its value is observed, not
+	// ineffectually reassigned — both as a sanity probe (the append
+	// actually happened) and to satisfy ineffassign on the
+	// assignment above.
+	require.Contains(t, env1, "APPEND_TEST=first-call-value",
+		"append must have extended env1 before we check env2")
 
 	env2 := SafeEnv()
 	for _, kv := range env2 {

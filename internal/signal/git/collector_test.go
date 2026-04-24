@@ -52,8 +52,11 @@ func initRepo(t *testing.T) string {
 func mustRunGit(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
+	// t.Context() ties the subprocess lifetime to the test's — if
+	// the test times out or is cancelled, pending git invocations
+	// get killed instead of orphaned. Go 1.24+.
 	//nolint:gosec // G204: test helper; binary is "git" literal, args are test-controlled
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
 	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -168,7 +171,8 @@ func TestCollector_WindowExcludesOldCommits(t *testing.T) {
 
 	// Backdated commit — outside any reasonable window.
 	backdate := "2020-01-01T00:00:00Z"
-	oldCmd := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "ancient") //nolint:gosec // G204: test helper
+	//nolint:gosec // G204: test helper
+	oldCmd := exec.CommandContext(t.Context(), "git", "-C", repo, "commit", "--allow-empty", "-m", "ancient")
 	// Start from gitenv.SafeEnv() — strip dangerous inherited
 	// vars — then append the backdating overrides. Inheriting
 	// from cmd.Environ() would leak GIT_DIR / GIT_CONFIG_* and

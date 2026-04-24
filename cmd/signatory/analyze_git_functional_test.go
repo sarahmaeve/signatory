@@ -229,7 +229,7 @@ func runGitInFunctional(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
 	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
 	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

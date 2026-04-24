@@ -66,7 +66,7 @@ func TestCollector_FirstCommitDate_MultipleCommits_ReturnsFirst(t *testing.T) {
 		{"2024-03-10T00:00:00Z", "newest"},
 	} {
 		//nolint:gosec // G204: test helper
-		cmd := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", ct.msg)
+		cmd := exec.CommandContext(t.Context(), "git", "-C", repo, "commit", "--allow-empty", "-m", ct.msg)
 		// Strip GIT_DIR / GIT_CONFIG_* before layering the backdating
 		// overrides. See internal/gitenv package doc for rationale.
 		cmd.Env = append(gitenv.SafeEnv(),
