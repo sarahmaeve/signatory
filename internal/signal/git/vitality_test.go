@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,7 +67,9 @@ func TestCollector_FirstCommitDate_MultipleCommits_ReturnsFirst(t *testing.T) {
 	} {
 		//nolint:gosec // G204: test helper
 		cmd := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", ct.msg)
-		cmd.Env = append(cmd.Environ(),
+		// Strip GIT_DIR / GIT_CONFIG_* before layering the backdating
+		// overrides. See internal/gitenv package doc for rationale.
+		cmd.Env = append(gitenv.SafeEnv(),
 			"GIT_AUTHOR_DATE="+ct.date,
 			"GIT_COMMITTER_DATE="+ct.date,
 		)

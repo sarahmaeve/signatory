@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -217,11 +218,18 @@ func initGitFixtureRepo(t *testing.T, originURL string) string {
 // runGitInFunctional is a local copy of the cross-package git
 // helper. We can't import test-only symbols from
 // internal/signal/git/, so this small helper lives here.
+//
+// Uses gitenv.SafeEnv() to strip GIT_DIR / GIT_CONFIG_* / other
+// config-injection env vars from the inherited environment. Without
+// that, an ambient GIT_DIR would redirect writes to the shared
+// worktree config — the mechanism behind the 2026-04-24 main-worktree
+// config corruption.
 func runGitInFunctional(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
 	//nolint:gosec // G204: test helper; binary is "git" literal
 	cmd := exec.Command("git", full...)
+	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

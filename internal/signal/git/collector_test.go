@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/stretchr/testify/assert"
@@ -37,11 +38,22 @@ func initRepo(t *testing.T) string {
 // mustRunGit runs `git -C repo <args...>` and fails the test on any
 // non-zero exit. Used for setup steps where any failure is a bug
 // in the test, not an assertion target.
+//
+// Uses gitenv.SafeEnv() to strip GIT_DIR, GIT_CONFIG_*, and the
+// other config-injection / redirection env vars from the inherited
+// environment. Without that, an ambient GIT_DIR (set by a git hook
+// or IDE integration) would cause `git -C <tempdir>` to still
+// resolve writes against the inherited config path — which for a
+// git worktree is the shared main repo's config. The postmortem
+// for the 2026-04-24 worktree corruption traced to exactly that
+// mechanism; every exec.Command("git", ...) in tests must set
+// cmd.Env = gitenv.SafeEnv() before running.
 func mustRunGit(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
 	//nolint:gosec // G204: test helper; binary is "git" literal, args are test-controlled
 	cmd := exec.Command("git", full...)
+	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -156,7 +168,11 @@ func TestCollector_WindowExcludesOldCommits(t *testing.T) {
 	// Backdated commit — outside any reasonable window.
 	backdate := "2020-01-01T00:00:00Z"
 	oldCmd := exec.Command("git", "-C", repo, "commit", "--allow-empty", "-m", "ancient") //nolint:gosec // G204: test helper
-	oldCmd.Env = append(oldCmd.Environ(),
+	// Start from gitenv.SafeEnv() — strip dangerous inherited
+	// vars — then append the backdating overrides. Inheriting
+	// from cmd.Environ() would leak GIT_DIR / GIT_CONFIG_* and
+	// risk writes against the shared worktree config.
+	oldCmd.Env = append(gitenv.SafeEnv(),
 		"GIT_AUTHOR_DATE="+backdate,
 		"GIT_COMMITTER_DATE="+backdate,
 	)

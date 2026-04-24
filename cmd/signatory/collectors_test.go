@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,16 @@ func initSourceRepo(t *testing.T, origin string) string {
 	return dir
 }
 
-// mustRunGitInTest is a local copy of the git-package test helper —
+// mustRunGitInTest runs `git -C repo <args...>` and fails the test
+// on any non-zero exit, using gitenv.SafeEnv() to strip GIT_DIR /
+// GIT_CONFIG_* / other config-injection env vars from the inherited
+// environment. Without that scrubbing, an ambient GIT_DIR would
+// redirect writes to the shared worktree config — the mechanism
+// behind the 2026-04-24 main-worktree config corruption. Every
+// exec.Command("git", ...) in this package's tests must set
+// cmd.Env = gitenv.SafeEnv() for the same reason.
+//
+// Local copy of the git-package test helper —
 // we can't import test-only symbols across packages. Fails the
 // test on any non-zero git exit.
 func mustRunGitInTest(t *testing.T, repo string, args ...string) {
@@ -44,6 +54,7 @@ func mustRunGitInTest(t *testing.T, repo string, args ...string) {
 	full := append([]string{"-C", repo}, args...)
 	//nolint:gosec // G204: test helper; binary is "git" literal
 	cmd := exec.Command("git", full...)
+	cmd.Env = gitenv.SafeEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	require.NoErrorf(t, cmd.Run(), "git %v: %s", args, stderr.String())
@@ -333,7 +344,7 @@ func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
 // These tests guard the env-var stripping on the analyze-path git
 // subprocesses (cmd/signatory/collectors.go), which is the second git-
 // clone site in the binary. The first site, runGitClone in handoff.go,
-// has been env-sanitized via safeGitEnv since the Go-security adversarial
+// has been env-sanitized via gitenv.SafeEnv since the Go-security adversarial
 // pass; the analyze-path additions (gitCloneFull, validateExistingClone)
 // landed later and inherited the full os.Environ() including the same
 // dangerous vars handoff already strips. The two-Opus 2026-04-22 review
@@ -343,14 +354,14 @@ func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
 // GIT_CONFIG_KEY_*/VALUE_* to attacker-controlled values; without the
 // stripping, the git subprocess invokes the attacker binary or applies
 // the injected config (e.g. core.sshCommand) — same RCE class as the
-// handoff-path threat the existing safeGitEnv tests cover.
+// handoff-path threat the existing gitenv.SafeEnv tests cover.
 //
 // Approach: PATH-shim a fake `git` that dumps its env to a file and
 // exits 0. After the parent calls gitCloneFull / validateExistingClone,
 // the test reads the dumped env and asserts the dangerous vars are
 // absent. Validates the actual subprocess boundary (cmd.Env), not just
-// safeGitEnv()'s output — the bug was specifically that cmd.Env wasn't
-// being assigned, so a test of safeGitEnv() in isolation wouldn't catch it.
+// gitenv.SafeEnv()'s output — the bug was specifically that cmd.Env wasn't
+// being assigned, so a test of gitenv.SafeEnv() in isolation wouldn't catch it.
 
 // installFakeGitEnvDump writes a POSIX shim named "git" into a fresh
 // temp dir, dumps that dir at the head of PATH for the test's lifetime,
@@ -398,9 +409,9 @@ func readEnvDump(t *testing.T, path string) map[string]string {
 // exec.CommandContext without setting cmd.Env, so the subprocess
 // inherited the full parent env including GIT_SSH_COMMAND and the
 // bulk-injection GIT_CONFIG_* vars. After the fix, cmd.Env =
-// safeGitEnv() strips them at the boundary.
+// gitenv.SafeEnv() strips them at the boundary.
 //
-// Revert proof: delete the `cmd.Env = safeGitEnv()` line from
+// Revert proof: delete the `cmd.Env = gitenv.SafeEnv()` line from
 // gitCloneFull; this test fails because GIT_SSH_COMMAND appears in
 // the env dump.
 //
@@ -410,9 +421,9 @@ func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
 	envDump := installFakeGitEnvDump(t)
 
 	// Hostile parent env — a representative sample of the vars
-	// safeGitEnv strips. Full coverage of the strip set lives in
-	// TestSafeGitEnv_StripsDangerousVars in handoff_test.go; here we
-	// just need enough to prove the boundary is enforced.
+	// gitenv.SafeEnv strips. Full coverage of the strip rule lives
+	// in internal/gitenv/env_test.go's TestSafeEnv_StripsAllGitPrefix;
+	// here we just need enough to prove the boundary is enforced.
 	t.Setenv("GIT_SSH_COMMAND", "evil-binary --steal-credentials")
 	t.Setenv("GIT_PROXY_COMMAND", "evil-proxy")
 	t.Setenv("GIT_EXEC_PATH", "/tmp/attacker-bin")
@@ -444,9 +455,9 @@ func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
 			"%s must not leak from parent env into git subprocess (gitCloneFull)", key)
 	}
 	// PATH must survive — the child needs it to locate ssh, helpers,
-	// etc. Verifies safeGitEnv didn't accidentally strip too much.
+	// etc. Verifies gitenv.SafeEnv didn't accidentally strip too much.
 	assert.NotEmpty(t, env["PATH"], "PATH must be preserved in child env")
-	// GIT_TERMINAL_PROMPT is force-set to 0 by safeGitEnv to prevent
+	// GIT_TERMINAL_PROMPT is force-set to 0 by gitenv.SafeEnv to prevent
 	// the child from blocking on a credential prompt.
 	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
 		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
@@ -459,7 +470,7 @@ func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
 // based config injection (GIT_CONFIG_KEY_* setting e.g. include.path
 // to a hostile config) can still subvert it. Same fix, same boundary.
 //
-// Revert proof: delete the `cmd.Env = safeGitEnv()` line in
+// Revert proof: delete the `cmd.Env = gitenv.SafeEnv()` line in
 // validateExistingClone; this test fails because GIT_CONFIG_KEY_0
 // appears in the dump.
 //

@@ -1816,180 +1816,85 @@ func TestPrecheck_ErrorPropagatesWithContext(t *testing.T) {
 		"precheck errors must carry the 'network-precheck' context prefix")
 }
 
-// --- safeGitEnv tests --------------------------------------------------------
+// --- gitenv subprocess-boundary test for defaultGitClone --------------------
 //
-// These tests guard the env-var stripping logic added after the Go-security
-// adversarial pass. Threat: a hostile parent environment sets GIT_SSH_COMMAND
-// or GIT_PROXY_COMMAND to an attacker-controlled binary; without the stripping
-// logic, git clone would invoke that binary with the clone URL as argument,
-// achieving RCE.
+// Unit tests for gitenv.SafeEnv (the strip-set contract) live in
+// internal/gitenv/env_test.go and are exhaustive. Subprocess-boundary
+// tests — proving that a production git-subprocess site actually sets
+// cmd.Env = gitenv.SafeEnv() and that the stripped env reaches the
+// child — live next to their respective production sites:
 //
-// Revert proof: replace safeGitEnv() with os.Environ() in the runGitClone
-// definition; TestSafeGitEnv_StripsDangerousVars fails because the dangerous
-// key still appears in the returned slice.
+//   - TestGitCloneFull_StripsDangerousEnv           (collectors_test.go)
+//   - TestValidateExistingClone_StripsDangerousEnv  (collectors_test.go)
+//   - TestDefaultGitClone_StripsDangerousEnv        (below — this file)
+//
+// These three tests together cover every production exec.Command("git",
+// ...) site that performs a clone-shaped operation. runGit (in
+// internal/signal/git/exec.go) is the fourth production site; its
+// subprocess-boundary coverage comes from the integration tests in
+// that package which run real git commands against real repos.
 
-// TestSafeGitEnv_StripsDangerousVars verifies that each of the documented
-// dangerous git environment variables is absent from safeGitEnv()'s output,
-// regardless of whether the parent process has them set.
+// TestDefaultGitClone_StripsDangerousEnv is the subprocess-boundary
+// regression test for the handoff-path git clone. Before the 2026-04-24
+// extraction, defaultGitClone would have inherited the parent's env,
+// allowing a hostile GIT_SSH_COMMAND to invoke an attacker binary
+// during the clone. The test installs a fake git shim that dumps its
+// env, runs defaultGitClone directly, and asserts the shim never saw
+// the dangerous vars.
 //
-// NOTE: t.Setenv and t.Parallel are mutually exclusive in Go's testing package
-// because Setenv modifies global process state. These tests are intentionally
-// sequential to use t.Setenv for clean env injection/restoration.
-func TestSafeGitEnv_StripsDangerousVars(t *testing.T) {
-	// Inject dangerous vars into this process's environment for the duration
-	// of the test, then restore. This simulates a hostile parent environment.
-	dangerous := []string{
-		"GIT_TERMINAL_PROMPT",
+// Revert proof: delete the `cmd.Env = gitenv.SafeEnv()` line in
+// defaultGitClone (handoff.go); this test fails because the shim's
+// env dump contains GIT_SSH_COMMAND / GIT_CONFIG_KEY_0 / etc.
+//
+// NOTE: Uses t.Setenv, which panics if the test also calls t.Parallel().
+// Intentionally sequential.
+func TestDefaultGitClone_StripsDangerousEnv(t *testing.T) {
+	envDump := installFakeGitEnvDump(t)
+
+	// Hostile parent env — representative sample of each threat class:
+	// transport override (GIT_SSH_COMMAND), config injection
+	// (GIT_CONFIG_COUNT + KEY/VALUE), binary-path redirection
+	// (GIT_EXEC_PATH), repo redirection (GIT_DIR, GIT_INDEX_FILE,
+	// GIT_COMMON_DIR — the last two were missed by the pre-gitenv
+	// deny-list and are the motivating gap for this test).
+	t.Setenv("GIT_SSH_COMMAND", "evil-binary --steal-credentials")
+	t.Setenv("GIT_EXEC_PATH", "/tmp/attacker-bin")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+	t.Setenv("GIT_CONFIG_VALUE_0", "evil")
+	t.Setenv("GIT_DIR", "/tmp/attacker-git-dir")
+	t.Setenv("GIT_INDEX_FILE", "/tmp/attacker-index")
+	t.Setenv("GIT_COMMON_DIR", "/tmp/attacker-common")
+
+	// Dest doesn't need to exist; the fake git shim ignores its args
+	// and exits 0. URL is synthetic but present for realism.
+	dest := filepath.Join(t.TempDir(), "clone-dest")
+	require.NoError(t,
+		defaultGitClone(context.Background(), "https://example.invalid/repo.git", dest, ""),
+		"fake git must exit 0 — non-zero indicates the shim wasn't picked up via PATH")
+
+	env := readEnvDump(t, envDump)
+	for _, key := range []string{
 		"GIT_SSH_COMMAND",
-		"GIT_SSH",
-		"GIT_PROXY_COMMAND",
 		"GIT_EXEC_PATH",
-		"GIT_CONFIG_GLOBAL",
-		"GIT_CONFIG_SYSTEM",
-		"GIT_DIR",
-		"GIT_WORK_TREE",
-		"GIT_ASKPASS",
-		"SSH_ASKPASS",
-		"SSH_ASKPASS_REQUIRE",
-		// Bulk-injection variants:
 		"GIT_CONFIG_COUNT",
 		"GIT_CONFIG_KEY_0",
 		"GIT_CONFIG_VALUE_0",
-		"GIT_CONFIG_KEY_1",
-		"GIT_CONFIG_VALUE_1",
+		"GIT_DIR",
+		"GIT_INDEX_FILE",
+		"GIT_COMMON_DIR",
+	} {
+		_, present := env[key]
+		assert.Falsef(t, present,
+			"%s must not leak from parent env into git subprocess (defaultGitClone)", key)
 	}
-
-	// t.Setenv handles cleanup automatically.
-	for _, key := range dangerous {
-		t.Setenv(key, "attacker-controlled-value")
-	}
-
-	env := safeGitEnv()
-
-	// Build a map for O(1) lookup.
-	envMap := make(map[string]string, len(env))
-	for _, kv := range env {
-		idx := strings.IndexByte(kv, '=')
-		if idx < 0 {
-			continue
-		}
-		envMap[kv[:idx]] = kv[idx+1:]
-	}
-
-	for _, key := range dangerous {
-		// GIT_TERMINAL_PROMPT is allowed through but forced to "0" (see below).
-		// All other dangerous keys must be absent entirely.
-		if key == "GIT_TERMINAL_PROMPT" {
-			continue
-		}
-		_, present := envMap[key]
-		assert.False(t, present,
-			"dangerous var %q must not appear in safeGitEnv() output", key)
-	}
-}
-
-// TestSafeGitEnv_ForceDisablesTerminalPrompt verifies that GIT_TERMINAL_PROMPT
-// is always set to "0" in the output, even when the parent env has it set to
-// "1". This prevents git from blocking on a credential prompt when running
-// non-interactively (which would make the 2-minute clone timeout look like a
-// hang rather than an error).
-//
-// Revert proof: remove the `safe = append(safe, "GIT_TERMINAL_PROMPT=0")`
-// line in safeGitEnv(); this test fails because GIT_TERMINAL_PROMPT is absent
-// from the output, not "0".
-func TestSafeGitEnv_ForceDisablesTerminalPrompt(t *testing.T) {
-	// Whether or not the parent had GIT_TERMINAL_PROMPT set, the result
-	// must contain exactly "GIT_TERMINAL_PROMPT=0".
-	// (t.Setenv + t.Parallel are mutually exclusive; intentionally sequential)
-	t.Setenv("GIT_TERMINAL_PROMPT", "1") // hostile parent value
-
-	env := safeGitEnv()
-
-	count := 0
-	found := false
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
-			count++
-			if kv == "GIT_TERMINAL_PROMPT=0" {
-				found = true
-			}
-		}
-	}
-	assert.True(t, found, "GIT_TERMINAL_PROMPT=0 must be present in safeGitEnv() output")
-	assert.Equal(t, 1, count, "GIT_TERMINAL_PROMPT must appear exactly once (no duplicates)")
-}
-
-// TestSafeGitEnv_PreservesPathAndHome verifies that safeGitEnv() retains the
-// vars that legitimate git operations depend on. Stripping PATH would prevent
-// git from finding ssh; stripping HOME would break the credential helper lookup
-// and ~/.gitconfig loading.
-func TestSafeGitEnv_PreservesPathAndHome(t *testing.T) {
-	// Inject known values so the assertion is deterministic regardless of the
-	// actual test environment.
-	// (t.Setenv + t.Parallel are mutually exclusive; intentionally sequential)
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
-	t.Setenv("HOME", "/home/testuser")
-
-	env := safeGitEnv()
-
-	envMap := make(map[string]string, len(env))
-	for _, kv := range env {
-		idx := strings.IndexByte(kv, '=')
-		if idx < 0 {
-			continue
-		}
-		envMap[kv[:idx]] = kv[idx+1:]
-	}
-
-	assert.Equal(t, "/usr/local/bin:/usr/bin:/bin", envMap["PATH"],
-		"PATH must be preserved in safeGitEnv() output")
-	assert.Equal(t, "/home/testuser", envMap["HOME"],
-		"HOME must be preserved in safeGitEnv() output")
-}
-
-// TestSafeGitEnv_CloneInheritsCleanEnv is an end-to-end regression test that
-// confirms safeGitEnv() strips the dangerous vars and that applyClone's
-// happy path still works after the env filtering. Exercises the invariant
-// in two halves: (1) safeGitEnv() output is sanitized, (2) applyClone
-// runs cleanly with --clone-dir while a dangerous env var is present.
-//
-// NOTE: Uses t.Setenv, which panics if a test also calls t.Parallel().
-// Keep this test sequential.
-func TestSafeGitEnv_CloneInheritsCleanEnv(t *testing.T) {
-	// Inject a dangerous var so we can verify it is stripped.
-	t.Setenv("GIT_SSH_COMMAND", "evil-binary --steal-credentials")
-
-	parent := t.TempDir()
-
-	// Half 1: verify safeGitEnv() directly strips the dangerous var.
-	env := safeGitEnv()
-	for _, kv := range env {
-		idx := strings.IndexByte(kv, '=')
-		key := kv
-		if idx >= 0 {
-			key = kv[:idx]
-		}
-		assert.NotEqual(t, "GIT_SSH_COMMAND", key,
-			"GIT_SSH_COMMAND must not be passed to git subprocess")
-	}
-
-	// Half 2: verify that applyClone's happy path still runs when a
-	// dangerous env var is present. The injected RunGitClone doesn't
-	// use safeGitEnv itself — the test here is that the stripping
-	// function doesn't cause applyClone to err out on a clean URL.
-	cmd := &HandoffCmd{
-		Role:     "security",
-		Target:   "https://github.com/nvbn/thefuck",
-		CloneDir: parent,
-		Language: "python",
-		Output:   filepath.Join(t.TempDir(), "out.md"),
-		Quiet:    true,
-		RunGitClone: func(_ context.Context, _, dest, _ string) error {
-			return os.MkdirAll(dest, 0o755)
-		},
-	}
-	require.NoError(t, cmd.Run(&Globals{}),
-		"safeGitEnv() must not break the happy clone path")
+	// PATH must survive — the child needs it to locate ssh, helpers,
+	// etc. Verifies gitenv.SafeEnv didn't accidentally over-strip.
+	assert.NotEmpty(t, env["PATH"], "PATH must be preserved in child env")
+	// GIT_TERMINAL_PROMPT is force-set to 0 by gitenv.SafeEnv to
+	// prevent the child from blocking on a credential prompt.
+	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
+		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
 }
 
 // TestCaptureStream_DrainGoroutineTerminatesOnClose verifies that captureStream's

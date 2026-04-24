@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,7 +264,10 @@ func TestCollector_TagSampleCap_BoundsSampleSize(t *testing.T) {
 func writeFakeSignedTag(t *testing.T, repo, name string) {
 	t.Helper()
 
-	headOut, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output() //nolint:gosec // G204: test helper
+	//nolint:gosec // G204: test helper
+	headCmd := exec.Command("git", "-C", repo, "rev-parse", "HEAD")
+	headCmd.Env = gitenv.SafeEnv()
+	headOut, err := headCmd.Output()
 	require.NoError(t, err)
 	headSha := strings.TrimSpace(string(headOut))
 
@@ -281,6 +285,7 @@ ZmFrZXNpZ25hdHVyZWJhc2U2NGRhdGE=
 `, headSha, name, name)
 
 	hashCmd := exec.Command("git", "-C", repo, "hash-object", "-w", "-t", "tag", "--stdin") //nolint:gosec // G204: test helper
+	hashCmd.Env = gitenv.SafeEnv()
 	hashCmd.Stdin = strings.NewReader(tagBody)
 	hashOut, err := hashCmd.Output()
 	require.NoError(t, err, "hash-object failed")

@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+
+	"github.com/sarahmaeve/signatory/internal/gitenv"
 )
 
 // runGit executes `git -C <repoPath> <args...>` with the supplied
@@ -25,6 +27,15 @@ import (
 //     signatory-analyze layer). Passing a user-controlled path
 //     to `git -C` is safe: git treats the path as a chdir
 //     target, not as a command.
+//   - cmd.Env is set to gitenv.SafeEnv(), which strips GIT_DIR,
+//     GIT_CONFIG_*, GIT_SSH_COMMAND, and the rest of the
+//     documented config-injection / redirection interface.
+//     Without this, an ambient GIT_DIR would override the -C
+//     flag's scope and cause every signal this collector emits
+//     to be collected from the wrong repository — a silent
+//     trust-model violation (attribution without grounding).
+//     The 2026-04-24 postmortem traced shared-config corruption
+//     to exactly this class of vector in the sibling test helpers.
 //
 // Stderr is captured, not streamed, so tests and callers can
 // inspect the exact git error message. On an empty repo or a
@@ -45,8 +56,9 @@ func runGit(ctx context.Context, repoPath string, args ...string) ([]byte, error
 	full = append(full, "-C", repoPath)
 	full = append(full, args...)
 
-	//nolint:gosec // G204: argv-form exec of a string-literal binary ("git"); all positional args are caller-controlled but never shell-interpreted
+	//nolint:gosec // G204: argv-form exec of a string-literal binary ("git"); all positional args are caller-controlled but never shell-interpreted; env sanitized by gitenv.SafeEnv
 	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Env = gitenv.SafeEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
