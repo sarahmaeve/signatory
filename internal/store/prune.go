@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -72,7 +73,7 @@ func (s *SQLite) planOneEntity(ctx context.Context, entityID string) (*EntityPru
 		`SELECT canonical_uri, short_name FROM entities WHERE id = ?`,
 		entityID).Scan(&canonicalURI, &shortName)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
@@ -403,6 +404,7 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 			continue
 		}
 		placeholders := inPlaceholders(len(spec.ids))
+		//nolint:gosec // G202: placeholders is a generated (?,?,?) string from an integer count, not user input; actual values bind via ExecContext args below
 		q := `DELETE FROM citations WHERE parent_kind = ? AND parent_id IN ` + placeholders
 		args := append([]any{spec.kind}, toAnyArgs(spec.ids)...)
 		r, err := tx.ExecContext(ctx, q, args...)
