@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sarahmaeve/signatory/internal/manifest"
+	pypimanifest "github.com/sarahmaeve/signatory/internal/manifest/pypi"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -511,6 +513,103 @@ func TestRun_EmptyManifestPath(t *testing.T) {
 	_, err := Run(context.Background(), s, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "required")
+}
+
+// TestRun_RequirementsTxt_RoutesToPyPIParser covers PyPI's survey
+// integration: a requirements.txt manifest reaches the pypi parser,
+// produces pkg:pypi/ canonical URIs (PEP 503 normalized), and tiers
+// resolve against the store like other ecosystems do.
+func TestRun_RequirementsTxt_RoutesToPyPIParser(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.txt")
+	// Includes a mixed-case name to exercise PEP 503 normalization
+	// of the canonical URI through the full pipeline.
+	require.NoError(t, os.WriteFile(path, []byte(
+		"requests==2.31.0\n"+
+			"Python-Dotenv==1.0.0\n",
+	), 0o600))
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	// Project info: requirements.txt has no project identity, so
+	// Name and EcoVersion are empty; only the ecosystem and
+	// manifest path get populated.
+	assert.Empty(t, r.Project.Name, "requirements.txt declares no project name")
+	assert.Equal(t, "pypi", r.Project.Ecosystem)
+	assert.Empty(t, r.Project.EcoVersion)
+
+	assert.Equal(t, 2, r.Summary.Total)
+	assert.Equal(t, 2, r.Summary.Direct)
+	assert.Equal(t, 2, r.Summary.ByTier[TierNotInStore])
+
+	assert.ElementsMatch(t,
+		[]string{"pkg:pypi/requests", "pkg:pypi/python-dotenv"},
+		r.Summary.NeedsReview,
+		"PEP 503 normalization must apply to the canonical URI surfaced for review")
+}
+
+// TestRun_PyProjectTOML_FailsWithSentinel verifies that a
+// pyproject.toml manifest fails at parse-dispatch with the
+// not-yet-implemented sentinel surfaced in the error chain. This
+// is the temporary state until the pyproject.toml parser lands.
+func TestRun_PyProjectTOML_FailsWithSentinel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyproject.toml")
+	require.NoError(t, os.WriteFile(path, []byte("[project]\nname = \"x\"\n"), 0o600))
+
+	s := openTestStore(t)
+	_, err := Run(context.Background(), s, path)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pypimanifest.ErrPyProjectTOMLNotYetSupported,
+		"pypi sentinel must remain in the chain so callers can render a specific message")
+}
+
+// TestRun_SetupPy_FailsWithRedirect verifies that setup.py errors
+// out clearly and points the user at parseable alternatives.
+// signatory will never parse setup.py — it's executable Python by
+// design — so this isn't a temporary state, it's a permanent
+// "use a different file" message.
+func TestRun_SetupPy_FailsWithRedirect(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "setup.py")
+	require.NoError(t, os.WriteFile(path, []byte("from setuptools import setup\nsetup()\n"), 0o600))
+
+	s := openTestStore(t)
+	_, err := Run(context.Background(), s, path)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pypimanifest.ErrSetupPyNotParseable)
+	assert.Contains(t, err.Error(), "pyproject.toml",
+		"setup.py error must redirect users to a statically parseable alternative")
+	assert.Contains(t, err.Error(), "requirements.txt")
+}
+
+// TestParseGraph_PyPIReturnsGraphUnavailable covers parseGraph's
+// dispatch for the three PyPI filenames. Graph extraction isn't
+// implemented for any PyPI manifest yet (lockfile parsing is the
+// path; see design/potential-pypi.md Layer 3 §"Graph extraction").
+// All three should land on ErrGraphUnavailable with the
+// pypi-specific message rather than the "unrecognized" default.
+func TestParseGraph_PyPIReturnsGraphUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, base := range []string{"requirements.txt", "pyproject.toml", "setup.py"} {
+		base := base
+		t.Run(base, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseGraph(context.Background(), filepath.Join("/some/dir", base))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, manifest.ErrGraphUnavailable)
+			assert.Contains(t, err.Error(), "pypi",
+				"error should attribute the gap to pypi, not 'unrecognized'")
+		})
+	}
 }
 
 // TestPostureTierMapping locks in the profile → survey enum

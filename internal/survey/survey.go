@@ -9,6 +9,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/manifest"
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	npmmanifest "github.com/sarahmaeve/signatory/internal/manifest/npm"
+	pypimanifest "github.com/sarahmaeve/signatory/internal/manifest/pypi"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -18,7 +19,9 @@ import (
 // Steps:
 //
 //  1. Parse the manifest at manifestPath (ecosystem determined
-//     by file suffix — only go.mod in v0.1).
+//     by file suffix — go.mod, package.json, requirements.txt
+//     in v0.1; pyproject.toml and setup.py are recognized but
+//     surface explanatory errors until their parsers land).
 //  2. For each dep, look up the entity in the store and resolve
 //     the tier per the rules in this package's doc.
 //  3. Aggregate counts into a Summary.
@@ -85,8 +88,9 @@ func Run(ctx context.Context, s store.Store, manifestPath string) (Result, error
 // parseGraph dispatches to the per-ecosystem graph parser based
 // on the manifest's filename. Mirrors parseManifest's dispatch
 // shape. Returns manifest.ErrGraphUnavailable for ecosystems
-// without graph extraction implemented (npm in v0.1 — follow-up
-// commit will land it).
+// without graph extraction implemented (npm and PyPI in v0.1 —
+// PyPI graph extraction will come from poetry.lock / uv.lock
+// parsing per design/potential-pypi.md Layer 3).
 func parseGraph(ctx context.Context, path string) (manifest.Graph, error) {
 	if path == "" {
 		return manifest.Graph{}, fmt.Errorf("%w: manifest path is required",
@@ -98,6 +102,12 @@ func parseGraph(ctx context.Context, path string) (manifest.Graph, error) {
 	case "package.json":
 		// npm graph extraction is a follow-up commit.
 		return manifest.Graph{}, fmt.Errorf("%w: npm graph extraction is a v0.1 follow-up",
+			manifest.ErrGraphUnavailable)
+	case "requirements.txt", "pyproject.toml", "setup.py":
+		// PyPI graph extraction depends on lockfile parsing (poetry.lock,
+		// uv.lock). Returning ErrGraphUnavailable lets survey degrade
+		// gracefully — reachability rendering falls back to no-graph mode.
+		return manifest.Graph{}, fmt.Errorf("%w: pypi graph extraction is a v0.1 follow-up",
 			manifest.ErrGraphUnavailable)
 	default:
 		return manifest.Graph{}, fmt.Errorf("%w: unrecognized manifest %q",
@@ -145,9 +155,11 @@ func populateReachability(g manifest.Graph, out *Result) {
 }
 
 // parseManifest dispatches to the correct parser based on the
-// manifest's filename. v0.1 supports Go (go.mod) and npm
-// (package.json); additional ecosystems extend the switch as
-// their parsers land.
+// manifest's filename. v0.1 supports Go (go.mod), npm
+// (package.json), and PyPI (requirements.txt as a deps-only
+// source; pyproject.toml and setup.py are recognized but
+// currently surface explanatory errors via pypimanifest.Parse).
+// Additional ecosystems extend the switch as their parsers land.
 //
 // Returns error on unrecognized manifest — callers should either
 // auto-detect via manifest.Detect (which already filters to known
@@ -162,8 +174,14 @@ func parseManifest(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 		return gomod.Parse(path)
 	case "package.json":
 		return npmmanifest.Parse(path)
+	case "requirements.txt", "pyproject.toml", "setup.py":
+		return pypimanifest.Parse(path)
 	default:
-		return manifest.ProjectInfo{}, nil, fmt.Errorf("unrecognized manifest filename %q (supported in v0.1: go.mod, package.json)", base)
+		return manifest.ProjectInfo{}, nil, fmt.Errorf(
+			"unrecognized manifest filename %q "+
+				"(supported in v0.1: go.mod, package.json, requirements.txt; "+
+				"recognized but not yet parsed: pyproject.toml, setup.py)",
+			base)
 	}
 }
 
