@@ -38,9 +38,37 @@ func TestCanonicalRepoURI(t *testing.T) {
 		CanonicalRepoURI("gitlab", "acme", "secret"))
 }
 
+// TestCanonicalRepoURI_LowercasesOwnerAndName documents that owner
+// and name are case-folded for case-insensitive platforms (GitHub
+// and GitLab both treat these path components as case-insensitive
+// at the API and git-clone layer). Without this, mixed-case input
+// produces a different canonical URI than lowercase input even
+// though they reference the same real-world entity, fragmenting
+// the store. See design/dogfood-errors.md "GitHub URI case-folding
+// diverges from canonical form".
+func TestCanonicalRepoURI_LowercasesOwnerAndName(t *testing.T) {
+	assert.Equal(t, "repo:github/burntsushi/toml",
+		CanonicalRepoURI("github", "BurntSushi", "toml"),
+		"owner case-folded")
+	assert.Equal(t, "repo:github/burntsushi/toml",
+		CanonicalRepoURI("github", "burntsushi", "TOML"),
+		"name case-folded")
+	assert.Equal(t, "repo:github/burntsushi/toml",
+		CanonicalRepoURI("github", "BURNTSUSHI", "TOML"),
+		"both case-folded")
+}
+
 func TestCanonicalIdentityURI(t *testing.T) {
 	assert.Equal(t, "identity:github/alecthomas",
 		CanonicalIdentityURI("github", "alecthomas"))
+}
+
+// TestCanonicalIdentityURI_LowercasesUser — same case-fold rule
+// for identities. GitHub usernames are case-insensitive on the
+// platform side; npm normalizes to lowercase too.
+func TestCanonicalIdentityURI_LowercasesUser(t *testing.T) {
+	assert.Equal(t, "identity:github/burntsushi",
+		CanonicalIdentityURI("github", "BurntSushi"))
 }
 
 func TestCanonicalOrgURI(t *testing.T) {
@@ -48,9 +76,25 @@ func TestCanonicalOrgURI(t *testing.T) {
 		CanonicalOrgURI("github", "stretchr"))
 }
 
+// TestCanonicalOrgURI_LowercasesName — same case-fold rule for
+// org URIs.
+func TestCanonicalOrgURI_LowercasesName(t *testing.T) {
+	assert.Equal(t, "org:github/textualize",
+		CanonicalOrgURI("github", "Textualize"))
+}
+
 func TestCanonicalPatchURI(t *testing.T) {
 	assert.Equal(t, "patch:github/alecthomas/kong/593",
 		CanonicalPatchURI("github", "alecthomas", "kong", "593"))
+}
+
+// TestCanonicalPatchURI_LowercasesOwnerAndRepo — same case-fold
+// rule for patch URIs on the owner+repo segments. The id is
+// preserved verbatim (typically numeric, but case-irrelevant by
+// nature of being an ID rather than a path component).
+func TestCanonicalPatchURI_LowercasesOwnerAndRepo(t *testing.T) {
+	assert.Equal(t, "patch:github/burntsushi/toml/42",
+		CanonicalPatchURI("github", "BurntSushi", "TOML", "42"))
 }
 
 func TestNormalizeGitHubRepoInput(t *testing.T) {
@@ -147,6 +191,14 @@ func TestNormalizeGitHubRepoInput(t *testing.T) {
 // input forms collapse to the SAME canonical URI — this is the whole
 // reason the function exists. Fragmenting duplicate entities across
 // input variants is issue #53.
+//
+// Case variants are part of the equivalence set: GitHub treats owner
+// and repo names as case-insensitive at the API and git-clone layer
+// (`https://github.com/burntsushi/toml` and `.../BurntSushi/toml`
+// resolve to the same repository). Pre-fix this function preserved
+// user-typed case verbatim, producing two distinct canonical URIs
+// for one real-world repo and fragmenting the store. See
+// design/dogfood-errors.md.
 func TestNormalizeGitHubRepoInput_Stable(t *testing.T) {
 	inputs := []string{
 		"alecthomas/kong",
@@ -158,6 +210,12 @@ func TestNormalizeGitHubRepoInput_Stable(t *testing.T) {
 		"git@github.com:alecthomas/kong",
 		"www.github.com/alecthomas/kong",
 		"  alecthomas/kong  ",
+		// Case variants — must collapse to the lowercase form.
+		"Alecthomas/kong",
+		"alecthomas/Kong",
+		"ALECTHOMAS/KONG",
+		"https://github.com/Alecthomas/Kong",
+		"git@github.com:ALECTHOMAS/KONG",
 	}
 	var first string
 	for i, input := range inputs {

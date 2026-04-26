@@ -153,30 +153,47 @@ func CanonicalPackageURI(ecosystem, name string) string {
 // Example: CanonicalRepoURI("github", "alecthomas", "kong") →
 // "repo:github/alecthomas/kong".
 //
-// Platform is lowercased; owner and name are preserved as-is.
+// Platform, owner, and name are all lowercased. The platforms we
+// support today (GitHub, GitLab) are case-insensitive on owner+repo
+// path segments at both the API and git-clone layer, so equivalent
+// real-world references (BurntSushi/toml, burntsushi/toml,
+// BURNTSUSHI/TOML) must collapse to one canonical URI to prevent
+// fragmenting one entity across multiple store rows. If a future
+// supported platform is genuinely case-sensitive on owner/name,
+// this function gains a platform-aware branch.
 func CanonicalRepoURI(platform, owner, name string) string {
-	return URISchemeRepo + strings.ToLower(platform) + "/" + owner + "/" + name
+	return URISchemeRepo + strings.ToLower(platform) + "/" +
+		strings.ToLower(owner) + "/" + strings.ToLower(name)
 }
 
 // CanonicalIdentityURI returns the canonical URI for a contributor
 // identity. Example: CanonicalIdentityURI("github", "alecthomas") →
 // "identity:github/alecthomas".
+//
+// User is lowercased — see CanonicalRepoURI for rationale.
 func CanonicalIdentityURI(platform, user string) string {
-	return URISchemeIdentity + strings.ToLower(platform) + "/" + user
+	return URISchemeIdentity + strings.ToLower(platform) + "/" + strings.ToLower(user)
 }
 
 // CanonicalOrgURI returns the canonical URI for an organization.
 // Example: CanonicalOrgURI("github", "stretchr") →
 // "org:github/stretchr".
+//
+// Name is lowercased — see CanonicalRepoURI for rationale.
 func CanonicalOrgURI(platform, name string) string {
-	return URISchemeOrg + strings.ToLower(platform) + "/" + name
+	return URISchemeOrg + strings.ToLower(platform) + "/" + strings.ToLower(name)
 }
 
 // CanonicalPatchURI returns the canonical URI for a patch (PR/MR).
 // Example: CanonicalPatchURI("github", "alecthomas", "kong", "593") →
 // "patch:github/alecthomas/kong/593".
+//
+// Owner and repo are lowercased — see CanonicalRepoURI for rationale.
+// The id is preserved verbatim (typically numeric; case-irrelevant
+// by nature of being an ID rather than a path segment).
 func CanonicalPatchURI(platform, owner, repo, id string) string {
-	return URISchemePatch + strings.ToLower(platform) + "/" + owner + "/" + repo + "/" + id
+	return URISchemePatch + strings.ToLower(platform) + "/" +
+		strings.ToLower(owner) + "/" + strings.ToLower(repo) + "/" + id
 }
 
 // NormalizeGitHubRepoInput takes user-supplied input that refers to a
