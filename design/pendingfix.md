@@ -300,20 +300,6 @@ Each item has:
   the rationale prose. Grep for "reviewer F" and "config reviewer"
   to find them.
 
-### Magic 2-minute clone timeout
-
-- **Source:** unaided cmd reviewer 2026-04-14 (F9, deferred)
-- **Severity:** nice-to-have
-- **Where:** `cmd/signatory/handoff.go:applyClone`
-- **Sketch:** `context.WithTimeout(ctx, 2*time.Minute)` is a buried
-  magic constant. Failure mode on timeout is "git clone failed:
-  context deadline exceeded" — not legible as "signatory killed git
-  after 2 minutes". Extract to a named constant
-  (`defaultCloneTimeout = 2 * time.Minute`) at package level. Wrap
-  the timeout error with "clone exceeded 2m timeout; if this is a
-  slow network or large repo, clone manually and pass --path".
-  Optional follow-up: a `--clone-timeout` flag.
-
 ### `ClassifyTarget` error message points the wrong way
 
 - **Source:** unaided cmd reviewer 2026-04-14 (F5, deferred)

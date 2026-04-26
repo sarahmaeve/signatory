@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
@@ -1504,6 +1505,124 @@ func TestClone_GuardFiresWhenNameValidationLoosens(t *testing.T) {
 	assert.NotEqual(t, "..", rel)
 	assert.False(t, strings.HasPrefix(rel, ".."+string(filepath.Separator)),
 		"dest %q must not be outside parent %q (rel=%q)", gotDest, resolvedParent, rel)
+}
+
+// --- defaultCloneTimeout / wrapCloneTimeoutError ----------------------------
+//
+// applyClone bounds each `git clone` invocation at defaultCloneTimeout
+// (2m). When that timer fires, exec.CommandContext sends SIGKILL and
+// the bare error reaching the operator is "git clone failed: signal:
+// killed" — accurate but uninformative about WHY git was killed.
+// wrapCloneTimeoutError augments the error with the policy context
+// ("exceeded signatory's 2m0s timeout") and an actionable
+// workaround ("pass --path with a pre-cloned tree to bypass") when —
+// and only when — signatory's own deadline was the cause.
+//
+// The helper is small but the truth table around it has four
+// distinct shapes, so we exercise them as a table:
+//
+//   1. child timed out, parent alive    → wrap (our deadline fired)
+//   2. child timed out, parent timed out → do NOT wrap (parent
+//      deadline propagated; blaming our 2m would mislead)
+//   3. child canceled (not timed out)   → do NOT wrap (caller cause)
+//   4. healthy contexts                 → do NOT wrap (real git error)
+//
+// The test never starts a real git subprocess. It builds contexts
+// in each shape via context.WithDeadline / context.WithCancel and
+// verifies the helper's classification. Pure-function unit test;
+// no fake-git shim, no t.Setenv, t.Parallel-safe.
+
+// TestWrapCloneTimeoutError_TruthTable locks the four-shape policy
+// the helper enforces. See the comment above for the shape names
+// and rationale.
+//
+// Revert proof: change the helper's gate from "child DeadlineExceeded
+// AND parent alive" to "child DeadlineExceeded" (drop the parent
+// check); the parent-also-timed-out case starts wrapping incorrectly.
+func TestWrapCloneTimeoutError_TruthTable(t *testing.T) {
+	t.Parallel()
+
+	underlying := errors.New("git clone failed: signal: killed")
+	target := "https://example.invalid/repo.git"
+
+	// Build each context shape inline so the table reads as the
+	// truth table. Past deadlines instantiate
+	// context.DeadlineExceeded immediately — no time.Sleep needed.
+	pastDeadline := time.Now().Add(-1 * time.Millisecond)
+
+	cases := []struct {
+		name                string
+		cloneCtx, parentCtx context.Context
+		wantWrap            bool
+	}{
+		{
+			name: "child timed out, parent alive — wraps",
+			cloneCtx: func() context.Context {
+				c, cancel := context.WithDeadline(context.Background(), pastDeadline)
+				t.Cleanup(cancel)
+				return c
+			}(),
+			parentCtx: context.Background(),
+			wantWrap:  true,
+		},
+		{
+			name: "child timed out, parent also timed out — does not wrap",
+			parentCtx: func() context.Context {
+				p, cancel := context.WithDeadline(context.Background(), pastDeadline)
+				t.Cleanup(cancel)
+				return p
+			}(),
+			cloneCtx: func() context.Context {
+				p, pcancel := context.WithDeadline(context.Background(), pastDeadline)
+				t.Cleanup(pcancel)
+				c, ccancel := context.WithDeadline(p, pastDeadline)
+				t.Cleanup(ccancel)
+				return c
+			}(),
+			wantWrap: false,
+		},
+		{
+			name: "child canceled (not timed out), parent alive — does not wrap",
+			cloneCtx: func() context.Context {
+				c, cancel := context.WithCancel(context.Background())
+				cancel()
+				return c
+			}(),
+			parentCtx: context.Background(),
+			wantWrap:  false,
+		},
+		{
+			name:      "healthy contexts (real git error) — does not wrap",
+			cloneCtx:  context.Background(),
+			parentCtx: context.Background(),
+			wantWrap:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapCloneTimeoutError(target, tc.cloneCtx, tc.parentCtx, underlying)
+
+			// In every case, the underlying err must remain reachable
+			// via errors.Is — wrapping uses %w.
+			require.ErrorIs(t, got, underlying,
+				"wrapped err must preserve the underlying cause via errors.Is")
+
+			if tc.wantWrap {
+				assert.Contains(t, got.Error(), "exceeded signatory's",
+					"wrapped err must name signatory as the cause")
+				assert.Contains(t, got.Error(), defaultCloneTimeout.String(),
+					"wrapped err must surface the timeout duration")
+				assert.Contains(t, got.Error(), "--path",
+					"wrapped err must point at the actionable workaround")
+				assert.Contains(t, got.Error(), target,
+					"wrapped err must include the target URL for log triage")
+			} else {
+				assert.Equal(t, underlying, got,
+					"non-wrap path must propagate err unchanged (no message rewriting)")
+			}
+		})
+	}
 }
 
 // --- Security regression tests -----------------------------------------------

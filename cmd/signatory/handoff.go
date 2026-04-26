@@ -777,6 +777,50 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	return pkgDisclosure + formatPrecheckReport(owner, name, result, ecoApplied, langApplied) + langWarning, nil
 }
 
+// defaultCloneTimeout bounds the wall-clock budget applyClone gives
+// a single `git clone` invocation. The value is policy, not
+// hardening: when it fires, signatory has decided the operator is
+// better served by a clear "your clone exceeded N minutes" failure
+// than by hanging indefinitely. Picked at 2 minutes because that's
+// generous for a shallow clone of any project signatory typically
+// targets while still well under typical CI step deadlines.
+//
+// On timeout, applyClone wraps the underlying git error via
+// wrapCloneTimeoutError so the operator sees "exceeded signatory's
+// 2m0s timeout" rather than the bare "signal: killed" that
+// CommandContext+SIGKILL produces.
+//
+// Distinct from gitenv.WaitDelay, which bounds the *post-kill*
+// pipe-drain wait — that's hardening (preventing an indefinite
+// hang in cmd.Wait if a grandchild holds the pipes). The clone
+// timeout is the deadline policy that triggers the kill in the
+// first place.
+const defaultCloneTimeout = 2 * time.Minute
+
+// wrapCloneTimeoutError augments err with a human-legible
+// explanation when the cause was the defaultCloneTimeout firing
+// (and not a parent-context cancellation or some unrelated git
+// failure). Pure function — no side effects, no subprocess —
+// safe to test in isolation with hand-built contexts.
+//
+// The "child timed out AND parent is alive" gate distinguishes
+// "signatory's clone budget elapsed" from "the caller cancelled
+// us" or "the caller's deadline elapsed." When the caller's
+// context is already in error, we propagate err unchanged because
+// the caller already knows the real cause; blaming our clone
+// timeout would be misleading.
+//
+// Wrapping uses %w so callers can still errors.Is/As against the
+// underlying *exec.ExitError or context.DeadlineExceeded chain.
+func wrapCloneTimeoutError(target string, cloneCtx, parentCtx context.Context, err error) error {
+	if errors.Is(cloneCtx.Err(), context.DeadlineExceeded) && parentCtx.Err() == nil {
+		return fmt.Errorf(
+			"clone of %q exceeded signatory's %s timeout (pass --path with a pre-cloned tree to bypass): %w",
+			target, defaultCloneTimeout, err)
+	}
+	return err
+}
+
 // defaultGitClone is the production git-clone implementation that
 // applyClone falls back to when HandoffCmd.RunGitClone is nil. It is
 // a regular package-level function (not a var) to remove any
@@ -1003,9 +1047,9 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 		}
 	}
 
-	// Shallow clone with a 2-minute timeout. Use a child context so the
+	// Shallow clone with a bounded timeout. Use a child context so the
 	// timeout doesn't bleed into the rest of the Run() pipeline.
-	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	cloneCtx, cancel := context.WithTimeout(ctx, defaultCloneTimeout)
 	defer cancel()
 
 	// Validate the requested git ref before passing to clone. Empty
@@ -1021,7 +1065,7 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 		clone = defaultGitClone
 	}
 	if err := clone(cloneCtx, cmd.Target, destClean, cmd.requestedVersion); err != nil {
-		return "", "", err
+		return "", "", wrapCloneTimeoutError(cmd.Target, cloneCtx, ctx, err)
 	}
 
 	if cmd.requestedVersion != "" {
