@@ -17,33 +17,6 @@ Each item has:
 
 ## Security
 
-### `safeGitEnv` is a denylist; consider promoting to a whitelist
-
-- **Source:** skill-equipped cmd-adversarial agent 2026-04-14 (Bug 1
-  recommendation #2, deferred)
-- **Severity:** should-fix
-- **Where:** `cmd/signatory/handoff.go:safeGitEnv()`
-- **Sketch:** The current denylist strips the 13 documented dangerous
-  git env vars plus the bulk-injection prefixes. A whitelist (pass only
-  PATH, HOME, USER, SSH_AUTH_SOCK, SSL_CERT_*, REQUESTS_CA_BUNDLE,
-  XDG_*, TMPDIR) would be more robust against future git releases that
-  add new dangerous env vars we don't yet know to strip. Deferred at
-  the time because the whitelist needs careful cross-platform testing
-  to avoid breaking legitimate TLS/proxy setups.
-
-### `runGitClone` should set `WaitDelay` to bound subprocess cleanup
-
-- **Source:** skill-equipped cmd-adversarial agent 2026-04-14
-  (recommendation #1, deferred)
-- **Severity:** nice-to-have
-- **Where:** `cmd/signatory/handoff.go:runGitClone`
-- **Sketch:** When the 2-minute context expires, Go SIGKILLs git
-  correctly, but git may have already spawned an `ssh` child that
-  doesn't inherit the kill. Setting `cmd.WaitDelay = 5 * time.Second`
-  bounds the time spent waiting for I/O pipes to drain after kill. Low
-  priority for a CLI tool today but worth adding before signatory
-  spawns more subprocesses or ships as an MCP server.
-
 ### Token leakage path in `applyNetworkPrecheck` errors
 
 - **Source:** unaided cmd-adversarial agent 2026-04-14 (priority 1
@@ -51,11 +24,14 @@ Each item has:
 - **Severity:** should-fix
 - **Where:** `internal/signal/github/client.go` error wrapping
 - **Sketch:** `ghclient.Client` propagates transport-layer errors
-  verbatim. A misconfigured proxy or hostile MITM that echoes
-  `Authorization: Bearer ghp_…` in an error body would NOT leak today
-  because `Client.get` discards response bodies on non-200, but a
-  transport-layer error (DNS failure, TLS error) that embeds the
-  request URL or headers in its message could. Add a
+  verbatim via `fmt.Errorf("execute request: %w", err)` (see
+  `client.go:240`, `client.go:300`). The response-body leak path is
+  closed (issue #93 — non-200 bodies are dropped, status code only),
+  but a transport-layer error (DNS failure, TLS error, timeout) can
+  still wrap an underlying error string that — depending on the
+  transport implementation — may include URL or proxy detail. The
+  bearer token is in the `Authorization` header, never the URL, so the
+  practical leak window is narrow today. Defense-in-depth: add a
   `sanitizeError(err, token) error` helper in the github package that
   scans error strings for the token value and redacts it. Apply at
   every error-return path in `client.go`.
@@ -117,18 +93,6 @@ Each item has:
   `--show-template <name>` that prints the raw template file for
   inspection. Unlocks self-service template debugging.
 
-### `tryOpenFile` fd-stat discipline is undocumented
-
-- **Source:** skill-equipped Opus reviewer 2026-04-14 (F4)
-- **Severity:** nice-to-have
-- **Where:** `internal/config/resolver.go:tryOpenFile`
-- **Sketch:** Current code uses `f.Stat()` on the open fd (correct —
-  avoids the open-then-replace-with-directory TOCTOU). A future
-  contributor "simplifying" this to `os.Stat(path)` first would
-  re-introduce the race. Add a one-line comment above the function:
-  `// Uses f.Stat() on the open fd (not os.Stat(path)) to avoid the
-  open-then-replace-with-directory TOCTOU.`
-
 ### `validateRelName`: rewrite as a whitelist instead of layered blacklist
 
 - **Source:** unaided config reviewer 2026-04-14 (F5, deferred)
@@ -173,27 +137,35 @@ Each item has:
   regression. No action until we observe a legitimate frame near the
   limit.
 
-### golangci-lint baseline has ~32 pre-existing issues outside MCP
+### golangci-lint baseline has ~24 pre-existing issues across cmd + internal
 
-- **Source:** noticed while wiring up `make check` on 2026-04-15
+- **Source:** noticed while wiring up `make check` on 2026-04-15;
+  re-baselined 2026-04-25
 - **Severity:** should-fix (batch cleanup, not urgent)
-- **Where:** `internal/store/sqlite.go`, `internal/store/analyst_output.go`,
-  `cmd/signatory/format_check.go`, `cmd/signatory/handoff.go`,
-  `cmd/signatory/ingest.go`, `internal/config/toml.go`
-- **Sketch:** Running `golangci-lint run ./...` today reports about 30
-  errcheck violations (nearly all `defer x.Close()` where the close
-  error is dropped) and two staticcheck quick-fix nits (`QF1002`
-  tagged-switch suggestion in `toml.go:349`, `QF1011` redundant type
-  in `analyst_output.go:564`). The MCP packages are clean; the
-  backlog is entirely older non-MCP code. Plan: one dedicated
-  commit that (a) wraps the `defer x.Close()` sites in a
-  `_ = x.Close()` pattern or equivalent with short `//nolint:errcheck
-  // <reason>` annotations where dropping genuinely is fine, and
-  (b) accepts the two staticcheck suggestions. CI does not currently
-  gate on golangci-lint, so the baseline went stale without a forcing
-  function — this fix should land alongside a CI addition so the
-  baseline can't regrow silently. `make lint` in the Makefile serves
-  as the local-dev forcing function until CI catches up.
+- **Where:** `cmd/signatory/serve_lifecycle.go` (noctx + unused),
+  `cmd/signatory/handoff_deposit_test.go` (noctx),
+  `cmd/signatory/functional_test.go` (noctx),
+  `cmd/signatory/posture.go` (staticcheck QF1002),
+  `internal/pipeline/client.go` (nilerr + gosec G402 annotated),
+  `internal/survey/survey.go` (nilerr), plus the residual errcheck
+  set across `internal/store/`, `cmd/signatory/handoff.go`, etc.
+- **Sketch:** Running `golangci-lint run ./...` today reports 24
+  issues: 9 noctx (stdlib calls that should use the *Context variant
+  — `exec.CommandContext`, `net.Dialer.DialContext`, `http.Client.Do`
+  with a request, `sql.QueryRowContext`), 7 errcheck (mostly the
+  `defer x.Close()` pattern that's harmless on read paths but
+  un-annotated), 2 nilerr (early-return paths that swallow `err`
+  before returning `nil`), 2 unused (dead `defaultPidPath` /
+  `defaultLogPath` constants in `serve_lifecycle.go`), 2 gosec, 1
+  staticcheck QF1002, 1 bodyclose. The earlier-noted toml.go QF1002
+  and analyst_output.go QF1011 are already fixed. Plan: split into
+  three small commits — (1) noctx pass (mechanical, propagates
+  context already in scope), (2) nilerr + unused + staticcheck
+  (small targeted fixes), (3) errcheck pass with `//nolint:errcheck
+  // <reason>` annotations. CI does not currently gate on
+  golangci-lint; pair this cleanup with a CI addition so the
+  baseline can't regrow silently. `make lint` is the local-dev
+  forcing function in the meantime.
 
 ## Test quality
 
@@ -229,7 +201,7 @@ Each item has:
 
 - **Source:** skill-equipped Opus reviewer 2026-04-14 (F12)
 - **Severity:** nice-to-have
-- **Where:** `cmd/signatory/handoff_test.go:497` —
+- **Where:** `cmd/signatory/handoff_test.go:701` —
   `assert.Contains(t, string(body), "go")`
 - **Sketch:** "go" appears in the provenance template in many places
   (links, prose). The assertion would pass even if the `{ECOSYSTEM}`
@@ -250,17 +222,6 @@ Each item has:
   refactor to direct `[]string` iteration could regress. Add
   `TestClassifyRootFiles_DedupesRepeatedNames` asserting a single
   result for `[]string{"go.mod", "go.mod"}`.
-
-### `writeHandoff` swallows close errors
-
-- **Source:** skill-equipped config-adversarial agent 2026-04-14
-  (recommendation #3, deferred)
-- **Severity:** nice-to-have
-- **Where:** `cmd/signatory/handoff.go:writeHandoff`
-- **Sketch:** `defer f.Close()` ignores the close error. On NFS or
-  distributed filesystems, a close error indicates data didn't flush
-  to disk. Capture the close error explicitly and surface if the
-  write succeeded but close failed — better silent corruption story.
 
 ## Templates / schema
 

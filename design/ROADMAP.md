@@ -13,7 +13,7 @@ Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-fac
 - **`signatory serve`.** Pipeline message service with start/stop/status/restart/logs subcommands.
 - **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm + Go aware via M3), `--clone-dir`, `--deposit-to` (posts rendered handoff directly into a pipeline session, replacing the former `--json` + curl shell-glue path).
 - **`signatory ingest` + `format-check`.** Analyst output validation and ingestion.
-- **`/analyze` skill.** LLM-orchestrated pipeline: session → handoff → parallel analyst dispatch → verify → synthesize. Candidate for retirement in M8 (see below).
+- **`/analyze` skill.** LLM-orchestrated pipeline: session → handoff → parallel analyst dispatch → verify → synthesize.
 - **Git signal collector.** Identity signals (mailmap, domain, concentration), commit-signing, tag-signing, first-commit-date.
 - **v0.1 architectural invariants** (Invariant 1–4) with CI enforcement.
 - **109+ tests** with race detection, pre-commit hooks (gofmt + vet + race).
@@ -36,11 +36,10 @@ V0.1 blocks until every item in this section is complete. Order within each subs
 
 ### Agent-facing contract milestones
 
-Seven of eight milestones shipped (M1, M5, M4, M3, M2, M7, M6 — see Shipped section above). Remaining, ordered by dependency:
+All seven milestones shipped (M1, M2, M3, M4, M5, M6, M7 — see Shipped section above). Remaining follow-ups:
 
-- **M8 — `/analyze` retirement.** Originally scoped as porting the 150-line bash orchestration into `signatory run analysis <target>`. **Re-examine after M6 dogfood (2026-04-21).** M6 already consumed most of the orchestration — the remaining bash in the skill is ~30 lines, and the "human + LLM same entry point" framing doesn't hold under v0.1 Invariant 1 (no direct LLM API; reasoning still needs Claude Code). Before investing ~400 LOC + ~500 LOC tests in M8's state machine, run M6 end-to-end against a real target and let findings shape whether the remaining bash is worth porting, or whether a different shape (chunked evidence delivery, different transport, etc.) is the real pressure. Tracked for post-dogfood decision.
 - **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.
-- ~~**Follow-up: /analyze skill update to pass --as.**~~ Shipped 2026-04-21. Both analyst prompts now carry `collected_from: "{TARGET}"` when calling `signatory_ingest_analysis`; the orchestrator substitutes `$TARGET` into the prompt at dispatch time. Step 3 verification now queries under `$TARGET` to match. Closes the M2 dogfood loop until M8 retires the skill.
+- ~~**Follow-up: /analyze skill update to pass --as.**~~ Shipped 2026-04-21. Both analyst prompts now carry `collected_from: "{TARGET}"` when calling `signatory_ingest_analysis`; the orchestrator substitutes `$TARGET` into the prompt at dispatch time. Step 3 verification now queries under `$TARGET` to match. Closes the M2 dogfood loop.
 
 ### Ecosystem providers
 
