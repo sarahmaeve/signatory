@@ -37,7 +37,87 @@ func TestDetect_NoManifest(t *testing.T) {
 	assert.Contains(t, err.Error(), "go.mod",
 		"error should list candidate filenames so users know what to add")
 	assert.Contains(t, err.Error(), "package.json",
-		"error should mention npm alongside go now that Detect supports both")
+		"error should mention npm alongside go")
+	assert.Contains(t, err.Error(), "pyproject.toml",
+		"error should mention pyproject.toml now that Detect recognizes Python projects")
+}
+
+func TestDetect_FindsPyProjectTOML(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pyProjectPath := filepath.Join(dir, "pyproject.toml")
+	require.NoError(t, os.WriteFile(pyProjectPath, []byte("[project]\nname = \"x\"\n"), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", ecosystem)
+	assert.Equal(t, "pyproject.toml", filepath.Base(path))
+}
+
+func TestDetect_FindsSetupPy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	setupPyPath := filepath.Join(dir, "setup.py")
+	require.NoError(t, os.WriteFile(setupPyPath, []byte("from setuptools import setup\nsetup(name='x')\n"), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", ecosystem)
+	assert.Equal(t, "setup.py", filepath.Base(path))
+}
+
+func TestDetect_FindsRequirementsTxt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	reqPath := filepath.Join(dir, "requirements.txt")
+	require.NoError(t, os.WriteFile(reqPath, []byte("requests==2.31.0\n"), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", ecosystem)
+	assert.Equal(t, "requirements.txt", filepath.Base(path))
+}
+
+// TestDetect_PyProjectTOMLWinsOverSetupPy documents that within the
+// PyPI ecosystem, the modern PEP 621 manifest is preferred over the
+// legacy setup.py when both exist. This isn't an arbitrary tie-break:
+// pyproject.toml carries declarative metadata that's safe to parse,
+// whereas setup.py is Python source that can't be read deterministically
+// without execution.
+func TestDetect_PyProjectTOMLWinsOverSetupPy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname = \"x\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "setup.py"), []byte("setup()\n"), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", ecosystem)
+	assert.Equal(t, "pyproject.toml", filepath.Base(path),
+		"pyproject.toml is the modern PEP 621 source of truth and must win over legacy setup.py")
+}
+
+// TestDetect_PyProjectTOMLWinsOverRequirementsTxt documents that a
+// project manifest beats a deps-only file when both are present.
+// requirements.txt carries no project identity and is often a
+// derived artifact (pip-compile output, dev-only); falling through
+// to it when pyproject.toml exists would be a regression.
+func TestDetect_PyProjectTOMLWinsOverRequirementsTxt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname = \"x\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("requests\n"), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", ecosystem)
+	assert.Equal(t, "pyproject.toml", filepath.Base(path),
+		"a project manifest must win over a deps-only requirements.txt")
 }
 
 func TestDetect_FindsPackageJSON(t *testing.T) {
