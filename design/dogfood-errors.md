@@ -106,6 +106,35 @@ Each item has:
     root cause as the rollup-misses-synthesis bug above; fix
     once, both surfaces light up.
 
+## Pending verifications
+
+Items where a fix has shipped but live end-to-end verification
+through the MCP surface is blocked on session lifecycle (the
+MCP server is long-lived and spawned with whatever signatory
+binary was installed at the start of the Claude Code session;
+post-fix binaries don't reach the running MCP process until the
+session restarts).
+
+These verifications are worth doing in a fresh session — they
+confirm the fix landed not just at the unit-test layer but
+through the actual MCP path the original bug surfaced through.
+When confirmed, delete the entry; if the live run reveals
+something the unit tests missed, file it as a fresh bug entry
+above.
+
+### `signatory_analyze` returns OK on entity with Layer 2 only
+
+- **Fix shipped:** `a72cbe0`
+- **Unit-test coverage:** `TestAnalyzeTool_EntityWithPostureNoSignals`
+  exercises the contract — entity with posture but no signals
+  returns OK, not cache-miss.
+- **Live verification needed:** in a fresh Claude Code session,
+  call `mcp__signatory__signatory_analyze target=burntsushi/toml`
+  (the entity that originally surfaced the bug). Expect:
+  status="ok" with the trusted-for-now posture surfacing, NOT
+  the `cache_miss_requires_refresh` error. Confirm the
+  server_version in the response metadata is post-`a72cbe0`.
+
 ## Manual process: worked examples
 
 Sibling to the error catalog above. When a manual workflow runs
