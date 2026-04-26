@@ -32,79 +32,40 @@ Each item has:
 
 ## Audit / observability
 
-### `signatory analysis show` rollup misses synthesis row
+### Missing MCP read surface for synthesis content
 
-- **Found:** 2026-04-26, dogfood run on
-  `repo:github/BurntSushi/toml`, analysis session
-  `a186fb43-5e3e-4f6b-9300-9ce603a98e5e`
-- **Severity:** should-fix (audit-trail integrity — the rollup
-  is the canonical "what happened in this run" view, and missing
-  the synthesis makes it actively misleading rather than just
-  incomplete)
-- **Where:** either `internal/mcp/tools/ingest.go`
-  (signatory_ingest_analysis — does the synthesist's call drop
-  `analysis_session_id`?), or wherever `signatory analysis show`
-  builds its linked-outputs query (likely `cmd/signatory/` plus
-  a store query in `internal/store/`)
-- **Symptom:** for the run above, synthesis output `c51e76fa`
-  is correctly visible in `signatory show-analyses
-  repo:github/BurntSushi/toml` with the expected synthesist
-  analyst_id, but `signatory analysis show a186fb43-…` lists
-  it as "missing" from the session and excludes it from the
-  linked-outputs body. The two views disagree.
-- **Sketch:** two diagnostic forks. (A) The synthesist agent's
-  `signatory_ingest_analysis` MCP call dropped
-  `analysis_session_id` — verifiable by inspecting the stored
-  synthesis row's session FK. (B) The rollup join in
-  `signatory analysis show` excludes round=0 (synthesis) rows by
-  schema mistake — verifiable by reading the query and checking
-  the WHERE clause. Fix whichever is at fault. Add a regression
-  test against the dogfood session id (or an in-memory
-  reproduction with the same shape) so the rollup→synthesis
-  linkage stays asserted.
-
-### Synthesis output absent from `signatory_show_conclusions`
-
-- **Found:** 2026-04-26, same BurntSushi/toml dogfood session.
-  Queried `signatory_show_conclusions target=burntsushi/toml`;
-  got 13 conclusions back, all from `signatory-security-v1` and
-  `signatory-provenance-v1`. The synthesis output `c51e76fa`
-  was not represented.
-- **Severity:** nice-to-have if working-as-designed; should-fix
-  if linked to the rollup bug above (likely same root cause).
-  Sub-finding: a user wanting to see "what did the synthesist
-  recommend?" has no MCP read path that surfaces the structured
-  synthesis content — only the raw `show_analyses` listing and
-  the per-conclusion search, neither of which carries the
-  synthesist's narrative or action items.
-- **Where:** depends on diagnosis. Possible loci:
-  - The synthesist's emitted output shape (does it produce
-    Conclusion records, or only `synthesis_supplement`? See
-    `templates/handoffs/synthesis-v1.md` and
-    `internal/exchange/` for the v1 schema)
-  - The store-query layer that backs `signatory_show_conclusions`
-    (does it filter by output type and exclude synthesis rows by
-    design?)
-  - Or a missing read surface entirely (no `show_synthesis`
-    tool exists)
-- **Symptom:** the synthesis is the highest-value output of a
-  run — it's where the proposed posture and action items live —
-  but `show_conclusions` doesn't expose any of that text.
-  Combined with the rollup bug above, the synthesis is currently
-  reachable only via `show_analyses` (a metadata listing, not
-  the content) and not via any conclusion-style search.
-- **Sketch:** investigate first. Two forks:
-  - (A) The synthesist emits only `synthesis_supplement`, not
-    Conclusion records — `show_conclusions` is correctly
-    Conclusion-only. Then the gap is a missing read tool: add
-    `signatory_show_synthesis target=X` (or similar) that
-    returns the latest synthesis output's structured content
-    for the entity. This is also what the rollup bug needs to
-    surface synthesis content.
-  - (B) The synthesist does emit Conclusions but they're not
-    landing in the conclusion table. Then this is the same
-    root cause as the rollup-misses-synthesis bug above; fix
-    once, both surfaces light up.
+- **Found:** 2026-04-26, BurntSushi/toml dogfood session
+  `a186fb43-…`, surfaced while looking up the synthesist's
+  proposed posture (synthesis output `c51e76fa`).
+- **Severity:** nice-to-have (working-as-designed gap, not a
+  bug — but a real usability hole)
+- **Where:** new MCP tool needed in `internal/mcp/tools/`;
+  closest existing analog is the CLI `signatory show-synthesis
+  <output-id>` verb (in `cmd/signatory/`), which renders the
+  stored synthesis as markdown.
+- **Symptom:** users wanting to read "what did the synthesist
+  recommend?" through the MCP surface have no clean path. The
+  closest tool, `signatory_show_conclusions`, never returns
+  synthesis rows because the synthesist explicitly does not emit
+  Conclusion records — synthesis output content lives in the
+  `synthesis_supplement` field, structurally distinct from the
+  Conclusion model. `signatory_show_analyses` returns metadata
+  about the synthesis row but not its body. The CLI has
+  `show-synthesis` for this purpose; the MCP surface doesn't.
+- **Investigation result:** confirmed working-as-designed at the
+  query layer. The synthesis-v1.md handoff template explicitly
+  instructs synthesists to populate `synthesis_supplement` and
+  NOT to produce Conclusions ("those are Layer-2 artifacts; you
+  are Layer-3"). So `show_conclusions` correctly filters them
+  out — the gap is a missing read surface, not a broken query.
+- **Sketch:** add a new MCP tool `signatory_show_synthesis`
+  taking either a `target` (return the latest synthesis output
+  for that entity) or an `output_id` (return that specific
+  synthesis row). Returns the structured `synthesis_supplement`
+  body — proposed_posture, reasoning, summary, action_items,
+  concordance_strengths, contradictions_detected, gaps. Mirrors
+  the existing CLI verb but on the MCP side. Independent of any
+  bug fix; it's a feature add that closes a real gap.
 
 ## Pending verifications
 
@@ -134,6 +95,29 @@ above.
   status="ok" with the trusted-for-now posture surfacing, NOT
   the `cache_miss_requires_refresh` error. Confirm the
   server_version in the response metadata is post-`a72cbe0`.
+
+### Synthesis ingest is rejected without analysis_session_id
+
+- **Fix shipped:** `84111cc`
+- **Unit-test coverage:** `TestIngest_SynthesisRequiresAnalysisSession`
+  in `internal/store/analyst_output_test.go` (store layer);
+  `TestIngestAnalysisTool_SynthesisWithoutSession_SchemaViolation`
+  in `internal/mcp/tools/ingest_analysis_test.go` (MCP boundary
+  error mapping).
+- **Live verification needed:** run the full /analyze skill in a
+  fresh Claude Code session against any target. After the run
+  completes, inspect the resulting analysis session via
+  `signatory analysis show <session-id>`. Expect: the synthesis
+  row appears in the linked-outputs body, NOT under the
+  "missing" rollup. Direct DB check confirms the new linkage:
+  `sqlite3 ~/.signatory/signatory.db "SELECT analyst_id,
+  analysis_session_id FROM analyst_outputs WHERE id = '<output>'"`
+  should show a non-empty session id for the synthesis row.
+  If the synthesist agent still drops the field, the ingest
+  fails with CodeSchemaViolation naming `analysis_session_id` —
+  the agent retries with the field included and the linkage
+  lands. Either way, no orphaned synthesis row should be possible
+  post-fix.
 
 ## Manual process: worked examples
 
