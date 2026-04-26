@@ -63,49 +63,6 @@ Each item has:
   reproduction with the same shape) so the rollup→synthesis
   linkage stays asserted.
 
-### `signatory_analyze` MCP tool gates on Layer 1, fails when only Layer 2 data exists
-
-- **Found:** 2026-04-26, follow-up read of the
-  `repo:github/burntsushi/toml` synthesis after the BurntSushi/toml
-  /analyze run. Tried `signatory_analyze` for both case forms;
-  both returned `cache_miss_requires_refresh` with message "no
-  cached signals for X; run signatory_refresh to collect."
-- **Severity:** should-fix (correctness — the tool's stated
-  contract isn't matching its implementation, and the error
-  message actively misleads users about what's missing)
-- **Where:** the `signatory_analyze` MCP tool implementation
-  (likely `internal/mcp/tools/analyze.go` or wherever the
-  cache-miss branch lives), plus the tool's description text
-- **Symptom:** an entity with synthesis, posture, and analyst
-  conclusions in the store — but no Layer 1 signals — returns
-  `cache_miss_requires_refresh`. The error message tells the user
-  to run `signatory_refresh` to collect signals, when the user
-  most likely wants to read the Layer 2 verdict that already
-  exists. The tool's own description claims it "Returns the
-  cached trust profile (Layer 1 signals + this entity's Layer 2
-  trust decision)," which implies it should surface Layer 2
-  even when Layer 1 is absent.
-- **Sketch:** decide the contract first, then fix.
-  - Path (A): `signatory_analyze` should soft-fail on missing
-    Layer 1 — return what Layer 2 data exists, mark the signals
-    section as absent, and let the caller decide whether to
-    refresh. Most aligned with the stated tool description.
-    Implementation: change the gating to "fail only if BOTH
-    layers are absent."
-  - Path (B): the tool genuinely requires both layers. Then the
-    description is wrong and the error message is wrong. Fix
-    both: description says "requires Layer 1 signals; falls back
-    to NotFound if absent," and the error message names what's
-    actually missing ("Layer 1 signals not collected; the entity
-    has Layer 2 conclusions — query via signatory_show_analyses
-    or signatory_show_conclusions to see them"). This shifts the
-    cost to the description but at least stops sending users to
-    the wrong remedy.
-  - Path (A) is the better default — the /analyze skill
-    intentionally produces Layer 2 without Layer 1, and any
-    entity analyzed through that pipeline is currently
-    unreachable through the tool meant for trust-summary lookups.
-
 ### Synthesis output absent from `signatory_show_conclusions`
 
 - **Found:** 2026-04-26, same BurntSushi/toml dogfood session.
