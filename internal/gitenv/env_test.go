@@ -3,6 +3,7 @@ package gitenv
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -348,6 +349,114 @@ func TestIsDenied(t *testing.T) {
 			assert.Equal(t, tc.want, isDenied(tc.name))
 		})
 	}
+}
+
+// TestNewCmd_SetsSafeEnv locks the env-strip discipline at the
+// local-porcelain constructor boundary. Every git subprocess in the
+// codebase routes through NewCmd, NewCloneCmd, or appends to SafeEnv
+// — see package doc "Callers". This test is the structural guard
+// for the NewCmd path; the subprocess-boundary tests
+// (TestDefaultGitClone_StripsDangerousEnv et al. in cmd/signatory)
+// verify the environment actually reaches the child.
+//
+// Asserts that cmd.Env is a SafeEnv-shaped slice. The exhaustive
+// strip-rule coverage lives in TestSafeEnv_* above; here we just
+// prove NewCmd does call SafeEnv (vs. silently leaving cmd.Env nil,
+// which would inherit os.Environ via exec).
+//
+// Revert proof: comment out `cmd.Env = SafeEnv()` in NewCmd; the
+// assertion fails because cmd.Env is nil and the GIT_TERMINAL_PROMPT=0
+// marker is absent.
+func TestNewCmd_SetsSafeEnv(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmd(t.Context(), "log")
+	require.NotNil(t, cmd.Env,
+		"NewCmd must set cmd.Env (nil cmd.Env causes exec to inherit os.Environ — the 2026-04-24 hazard)")
+	assert.Contains(t, cmd.Env, "GIT_TERMINAL_PROMPT=0",
+		"NewCmd's cmd.Env must be a SafeEnv-shaped slice (force-appended GIT_TERMINAL_PROMPT=0 is the marker)")
+}
+
+// TestNewCmd_DoesNotSetWaitDelay locks the deliberate clone-only
+// scope of WaitDelay. NewCmd is for local porcelain reads (log,
+// for-each-ref, rev-list, etc.) which don't fork network helpers
+// in practice; setting WaitDelay on every git invocation produced
+// an empirically-observed slowdown in cmd/signatory's test suite,
+// which is why the constructor was split. See package doc "Why
+// clone-only" for the rationale.
+//
+// Revert proof: copy `cmd.WaitDelay = WaitDelay` from NewCloneCmd
+// into NewCmd; the assertion fails because cmd.WaitDelay is no
+// longer the zero Duration.
+func TestNewCmd_DoesNotSetWaitDelay(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmd(t.Context(), "log")
+	assert.Zero(t, cmd.WaitDelay,
+		"NewCmd is for local porcelain — WaitDelay belongs on NewCloneCmd only (see package doc 'Why clone-only')")
+}
+
+// TestNewCmd_PassesArgs locks the argv passthrough — args supplied
+// to NewCmd must reach cmd.Args verbatim, prefixed only by the "git"
+// binary name (cmd.Args[0] convention). Catches a regression where
+// NewCmd accidentally rewrites or filters args.
+//
+// Revert proof: change NewCmd to e.g. exec.CommandContext(ctx, "git",
+// args[1:]...) (drop the first arg); this test fails because
+// cmd.Args[1] is no longer "log".
+func TestNewCmd_PassesArgs(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmd(t.Context(), "log", "--oneline", "-n", "5")
+	assert.Equal(t,
+		[]string{"git", "log", "--oneline", "-n", "5"},
+		cmd.Args,
+		"NewCmd must pass args verbatim with 'git' as argv[0]")
+}
+
+// TestNewCloneCmd_SetsWaitDelay locks the post-SIGKILL pipe-drain
+// bound on the clone-shaped constructor. Without it, a grandchild
+// that inherited stdout/stderr (typically ssh, askpass, or a
+// credential helper that didn't receive the kill) holds the
+// parent's pipes open indefinitely after Go's CommandContext
+// SIGKILLs git on context expiry, blocking cmd.Wait. See package
+// doc "WaitDelay rationale" for the threat shape and "Why
+// clone-only" for why this isn't applied to NewCmd.
+//
+// Locking the constant value too — drift would be a silent
+// inconsistency in subprocess hardening, and this assertion keeps
+// the bound aligned to the documented number.
+//
+// Safety note. Pure constructor inspection — no Run / Output /
+// CombinedOutput call, no PATH-shimmed fake-git, no env mutation.
+// The 2026-04-24 worktree-corruption hazard requires a *running*
+// git subprocess with an unscrubbed env to manifest; this test
+// runs none.
+//
+// Revert proof: comment out `cmd.WaitDelay = WaitDelay` in
+// NewCloneCmd; the assertion fails on the zero-Duration default.
+func TestNewCloneCmd_SetsWaitDelay(t *testing.T) {
+	t.Parallel()
+	cmd := NewCloneCmd(t.Context(), "clone", "https://example.invalid/repo.git", "/tmp/x")
+	assert.Equal(t, WaitDelay, cmd.WaitDelay,
+		"NewCloneCmd must carry WaitDelay to bound post-kill pipe-drain on clone-shaped operations")
+	assert.Equal(t, 5*time.Second, WaitDelay,
+		"WaitDelay constant must match the documented 5s bound — see package doc before changing")
+}
+
+// TestNewCloneCmd_AlsoSetsSafeEnv locks the symmetry between
+// constructors: NewCloneCmd must inherit NewCmd's env-strip
+// discipline. The current implementation does this by delegating
+// (NewCloneCmd calls NewCmd internally), but the assertion guards
+// against a future "simplification" that forgets one or the other.
+//
+// Revert proof: rewrite NewCloneCmd to build the cmd inline without
+// calling NewCmd, omitting cmd.Env = SafeEnv(); this test fails on
+// the missing GIT_TERMINAL_PROMPT=0 marker.
+func TestNewCloneCmd_AlsoSetsSafeEnv(t *testing.T) {
+	t.Parallel()
+	cmd := NewCloneCmd(t.Context(), "clone", "https://example.invalid/repo.git", "/tmp/x")
+	require.NotNil(t, cmd.Env,
+		"NewCloneCmd must set cmd.Env (the env-strip discipline is the OLD invariant; WaitDelay is the NEW one)")
+	assert.Contains(t, cmd.Env, "GIT_TERMINAL_PROMPT=0",
+		"NewCloneCmd's cmd.Env must be a SafeEnv-shaped slice")
 }
 
 // toMap converts a KEY=VALUE slice into a map keyed by variable

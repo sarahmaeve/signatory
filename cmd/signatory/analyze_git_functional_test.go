@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -220,17 +219,15 @@ func initGitFixtureRepo(t *testing.T, originURL string) string {
 // helper. We can't import test-only symbols from
 // internal/signal/git/, so this small helper lives here.
 //
-// Uses gitenv.SafeEnv() to strip GIT_DIR / GIT_CONFIG_* / other
-// config-injection env vars from the inherited environment. Without
-// that, an ambient GIT_DIR would redirect writes to the shared
-// worktree config — the mechanism behind the 2026-04-24 main-worktree
-// config corruption.
+// Routes through gitenv.NewCmd so the test subprocess inherits the
+// same env-strip + WaitDelay discipline production code does.
+// Without the env strip, an ambient GIT_DIR would redirect writes
+// to the shared worktree config — the mechanism behind the
+// 2026-04-24 main-worktree config corruption.
 func runGitInFunctional(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
-	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.CommandContext(t.Context(), "git", full...)
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCmd(t.Context(), full...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

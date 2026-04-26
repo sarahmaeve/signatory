@@ -3,7 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -264,9 +263,7 @@ func TestCollector_TagSampleCap_BoundsSampleSize(t *testing.T) {
 func writeFakeSignedTag(t *testing.T, repo, name string) {
 	t.Helper()
 
-	//nolint:gosec // G204: test helper
-	headCmd := exec.CommandContext(t.Context(), "git", "-C", repo, "rev-parse", "HEAD")
-	headCmd.Env = gitenv.SafeEnv()
+	headCmd := gitenv.NewCmd(t.Context(), "-C", repo, "rev-parse", "HEAD")
 	headOut, err := headCmd.Output()
 	require.NoError(t, err)
 	headSha := strings.TrimSpace(string(headOut))
@@ -284,9 +281,7 @@ ZmFrZXNpZ25hdHVyZWJhc2U2NGRhdGE=
 -----END PGP SIGNATURE-----
 `, headSha, name, name)
 
-	//nolint:gosec // G204: test helper
-	hashCmd := exec.CommandContext(t.Context(), "git", "-C", repo, "hash-object", "-w", "-t", "tag", "--stdin")
-	hashCmd.Env = gitenv.SafeEnv()
+	hashCmd := gitenv.NewCmd(t.Context(), "-C", repo, "hash-object", "-w", "-t", "tag", "--stdin")
 	hashCmd.Stdin = strings.NewReader(tagBody)
 	hashOut, err := hashCmd.Output()
 	require.NoError(t, err, "hash-object failed")

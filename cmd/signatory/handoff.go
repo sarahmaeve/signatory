@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -102,9 +101,9 @@ type HandoffCmd struct {
 	PrecheckSource ecosystem.Source `kong:"-"`
 
 	// RunGitClone overrides the git subprocess invocation for
-	// --clone-dir. nil → fall through to defaultGitClone (exec.CommandContext
-	// with gitenv.SafeEnv). Same rationale as PrecheckSource: parallel-safe
-	// injection, visible dependency.
+	// --clone-dir. nil → fall through to defaultGitClone (which
+	// builds the cmd via gitenv.NewCmd). Same rationale as
+	// PrecheckSource: parallel-safe injection, visible dependency.
 	//
 	// version is the git ref (tag/branch) to check out, or empty
 	// for HEAD-of-default-branch. When non-empty, the production
@@ -784,28 +783,18 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 // accidental-mutation surface — tests inject via HandoffCmd.RunGitClone
 // field assignment, not via swap-the-global.
 //
-// Creates an exec.CommandContext so a cancelled context propagates to
-// the git subprocess.
-//
-// Security: the subprocess runs with a minimal, hardened environment
-// derived from os.Environ() with dangerous git-specific vars stripped.
-// Without this, a hostile parent environment (GIT_TERMINAL_PROMPT,
-// GIT_SSH_COMMAND, GIT_PROXY_COMMAND, GIT_CONFIG_COUNT, etc.) could
-// redirect git's network transport, invoke attacker-controlled helpers,
-// or smuggle config that overrides the URL we validated. We strip rather
-// than whitelist so the process still inherits PATH, HOME, and
-// TLS-related vars that legitimate git operations need.
+// Subprocess discipline (env scrubbing + post-kill pipe-drain bound)
+// comes from gitenv.NewCloneCmd — clone-shaped operations may fork
+// ssh/askpass/credential-helper grandchildren that won't inherit
+// SIGKILL, so WaitDelay caps cmd.Wait's pipe-drain. See the gitenv
+// package doc for the threat shape, the GIT_*-prefix-strip rule,
+// and why WaitDelay is scoped to clone-shaped sites only.
+// Argv validation upstream: url by safeGitCloneURL (rejects ?, #,
+// userinfo, NUL); dest by the containment check in applyClone
+// (filepath.Rel against an EvalSymlinks-resolved parent) and
+// safeCloneRepoName; version by safeGitVersion (rejects leading -,
+// shell metacharacters, path traversal).
 func defaultGitClone(ctx context.Context, url, dest, version string) error {
-	// G204 rationale: CommandContext doesn't invoke a shell, so
-	// shell-metacharacter injection in url/dest/version is not a
-	// threat. url is validated by safeGitCloneURL (rejects ?, #,
-	// userinfo, NUL); dest is validated by the containment check
-	// in applyClone (filepath.Rel against an EvalSymlinks-resolved
-	// parent) and by safeCloneRepoName; version is validated by
-	// safeGitVersion (rejects leading -, shell metacharacters,
-	// path traversal). Env inheritance is stripped to a vetted set
-	// by gitenv.SafeEnv so GIT_SSH_COMMAND / GIT_PROXY_COMMAND /
-	// GIT_CONFIG_* can't redirect the clone.
 	args := []string{"clone", "--depth=1"}
 	if version != "" {
 		// --branch accepts both tag names and branch names. Git
@@ -816,8 +805,7 @@ func defaultGitClone(ctx context.Context, url, dest, version string) error {
 		args = append(args, "--branch", version)
 	}
 	args = append(args, url, dest)
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; url/dest/version pre-validated; env sanitized by gitenv.SafeEnv
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCloneCmd(ctx, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))

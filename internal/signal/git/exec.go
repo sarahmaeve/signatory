@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 
 	"github.com/sarahmaeve/signatory/internal/gitenv"
 )
@@ -16,26 +15,30 @@ import (
 //
 // Security notes:
 //
-//   - The binary name "git" is a string literal, not a variable.
-//     gosec's G204 rule fires on variables, not literals.
+//   - Subprocess discipline (env scrubbing) comes from gitenv.NewCmd.
+//     The env-strip is load-bearing here: an ambient GIT_DIR would
+//     override the -C flag's scope and cause every signal this
+//     collector emits to be collected from the wrong repository — a
+//     silent trust-model violation (attribution without grounding).
+//     The 2026-04-24 postmortem traced shared-config corruption to
+//     exactly this class of vector in the sibling test helpers.
+//   - WaitDelay is intentionally NOT applied here. runGit's callers
+//     all pass porcelain commands (log, for-each-ref, rev-list,
+//     rev-parse) that read the object store and don't fork network
+//     helpers in practice, so the SIGKILL-orphans-pipe-holder
+//     hazard that motivates WaitDelay doesn't apply. See the gitenv
+//     package doc "Why clone-only" — applying WaitDelay uniformly
+//     to every git subprocess introduced an empirically-observed
+//     slowdown in cmd/signatory's test suite.
+//   - The repoPath is a path supplied by the Collector (which in
+//     turn gets it from the caller, validated at the
+//     signatory-analyze layer). Passing a user-controlled path to
+//     `git -C` is safe: git treats the path as a chdir target, not
+//     as a command.
 //   - Arguments are passed as a variadic list (argv form), never
 //     concatenated into a shell string. There is no shell
 //     interpretation, no glob expansion, no quote handling —
 //     each element is one argv slot exactly.
-//   - The repoPath is a path supplied by the Collector (which
-//     in turn gets it from the caller, validated at the
-//     signatory-analyze layer). Passing a user-controlled path
-//     to `git -C` is safe: git treats the path as a chdir
-//     target, not as a command.
-//   - cmd.Env is set to gitenv.SafeEnv(), which strips GIT_DIR,
-//     GIT_CONFIG_*, GIT_SSH_COMMAND, and the rest of the
-//     documented config-injection / redirection interface.
-//     Without this, an ambient GIT_DIR would override the -C
-//     flag's scope and cause every signal this collector emits
-//     to be collected from the wrong repository — a silent
-//     trust-model violation (attribution without grounding).
-//     The 2026-04-24 postmortem traced shared-config corruption
-//     to exactly this class of vector in the sibling test helpers.
 //
 // Stderr is captured, not streamed, so tests and callers can
 // inspect the exact git error message. On an empty repo or a
@@ -56,9 +59,7 @@ func runGit(ctx context.Context, repoPath string, args ...string) ([]byte, error
 	full = append(full, "-C", repoPath)
 	full = append(full, args...)
 
-	//nolint:gosec // G204: argv-form exec of a string-literal binary ("git"); all positional args are caller-controlled but never shell-interpreted; env sanitized by gitenv.SafeEnv
-	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCmd(ctx, full...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

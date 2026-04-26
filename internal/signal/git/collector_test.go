@@ -40,24 +40,22 @@ func initRepo(t *testing.T) string {
 // non-zero exit. Used for setup steps where any failure is a bug
 // in the test, not an assertion target.
 //
-// Uses gitenv.SafeEnv() to strip GIT_DIR, GIT_CONFIG_*, and the
-// other config-injection / redirection env vars from the inherited
-// environment. Without that, an ambient GIT_DIR (set by a git hook
-// or IDE integration) would cause `git -C <tempdir>` to still
-// resolve writes against the inherited config path — which for a
-// git worktree is the shared main repo's config. The postmortem
-// for the 2026-04-24 worktree corruption traced to exactly that
-// mechanism; every exec.Command("git", ...) in tests must set
-// cmd.Env = gitenv.SafeEnv() before running.
+// Routes through gitenv.NewCmd so the test subprocess inherits the
+// same env-strip + WaitDelay discipline production code does.
+// Without the env strip, an ambient GIT_DIR (set by a git hook or
+// IDE integration) would cause `git -C <tempdir>` to still resolve
+// writes against the inherited config path — which for a git
+// worktree is the shared main repo's config. The postmortem for
+// the 2026-04-24 worktree corruption traced to exactly that
+// mechanism.
+//
+// t.Context() ties the subprocess lifetime to the test's — if the
+// test times out or is cancelled, pending git invocations get
+// killed instead of orphaned. Go 1.24+.
 func mustRunGit(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
-	// t.Context() ties the subprocess lifetime to the test's — if
-	// the test times out or is cancelled, pending git invocations
-	// get killed instead of orphaned. Go 1.24+.
-	//nolint:gosec // G204: test helper; binary is "git" literal, args are test-controlled
-	cmd := exec.CommandContext(t.Context(), "git", full...)
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCmd(t.Context(), full...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

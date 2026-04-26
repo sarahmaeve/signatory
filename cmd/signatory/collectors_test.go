@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,23 +37,19 @@ func initSourceRepo(t *testing.T, origin string) string {
 }
 
 // mustRunGitInTest runs `git -C repo <args...>` and fails the test
-// on any non-zero exit, using gitenv.SafeEnv() to strip GIT_DIR /
-// GIT_CONFIG_* / other config-injection env vars from the inherited
-// environment. Without that scrubbing, an ambient GIT_DIR would
-// redirect writes to the shared worktree config — the mechanism
-// behind the 2026-04-24 main-worktree config corruption. Every
-// exec.Command("git", ...) in this package's tests must set
-// cmd.Env = gitenv.SafeEnv() for the same reason.
+// on any non-zero exit. Routes through gitenv.NewCmd so the test
+// subprocess inherits the same env-strip + WaitDelay discipline
+// production code does. Without the env strip, an ambient GIT_DIR
+// would redirect writes to the shared worktree config — the
+// mechanism behind the 2026-04-24 main-worktree config corruption.
 //
-// Local copy of the git-package test helper —
-// we can't import test-only symbols across packages. Fails the
-// test on any non-zero git exit.
+// Local copy of the git-package test helper — we can't import
+// test-only symbols across packages. Fails the test on any
+// non-zero git exit.
 func mustRunGitInTest(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", repo}, args...)
-	//nolint:gosec // G204: test helper; binary is "git" literal
-	cmd := exec.CommandContext(t.Context(), "git", full...)
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCmd(t.Context(), full...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	require.NoErrorf(t, cmd.Run(), "git %v: %s", args, stderr.String())

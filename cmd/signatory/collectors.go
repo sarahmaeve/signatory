@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -207,18 +206,18 @@ func ensurePathEmptyOrMissing(path string) error {
 // trust-model violation (attribution without grounding), not a
 // stylistic issue.
 //
-// Env inheritance is stripped to a vetted set by gitenv.SafeEnv so GIT_CONFIG_KEY_*/VALUE_*, GIT_DIR, and the other
-// transport/config-injection vars can't subvert the origin lookup.
-// Symmetric with the runGitClone / gitCloneFull sites in this binary.
+// Subprocess discipline (env scrubbing) comes from gitenv.NewCmd.
+// This is local porcelain — `git -C path remote get-url origin`
+// reads the repo's config and does not fork network helpers — so
+// WaitDelay is intentionally NOT applied here. See the gitenv
+// package doc "Why clone-only" for the rationale.
 func validateExistingClone(ctx context.Context, path, expectedURI string) error {
 	info, err := os.Stat(filepath.Join(path, ".git"))
 	if err != nil || info == nil {
 		return fmt.Errorf("%w: %q", ErrPathNotAClone, path)
 	}
 
-	//nolint:gosec // G204: argv-form exec of "git"; path is operator-supplied; env sanitized by gitenv.SafeEnv
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "remote", "get-url", "origin")
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCmd(ctx, "-C", path, "remote", "get-url", "origin")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -252,13 +251,15 @@ func validateExistingClone(ctx context.Context, path, expectedURI string) error 
 // Caller must have validated url via safeGitCloneURL and dest via
 // ensurePathEmptyOrMissing before invoking this.
 //
-// Env inheritance is stripped to a vetted set by gitenv.SafeEnv so GIT_SSH_COMMAND / GIT_PROXY_COMMAND / GIT_EXEC_PATH
-// / GIT_CONFIG_* can't redirect the clone or invoke an attacker-
-// controlled helper. Symmetric with the runGitClone site in handoff.go.
+// Subprocess discipline (env scrubbing + post-kill pipe-drain
+// bound) comes from gitenv.NewCloneCmd — clone-shaped operations
+// may fork ssh/askpass/credential-helper grandchildren that won't
+// inherit SIGKILL, so WaitDelay caps cmd.Wait's pipe-drain. See
+// the gitenv package doc for the threat shape and why WaitDelay
+// is scoped to clone-shaped sites only. Symmetric with
+// defaultGitClone in handoff.go.
 func gitCloneFull(ctx context.Context, url, dest string) error {
-	//nolint:gosec // G204: argv-form exec of "git"; url pre-validated by safeGitCloneURL, dest pre-validated by ensurePathEmptyOrMissing; env sanitized by gitenv.SafeEnv
-	cmd := exec.CommandContext(ctx, "git", "clone", url, dest)
-	cmd.Env = gitenv.SafeEnv()
+	cmd := gitenv.NewCloneCmd(ctx, "clone", url, dest)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

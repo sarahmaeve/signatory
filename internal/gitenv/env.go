@@ -1,5 +1,30 @@
-// Package gitenv provides the canonical sanitized environment slice
-// for every git subprocess signatory spawns — production and test.
+// Package gitenv provides the canonical constructor and sanitized
+// environment slice for every git subprocess signatory spawns —
+// production and test.
+//
+// # API summary
+//
+//   - NewCmd is the constructor for local-porcelain git subprocesses
+//     (read-only operations against an already-cloned repo: log,
+//     for-each-ref, rev-list, rev-parse, remote get-url, etc.). It
+//     sets cmd.Env to SafeEnv. It does NOT set WaitDelay; these
+//     operations don't spawn ssh/askpass/credential-helper
+//     grandchildren in practice (see "WaitDelay rationale" below
+//     for why).
+//   - NewCloneCmd is the constructor for outbound git clones — the
+//     operations that talk to a remote and may fork ssh / askpass /
+//     credential-helper grandchildren that won't inherit SIGKILL.
+//     It sets cmd.Env to SafeEnv AND cmd.WaitDelay to WaitDelay.
+//     Used by defaultGitClone (handoff path) and gitCloneFull
+//     (analyze path). Both are the network-spawning sites.
+//   - SafeEnv returns the hardened env slice (dangerous vars
+//     stripped, GIT_TERMINAL_PROMPT=0 force-appended). Use directly
+//     when you need to append identity / date overrides on top of
+//     the hardened env (commitAs in identity_test.go, the
+//     backdated-commit site in collector_test.go, the date-override
+//     site in vitality_test.go).
+//   - WaitDelay is the exported value NewCloneCmd sets on
+//     cmd.WaitDelay. 5 seconds. See "WaitDelay rationale" below.
 //
 // # Design: deny-by-default, explicit re-admit
 //
@@ -91,27 +116,132 @@
 //     of SafeEnv() explicitly — see internal/signal/git/identity_test
 //     (commitAs) and collector_test (backdated-commit site).
 //
+// # WaitDelay rationale
+//
+// NewCloneCmd sets cmd.WaitDelay = WaitDelay (5s) on every
+// constructed *exec.Cmd. WaitDelay bounds the time cmd.Wait spends
+// draining stdout/stderr after Go's CommandContext sends SIGKILL on
+// context expiry. Without it, a grandchild that inherited the pipes
+// — typically ssh, askpass, or a credential helper that didn't
+// itself receive the kill — can hold them open indefinitely,
+// blocking Wait long after git itself has died.
+//
+// Why clone-only. The grandchild concern is specific to clone-shaped
+// operations that talk to a remote: git forks ssh/askpass/credential-
+// helper to authenticate the network call. Local porcelain commands
+// (log, for-each-ref, rev-list, rev-parse, remote get-url against an
+// already-cloned repo) read the object store and don't trigger
+// network helpers in practice. Setting WaitDelay on every git
+// subprocess introduced an empirically-observed slowdown in the
+// cmd/signatory test suite that this two-constructor split avoids.
+// The runtime-cost mechanism wasn't fully diagnosed; the structural
+// fix is to scope WaitDelay to where its threat model actually
+// applies.
+//
+// Scope. WaitDelay only bounds cmd.Wait's pipe-drain. It does NOT
+// terminate the grandchild process. After Wait returns
+// exec.ErrWaitDelay, the surviving grandchild keeps running — it
+// can continue consuming CPU, hold network connections open, write
+// to disk, and exit on its own schedule. For signatory's threat
+// model that's a bounded annoyance (no signatory state is held by
+// the grandchild) but worth understanding when reading audit logs:
+// "git clone returned" is not the same as "all work git started has
+// finished."
+//
+// 5 seconds is well above any legitimate post-kill drain on modern
+// systems. The bound is set once here so the two outbound clone
+// sites share it; drift between them would be a silent
+// inconsistency in subprocess hardening.
+//
 // # Callers
 //
-//   - cmd/signatory: validateExistingClone, gitCloneFull, runGitClone
-//   - internal/signal/git: runGit (the workhorse used by every
-//     git-derived signal — commit signing, tags, identity, vitality)
-//   - every _test.go in the above two packages that spawns a git
-//     subprocess, plus any future test helper
+// Every exec.Command / exec.CommandContext("git", ...) site in this
+// codebase — production AND test — MUST go through NewCmd or
+// NewCloneCmd, OR set cmd.Env to a slice rooted in SafeEnv()
+// (identity-override case). Inheriting the parent env (either
+// implicitly by not setting cmd.Env, or explicitly via
+// cmd.Environ()) is forbidden. The canonical sites today:
 //
-// Every exec.Command("git", ...) site in this codebase — production
-// AND test — MUST set cmd.Env = gitenv.SafeEnv() before Run() /
-// Output() / CombinedOutput(). Inheriting the parent env (either
-// implicitly by not setting cmd.Env, or explicitly via cmd.Environ())
-// is forbidden. New git subprocess sites added in the future must
-// follow the same rule; reviewers should flag any exec.Command("git",
-// ...) without an accompanying cmd.Env = gitenv.SafeEnv().
+//   - cmd/signatory: defaultGitClone, gitCloneFull (clone-shaped,
+//     network-spawning) — via NewCloneCmd
+//   - cmd/signatory: validateExistingClone (local porcelain:
+//     `git -C path remote get-url origin`) — via NewCmd
+//   - internal/signal/git: runGit (the workhorse used by every
+//     git-derived signal — commit signing, tags, identity, vitality;
+//     all porcelain reads against the object store) — via NewCmd
+//   - test helpers in cmd/signatory and internal/signal/git that
+//     build fixture repos or run local porcelain — via NewCmd
+//   - test helpers that need to append identity / date overrides on
+//     top of the hardened env — via SafeEnv directly (commitAs in
+//     identity_test.go, the backdated-commit site in collector_test.go,
+//     the date-override site in vitality_test.go)
+//
+// Reviewers should flag any exec.Command("git", ...) that doesn't
+// route through NewCmd / NewCloneCmd or use SafeEnv as the env
+// basis.
 package gitenv
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 )
+
+// WaitDelay is the post-kill pipe-drain bound NewCloneCmd sets on
+// every constructed *exec.Cmd. See package doc "WaitDelay rationale"
+// for why 5s, why clone-only, and what WaitDelay does and doesn't
+// bound.
+const WaitDelay = 5 * time.Second
+
+// NewCmd builds an *exec.Cmd for the git binary with the env-strip
+// discipline every git subprocess in this codebase must follow:
+//
+//   - cmd.Env = SafeEnv() — strips GIT_*, SSH_ASKPASS*, libcurl proxy
+//     vars; force-appends GIT_TERMINAL_PROMPT=0
+//
+// Use NewCmd for local porcelain operations against an already-
+// cloned repo (log, for-each-ref, rev-list, rev-parse, remote
+// get-url, etc.). For clone-shaped operations that talk to a remote
+// and may fork ssh/askpass/credential-helper grandchildren, use
+// NewCloneCmd instead — it adds cmd.WaitDelay on top of the env
+// discipline.
+//
+// The args are passed verbatim as argv to git. No shell. Each arg
+// occupies one argv slot; metacharacters are not interpreted.
+//
+// G204 note. Every call site that constructs args from caller-
+// supplied data must validate those args upstream (URL schemes,
+// path containment, ref-name shape, etc.) — argv-form exec is
+// shell-injection-safe but does not protect against argv-flag
+// injection (a "-evil" first arg parsed as a flag). Validation
+// remains the call site's responsibility; NewCmd just guarantees
+// the env discipline.
+func NewCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; args validated by callers (URL schemes, path containment, ref-name shape)
+	cmd.Env = SafeEnv()
+	return cmd
+}
+
+// NewCloneCmd builds an *exec.Cmd for clone-shaped git operations:
+// it applies NewCmd's env-strip discipline AND sets cmd.WaitDelay =
+// WaitDelay so cmd.Wait can't block indefinitely on an
+// ssh/askpass/credential-helper grandchild that didn't inherit the
+// parent's SIGKILL.
+//
+// Use only for outbound clone or fetch operations that may fork a
+// network helper. For local porcelain reads against an already-
+// cloned repo, use NewCmd — see package doc "Why clone-only" for
+// why WaitDelay is scoped to clone-shaped sites.
+//
+// G204 and argv discipline are the same as NewCmd; see that
+// constructor's doc.
+func NewCloneCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := NewCmd(ctx, args...)
+	cmd.WaitDelay = WaitDelay
+	return cmd
+}
 
 // denyPrefixes enumerates the prefixes whose entire namespace is
 // stripped. New dangerous prefix families (hypothetical future:
