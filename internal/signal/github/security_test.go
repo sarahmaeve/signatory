@@ -1034,6 +1034,103 @@ func TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod(t *testing.T) {
 // stderr knows whether they're looking at a 5xx (server problem) or a
 // 4xx (client problem). If this test breaks, the body-stripping fix
 // went too far and removed useful structured information.
+// --- sanitizeError wiring through get() and getWithLinkHeader() ------------
+//
+// The sanitizeError function (unit-tested in client_test.go) only
+// protects callers if every error-return path in get() and
+// getWithLinkHeader() actually applies it. The named-return + defer
+// pattern is the wiring; these tests prove the wiring is in place
+// by injecting a custom http.RoundTripper that returns a transport-
+// layer error containing the bearer token, then asserting the
+// returned error is redacted.
+//
+// Why a custom RoundTripper, not httptest.NewServer. The threat
+// model is *transport-layer* error rendering — the failure happens
+// inside http.Client.Do before any HTTP exchange. A real server
+// can't reproduce this; the request never reaches it. The
+// RoundTripper returns the error directly, mimicking what a
+// hostile/buggy proxy middleware would produce.
+//
+// Why two tests, one per private method. get() and
+// getWithLinkHeader() are independent error-return surfaces.
+// Sanitization on get() doesn't imply sanitization on
+// getWithLinkHeader(); a future contributor could add the defer to
+// one and forget the other. Each method gets its own wiring test
+// via the public method that invokes it (GetRepo for get,
+// GetTotalCommitCount for getWithLinkHeader).
+
+// tokenLeakingRoundTripper is a synthetic transport that returns
+// an error containing the request's Authorization header in its
+// rendered string. Mimics the threat model: a hostile/buggy
+// transport or proxy middleware that interpolates request detail
+// into transport error messages.
+type tokenLeakingRoundTripper struct{}
+
+func (t *tokenLeakingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("synthetic transport failure: header=%s", req.Header.Get("Authorization"))
+}
+
+// TestSecurity_TokenSanitized_FromGet proves the named-return +
+// defer wiring in client.get() actually applies sanitizeError to
+// transport-layer errors before they reach the caller.
+//
+// Calls GetRepo (which uses get internally) with a Client whose
+// http.Transport leaks the Authorization header into its error
+// string. Without the defer in get(), the bearer token surfaces in
+// the returned error. With the defer, the token is replaced by
+// [REDACTED-TOKEN].
+//
+// Revert proof: remove the `defer func() { err = sanitizeError(err,
+// c.token) }()` line from client.get(); this test fails because the
+// returned err.Error() contains the raw token.
+func TestSecurity_TokenSanitized_FromGet(t *testing.T) {
+	t.Parallel()
+	const token = "ghp_pretendThisIsARealGitHubTokenAaa1234567890"
+
+	client := &Client{
+		httpClient: &http.Client{Transport: &tokenLeakingRoundTripper{}},
+		token:      token,
+		baseURL:    "https://api.github.invalid",
+	}
+
+	_, err := client.GetRepo(context.Background(), "owner", "repo")
+	require.Error(t, err, "leaking transport must produce an error")
+
+	assert.NotContains(t, err.Error(), token,
+		"TOKEN LEAK from get(): named-return + defer wiring missing or broken")
+	assert.Contains(t, err.Error(), "[REDACTED-TOKEN]",
+		"sanitization marker must appear so operators can grep for redaction events")
+}
+
+// TestSecurity_TokenSanitized_FromGetWithLinkHeader is the
+// independent wiring proof for getWithLinkHeader. The two paginated
+// and non-paginated GET helpers are separate error-return surfaces;
+// both need the defer.
+//
+// Calls GetTotalCommitCount (which uses getWithLinkHeader) with the
+// same leaking transport. Same shape, separate wiring.
+//
+// Revert proof: remove the `defer func() { err = sanitizeError(err,
+// c.token) }()` line from client.getWithLinkHeader; this test fails.
+func TestSecurity_TokenSanitized_FromGetWithLinkHeader(t *testing.T) {
+	t.Parallel()
+	const token = "ghp_pretendThisIsARealGitHubTokenAaa1234567890"
+
+	client := &Client{
+		httpClient: &http.Client{Transport: &tokenLeakingRoundTripper{}},
+		token:      token,
+		baseURL:    "https://api.github.invalid",
+	}
+
+	_, err := client.GetTotalCommitCount(context.Background(), "owner", "repo")
+	require.Error(t, err, "leaking transport must produce an error")
+
+	assert.NotContains(t, err.Error(), token,
+		"TOKEN LEAK from getWithLinkHeader(): named-return + defer wiring missing or broken")
+	assert.Contains(t, err.Error(), "[REDACTED-TOKEN]",
+		"sanitization marker must appear so operators can grep for redaction events")
+}
+
 func TestSecurity_ClientErrorPreservesStatusCode(t *testing.T) {
 	statuses := []int{401, 422, 500, 502, 503}
 

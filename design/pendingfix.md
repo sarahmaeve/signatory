@@ -17,25 +17,6 @@ Each item has:
 
 ## Security
 
-### Token leakage path in `applyNetworkPrecheck` errors
-
-- **Source:** unaided cmd-adversarial agent 2026-04-14 (priority 1
-  recommendation, deferred); confirmed by skill-equipped pass
-- **Severity:** should-fix
-- **Where:** `internal/signal/github/client.go` error wrapping
-- **Sketch:** `ghclient.Client` propagates transport-layer errors
-  verbatim via `fmt.Errorf("execute request: %w", err)` (see
-  `client.go:240`, `client.go:300`). The response-body leak path is
-  closed (issue #93 — non-200 bodies are dropped, status code only),
-  but a transport-layer error (DNS failure, TLS error, timeout) can
-  still wrap an underlying error string that — depending on the
-  transport implementation — may include URL or proxy detail. The
-  bearer token is in the `Authorization` header, never the URL, so the
-  practical leak window is narrow today. Defense-in-depth: add a
-  `sanitizeError(err, token) error` helper in the github package that
-  scans error strings for the token value and redacts it. Apply at
-  every error-return path in `client.go`.
-
 ### `expandTilde` silently passes through when `$HOME` is unresolvable
 
 - **Source:** unaided config reviewer 2026-04-14 (F12, deferred)

@@ -221,8 +221,44 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("GitHub API rate limit exceeded, resets at %s", e.ResetAt.Format(time.RFC3339))
 }
 
+// sanitizeError redacts token from err's rendered string when it
+// appears, returning a fresh value carrying the redacted text.
+//
+// Behavior:
+//   - nil err → nil (helper safe on success paths, where the
+//     named-return + defer pattern fires unconditionally).
+//   - empty token (unauthenticated client) → input err unchanged.
+//     Without this guard, strings.ReplaceAll with an empty pattern
+//     would interleave the marker between every character.
+//   - token absent from err.Error() → input err unchanged. Chain
+//     preserved so callers' errors.Is(err, ErrNotFound) keeps
+//     working through the boundary.
+//   - token present → fresh errors.New with all occurrences
+//     replaced by [REDACTED-TOKEN]. Chain dropped (security beats
+//     Unwrap convenience): preserving the chain via custom error
+//     type would let errors.Unwrap(err).Error() recover the token.
+func sanitizeError(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	if token == "" {
+		return err
+	}
+	s := err.Error()
+	if !strings.Contains(s, token) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(s, token, "[REDACTED-TOKEN]"))
+}
+
 // get performs a GET request to the GitHub API.
-func (c *Client) get(ctx context.Context, path string, result any) error {
+//
+// Named return + deferred sanitizeError applies token redaction at
+// every error-return path including those added in the future. See
+// sanitizeError's doc for the threat model.
+func (c *Client) get(ctx context.Context, path string, result any) (err error) {
+	defer func() { err = sanitizeError(err, c.token) }()
+
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -282,7 +318,13 @@ func (c *Client) get(ctx context.Context, path string, result any) error {
 }
 
 // getWithLinkHeader performs a GET and returns the Link header for pagination.
-func (c *Client) getWithLinkHeader(ctx context.Context, path string, result any) (string, error) {
+//
+// Named return + deferred sanitizeError matches get's pattern:
+// every error-return path runs through token redaction at function
+// exit. See sanitizeError's doc for the threat model.
+func (c *Client) getWithLinkHeader(ctx context.Context, path string, result any) (link string, err error) {
+	defer func() { err = sanitizeError(err, c.token) }()
+
 	url := c.baseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
