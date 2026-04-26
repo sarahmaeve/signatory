@@ -1,9 +1,13 @@
 # Potential: PyPI ecosystem provider — gap analysis vs. npm / Go / GitHub
 
-Status: proposed. Captured 2026-04-24 during the v0.1 burndown scoping
-conversation. The goal of this doc is to fully enumerate what's missing
-for PyPI to reach parity with the shipped npm and Go providers, so the
-eventual implementation plan starts with accurate scope.
+Status: **partially shipped** as of 2026-04-26. Originally captured
+2026-04-24 as a forward-looking gap analysis. Since then the
+manifest pipeline (Layers 2, 3, 9 plus substantial test coverage
+under Layer 10) has shipped end-to-end and is dogfood-validated
+against two real-world Python projects. See "Status update" below
+for the layer-by-layer breakdown; the rest of this document
+preserves the original gap analysis as the reference for the
+work that remains.
 
 Cross-references:
 - [`npm-plan.txt`](npm-plan.txt) — the npm shipped-state doc and
@@ -12,6 +16,80 @@ Cross-references:
   pluggable resolver registry the new PyPI resolver plugs into
 - [`v0.1-invariants.md`](v0.1-invariants.md) §Invariant 2 —
   collectors live under `internal/signal/registry/<eco>/`
+- [`parsedeep.md`](parsedeep.md) — the implementation plan and
+  architectural notes for Layer 3 (manifest parser); now historical
+  but kept for the v3 Poetry-as-third-handler reasoning
+
+## Status update (2026-04-26)
+
+The manifest pipeline shipped across eight commits between
+2026-04-25 and 2026-04-26. Three of the ten layers in this gap
+analysis are now closed; one is substantially covered.
+
+| Layer | Topic | Status | Closing commits |
+|---|---|---|---|
+| Layer 1 | Canonical URI / `parsePyPIURL` | not started | — |
+| Layer 2 | Manifest detection | **shipped** | `e133043` |
+| Layer 3 | Manifest parser | **shipped (v0.1 scope)** | `c8c9e14` (requirements.txt), `91ff96b` (dispatcher), `194d007` (TOML lib), `1df4af5` (PEP 508 helper extract), `5ef6fc1` (PEP 621 + PEP 735), `d0808f7` (Poetry as third independent handler) |
+| Layer 4 | Registry client | not started | — |
+| Layer 5 | Signal collector | not started | — |
+| Layer 6 | Identity / source resolver | not started | — |
+| Layer 7 | CLI collector dispatch | not started | — (one-line addition once Layer 5 ships) |
+| Layer 8 | Handoff template rename | not started | — |
+| Layer 9 | Survey integration | **shipped** | `0b6524c` (initial wiring), revisions in `5ef6fc1` and `d0808f7` |
+| Layer 10 | Test fixtures / e2e | **substantially covered for shipped layers** | five fixture pyproject.toml files in `internal/manifest/pypi/testdata/`, fixture-backed survey-level smoke tests, dogfood validations against `Textualize/rich` and `python-poetry/poetry` |
+
+What this means in user-facing terms:
+
+- `signatory survey --manifest <path>` now produces a clean dep
+  enumeration for any Python project shape we encountered:
+  requirements.txt, PEP 621-only, PEP 735-only (non-package
+  app), Poetry-only (legacy or modern groups), and the hybrid
+  PEP 621 + Poetry case (e.g., python-poetry/poetry itself).
+- `signatory analyze pkg:pypi/<name>` still cannot gather
+  automated registry signals (Layer 5 not started). Users
+  running `/analyze` on a PyPI target get whatever the
+  LLM-backed analyst agents produce manually, with no Layer 1
+  mechanical signals beneath them. `signatory_analyze` MCP
+  cache-misses on PyPI-only entities because Layer 1 was never
+  collected — see `dogfood-errors.md` for the bug we filed
+  about the cache-miss error message being misleading.
+- `signatory analyze https://pypi.org/project/<name>/` still
+  rejects at URL parsing (Layer 1 not started).
+- `pkg:pypi/<name>` cannot be auto-resolved to its source
+  repository (Layer 6 not started).
+
+### Architectural decisions preserved
+
+A few decisions made during Layer 3 implementation are worth
+preserving here for future reference, since the gap analysis
+below pre-dates them:
+
+- **PEP 735 `[dependency-groups]` is in scope** (originally
+  marked "out of scope; smaller adoption" in the gap analysis;
+  pulled into scope after live verification of the spec).
+  Implemented in `5ef6fc1` alongside PEP 621.
+- **Poetry runs as a third independent table-handler**, not a
+  fallback parser. The "fallback" framing was invalidated by
+  the hybrid case — projects that have both `[project]` and
+  `[tool.poetry.group.*.dependencies]` (e.g., python-poetry/poetry
+  itself). All three handlers (PEP 621, PEP 735, Poetry) run
+  regardless of who else found data; deps from each contribute
+  to the union with no cross-handler dedup. See `parsedeep.md`
+  v3 revision history for the full reasoning.
+- **TOML library: `github.com/BurntSushi/toml` v1.6.0** vetted via
+  signatory's own /analyze pipeline (analysis session
+  `a186fb43-…`), trusted-for-now, adopted in `194d007` with
+  four-way SHA verification recorded in the commit message.
+- **`setup.py` permanently produces a redirect-error**
+  (`ErrSetupPyNotParseable`) pointing users at pyproject.toml
+  or requirements.txt. Static parsing of executable Python is
+  impossible by design; this isn't a "v0.1 scope" decision but
+  a permanent architectural one.
+- **64 KiB size cap on pyproject.toml** before TOML decode, per
+  the BurntSushi/toml synthesis recommendation. Real
+  pyproject.toml files are well under 16 KiB; the cap rules
+  out adversarial input without affecting any legitimate file.
 
 ## Methodology
 
