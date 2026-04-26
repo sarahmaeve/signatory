@@ -49,15 +49,26 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	case "requirements.txt":
 		return parseRequirementsAsManifest(path)
 	case "pyproject.toml":
-		return manifest.ProjectInfo{}, nil,
-			fmt.Errorf("%w: %s", ErrPyProjectTOMLNotYetSupported, path)
+		info, deps, err := parsePyProject(path)
+		if err != nil {
+			// Files that have neither [project] nor
+			// [dependency-groups] (e.g., a Poetry-only file with
+			// just [tool.poetry]) surface the existing user-facing
+			// sentinel until Commit 6 wires the Poetry fallback.
+			if errors.Is(err, errNoModernFormat) {
+				return manifest.ProjectInfo{}, nil,
+					fmt.Errorf("%w: %s", ErrPyProjectTOMLNotYetSupported, path)
+			}
+			return manifest.ProjectInfo{}, nil, err
+		}
+		return info, deps, nil
 	case "setup.py":
 		return manifest.ProjectInfo{}, nil,
 			fmt.Errorf("%w: %s", ErrSetupPyNotParseable, path)
 	default:
 		return manifest.ProjectInfo{}, nil, fmt.Errorf(
 			"pypi: unrecognized manifest filename %q "+
-				"(supported: requirements.txt; recognized but not yet parsed: pyproject.toml, setup.py)",
+				"(supported: requirements.txt, pyproject.toml; recognized but not yet parsed: setup.py)",
 			base)
 	}
 }

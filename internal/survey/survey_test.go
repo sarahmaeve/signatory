@@ -552,16 +552,21 @@ func TestRun_RequirementsTxt_RoutesToPyPIParser(t *testing.T) {
 		"PEP 503 normalization must apply to the canonical URI surfaced for review")
 }
 
-// TestRun_PyProjectTOML_FailsWithSentinel verifies that a
-// pyproject.toml manifest fails at parse-dispatch with the
-// not-yet-implemented sentinel surfaced in the error chain. This
-// is the temporary state until the pyproject.toml parser lands.
-func TestRun_PyProjectTOML_FailsWithSentinel(t *testing.T) {
+// TestRun_PyProjectTOML_NoModernFormat_FailsWithSentinel verifies
+// that a pyproject.toml without either [project] or
+// [dependency-groups] (e.g., a Poetry-only file with just
+// [tool.poetry]) still surfaces the not-yet-supported sentinel.
+// Once Commit 6 lands the Poetry parser this test will need to
+// be updated again — for now the sentinel firing here is the
+// "no Poetry fallback yet" message.
+func TestRun_PyProjectTOML_NoModernFormat_FailsWithSentinel(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pyproject.toml")
-	require.NoError(t, os.WriteFile(path, []byte("[project]\nname = \"x\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(
+		"[build-system]\nrequires = [\"setuptools>=61.0\"]\nbuild-backend = \"setuptools.build_meta\"\n",
+	), 0o600))
 
 	s := openTestStore(t)
 	_, err := Run(context.Background(), s, path)
@@ -589,6 +594,94 @@ func TestRun_SetupPy_FailsWithRedirect(t *testing.T) {
 	assert.Contains(t, err.Error(), "pyproject.toml",
 		"setup.py error must redirect users to a statically parseable alternative")
 	assert.Contains(t, err.Error(), "requirements.txt")
+}
+
+// TestRun_PyProjectTOML_PEP621AndPEP735_SmokeFixture is the
+// permanent smoke test for the PyPI pipeline. It parses a
+// realistic-shape pyproject.toml fixture end-to-end (Detect →
+// Parse → ProjectInfo + Deps → tier resolution → Summary) and
+// asserts on the result structure. Catches regressions across
+// the full pipeline rather than any one layer in isolation.
+//
+// The fixture file at internal/manifest/pypi/testdata/
+// pep621-and-pep735.toml carries inline comments documenting
+// the expected dep count and which sub-table each dep comes
+// from, so debugging a future failure can read the fixture and
+// understand the contract without re-deriving it from this test.
+func TestRun_PyProjectTOML_PEP621AndPEP735_SmokeFixture(t *testing.T) {
+	t.Parallel()
+
+	fixturePath, err := filepath.Abs("../manifest/pypi/testdata/pep621-pep735/pyproject.toml")
+	require.NoError(t, err)
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, fixturePath)
+	require.NoError(t, err)
+
+	// Project metadata flows through from PEP 621.
+	assert.Equal(t, "smoke-pkg", r.Project.Name)
+	assert.Equal(t, "pypi", r.Project.Ecosystem)
+	assert.Equal(t, ">=3.10", r.Project.EcoVersion)
+
+	// Dep count: 11 per the fixture's documented breakdown
+	// (4 from [project].dependencies + 1 docs + 1 test +
+	//  2 dev group + 1 test group + 2 all-test group).
+	// PEP 735 forbids deduplication during include expansion,
+	// so the all-test group's pytest (via include) and the
+	// test group's own pytest both surface — that's the spec.
+	assert.Equal(t, 11, r.Summary.Total,
+		"flat dep total counts every declaration; cross-table dedup is not the parser's job")
+	assert.Equal(t, 11, r.Summary.Direct,
+		"every pyproject.toml dep is Direct; no transitives at this layer")
+
+	// Spot-check key shapes through the full pipeline:
+	// PEP 503 normalization must apply ("Python-Dotenv" → lowercased)
+	// and environment markers must be stripped (pywin32 surfaces
+	// regardless of sys_platform).
+	needsReview := make(map[string]bool, len(r.Summary.NeedsReview))
+	for _, uri := range r.Summary.NeedsReview {
+		needsReview[uri] = true
+	}
+	assert.True(t, needsReview["pkg:pypi/python-dotenv"],
+		"PEP 503 normalization applied through full pipeline: Python-Dotenv → python-dotenv")
+	assert.True(t, needsReview["pkg:pypi/pywin32"],
+		"environment marker on pywin32 stripped; dep surfaces regardless of platform")
+	assert.True(t, needsReview["pkg:pypi/pytest"],
+		"pytest from the test group AND from the all-test include both surface")
+	assert.True(t, needsReview["pkg:pypi/pytest-cov"],
+		"PEP 735 group entries surface alongside PEP 621 deps")
+	assert.True(t, needsReview["pkg:pypi/sphinx"],
+		"PEP 621 optional-dependencies surface alongside main dependencies")
+}
+
+// TestRun_PyProjectTOML_PEP735OnlyApp_SmokeFixture is the
+// permanent smoke test for the PEP 735 application/CLI use case
+// — a Python project with no [project] table at all. This was
+// the gap PEP 735 was designed to close (pre-PEP-735, applications
+// had nowhere standard to declare dev/test deps).
+func TestRun_PyProjectTOML_PEP735OnlyApp_SmokeFixture(t *testing.T) {
+	t.Parallel()
+
+	fixturePath, err := filepath.Abs("../manifest/pypi/testdata/pep735-app/pyproject.toml")
+	require.NoError(t, err)
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, fixturePath)
+	require.NoError(t, err)
+
+	// No [project] → no project identity. Ecosystem still set,
+	// because the file IS recognized as a PyPI manifest.
+	assert.Empty(t, r.Project.Name, "no [project] table; no project name")
+	assert.Empty(t, r.Project.EcoVersion, "no [project] table; no requires-python")
+	assert.Equal(t, "pypi", r.Project.Ecosystem)
+
+	assert.Equal(t, 3, r.Summary.Total)
+	assert.Equal(t, 3, r.Summary.Direct)
+
+	assert.ElementsMatch(t,
+		[]string{"pkg:pypi/click", "pkg:pypi/pyyaml", "pkg:pypi/pytest"},
+		r.Summary.NeedsReview,
+		"all three deps from [dependency-groups] surface for review")
 }
 
 // TestParseGraph_PyPIReturnsGraphUnavailable covers parseGraph's

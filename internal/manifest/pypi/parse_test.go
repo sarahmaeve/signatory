@@ -36,16 +36,43 @@ func TestParse_DispatchesRequirementsTxt(t *testing.T) {
 	assert.Contains(t, names, "click")
 }
 
-func TestParse_PyProjectTOMLReturnsNotYetSupported(t *testing.T) {
+func TestParse_PyProjectTOMLWithModernFormat_Succeeds(t *testing.T) {
+	// A pyproject.toml with a [project] table is now successfully
+	// parsed (Commit 5c). The dispatcher returns ProjectInfo and
+	// deps, no longer the not-yet-supported sentinel.
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pyproject.toml")
-	require.NoError(t, os.WriteFile(path, []byte("[project]\nname = \"x\"\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`[project]
+name = "example"
+dependencies = ["requests==2.31.0"]
+`), 0o600))
+
+	info, deps, err := Parse(path)
+	require.NoError(t, err)
+	assert.Equal(t, "example", info.Name)
+	assert.Equal(t, "pypi", info.Ecosystem)
+	require.Len(t, deps, 1)
+	assert.Equal(t, "requests", deps[0].Name)
+}
+
+func TestParse_PyProjectTOMLWithoutModernFormat_FallsThroughToSentinel(t *testing.T) {
+	// A pyproject.toml with only [build-system] (no [project],
+	// no [dependency-groups]) — until Commit 6 lands the Poetry
+	// fallback, the dispatcher surfaces the user-facing
+	// not-yet-supported sentinel for files outside our scope.
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyproject.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+`), 0o600))
 
 	info, deps, err := Parse(path)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPyProjectTOMLNotYetSupported,
-		"caller-facing sentinel lets survey render a clear message")
+		"files with neither [project] nor [dependency-groups] still surface the sentinel until Poetry fallback ships")
 	assert.Empty(t, info.ManifestPath, "no partial ProjectInfo on error")
 	assert.Empty(t, deps, "no partial deps on error")
 }

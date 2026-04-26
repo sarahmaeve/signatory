@@ -1,0 +1,50 @@
+# Smoke fixture for signatory's PyPI pipeline.
+#
+# Combines PEP 621 [project] (modern packaging metadata) with
+# PEP 735 [dependency-groups] (modern dev/test deps) to exercise
+# the full surface signatory's parser handles. Used by both
+# package-level integration tests in internal/manifest/pypi/ and
+# survey-level smoke tests in internal/survey/.
+#
+# What this fixture exercises:
+#   - [project] name + version + requires-python
+#   - dependencies array with version specifiers, extras,
+#     PEP 503-sensitive casing, and an environment marker
+#   - optional-dependencies with multiple groups
+#   - [dependency-groups] with simple groups and
+#     {include-group = "..."} composition
+#   - PEP 503 group-name normalization (a group named with
+#     mixed case still resolves)
+#
+# Expected dep total when parsed: 11 (no deduplication across
+# tables, per PEP 735's no-dedupe rule):
+#   [project].dependencies              → 4 (requests, click,
+#                                            Python-Dotenv, pywin32)
+#   [project.optional-dependencies].docs → 1 (sphinx)
+#   [project.optional-dependencies].test → 1 (coverage)
+#   [dependency-groups].dev             → 2 (ruff, mypy)
+#   [dependency-groups].test            → 1 (pytest)
+#   [dependency-groups].all-test        → 2 (pytest via include + pytest-cov)
+
+[project]
+name = "smoke-pkg"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "requests==2.31.0",
+    "click>=8.0",
+    "Python-Dotenv==1.0.0",
+    'pywin32==306 ; sys_platform == "win32"',
+]
+
+[project.optional-dependencies]
+docs = ["sphinx>=7.0"]
+test = ["coverage>=7.0"]
+
+[dependency-groups]
+dev = ["ruff", "mypy"]
+test = ["pytest>=8.0"]
+all-test = [
+    {include-group = "test"},
+    "pytest-cov",
+]

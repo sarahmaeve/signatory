@@ -1,0 +1,22 @@
+# Smoke fixture for the PEP 735 application/CLI use case.
+#
+# A Python project that's NOT a distributable package — typical
+# of CLIs, internal tools, and applications. There's no [project]
+# table (no PyPI publishing intent), so [dependency-groups] is the
+# only deps source. Pre-PEP-735, projects in this shape had
+# nowhere to put dev/test deps in any standardized form;
+# PEP 735 fixed that.
+#
+# What this fixture exercises:
+#   - signatory parses files with NO [project] table cleanly
+#   - ProjectInfo.Name is empty in this case (no project identity)
+#   - Multiple [dependency-groups] flatten with all entries Direct
+#
+# Expected dep total when parsed: 3 (click, pyyaml, pytest).
+
+[dependency-groups]
+runtime = [
+    "click",
+    "pyyaml",
+]
+dev = ["pytest"]
