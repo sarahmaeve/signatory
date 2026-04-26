@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
@@ -216,23 +215,25 @@ func splitContinuations(content string) []string {
 }
 
 // parseRequirementLine extracts a Dep from a single non-empty,
-// non-comment, non-include line. Returns ok=false for lines that
-// are pip-only directives (--hash on its own, --index-url, etc.)
+// non-comment, non-include line of a requirements.txt file.
+// Handles the requirements.txt-specific wrapping (pip directives
+// like -e and --hash that aren't part of PEP 508) then delegates
+// the actual dependency-specification parsing to
+// parsePEP508Requirement so the same logic is reused by the
+// pyproject.toml parser.
+//
+// Returns ok=false for lines that are pip-only directives
+// (--hash on its own from a continuation, --index-url, etc.)
 // rather than dep declarations.
 func parseRequirementLine(line string) (manifest.Dep, bool) {
-	// Strip env marker: everything from the first ';' onward.
-	// Markers are stripped before tokenization because they can
-	// contain spaces and quoted values that confuse the simple
-	// whitespace tokenization below.
-	if idx := strings.Index(line, ";"); idx >= 0 {
-		line = line[:idx]
-	}
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return manifest.Dep{}, false
 	}
 
-	// Editable install: -e <spec>. Always classified as pypi-local.
+	// Editable install: -e <spec>. pip-specific syntax not present
+	// in PEP 508; classify as pypi-local and surface the verbatim
+	// spec so the operator can see what was declared.
 	if rest, ok := strings.CutPrefix(line, "-e "); ok {
 		return manifest.Dep{
 			Name:      "-e " + strings.TrimSpace(rest),
@@ -242,153 +243,13 @@ func parseRequirementLine(line string) (manifest.Dep, bool) {
 	}
 
 	// Other dash-prefixed lines (--hash on its own from a
-	// continuation, --index-url, etc.) aren't deps.
+	// continuation, --index-url, etc.) aren't deps. pip-specific
+	// preprocessing — caller of parsePEP508Requirement is supposed
+	// to have stripped these by the time the spec reaches the
+	// shared helper.
 	if strings.HasPrefix(line, "-") {
 		return manifest.Dep{}, false
 	}
 
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return manifest.Dep{}, false
-	}
-
-	// PEP 508 URL form: "name @ url"
-	if len(fields) >= 3 && fields[1] == "@" {
-		return manifest.Dep{
-			Name:      strings.Join(fields[:3], " "),
-			Ecosystem: "pypi-local",
-			Direct:    true,
-		}, true
-	}
-
-	spec := fields[0]
-
-	// VCS, URL, or local file?
-	if isNonRegistrySpec(spec) {
-		return manifest.Dep{
-			Name:      spec,
-			Ecosystem: "pypi-local",
-			Direct:    true,
-		}, true
-	}
-
-	// Standard form: <name>[<extras>][<version_specifiers>]
-	name, version := splitNameAndVersion(spec)
-	canonicalName := stripExtras(name)
-
-	dep := manifest.Dep{
-		Name:      name,
-		Version:   version,
-		Direct:    true,
-		Ecosystem: "pypi",
-	}
-	if isValidPEP508Name(canonicalName) {
-		dep.CanonicalURI = "pkg:pypi/" + pep503Normalize(canonicalName)
-	}
-	// Invalid names get the pypi ecosystem slug but no CanonicalURI
-	// — same defensive pattern as npm's malformed-name handling.
-	return dep, true
-}
-
-// splitNameAndVersion separates a spec into name (possibly with
-// extras) and version specifier (with operator preserved).
-// Skips over the [extras] block when scanning for the operator
-// boundary so "requests[security]==2.31.0" splits at the '=', not
-// inside the bracket.
-func splitNameAndVersion(spec string) (name, version string) {
-	inExtras := false
-	for i, r := range spec {
-		switch r {
-		case '[':
-			inExtras = true
-			continue
-		case ']':
-			inExtras = false
-			continue
-		}
-		if inExtras {
-			continue
-		}
-		switch r {
-		case '<', '>', '=', '!', '~':
-			return spec[:i], spec[i:]
-		}
-	}
-	return spec, ""
-}
-
-// stripExtras drops the [extras] suffix from a name.
-// "requests[security]" → "requests"; "requests" → "requests".
-func stripExtras(name string) string {
-	if idx := strings.Index(name, "["); idx >= 0 {
-		return name[:idx]
-	}
-	return name
-}
-
-// pep503Normalize applies PEP 503 name normalization for use in
-// the canonical URI: lowercase the name and collapse runs of
-// [_.-] to a single hyphen.
-//
-//	"Python_Dotenv" → "python-dotenv"
-//	"python__dot..env" → "python-dot-env"
-//
-// The canonical form is what the registry resolves equivalent
-// names to; signatory uses it to ensure that pkg:pypi/Requests
-// and pkg:pypi/requests don't fragment the store.
-func pep503Normalize(name string) string {
-	name = strings.ToLower(name)
-	var sb strings.Builder
-	sb.Grow(len(name))
-	inSep := false
-	for _, r := range name {
-		if r == '_' || r == '.' || r == '-' {
-			if !inSep {
-				sb.WriteRune('-')
-				inSep = true
-			}
-			continue
-		}
-		sb.WriteRune(r)
-		inSep = false
-	}
-	return sb.String()
-}
-
-// pep508Name is the PEP 508 distribution name grammar
-// (case-insensitive): an alphanumeric character, optionally
-// followed by a sequence of alphanumerics, dots, hyphens, and
-// underscores, ending with an alphanumeric.
-//
-// Names that don't match get no CanonicalURI — defensive against
-// stamping pkg:pypi/.. or pkg:pypi/<empty> into the store.
-var pep508Name = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
-
-// isValidPEP508Name reports whether name conforms to the PEP 508
-// distribution name grammar.
-func isValidPEP508Name(name string) bool {
-	return pep508Name.MatchString(name)
-}
-
-// isNonRegistrySpec returns true when spec points somewhere other
-// than the public PyPI registry. Mirrors npm's isNonRegistrySpec
-// shape. Comparing case-insensitively is defensive — VCS prefixes
-// are conventionally lowercase but loose tooling accepts mixed.
-func isNonRegistrySpec(spec string) bool {
-	s := strings.ToLower(spec)
-	for _, prefix := range []string{
-		"git+",
-		"hg+",
-		"svn+",
-		"bzr+",
-		"http://",
-		"https://",
-		"ftp://",
-		"file:",
-	} {
-		if strings.HasPrefix(s, prefix) {
-			return true
-		}
-	}
-	return false
+	return parsePEP508Requirement(line)
 }
