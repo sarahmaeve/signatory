@@ -16,6 +16,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2335,8 +2336,24 @@ func TestHandoff_Synthesist_ExcludesPriorSyntheses(t *testing.T) {
 
 	// Add a prior synthesis with a very distinctive tier/reasoning
 	// marker that we'll assert-absent from the rendered handoff.
+	// Synthesis ingest requires a linked analysis session post-Bug-1
+	// enforcement; create a minimal one for the entity that the
+	// fixture's analyst output already created.
 	s, err := g.OpenStore(t.Context())
 	require.NoError(t, err)
+	sqliteStore, ok := s.(*store.SQLite)
+	require.True(t, ok)
+	ent, err := s.FindEntityByURI(t.Context(), canonicalURI)
+	require.NoError(t, err)
+	priorSession := &profile.AnalysisSession{
+		ID:        profile.NewEntityID(),
+		EntityID:  ent.ID,
+		TargetURI: canonicalURI,
+		InvokedBy: "prior-synthesis-test",
+		StartedAt: time.Now().UTC(),
+		Status:    profile.AnalysisSessionInProgress,
+	}
+	require.NoError(t, sqliteStore.CreateAnalysisSession(t.Context(), priorSession))
 	_, err = s.IngestAnalystOutput(t.Context(), &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
@@ -2352,7 +2369,7 @@ func TestHandoff_Synthesist_ExcludesPriorSyntheses(t *testing.T) {
 			Reasoning: "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER body",
 			Summary:   "DISTINCTIVE-PRIOR-SYNTHESIS-MARKER summary",
 		},
-	}, "prior-synthesis-source")
+	}, "prior-synthesis-source", store.WithAnalysisSession(priorSession.ID))
 	require.NoError(t, err)
 	s.Close() //nolint:errcheck // test cleanup
 

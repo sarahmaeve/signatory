@@ -253,9 +253,19 @@ Example minimal output shape:
 Land the output by calling `signatory_ingest_analysis`:
 
 ```
-analyst_output: <your v1 JSON>
-source:         "mcp:synthesist"
+analyst_output:      <your v1 JSON>
+source:              "mcp:synthesist"
+analysis_session_id: <the id from the SESSION_INSTRUCTION block above>
 ```
+
+The `analysis_session_id` is required for synthesis ingest. The
+store rejects synthesis outputs without a linked session because
+the audit-trail rollup query (`signatory analysis show <id>`)
+filters by that field — an unlinked synthesis row is invisible to
+the surface its existence was meant to populate. If you omit it,
+the ingest fails with `CodeSchemaViolation` naming the missing
+field; retry with the value from the SESSION_INSTRUCTION block at
+the top of this handoff.
 
 You do NOT pass `collected_from` — the synthesist inherits the
 caller-identity indexing from the analyses it's synthesizing, and

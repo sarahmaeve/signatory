@@ -23,4 +23,25 @@ var (
 	// surface it from AppendResolution and other write paths whose
 	// entity_id referent must be pre-validated before INSERT.
 	ErrOrphanedEntity = errors.New("referenced entity does not exist")
+
+	// ErrSynthesisRequiresSession is returned by IngestAnalystOutput
+	// when a synthesis-role output (analyst_id matching
+	// exchange.SynthesistAnalystIDPrefix) is ingested without
+	// WithAnalysisSession. Synthesis outputs are session-scoped
+	// artifacts: the rollup query in `signatory analysis show`
+	// filters by analysis_session_id, so an unlinked synthesis row
+	// becomes invisible to the audit-trail surface its existence
+	// was meant to populate. Pre-enforcement, agent noncompliance
+	// produced 9 of 11 historical synthesis outputs in the dogfood
+	// store as orphaned rows. Server-side enforcement converts the
+	// silent-data-integrity-loss pattern into a loud, retryable
+	// rejection. See design/dogfood-errors.md.
+	//
+	// The sibling invariant (synthesis outputs must carry non-empty
+	// target) is enforced by the v1 schema validator
+	// (exchange.Validate), which runs before this check; an empty
+	// target produces a generic "target required" validation error
+	// that catches the case before the synthesis-specific path is
+	// reached. No need for a separate synthesis-target sentinel.
+	ErrSynthesisRequiresSession = errors.New("synthesis output requires analysis_session_id")
 )

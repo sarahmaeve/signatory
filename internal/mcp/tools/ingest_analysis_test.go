@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/mcp"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -391,4 +392,52 @@ func TestIngestAnalysisTool_WithAnalysisSession_UnknownID(t *testing.T) {
 	require.NotNil(t, resp.Error)
 	assert.Contains(t, resp.Error.Message, "ingest failed",
 		"error message should identify the ingest phase so callers can retry with a corrected id")
+}
+
+// TestIngestAnalysisTool_SynthesisWithoutSession_SchemaViolation
+// confirms the new error mapping: the store-layer
+// ErrSynthesisRequiresSession sentinel is converted to a
+// CodeSchemaViolation MCP response with the offending field named.
+// That makes the error agent-correctable — the synthesist drops
+// analysis_session_id, gets this loud rejection, and retries with
+// the field included in the same turn.
+func TestIngestAnalysisTool_SynthesisWithoutSession_SchemaViolation(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+
+	// Build a minimal-valid synthesis-shape payload.
+	synth := exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-synthesis-v1",
+			Model:     "test-model",
+			InvokedAt: "2026-04-26T12:00:00Z",
+		},
+		Target: "pkg:test/widget",
+		SynthesisSupplement: &exchange.SynthesisSupplement{
+			ProposedPosture: exchange.ProposedPosture{
+				Tier:             exchange.ProposedTierTrustedForNow,
+				RationaleSummary: "test rationale",
+			},
+			Reasoning: "test reasoning",
+			Summary:   "test summary",
+		},
+	}
+	payload, err := json.Marshal(synth)
+	require.NoError(t, err)
+
+	// Ingest WITHOUT analysis_session_id — the bug pattern.
+	envelope := map[string]any{
+		"analyst_output": json.RawMessage(payload),
+	}
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), raw)
+	require.Equal(t, "error", resp.Status)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code,
+		"synthesis-requires-session must surface as schema violation, not internal error, so the agent retries")
+	assert.Contains(t, resp.Error.Message, "analysis_session_id",
+		"error message must name the missing field so the agent knows what to add")
 }

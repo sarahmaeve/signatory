@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/mcp"
@@ -168,6 +169,15 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 
 	result, err := t.Store.IngestAnalystOutput(ctx, &out, source, ingestOpts...)
 	if err != nil {
+		// Synthesis-specific contract violations are agent-correctable:
+		// surface them as schema violations naming the missing field
+		// so the agent retries with the corrected payload in the same
+		// turn. Any other ingest error is internal.
+		if errors.Is(err, store.ErrSynthesisRequiresSession) {
+			return mcp.Err(mcp.CodeSchemaViolation,
+				"synthesis outputs require analysis_session_id; pass it as the top-level field of the ingest call (the SESSION_INSTRUCTION block in your handoff names the id)",
+				map[string]string{"field": "analysis_session_id"})
+		}
 		return mcp.Err(mcp.CodeInternalError,
 			"ingest failed: "+err.Error(), nil)
 	}

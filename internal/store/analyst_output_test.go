@@ -437,12 +437,20 @@ func synthesisTestInput() *exchange.AnalystOutput {
 // IngestAnalystOutput → GetAnalystOutput unchanged. Drives migration v8
 // (new columns), the supplement-aware ingest write, and the
 // supplement-aware Get read.
+//
+// Updated post-Bug-1 enforcement to pass WithAnalysisSession; without
+// it the ingest is rejected with ErrSynthesisRequiresSession. The
+// round-trip semantics under test are unchanged.
 func TestIngest_SynthesisSupplement_RoundTrip(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
 
 	input := synthesisTestInput()
-	result, err := s.IngestAnalystOutput(ctx, input, "synthesis-test")
+	sess := newSessionFixture(t, s, input.Target)
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+
+	result, err := s.IngestAnalystOutput(ctx, input, "synthesis-test",
+		WithAnalysisSession(sess.ID))
 	require.NoError(t, err)
 	require.NotEmpty(t, result.OutputID)
 
@@ -520,7 +528,10 @@ func TestIngest_SynthesisSupplement_FullShapeRoundTrip(t *testing.T) {
 		},
 	}
 
-	result, err := s.IngestAnalystOutput(ctx, input, "full-shape-test")
+	sess := newSessionFixture(t, s, input.Target)
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+	result, err := s.IngestAnalystOutput(ctx, input, "full-shape-test",
+		WithAnalysisSession(sess.ID))
 	require.NoError(t, err)
 
 	loaded, err := s.GetAnalystOutput(ctx, result.OutputID)
@@ -537,6 +548,97 @@ func TestIngest_SynthesisSupplement_FullShapeRoundTrip(t *testing.T) {
 // a nil SynthesisSupplement. Belt-and-suspenders against a future
 // bug where the Get path incorrectly materializes an empty supplement
 // for non-synthesist rows.
+// --- Synthesis ingest enforcement (Bug 1 from dogfood-errors.md) ----------
+
+// TestIngest_SynthesisRequiresAnalysisSession asserts that ingesting
+// a synthesis-role output without WithAnalysisSession is rejected at
+// the store layer. Pre-fix, agents that dropped analysis_session_id
+// during the ingest call landed orphaned rows that escaped the
+// session rollup query — 9 of 11 historical synthesis outputs in the
+// store were unlinked due to this. Post-fix, the rejection is loud
+// and retryable: the agent's MCP call gets CodeSchemaViolation
+// with the missing field named, and a retry with the field set
+// succeeds. See design/dogfood-errors.md.
+func TestIngest_SynthesisRequiresAnalysisSession(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	input := synthesisTestInput()
+	_, err := s.IngestAnalystOutput(ctx, input, "synthesis-no-session")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSynthesisRequiresSession,
+		"sentinel must be in the error chain so callers can map it to a useful response")
+}
+
+// TestIngest_SynthesisRequiresTarget asserts the sibling invariant:
+// synthesis outputs must carry a non-empty target. 7 of 11
+// historical synthesis outputs in the dogfood store had empty
+// target — same agent-noncompliance pattern as the session-id
+// case. Enforcement here lives at the v1 schema validator (which
+// runs before the synthesis-specific path in IngestAnalystOutput),
+// not as a separate synthesis sentinel. Either layer is fine for
+// the goal: an agent that drops `target` gets a loud rejection it
+// can retry from. The test confirms the rejection still happens
+// for synthesis-role outputs even when the session id is correctly
+// supplied.
+func TestIngest_SynthesisRequiresTarget(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	sess := newSessionFixture(t, s, "pkg:npm/synth-empty-target")
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+
+	input := synthesisTestInput()
+	input.Target = "" // bug pattern: agent dropped target
+	_, err := s.IngestAnalystOutput(ctx, input, "synthesis-no-target",
+		WithAnalysisSession(sess.ID))
+	require.Error(t, err,
+		"synthesis with empty target must be rejected — by validator or by IngestAnalystOutput, either is fine")
+	assert.Contains(t, err.Error(), "target",
+		"the rejection error must name the target field so the agent can self-correct")
+}
+
+// TestIngest_NonSynthesis_NoSessionRequirement is the regression
+// guard: enforcement applies ONLY to synthesis-role analyst_ids.
+// Regular analyst outputs (security, provenance, etc.) ingest
+// without a session, as they did before.
+func TestIngest_NonSynthesis_NoSessionRequirement(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := newTestAnalystOutput("pkg:npm/regular-analyst", "external-sec-v1")
+	res, err := s.IngestAnalystOutput(ctx, out, "non-synthesis-no-session")
+	require.NoError(t, err,
+		"non-synthesis outputs without WithAnalysisSession must still succeed — enforcement is synthesis-specific")
+	assert.NotEmpty(t, res.OutputID)
+}
+
+// TestIngest_SynthesisWithBothFields_Succeeds is the positive
+// control for the contract: both required fields present → success,
+// FK populated, target stored verbatim.
+func TestIngest_SynthesisWithBothFields_Succeeds(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	sess := newSessionFixture(t, s, "pkg:npm/synth-happy")
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+
+	input := synthesisTestInput()
+	input.Target = "pkg:npm/synth-happy"
+	res, err := s.IngestAnalystOutput(ctx, input, "synthesis-happy",
+		WithAnalysisSession(sess.ID))
+	require.NoError(t, err)
+	assert.NotEmpty(t, res.OutputID)
+
+	// FK populated → ListOutputsForSession returns the row.
+	outputs, err := s.ListOutputsForSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1, "synthesis row must surface in session rollup post-fix")
+	assert.Equal(t, "signatory-synthesis-v1", outputs[0].AnalystID)
+}
+
+// --- Existing synthesis-supplement coverage --------------------------------
+
 func TestGetAnalystOutput_NonSynthesist_NoSupplement(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()
@@ -578,7 +680,10 @@ func TestGetSynthesisProposal_HappyPath(t *testing.T) {
 			Summary:   "s",
 		},
 	}
-	result, err := s.IngestAnalystOutput(ctx, input, "proposal-test")
+	sess := newSessionFixture(t, s, input.Target)
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+	result, err := s.IngestAnalystOutput(ctx, input, "proposal-test",
+		WithAnalysisSession(sess.ID))
 	require.NoError(t, err)
 
 	proposal, err := s.GetSynthesisProposal(ctx, result.OutputID)

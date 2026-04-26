@@ -8,11 +8,14 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 	"github.com/sarahmaeve/signatory/internal/synthesis"
 )
@@ -72,7 +75,26 @@ func TestAssemble_WithRealStore(t *testing.T) {
 			Summary:   "integration-test summary",
 		},
 	}
-	_, err = s.IngestAnalystOutput(ctx, synth, "integration-test-synth")
+	// Synthesis ingest requires a linked analysis session post-Bug-1
+	// enforcement (commit forthcoming; see design/dogfood-errors.md).
+	// Create a minimal session and link the synthesis output to it.
+	// The session's entity already exists from the analyst-output
+	// ingest above (it created the entity for pkg:npm/integration-
+	// example), so we just need to re-fetch its ID for the FK.
+	ent, err := s.FindEntityByURI(ctx, "pkg:npm/integration-example")
+	require.NoError(t, err)
+	sess := &profile.AnalysisSession{
+		ID:        uuid.NewString(),
+		EntityID:  ent.ID,
+		TargetURI: "pkg:npm/integration-example",
+		InvokedBy: "integration-test",
+		StartedAt: time.Now().UTC(),
+		Status:    profile.AnalysisSessionInProgress,
+	}
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+
+	_, err = s.IngestAnalystOutput(ctx, synth, "integration-test-synth",
+		store.WithAnalysisSession(sess.ID))
 	require.NoError(t, err)
 
 	// Assemble via the real store. Evidence should carry exactly

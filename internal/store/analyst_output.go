@@ -137,6 +137,23 @@ func (s *SQLite) IngestAnalystOutput(
 		opt(&options)
 	}
 
+	// Synthesis-role outputs are session-scoped artifacts: the rollup
+	// query in `signatory analysis show` filters by
+	// analysis_session_id, so an unlinked synthesis row is invisible
+	// to the audit-trail surface its existence was meant to populate.
+	// Agent compliance with the SESSION_INSTRUCTION block in the
+	// handoff is observably inconsistent — 9 of 11 historical
+	// synthesis outputs in the dogfood store were orphaned by
+	// dropped fields. Loud rejection here lets the agent retry with
+	// the corrected payload (the MCP boundary maps the sentinel to
+	// CodeSchemaViolation with the missing field named).
+	//
+	// The sibling target-required invariant is enforced by
+	// out.Validate() above; an empty target never reaches this point.
+	if exchange.IsSynthesistRole(out.Attribution.AnalystID) && options.analysisSessionID == "" {
+		return nil, ErrSynthesisRequiresSession
+	}
+
 	hash, err := analystOutputContentHash(out)
 	if err != nil {
 		return nil, fmt.Errorf("compute content hash: %w", err)

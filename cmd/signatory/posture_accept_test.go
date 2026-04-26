@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,13 +40,52 @@ func synthesisForAccept() *exchange.AnalystOutput {
 // ingestSynthesisForAccept is the common test setup: ingest a
 // synthesis output into g's store and return the resulting
 // OutputID so the test can pass it to PostureAcceptCmd.
+//
+// Creates an analysis session for the synthesis output's target
+// and links the ingested output to it — synthesis ingest requires
+// a non-empty analysis_session_id post-Bug-1 enforcement (see
+// design/dogfood-errors.md). The session is otherwise unused by
+// these tests.
 func ingestSynthesisForAccept(t *testing.T, g *Globals, out *exchange.AnalystOutput) string {
 	t.Helper()
 	ctx := t.Context()
 	s, err := g.OpenStore(ctx)
 	require.NoError(t, err)
 	defer s.Close() //nolint:errcheck // test cleanup
-	result, err := s.IngestAnalystOutput(ctx, out, "synthesis-for-accept-test")
+
+	// Create an entity for the target so the session FK holds, then
+	// the session itself. The store's IngestAnalystOutput will reuse
+	// the entity it finds at the given URI; session-create needs the
+	// entity row up front.
+	//
+	// Plan-A canonicalization strips any @version suffix from the
+	// target before lookup/insert; so create our pre-session entity
+	// at the unversioned form to avoid leaving an orphan versioned
+	// entity that breaks the @V-stripping regression assertions.
+	sqliteStore, ok := s.(*store.SQLite)
+	require.True(t, ok, "test setup expects *store.SQLite")
+
+	entityURI, _ := profile.SplitURIVersion(out.Target)
+	entity := &profile.Entity{
+		ID:           profile.NewEntityID(),
+		CanonicalURI: entityURI,
+		Type:         profile.EntityProject,
+		ShortName:    "test",
+	}
+	require.NoError(t, sqliteStore.PutEntity(ctx, entity))
+
+	session := &profile.AnalysisSession{
+		ID:        profile.NewEntityID(),
+		EntityID:  entity.ID,
+		TargetURI: entityURI,
+		InvokedBy: "posture-accept-test",
+		StartedAt: time.Now().UTC(),
+		Status:    profile.AnalysisSessionInProgress,
+	}
+	require.NoError(t, sqliteStore.CreateAnalysisSession(ctx, session))
+
+	result, err := s.IngestAnalystOutput(ctx, out, "synthesis-for-accept-test",
+		store.WithAnalysisSession(session.ID))
 	require.NoError(t, err)
 	return result.OutputID
 }
