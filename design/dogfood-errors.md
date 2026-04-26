@@ -149,40 +149,6 @@ Each item has:
     root cause as the rollup-misses-synthesis bug above; fix
     once, both surfaces light up.
 
-## URI canonicalization
-
-### GitHub URI case-folding diverges from canonical form
-
-- **Found:** 2026-04-26, dogfood run on
-  `repo:github/BurntSushi/toml`, surfaced by both analysts
-  during the same run
-- **Severity:** should-fix (correctness; the §3.2 caller-identity
-  fallback masks the bug today, but the fallback existing isn't
-  a reason to leave the duplicate-entity problem to accumulate
-  silently)
-- **Where:** wherever `repo:github/<owner>/<repo>` URIs are
-  normalized — likely `internal/profile/uri.go` or
-  `internal/profile/target.go`'s GitHub URL parser. There is an
-  existing `parseNpmjsURL` analog at `target.go:250`; the
-  GitHub path probably lives near it.
-- **Symptom:** `https://github.com/burntsushi/toml` (lowercase)
-  and `https://github.com/BurntSushi/toml` resolve to different
-  canonical entities (`bfaee39d…` vs `c0dd8121…`). GitHub's API
-  and `git clone` are case-insensitive on owner+repo paths, so
-  the two URLs point to the same repo on the network. signatory's
-  normalizer treats them as distinct, producing two entities for
-  one real repo.
-- **Sketch:** lowercase the owner+repo path during
-  canonicalization for `repo:github/…` URIs. Update the parser
-  to emit the lowercased form, and add a one-shot store
-  migration (or a documented merge command) that consolidates
-  any pre-existing duplicate entities surfaced by the bug.
-  Tests: assert that `BurntSushi/toml`, `burntsushi/toml`,
-  `BURNTSUSHI/TOML`, and the URL forms of each all resolve to
-  one canonical URI. Note in the fix: the §3.2 caller-identity
-  fallback handles indexing today, so this fix is about
-  preventing the fragmentation, not about repairing missing data.
-
 ## Manual process: worked examples
 
 Sibling to the error catalog above. When a manual workflow runs
