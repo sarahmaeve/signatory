@@ -156,18 +156,61 @@ func TestAnalyzeTool_InvalidDepth(t *testing.T) {
 	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
 }
 
+// TestAnalyzeTool_EntityExistsNoSignals documents the soft-fail
+// contract: an entity that exists but has no Layer 1 signals
+// returns OK with an empty SignalsSummary, NOT a cache-miss error.
+// This is the state /analyze-skill-produced entities are in by
+// default — the skill dispatches analyst agents (Layer 2) without
+// invoking signal collectors (Layer 1). Pre-fix this returned
+// CodeCacheMissRequiresRefresh, which lied about the data being
+// absent and pointed users at the wrong remedy. See
+// design/dogfood-errors.md "signatory_analyze MCP tool gates on
+// Layer 1, fails when only Layer 2 data exists".
 func TestAnalyzeTool_EntityExistsNoSignals(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	// Entity exists but no signals seeded.
 	seedEntity(t, s, "repo:github/acme/empty", "acme/empty")
 
 	tool := &AnalyzeTool{Store: s}
 	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/empty"}`))
 
-	// No signals → cache miss.
-	assert.Equal(t, "error", resp.Status)
-	assert.Equal(t, mcp.CodeCacheMissRequiresRefresh, resp.Error.Code)
+	require.Equal(t, "ok", resp.Status,
+		"entity-exists-without-signals must return OK; cache-miss is the entity-not-found case only")
+	assert.True(t, resp.Metadata.CacheHit, "cached entity record was found")
+
+	data, ok := resp.Data.(analyzeData)
+	require.True(t, ok)
+	assert.Equal(t, "repo:github/acme/empty", data.Entity.CanonicalURI)
+	// SignalsSummary is empty (zero value) — honest representation
+	// that no Layer 1 signals are cached for this entity.
+	assert.Empty(t, data.ForgeryResistance,
+		"no signals → no forgery resistance to compute")
+}
+
+// TestAnalyzeTool_EntityWithPostureNoSignals is the precise dogfood
+// scenario from design/dogfood-errors.md: an entity has a Layer 2
+// posture (the /analyze skill recorded one) but no Layer 1 signals.
+// The tool should return the posture, not error out claiming the
+// data is missing.
+func TestAnalyzeTool_EntityWithPostureNoSignals(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:github/acme/postured", "acme/postured")
+	require.NoError(t, s.SetPosture(context.Background(), &profile.Posture{
+		EntityID:  e.ID,
+		Tier:      profile.PostureTrustedForNow,
+		Rationale: "set by /analyze skill",
+		SetAt:     time.Now().UTC(),
+	}))
+
+	tool := &AnalyzeTool{Store: s}
+	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"acme/postured"}`))
+
+	require.Equal(t, "ok", resp.Status)
+	data, ok := resp.Data.(analyzeData)
+	require.True(t, ok)
+	require.NotNil(t, data.Entity.Posture, "posture from Layer 2 must surface in the response")
+	assert.Equal(t, "trusted-for-now", data.Entity.Posture.Tier)
 }
 
 // TestDominantForgeryResistance exercises the helper directly, including the

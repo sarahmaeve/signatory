@@ -25,10 +25,18 @@ import (
 
 // AnalyzeTool implements signatory_analyze.
 //
-// Returns the cached profile for a target. On cache miss with
-// refresh:false returns CodeCacheMissRequiresRefresh. In v0.1 refresh:true
-// returns the same cache-miss error rather than performing a live collect —
-// the actual refresh is done by signatory_refresh.
+// Returns the cached profile for a target. CodeCacheMissRequiresRefresh
+// fires only when the entity itself isn't in the store — i.e. no
+// analyst (manual or automated) has ever assessed this target. An
+// entity that exists but has no Layer 1 signals (the natural state
+// of any target processed via the /analyze skill, which dispatches
+// analyst agents without invoking signal collectors) returns OK
+// with an empty SignalsSummary. The tool's response shape carries
+// both Layer 1 (signals_summary, forgery_resistance) and Layer 2
+// (entity.posture) data; either may be empty independently. Layer 1
+// refresh is the job of signatory_refresh — refresh:true on this
+// tool is informational only in v0.1 and does not affect the
+// returned data.
 type AnalyzeTool struct {
 	Store store.Store
 }
@@ -115,16 +123,14 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 	if err != nil {
 		return mcp.Err(mcp.CodeInternalError, "read signals failed: "+err.Error(), nil)
 	}
-	if len(signals) == 0 {
-		if in.Refresh {
-			return mcp.Err(mcp.CodeCacheMissRequiresRefresh,
-				"entity exists but has no signals; run signatory_refresh to collect",
-				map[string]string{"target": in.Target})
-		}
-		return mcp.Err(mcp.CodeCacheMissRequiresRefresh,
-			"no cached signals for "+in.Target+"; run signatory_refresh to collect",
-			map[string]string{"target": in.Target})
-	}
+	// Empty signals are NOT a cache miss. The /analyze skill produces
+	// entities with Layer 2 conclusions/posture/synthesis but no
+	// Layer 1 signals (skill dispatches analysts; doesn't invoke
+	// signal collectors). Returning an error here would lie about
+	// the data being absent and point users at signatory_refresh,
+	// which is the wrong remedy when what they want is the Layer 2
+	// verdict. Empty signals → empty SignalsSummary in the response,
+	// which is honest about the cache state.
 
 	postures, err := t.Store.GetPostures(ctx, entity.ID)
 	if err != nil {
