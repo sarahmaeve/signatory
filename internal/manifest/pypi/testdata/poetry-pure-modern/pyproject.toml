@@ -1,0 +1,37 @@
+# Smoke fixture for pure Poetry with modern group syntax.
+#
+# Pure Poetry (no PEP 621 [project] table) using Poetry 1.2+'s
+# [tool.poetry.group.<name>.dependencies] form. No confirmed
+# real-world target in this exact shape — projects that adopted
+# the modern groups generally also migrated to PEP 621 (becoming
+# the hybrid case). Synthesized fixture covers the parser's
+# correctness on the shape regardless.
+#
+# Expected when parsed:
+#   ProjectInfo.Name       = "pure-modern-pkg"
+#   ProjectInfo.EcoVersion = "^3.10"
+#   Deps (4 total, all Direct=true):
+#     - requests   (from [tool.poetry.dependencies])
+#     - pytest     (from [tool.poetry.group.dev.dependencies])
+#     - coverage   (from [tool.poetry.group.test.dependencies])
+#     - sphinx     (from [tool.poetry.group.docs.dependencies])
+
+[tool.poetry]
+name = "pure-modern-pkg"
+version = "0.1.0"
+description = "Pure Poetry with modern group syntax"
+authors = ["Test Author <test@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.31.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.poetry.group.test.dependencies]
+coverage = "^7.0"
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^7.0"

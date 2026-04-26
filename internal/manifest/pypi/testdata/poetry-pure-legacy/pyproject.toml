@@ -1,0 +1,34 @@
+# Smoke fixture for pure Poetry with legacy dev-dependencies form.
+#
+# Mirrors the shape of Textualize/rich (verified 2026-04-26 via
+# WebFetch on github.com/Textualize/rich/master/pyproject.toml).
+# No [project] table — Poetry is the sole metadata + deps source.
+# Dev deps live under [tool.poetry.dev-dependencies], the form
+# used before Poetry 1.2 introduced [tool.poetry.group.*].
+#
+# Expected when parsed:
+#   ProjectInfo.Name       = "pure-legacy-pkg"
+#   ProjectInfo.EcoVersion = "^3.10"
+#   Deps (4 total, all Direct=true):
+#     - requests   (from [tool.poetry.dependencies])
+#     - click      (from [tool.poetry.dependencies])
+#     - pytest     (from [tool.poetry.dev-dependencies])
+#     - black      (from [tool.poetry.dev-dependencies])
+#   The python pin is NOT a dep — it's the runtime version pin
+#   that flows into ProjectInfo.EcoVersion.
+
+[tool.poetry]
+name = "pure-legacy-pkg"
+version = "0.1.0"
+description = "Pure Poetry with legacy dev-deps form (Textualize/rich shape)"
+authors = ["Test Author <test@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.31.0"
+click = ">=8.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^8.0"
+black = "^24.0"

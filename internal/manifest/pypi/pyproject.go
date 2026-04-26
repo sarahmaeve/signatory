@@ -35,11 +35,12 @@ var errNoModernFormat = errors.New("pyproject.toml has neither [project] nor [de
 // pyProjectFile is the TOML-decoder target for the slice of
 // pyproject.toml signatory cares about. Every field is optional
 // — pyproject.toml has no required tables, and we tolerate
-// arbitrary additional fields (build-system, tool.*, etc.) by
-// silently ignoring them.
+// arbitrary additional fields (build-system, tool.* sub-tables
+// other than poetry, etc.) by silently ignoring them.
 type pyProjectFile struct {
 	Project          *projectTable    `toml:"project"`
 	DependencyGroups dependencyGroups `toml:"dependency-groups"`
+	Tool             *toolTable       `toml:"tool"`
 }
 
 // projectTable is the PEP 621 [project] table. Many real-world
@@ -103,7 +104,8 @@ func parsePyProject(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 
 	hasProject := f.Project != nil
 	hasGroups := len(f.DependencyGroups) > 0
-	if !hasProject && !hasGroups {
+	hasPoetry := f.Tool != nil && f.Tool.Poetry != nil
+	if !hasProject && !hasGroups && !hasPoetry {
 		return manifest.ProjectInfo{}, nil, errNoModernFormat
 	}
 
@@ -116,6 +118,10 @@ func parsePyProject(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 
 	var deps []manifest.Dep
 
+	// Three independent table-handlers run regardless of who else
+	// found data; deps from all three contribute to the union with
+	// no cross-handler deduplication. Architecture confirmed by
+	// the v3 dogfood verification — see design/parsedeep.md §"Commit 6".
 	if hasProject {
 		info.Name = f.Project.Name
 		info.EcoVersion = f.Project.RequiresPython
@@ -128,6 +134,26 @@ func parsePyProject(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 			return manifest.ProjectInfo{}, nil, err
 		}
 		deps = append(deps, groupDeps...)
+	}
+
+	if hasPoetry {
+		poetryMeta, poetryDeps, err := extractPoetryDeps(f.Tool.Poetry)
+		if err != nil {
+			return manifest.ProjectInfo{}, nil, err
+		}
+		deps = append(deps, poetryDeps...)
+		// Merge metadata: PEP 621 wins when present; Poetry fills
+		// gaps. Empty-string check covers both "PEP 621 absent"
+		// and "PEP 621 present but didn't set this field" — the
+		// latter is rare but harmless.
+		if poetryMeta != nil {
+			if info.Name == "" {
+				info.Name = poetryMeta.Name
+			}
+			if info.EcoVersion == "" {
+				info.EcoVersion = poetryMeta.EcoVersion
+			}
+		}
 	}
 
 	return info, deps, nil

@@ -1,0 +1,40 @@
+# Smoke fixture for hybrid PEP 621 + Poetry groups configuration.
+#
+# Mirrors the shape of python-poetry/poetry itself (verified
+# 2026-04-26 via WebFetch on github.com/python-poetry/poetry/main/
+# pyproject.toml). PEP 621 [project] is the primary descriptor;
+# [tool.poetry.group.*.dependencies] holds dev/test groups while
+# [tool.poetry] proper carries Poetry-specific tooling config.
+#
+# This is THE case that broke v1/v2's "Poetry as fallback" framing.
+# A hybrid file's [project] makes PEP 621 succeed, no fallthrough
+# triggers, and pre-v3 the parser would have silently dropped the
+# dev/test groups under [tool.poetry.group.*]. The v3 architecture
+# (Poetry as third independent handler) catches this case.
+#
+# Expected when parsed:
+#   ProjectInfo.Name       = "hybrid-pkg"     (from [project], PEP 621 wins)
+#   ProjectInfo.EcoVersion = ">=3.10"         (from [project].requires-python)
+#   Deps (4 total, all Direct=true):
+#     - requests   (from [project].dependencies)
+#     - click      (from [project].dependencies)
+#     - pytest     (from [tool.poetry.group.dev.dependencies])
+#     - mypy       (from [tool.poetry.group.dev.dependencies])
+
+[project]
+name = "hybrid-pkg"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "requests==2.31.0",
+    "click>=8.0",
+]
+
+[tool.poetry]
+# Poetry-specific build config kept under [tool.poetry] alongside
+# the modern [project] table. Common pattern post-Poetry-2.0.
+requires-poetry = ">=2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+mypy = "^1.0"

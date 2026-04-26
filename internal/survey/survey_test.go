@@ -684,6 +684,94 @@ func TestRun_PyProjectTOML_PEP735OnlyApp_SmokeFixture(t *testing.T) {
 		"all three deps from [dependency-groups] surface for review")
 }
 
+// TestRun_PyProjectTOML_Poetry_PureLegacy_SmokeFixture is the
+// permanent smoke test for pure Poetry with the legacy
+// [tool.poetry.dev-dependencies] form. The fixture mirrors the
+// shape of Textualize/rich, verified 2026-04-26 via WebFetch.
+func TestRun_PyProjectTOML_Poetry_PureLegacy_SmokeFixture(t *testing.T) {
+	t.Parallel()
+
+	fixturePath, err := filepath.Abs("../manifest/pypi/testdata/poetry-pure-legacy/pyproject.toml")
+	require.NoError(t, err)
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, fixturePath)
+	require.NoError(t, err)
+
+	// Metadata flows from [tool.poetry] when PEP 621 is absent.
+	assert.Equal(t, "pure-legacy-pkg", r.Project.Name)
+	assert.Equal(t, "^3.10", r.Project.EcoVersion)
+	assert.Equal(t, "pypi", r.Project.Ecosystem)
+
+	// 4 deps per the fixture's documented breakdown:
+	// requests + click (main) + pytest + black (dev-dependencies).
+	// python is the runtime pin and not surfaced as a dep.
+	assert.Equal(t, 4, r.Summary.Total)
+	assert.Equal(t, 4, r.Summary.Direct)
+
+	assert.ElementsMatch(t,
+		[]string{"pkg:pypi/requests", "pkg:pypi/click", "pkg:pypi/pytest", "pkg:pypi/black"},
+		r.Summary.NeedsReview)
+}
+
+// TestRun_PyProjectTOML_Poetry_PureModern_SmokeFixture is the
+// permanent smoke test for pure Poetry with the modern
+// [tool.poetry.group.*.dependencies] form. No confirmed real-world
+// target in this exact shape — projects that adopted modern groups
+// generally also migrated to PEP 621 (becoming hybrid).
+func TestRun_PyProjectTOML_Poetry_PureModern_SmokeFixture(t *testing.T) {
+	t.Parallel()
+
+	fixturePath, err := filepath.Abs("../manifest/pypi/testdata/poetry-pure-modern/pyproject.toml")
+	require.NoError(t, err)
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, fixturePath)
+	require.NoError(t, err)
+
+	assert.Equal(t, "pure-modern-pkg", r.Project.Name)
+	assert.Equal(t, "^3.10", r.Project.EcoVersion)
+
+	assert.Equal(t, 4, r.Summary.Total)
+	assert.ElementsMatch(t,
+		[]string{"pkg:pypi/requests", "pkg:pypi/pytest", "pkg:pypi/coverage", "pkg:pypi/sphinx"},
+		r.Summary.NeedsReview)
+}
+
+// TestRun_PyProjectTOML_Poetry_Hybrid_SmokeFixture is the permanent
+// smoke test for the hybrid configuration that broke v1/v2's
+// "Poetry as fallback" framing. Mirrors the shape of
+// python-poetry/poetry itself, verified 2026-04-26 via WebFetch.
+//
+// Pre-v3 the parser would have routed [project]-bearing files
+// through PEP 621 only and silently dropped the
+// [tool.poetry.group.*.dependencies] dev/test deps. The v3
+// architecture (Poetry as third independent handler) catches them.
+func TestRun_PyProjectTOML_Poetry_Hybrid_SmokeFixture(t *testing.T) {
+	t.Parallel()
+
+	fixturePath, err := filepath.Abs("../manifest/pypi/testdata/poetry-hybrid/pyproject.toml")
+	require.NoError(t, err)
+
+	s := openTestStore(t)
+	r, err := Run(context.Background(), s, fixturePath)
+	require.NoError(t, err)
+
+	// PEP 621 wins for metadata in the hybrid case.
+	assert.Equal(t, "hybrid-pkg", r.Project.Name)
+	assert.Equal(t, ">=3.10", r.Project.EcoVersion)
+
+	// 4 deps total: 2 from [project].dependencies (requests, click)
+	// AND 2 from [tool.poetry.group.dev.dependencies] (pytest, mypy).
+	// The Poetry deps surfacing here is the regression catch — pre-v3
+	// the parser would have stopped after PEP 621 and missed them.
+	assert.Equal(t, 4, r.Summary.Total)
+	assert.ElementsMatch(t,
+		[]string{"pkg:pypi/requests", "pkg:pypi/click", "pkg:pypi/pytest", "pkg:pypi/mypy"},
+		r.Summary.NeedsReview,
+		"both PEP 621 main deps AND Poetry group dev deps surface (the v3 architecture's whole point)")
+}
+
 // TestParseGraph_PyPIReturnsGraphUnavailable covers parseGraph's
 // dispatch for the three PyPI filenames. Graph extraction isn't
 // implemented for any PyPI manifest yet (lockfile parsing is the
