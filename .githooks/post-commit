@@ -24,13 +24,14 @@ if ! echo "$changed" | grep -qE '^(cmd/|internal/|templates/|go\.(mod|sum)|embed
     exit 0
 fi
 
-echo "=== post-commit: updating \$GOBIN/signatory ==="
+echo "=== post-commit: updating \$GOBIN binaries ==="
 if out=$(make install 2>&1); then
-    # make install already echoes "installing signatory ... (commit)";
-    # surface only that line to keep commit output quiet.
-    echo "$out" | tail -2
+    # make install echoes "installing <name> [version (commit)]" once
+    # per binary; grep surfaces those lines and ignores the recipe
+    # output. Robust to adding/removing binaries from `install`.
+    echo "$out" | grep "^installing" || echo "$out"
 else
-    echo "ERROR: make install failed after commit — your \$GOBIN binary is now stale"
+    echo "ERROR: make install failed after commit — your \$GOBIN binaries are now stale"
     echo "$out"
     exit 1
 fi
