@@ -10,8 +10,9 @@
 //
 // Subcommands:
 //
-//	dogfood-metrics serve          start the OTLP/HTTP receiver
-//	dogfood-metrics report <id>    generate per-session report (slice 3)
+//	dogfood-metrics serve                      start the OTLP/HTTP receiver
+//	dogfood-metrics hook --event <name>        process a Claude Code hook event from stdin
+//	dogfood-metrics report <id>                generate per-session report (slice 3)
 package main
 
 import (
@@ -31,6 +32,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		runServe(os.Args[2:])
+	case "hook":
+		runHookCmd(os.Args[2:])
 	case "report":
 		// Slice 3 territory; surface a clear deferral message rather
 		// than a generic "unknown command" so callers running ahead
@@ -51,6 +54,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics serve [-addr :4318] [-out-dir dogfood-metrics/raw]")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics hook  --event <name> [-out-dir dogfood-metrics/raw]")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics report <session-id>     (not implemented yet)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "See design/agent-otel.md for architecture.")
@@ -82,4 +86,35 @@ func runServe(args []string) {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+// runHookCmd is the entry point for the `hook` subcommand. Invoked
+// per Claude Code hook event (PreToolUse, PostToolUse, etc.). Reads
+// the event JSON from stdin, classifies the tool call, appends a
+// JSONL line to the per-session file in -out-dir.
+//
+// CRITICAL: this MUST exit 0 even on internal failure. Per round-3
+// verification of the dogfood-telemetry plan, exit code 2 from a
+// PreToolUse hook BLOCKS the tool call. Observe-only telemetry
+// must never block — even a write failure or malformed input gets
+// recorded as a side note and exits 0.
+func runHookCmd(args []string) {
+	fs := flag.NewFlagSet("hook", flag.ExitOnError)
+	outDir := fs.String("out-dir", "dogfood-metrics/raw", "directory for per-session hook JSONL files")
+	event := fs.String("event", "PreToolUse", "hook event name (PreToolUse, PostToolUse, ...)")
+	if err := fs.Parse(args); err != nil {
+		// flag.ExitOnError already exited, but defense in depth.
+		os.Exit(0)
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		// Log to stderr (Claude Code may surface it to the user)
+		// but still exit 0 — a missing dogfood dir must not block
+		// real work.
+		fmt.Fprintf(os.Stderr, "dogfood-hook: mkdir %s: %v\n", *outDir, err)
+		os.Exit(0)
+	}
+	if err := runHook(os.Stdin, *outDir, *event, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "dogfood-hook: %v\n", err)
+	}
+	os.Exit(0)
 }
