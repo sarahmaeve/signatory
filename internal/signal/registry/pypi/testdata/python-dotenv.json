@@ -1,0 +1,19 @@
+{
+  "info": {
+    "name": "python-dotenv",
+    "version": "1.0.1",
+    "author": "Saurabh Kumar",
+    "author_email": "me@saurabh-kumar.com",
+    "home_page": "",
+    "license": "BSD-3-Clause",
+    "project_urls": {
+      "Changelog": "https://github.com/theskumar/python-dotenv/blob/main/CHANGELOG.md",
+      "Documentation": "https://saurabh-kumar.com/python-dotenv/",
+      "Homepage": "https://github.com/theskumar/python-dotenv",
+      "Repository": "https://github.com/theskumar/python-dotenv"
+    },
+    "requires_python": ">=3.8"
+  },
+  "releases": {},
+  "urls": []
+}

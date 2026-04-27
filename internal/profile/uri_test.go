@@ -28,6 +28,43 @@ func TestCanonicalPackageURI(t *testing.T) {
 	}
 }
 
+// TestCanonicalPackageURI_PyPINormalizes pins that PyPI names are
+// PEP 503-normalized at construction time — `Requests` and
+// `python_dotenv` produce the same canonical URI as `requests` and
+// `python-dotenv`. Without this, a caller that builds a pkg:pypi/
+// URI without first routing through resolveCanonicalURI (the input-
+// parsing path that already normalizes) would produce a non-canonical
+// URI and fragment the store across identities the PyPI registry
+// considers the same. Defense-in-depth: every pkg:pypi/ URI emitted
+// from this package is canonical, regardless of caller hygiene.
+//
+// Other ecosystems are unchanged — npm preserves case (registry is
+// case-sensitive), Go modules preserve verbatim path.
+func TestCanonicalPackageURI_PyPINormalizes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already canonical", "requests", "pkg:pypi/requests"},
+		{"mixed case", "Requests", "pkg:pypi/requests"},
+		{"all caps", "REQUESTS", "pkg:pypi/requests"},
+		{"underscore", "python_dotenv", "pkg:pypi/python-dotenv"},
+		{"dot", "python.dotenv", "pkg:pypi/python-dotenv"},
+		{"mixed run", "Python_-.Dotenv", "pkg:pypi/python-dotenv"},
+		{"PYPI ecosystem also normalizes", "Requests", "pkg:pypi/requests"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CanonicalPackageURI("pypi", tc.in))
+		})
+	}
+	// Ecosystem case-fold path also triggers normalization.
+	assert.Equal(t, "pkg:pypi/requests",
+		CanonicalPackageURI("PYPI", "Requests"),
+		"ecosystem PYPI should lowercase to pypi and trigger normalization")
+}
+
 func TestCanonicalRepoURI(t *testing.T) {
 	assert.Equal(t, "repo:github/alecthomas/kong",
 		CanonicalRepoURI("github", "alecthomas", "kong"))
@@ -322,7 +359,7 @@ func TestValidateCanonicalURI_Rejects(t *testing.T) {
 // without pulling strings.Repeat into the test imports.
 func repeatString(s string, n int) string {
 	out := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, s...)
 	}
 	return string(out)

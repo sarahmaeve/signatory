@@ -143,10 +143,27 @@ func ValidateCanonicalURI(uri string) error {
 // package entity. Example: CanonicalPackageURI("npm", "express") →
 // "pkg:npm/express".
 //
-// Ecosystem is normalized to lowercase. Name is preserved as-is because
-// most package ecosystems treat names case-sensitively.
+// Ecosystem is normalized to lowercase. Name handling depends on the
+// ecosystem:
+//
+//   - npm: preserved as-is (the registry is case-sensitive).
+//   - golang: preserved as-is (import paths are verbatim).
+//   - pypi: PEP 503-normalized (lowercased + runs of `.`/`-`/`_`
+//     collapsed to a single `-`) because PyPI's registry canonicalizes
+//     names on lookup; mismatched casing or separator style would
+//     fragment the store across identities the registry considers the
+//     same. See profile/pypi.go for the normalization spec.
+//
+// The pypi branch is defense-in-depth: the input-parsing path
+// (resolveCanonicalURI) already normalizes pypi names before storing,
+// but a caller that constructs a pkg:pypi/ URI directly via this
+// function would otherwise emit a non-canonical URI.
 func CanonicalPackageURI(ecosystem, name string) string {
-	return URISchemePackage + strings.ToLower(ecosystem) + "/" + name
+	eco := strings.ToLower(ecosystem)
+	if eco == "pypi" {
+		name = NormalizePyPIName(name)
+	}
+	return URISchemePackage + eco + "/" + name
 }
 
 // CanonicalRepoURI returns the canonical URI for a source repository.
@@ -302,12 +319,9 @@ func SplitURIVersion(uri string) (base, version string) {
 		// guess.
 		return uri, ""
 	}
-	lastSeg := uri[lastSlash+1:]
-	at := strings.IndexByte(lastSeg, '@')
-	if at < 0 {
+	name, version, ok := strings.Cut(uri[lastSlash+1:], "@")
+	if !ok {
 		return uri, ""
 	}
-	base = uri[:lastSlash+1] + lastSeg[:at]
-	version = lastSeg[at+1:]
-	return base, version
+	return uri[:lastSlash+1] + name, version
 }
