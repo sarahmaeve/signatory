@@ -17,24 +17,21 @@ rounds that informed it.
 
 ## Components
 
-| Piece | Where | Status |
-|---|---|---|
-| OTLP/HTTP/JSON receiver | `cmd/dogfood-metrics serve` | Slice 1 (this) |
-| PreToolUse hook script | `scripts/dogfood-hook.sh` | Slice 2 |
-| Claude Code wiring (env + hooks) | `.claude/settings.json` | Slice 2 |
-| Per-session report generator | `cmd/dogfood-metrics report <id>` | Slice 3 |
+| Piece | Where |
+|---|---|
+| OTLP/HTTP/JSON receiver | `cmd/dogfood-metrics serve` |
+| Claude Code hook entry point | `scripts/dogfood-hook.sh` |
+| Hook event classifier (Go) | `cmd/dogfood-metrics hook` |
+| Claude Code wiring (env + hooks) | `.claude/settings.json` |
+| Per-session report generator | `cmd/dogfood-metrics report <id>` |
+| End-to-end smoke driver | `cmd/dogfood-metrics-smoke` |
 
-## Running the receiver (slice 1)
+## Subcommand summary
 
-```bash
-# Build
-go build -o /tmp/dogfood-metrics ./cmd/dogfood-metrics
-
-# Run (defaults: -addr :4318, -out-dir dogfood-metrics/raw)
-/tmp/dogfood-metrics serve
-
-# Or directly
-go run ./cmd/dogfood-metrics serve
+```
+dogfood-metrics serve  [-addr :4318] [-out-dir dogfood-metrics/raw]
+dogfood-metrics hook   --event PreToolUse [-out-dir dogfood-metrics/raw]
+dogfood-metrics report [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>
 ```
 
 The receiver:
@@ -49,41 +46,85 @@ The receiver:
 Each line in the output JSONL files is the verbatim OTLP-JSON body
 of one request, compacted (one JSON value per line). The format is
 directly replayable into any OTEL collector via the `otlpjsonfile`
-receiver.
+receiver — see `design/agent-otel.md` "SigNoz upgrade path."
 
-## Verifying the receiver (slice 1)
+The hook subcommand:
+- Reads one Claude Code hook event JSON from stdin
+- Classifies the tool call (`local_db` / `local_signatory_cli` /
+  `local_other` / `external_web` / `external_curl` / `external_git`
+  / `signatory_source`)
+- Appends one JSON line to `raw/hooks-<session_id>.jsonl`
+- Always exits 0 — exit 2 from a PreToolUse hook would block the
+  tool call (round-3 verification)
 
-Without Claude Code wired up yet, you can confirm the receiver works
-with `curl`:
+The report subcommand:
+- Reads `raw/traces.jsonl` (filters by `session.id` resource attr)
+- Reads `raw/hooks-<session-id>.jsonl`
+- Joins on session id, aggregates spans by `query_source`
+  (subagent name) and hook events by classification
+- Renders `sessions/<session-id>/report.md` with five fixed
+  sections: subagent activity, tool-call classification, external
+  calls (cache-miss candidates), source reads (underspecification
+  candidates), plus the header
+
+## Verification
+
+**Verification lives in Go**, not in shell scripts. Two layers:
+
+### Unit tests
 
 ```bash
-# Start the receiver in one terminal
-go run ./cmd/dogfood-metrics serve
-
-# In another terminal — ungzipped POST
-curl -i -X POST http://localhost:4318/v1/traces \
-  -H 'Content-Type: application/json' \
-  --data '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"test"}}]},"scopeSpans":[{"spans":[{"name":"x"}]}]}]}'
-
-# Expect: HTTP/1.1 202 Accepted
-# And: cat dogfood-metrics/raw/traces.jsonl  → one line of OTLP-JSON
-
-# Gzipped POST (defense path)
-echo -n '{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[]}]}' | \
-  gzip | \
-  curl -i -X POST http://localhost:4318/v1/traces \
-       -H 'Content-Type: application/json' \
-       -H 'Content-Encoding: gzip' \
-       --data-binary @-
-
-# Expect: HTTP/1.1 202 Accepted
-# And: cat dogfood-metrics/raw/traces.jsonl  → second line, decompressed
+go test ./cmd/dogfood-metrics/...
 ```
 
-## Coming next (slices 2–3)
+Covers the http.Handler, the hook classifier, the OTLP-JSON
+parser, the report renderer — each in isolation.
 
-- Slice 2 wires Claude Code to talk to this receiver via OTEL env
-  vars and adds the PreToolUse hook script.
-- Slice 3 adds the `report <session-id>` subcommand that joins the
-  OTLP-JSON stream with the hook JSONL stream and emits a markdown
-  per-session report.
+### End-to-end smoke binary
+
+```bash
+go run ./cmd/dogfood-metrics-smoke
+```
+
+Builds `dogfood-metrics` into a temp dir, spawns the receiver as
+a subprocess on a free port, exercises every `serve` path
+(ungzipped + gzipped POST, malformed JSON, unknown path, GET),
+pipes a sample event through the `hook` subprocess, runs the
+`report` subprocess, asserts at each step. Expected output ends
+with `All N assertions passed.` (currently 24).
+
+The smoke binary is the project's official "does the binary
+work end-to-end?" check — modeled on `cmd/smoke-mcp/` and
+written in Go because tests are permanent fixtures, not
+temporary scripts. Earlier curl-based verification has been
+retired in favor of this driver.
+
+## Live capture (against a real Claude Code session)
+
+Once everything is committed and `/hooks` (or session restart)
+has picked up `.claude/settings.json`:
+
+1. **In one terminal**, start the receiver:
+   ```bash
+   go run ./cmd/dogfood-metrics serve
+   ```
+
+2. **In another terminal**, run Claude Code in this project as
+   normal. The hook fires per tool call (writes to
+   `raw/hooks-<session>.jsonl`), and Claude Code emits OTEL
+   traces to the receiver (writes to `raw/traces.jsonl` and
+   `raw/logs.jsonl`).
+
+3. **After a session**, render the report. The session id is in
+   the hook filename:
+   ```bash
+   ls dogfood-metrics/raw/hooks-*.jsonl
+   go run ./cmd/dogfood-metrics report <session-id>
+   open dogfood-metrics/sessions/<session-id>/report.md
+   ```
+
+The report's "External calls" section is the cache-miss-candidate
+list per the ROADMAP "improve economics" subsection. The
+"Source reads" section is the underspecification signal per
+`design/agent-otel.md`. Both feed into `design/dogfood-errors.md`
+when patterns surface.

@@ -69,6 +69,7 @@ filestore/
 /signatory
 /smoke-mcp
 /dogfood-metrics-bin
+/dogfood-metrics-smoke
 
 # Dogfood telemetry runtime data (per design/agent-otel.md).
 # The receiver writes OTLP-JSON here; the report generator writes

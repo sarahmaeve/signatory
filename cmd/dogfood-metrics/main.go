@@ -12,7 +12,7 @@
 //
 //	dogfood-metrics serve                      start the OTLP/HTTP receiver
 //	dogfood-metrics hook --event <name>        process a Claude Code hook event from stdin
-//	dogfood-metrics report <id>                generate per-session report (slice 3)
+//	dogfood-metrics report <session-id>        render per-session markdown report
 package main
 
 import (
@@ -35,11 +35,7 @@ func main() {
 	case "hook":
 		runHookCmd(os.Args[2:])
 	case "report":
-		// Slice 3 territory; surface a clear deferral message rather
-		// than a generic "unknown command" so callers running ahead
-		// of the slice timeline get an immediately-useful answer.
-		fmt.Fprintln(os.Stderr, "report: not implemented yet — see design/agent-otel.md slice 3")
-		os.Exit(2)
+		runReportCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -55,7 +51,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics serve [-addr :4318] [-out-dir dogfood-metrics/raw]")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics hook  --event <name> [-out-dir dogfood-metrics/raw]")
-	fmt.Fprintln(os.Stderr, "  dogfood-metrics report <session-id>     (not implemented yet)")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics report [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "See design/agent-otel.md for architecture.")
 }
@@ -117,4 +113,28 @@ func runHookCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "dogfood-hook: %v\n", err)
 	}
 	os.Exit(0)
+}
+
+// runReportCmd is the entry point for the `report` subcommand.
+// Reads `<in-dir>/traces.jsonl` plus `<in-dir>/hooks-<id>.jsonl`,
+// joins on session_id, writes the rendered markdown to
+// `<out-dir>/<id>/report.md`. Errors (missing session,
+// filesystem failures) surface as exit 1.
+func runReportCmd(args []string) {
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	inDir := fs.String("in-dir", "dogfood-metrics/raw", "directory containing traces.jsonl and hooks-<session-id>.jsonl")
+	outDir := fs.String("out-dir", "dogfood-metrics/sessions", "directory to write per-session reports under")
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "report: exactly one positional argument required (session id)")
+		fmt.Fprintln(os.Stderr, "Usage: dogfood-metrics report <session-id> [-in-dir <dir>] [-out-dir <dir>]")
+		os.Exit(2)
+	}
+	sessionID := fs.Arg(0)
+	if err := runReport(sessionID, *inDir, *outDir); err != nil {
+		log.Fatalf("report: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "report: wrote %s/%s/report.md\n", *outDir, sessionID)
 }
