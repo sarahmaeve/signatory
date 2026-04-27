@@ -68,3 +68,12 @@ filestore/
 # in that directory from `git status` and `git add`).
 /signatory
 /smoke-mcp
+/dogfood-metrics-bin
+
+# Dogfood telemetry runtime data (per design/agent-otel.md).
+# The receiver writes OTLP-JSON here; the report generator writes
+# per-session reports here. Both are local-only working state, not
+# source. The dogfood-metrics/README.md and any committed config
+# files at the directory root are NOT ignored.
+dogfood-metrics/raw/
+dogfood-metrics/sessions/
