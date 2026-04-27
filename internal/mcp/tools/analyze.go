@@ -116,12 +116,18 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 			map[string]string{"target": in.Target})
 	}
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, "store lookup failed: "+err.Error(), nil)
+		// Internal store/driver errors do not cross the MCP boundary.
+		// The agent caller has no use for SQLite text and we don't
+		// want DB paths or schema topology in transcripts. Operation
+		// context goes in the structured details map.
+		return mcp.Err(mcp.CodeInternalError, "store lookup failed",
+			map[string]string{"operation": "FindEntityByURI", "target": in.Target})
 	}
 
 	signals, err := t.Store.GetLatestSignals(ctx, entity.ID)
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, "read signals failed: "+err.Error(), nil)
+		return mcp.Err(mcp.CodeInternalError, "read signals failed",
+			map[string]string{"operation": "GetLatestSignals", "entity_id": entity.ID})
 	}
 	// Empty signals are NOT a cache miss. The /analyze skill produces
 	// entities with Layer 2 conclusions/posture/synthesis but no
@@ -134,7 +140,8 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 
 	postures, err := t.Store.GetPostures(ctx, entity.ID)
 	if err != nil {
-		return mcp.Err(mcp.CodeInternalError, "read postures failed: "+err.Error(), nil)
+		return mcp.Err(mcp.CodeInternalError, "read postures failed",
+			map[string]string{"operation": "GetPostures", "entity_id": entity.ID})
 	}
 
 	ent := analyzeEntity{

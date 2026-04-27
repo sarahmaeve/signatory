@@ -178,8 +178,13 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 				"synthesis outputs require analysis_session_id; pass it as the top-level field of the ingest call (the SESSION_INSTRUCTION block in your handoff names the id)",
 				map[string]string{"field": "analysis_session_id"})
 		}
-		return mcp.Err(mcp.CodeInternalError,
-			"ingest failed: "+err.Error(), nil)
+		// Non-sentinel ingest failures are internal — store / driver
+		// text does not cross the MCP boundary. The agent gets a
+		// stable opaque message plus the target it tried to ingest
+		// in the structured details, which is enough to retry or
+		// surface to the user.
+		return mcp.Err(mcp.CodeInternalError, "ingest failed",
+			map[string]string{"operation": "IngestAnalystOutput", "target": out.Target})
 	}
 
 	patternCount := 0
