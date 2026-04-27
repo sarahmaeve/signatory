@@ -1,13 +1,14 @@
 # Potential: PyPI ecosystem provider — gap analysis vs. npm / Go / GitHub
 
-Status: **partially shipped** as of 2026-04-26. Originally captured
+Status: **partially shipped** as of 2026-04-27. Originally captured
 2026-04-24 as a forward-looking gap analysis. Since then the
-manifest pipeline (Layers 2, 3, 9 plus substantial test coverage
-under Layer 10) has shipped end-to-end and is dogfood-validated
-against two real-world Python projects. See "Status update" below
-for the layer-by-layer breakdown; the rest of this document
-preserves the original gap analysis as the reference for the
-work that remains.
+manifest pipeline (Layers 2, 3, 9 + Layer 10 coverage) shipped
+2026-04-25/26, and the Layer 6 source resolver shipped 2026-04-27
+on a thin Layer 4 client. Layer 5 is explicitly deferred behind a
+forcing function (PyPI-unique signal would have changed an
+analyst's conclusion). See "Status update" below for the
+layer-by-layer breakdown; the rest of this document preserves the
+original gap analysis as the reference for the work that remains.
 
 Cross-references:
 - [`npm-plan.txt`](npm-plan.txt) — the npm shipped-state doc and
@@ -20,44 +21,52 @@ Cross-references:
   architectural notes for Layer 3 (manifest parser); now historical
   but kept for the v3 Poetry-as-third-handler reasoning
 
-## Status update (2026-04-26)
+## Status update (2026-04-27)
 
-The manifest pipeline shipped across eight commits between
-2026-04-25 and 2026-04-26. Three of the ten layers in this gap
-analysis are now closed; one is substantially covered.
+Manifest pipeline shipped 2026-04-25/26 (eight commits); Layer 6
+source resolver shipped 2026-04-27 in one batched commit
+(`ad32c7f`). **Four of the ten layers in this gap analysis are
+now closed**, one is partially shipped (thin slice), one is
+explicitly deferred behind a forcing function, and one is
+substantially covered.
 
 | Layer | Topic | Status | Closing commits |
 |---|---|---|---|
-| Layer 1 | Canonical URI / `parsePyPIURL` | not started | — |
+| Layer 1 | Canonical URI / `parsePyPIURL` | partially shipped | URL helper exists at `target.go:415`; full host-anchoring + lookalike-rejection tests still missing |
 | Layer 2 | Manifest detection | **shipped** | `e133043` |
 | Layer 3 | Manifest parser | **shipped (v0.1 scope)** | `c8c9e14` (requirements.txt), `91ff96b` (dispatcher), `194d007` (TOML lib), `1df4af5` (PEP 508 helper extract), `5ef6fc1` (PEP 621 + PEP 735), `d0808f7` (Poetry as third independent handler) |
-| Layer 4 | Registry client | not started | — |
-| Layer 5 | Signal collector | not started | — |
-| Layer 6 | Identity / source resolver | not started | — |
+| Layer 4 | Registry client | **thin slice shipped (source-resolution scope only)** | `ad32c7f` — `Client`, `GetProjectInfo`, defenses; per-version endpoint + `/simple/<name>/` + `releases` shape deferred to Layer 5 |
+| Layer 5 | Signal collector | **deferred behind forcing function** | reframed scope (PyPI-unique signals, not npm parity) — see "Layer 5 reframed" decision below |
+| Layer 6 | Identity / source resolver | **shipped (thin slice)** | `ad32c7f` |
 | Layer 7 | CLI collector dispatch | not started | — (one-line addition once Layer 5 ships) |
 | Layer 8 | Handoff template rename | not started | — |
 | Layer 9 | Survey integration | **shipped** | `0b6524c` (initial wiring), revisions in `5ef6fc1` and `d0808f7` |
-| Layer 10 | Test fixtures / e2e | **substantially covered for shipped layers** | five fixture pyproject.toml files in `internal/manifest/pypi/testdata/`, fixture-backed survey-level smoke tests, dogfood validations against `Textualize/rich` and `python-poetry/poetry` |
+| Layer 10 | Test fixtures / e2e | **substantially covered for shipped layers** | five fixture pyproject.toml files in `internal/manifest/pypi/testdata/`; ~60 subtests in `internal/signal/registry/pypi/` + `internal/ecosystem/resolver/`; dogfood validations against `Textualize/rich` and `python-poetry/poetry` |
 
 What this means in user-facing terms:
 
-- `signatory survey --manifest <path>` now produces a clean dep
-  enumeration for any Python project shape we encountered:
+- `signatory survey --manifest <path>` produces a clean dep
+  enumeration for any Python project shape we've encountered:
   requirements.txt, PEP 621-only, PEP 735-only (non-package
   app), Poetry-only (legacy or modern groups), and the hybrid
   PEP 621 + Poetry case (e.g., python-poetry/poetry itself).
+- **`signatory handoff security --target pkg:pypi/X --network-precheck`**
+  now resolves PyPI sources via `Default.Resolve(ctx, "pypi", X)`
+  instead of requiring a hand-typed github URL — the same
+  capability npm has had since the early M3 work. The deterministic
+  resolver replaces the LLM-walks-pypi.org-via-WebFetch pattern
+  for source-repo discovery; the JSON registry record is harder to
+  forge than the LLM's reading of an arbitrary README.
 - `signatory analyze pkg:pypi/<name>` still cannot gather
-  automated registry signals (Layer 5 not started). Users
-  running `/analyze` on a PyPI target get whatever the
-  LLM-backed analyst agents produce manually, with no Layer 1
-  mechanical signals beneath them. `signatory_analyze` MCP
-  cache-misses on PyPI-only entities because Layer 1 was never
-  collected — see `dogfood-errors.md` for the bug we filed
-  about the cache-miss error message being misleading.
+  automated registry signals (Layer 5 deferred). `/analyze`
+  produces Layer 2 analyst conclusions without underlying
+  Layer 1 mechanical signals; `signatory_analyze` cleanly
+  soft-fails on the missing Layer 1 (`a72cbe0`) so the
+  user-facing path is no longer broken — just thinner than the
+  npm path.
 - `signatory analyze https://pypi.org/project/<name>/` still
-  rejects at URL parsing (Layer 1 not started).
-- `pkg:pypi/<name>` cannot be auto-resolved to its source
-  repository (Layer 6 not started).
+  rejects at URL parsing (Layer 1 helper exists but isn't wired
+  into `ResolveTarget`'s acceptance path; see Layer 1 entry).
 
 ### Architectural decisions preserved
 
@@ -90,6 +99,47 @@ below pre-dates them:
   the BurntSushi/toml synthesis recommendation. Real
   pyproject.toml files are well under 16 KiB; the cap rules
   out adversarial input without affecting any legitimate file.
+- **Layer 4 absorbed into Layer 6's scope as a thin slice**
+  (decided 2026-04-27). The original gap analysis treated
+  Layers 4, 5, 6 as parallel "not started" items, but Layer 6
+  is structurally a thin wrapper over Layer 4 (see
+  `internal/ecosystem/resolver/npm.go` — 70 LOC of adapter
+  delegating to `npm.Client.ResolveRepoURL`). Building Layer 4
+  in isolation would violate the no-abstractions-without-callers
+  rule. Instead, `internal/signal/registry/pypi/` ships only
+  the surface Layer 6 needs (`Client`, `GetProjectInfo`, `Info`
+  with `ProjectURLs` + `HomePage`, defenses); Layer 5's wider
+  needs (per-version endpoint, `/simple/<name>/` PEP 740,
+  `Releases`, `Distribution`) extend the same package
+  additively when their forcing function lands. No rewrite at
+  the Layer 5 transition.
+- **Layer 5 reframed: not "npm parity," PyPI-unique signals**
+  (decided 2026-04-27). Walking npm's seven signals one by one
+  through PyPI's API surface revealed that the npm-parallel
+  signals mostly degrade badly: `maintainer_count` is free-form
+  text (very low forgery resistance vs npm's first-class
+  account list); `publish_origin_consistency` has no working
+  PyPI analog (`urls[].uploaded_by` is spotty); `weekly_downloads`
+  isn't first-party; `postinstall_introduced` doesn't apply
+  (every sdist runs arbitrary code). The signals that DO carry
+  weight on PyPI are mostly PyPI-unique: `trusted_publishing`
+  (PEP 740, cryptographic), `pypi_stdlib_shadow` (deterministic
+  dependency-confusion check), `sdist_present` /
+  `sdist_wheel_size_ratio` (wheels-only-attack pattern),
+  `yanked_release_count` (governance discipline). Plus
+  `last_publish` and `release_integrity` ride along cheaply.
+  The phasing in §"Proposed phasing" was rewritten around this
+  set rather than the npm-mirror set.
+- **Layer 5 deferral with explicit forcing function** (decided
+  2026-04-27). Without dogfood pain attributable to a missing
+  PyPI mechanical signal, the case for shipping Layer 5 is
+  theoretical. The trigger to revisit: a PyPI analyst conclusion
+  that a mechanical signal would have caught — most likely
+  `trusted_publishing` (a published-via-OIDC vs published-via-
+  password divergence the analyst can't see) or `pypi_stdlib_shadow`
+  (a dependency-confusion attempt the analyst would miss in a
+  manifest scan). When that happens, ship the relevant subset
+  of Layer 5 against the forcing case directly.
 
 ## Methodology
 
@@ -129,23 +179,40 @@ that give the appearance of PyPI support but don't carry weight:
 - Handoff dispatch with `--ecosystem=pypi` renders a handoff template
   that points the analyst at the right pypi.org endpoints and manifest
   files.
+- **Source resolution: `Default.Resolve(ctx, "pypi", X)` answers via
+  `internal/ecosystem/resolver/pypi.go`**, walking
+  `info.project_urls` in priority order then falling back to
+  the deprecated `info.home_page`. Exposed to users through
+  `signatory handoff security --target pkg:pypi/X --network-precheck`.
+- **Survey of any encountered Python project shape** —
+  requirements.txt, PEP 621-only, PEP 735-only, Poetry-only
+  (legacy or modern groups), and the hybrid PEP 621 + Poetry
+  case. Dep enumeration shipped 2026-04-26.
 
 **What DOESN'T work:**
 
-- `signatory analyze pkg:pypi/requests` cannot gather any registry
-  signals — there is no PyPI collector.
-- `signatory analyze https://pypi.org/project/requests/` is rejected
-  at `ResolveTarget` (the URL parser has an npm-specific branch only).
-- `pkg:pypi/requests` cannot be resolved to its source repository —
-  there is no PyPI resolver in `internal/ecosystem/resolver/`.
-- `signatory survey pyproject.toml` fails with "unrecognized manifest
-  filename" — there is no PyPI manifest parser.
+- `signatory analyze pkg:pypi/requests` does not gather automated
+  registry signals — Layer 5 is deferred behind a forcing function
+  (see "Layer 5 reframed" decision above). `signatory_analyze`
+  cleanly soft-fails on the missing Layer 1 signals (`a72cbe0`),
+  so the user-facing path is no longer broken — it's just
+  thinner than the npm path. `/analyze` produces Layer 2
+  conclusions via LLM analyst agents without Layer 1 signals
+  beneath them.
+- `signatory analyze https://pypi.org/project/requests/` does not
+  yet route through the URL acceptance path. `parsePyPIURL` exists
+  at `target.go:415` and normalizes correctly when called, but
+  full host-anchoring + lookalike-rejection tests parallel to the
+  npm URL parser are still pending (Layer 1).
 - `signatory handoff security --ecosystem=pypi --language=python` is
   served by `security-review-v1.md`, which IS the Python-specific
   template (despite the name) — this one works incidentally. See
-  §"Template naming" below.
+  §"Template naming" below; the rename to
+  `security-review-python-v1.md` is a standalone consistency fix
+  (Layer 8) still pending.
 - `signatory show analyses` and other surfaces render correctly if
-  data is in the store, but nothing puts data there for PyPI.
+  data is in the store, but nothing puts Layer 1 PyPI data there
+  until Layer 5 ships.
 
 ## Reference: shipped surfaces for npm and Go
 
@@ -257,9 +324,22 @@ complete ecosystem provider.
 ## What's missing, organized by layer
 
 This is the implementation-ready list. Each bullet is a concrete
-deliverable a commit can close.
+deliverable a commit can close. **Several layers below have
+shipped since this list was written; each carries an inline
+status marker at the top of its subsection. Skim those first
+before treating any item as outstanding work.**
 
 ### Layer 1: Canonical URI acceptance
+
+**Status (2026-04-27): partially shipped.** `parsePyPIURL`
+exists at `internal/profile/target.go:415` and applies PEP 503
+normalization correctly when called. What's still missing:
+host-anchoring against lookalike domains
+(`pypi.org.attacker.com`), full positive/negative test coverage
+parallel to `parseNpmjsURL`'s, and wire-up into the
+`ResolveTarget` URL-input acceptance branch so a literal
+`https://pypi.org/project/<name>/` works as a CLI input.
+Recommended-next-steps item #2 in §"Recommended next steps."
 
 - **`parsePyPIURL` helper in `internal/profile/target.go`** (parallel
   to `parseNpmjsURL`). Must accept:
@@ -289,6 +369,14 @@ deliverable a commit can close.
   (see §"PyPI-specific complications" on requirements.txt identity).
 
 ### Layer 3: Manifest parser
+
+**Status (2026-04-27): SHIPPED for v0.1 scope** — see Status
+table above for the full commit chain. PEP 621, PEP 735, and
+Poetry handlers all run as independent table-handlers (the
+hybrid PEP 621 + Poetry case is supported); requirements.txt
+parser is in. Lockfile parsing (`poetry.lock`, `uv.lock`) and
+graph extraction remain Phase C work. The original
+implementation list is preserved below for reference.
 
 **New package: `internal/manifest/pypi/`.** Dispatch entry point
 parallel to `gomod.Parse` and `npm.Parse`. Internally, dispatch to
@@ -389,6 +477,23 @@ graph extraction lands, so the idiom is set).
 
 ### Layer 4: Registry client
 
+**Status (2026-04-27): thin slice shipped in `ad32c7f`.** The
+source-resolution-supporting subset landed: `Client`,
+`NewClient`, `NewClientWithBaseURL`, `checkRedirect`,
+`ValidatePackageName` (PEP 508 grammar), `ErrNotFound`,
+`GetProjectInfo` (decodes only `info.project_urls` +
+`info.home_page`), 10 MB body cap matching npm, error-body
+sanitization (#93), context propagation. The wider surface
+described below — per-version endpoint, `/simple/<name>/` for
+PEP 740, `Releases`/`Distribution` shapes, longitudinal
+helpers, `pypistats.org` integration — is deliberately deferred
+to Layer 5's forcing function. The package will extend
+additively when Layer 5 lands; commit 5's resolver wiring stays
+stable across that transition.
+
+What's still needed (preserved as the implementation-ready
+list for whoever picks up Layer 5):
+
 **New package: `internal/signal/registry/pypi/client.go`.** Mirror
 the npm client's defenses:
 
@@ -458,6 +563,39 @@ has no equivalent for):
 
 ### Layer 5: Signal collector
 
+**Status (2026-04-27): deferred behind forcing function.** The
+original "ship npm-parallel signals" framing was reconsidered
+on 2026-04-27 — see "Layer 5 reframed" decision in
+§"Architectural decisions preserved." Summary: the npm-parallel
+signals (`maintainer_count`, `weekly_downloads`,
+`publish_origin_consistency`, `postinstall_introduced`) mostly
+degrade badly on PyPI's API surface; the signals that DO carry
+weight are mostly PyPI-unique. The right Layer 5 cut is the
+PyPI-unique subset, not parity-with-npm.
+
+**Tight Layer 5 cut when this ships** (5–6 signals, half
+PyPI-unique):
+
+| Signal | Why it carries weight on PyPI |
+|---|---|
+| `trusted_publishing` (PEP 740) | Cryptographic forgery resistance; via `/simple/<name>/` |
+| `pypi_stdlib_shadow` | Deterministic dependency-confusion check; static lookup |
+| `sdist_present` (per-version) | Wheels-only is a publish-hygiene smell |
+| `sdist_wheel_size_ratio` | Sudden divergence flags wheels carrying artifacts not in sdist |
+| `yanked_release_count` | Governance / release-discipline indicator |
+| `last_publish` + `release_integrity` | Ride along cheaply on the same payload |
+
+Forcing function for shipping: a PyPI analyst conclusion that
+a mechanical signal would have caught. Most likely first
+triggers: `trusted_publishing` (a published-via-OIDC vs
+published-via-password divergence the analyst can't see) or
+`pypi_stdlib_shadow` (a dependency-confusion attempt the
+analyst would miss in a manifest scan).
+
+The historical "first-cut analogous to npm's set" matrix below
+is preserved as the original gap-analysis reference, but is
+NOT the recommended scope when Layer 5 reawakens.
+
 **New package: `internal/signal/registry/pypi/collector.go`.** Same
 contract as npm: implements `signal.Collector`, scheme-filtered to
 `pkg:pypi/*`, emits signals via `signal.CollectionResult`.
@@ -497,6 +635,37 @@ Group / ForgeryResistance / Description / Caveats populated, or
 `signal.Make` will panic at emit time.
 
 ### Layer 6: Identity / source resolver
+
+**Status (2026-04-27): SHIPPED in `ad32c7f`.** What landed:
+
+- `internal/ecosystem/resolver/pypi.go` — `PyPIResolver`
+  wrapping `pypi.Client`, `init()` registers with
+  `resolver.Default` under `"pypi"`. ~70 LOC mirroring
+  `npm.go`.
+- `internal/signal/registry/pypi/resolve.go` —
+  `(*Client).ResolveRepoURL`, walks a fixed nine-key
+  priority list across `info.project_urls` (Repository,
+  Source, Source Code, SourceCode, source, Code, GitHub,
+  Repo, Homepage), falls back to deprecated `info.home_page`,
+  routes the winner through `NormalizeDeclaredRepoURL`.
+  Returns `("", nil)` for the legitimate "no resolvable
+  github source" case.
+- `internal/signal/registry/pypi/normalize.go` — pure
+  `NormalizeDeclaredRepoURL`: strips `git+` prefix, rewrites
+  `ssh://git@github.com` → `https://github.com`, drops
+  `.git` suffix and `#fragment`, refuses `git://`, delegates
+  the github URL grammar to `profile.ResolveTarget`. Empty
+  for any non-github host until other platforms are
+  first-classed.
+- ~60 subtests across `normalize_test.go`,
+  `client_test.go`, `resolve_test.go`, and
+  `internal/ecosystem/resolver/pypi_test.go`. Defenses
+  exercised end-to-end via httptest fixtures.
+
+The original implementation-ready text is preserved below
+for historical reference; everything in it is shipped except
+the final paragraph about other-platform support, which
+remains v0.2+ scope.
 
 **New file: `internal/ecosystem/resolver/pypi.go`.** Structurally
 parallel to `npm.go` — network-backed resolver that reads a field
@@ -573,6 +742,14 @@ added.
 
 ### Layer 9: Survey integration
 
+**Status (2026-04-27): SHIPPED** — wired in `0b6524c` with
+revisions in `5ef6fc1` and `d0808f7`. The
+`parseManifest` dispatch routes `pyproject.toml`,
+`requirements.txt`, and the Poetry / PEP 621 / PEP 735 cases
+correctly. Graph extraction returns `ErrGraphUnavailable`
+gracefully (Phase C not started). Original implementation list
+preserved below for historical reference.
+
 Three one-line additions to `internal/survey/survey.go`:
 
 - `parseManifest` dispatch for `pyproject.toml`, `setup.py`, and
@@ -586,6 +763,16 @@ work needed there until the MCP survey wiring lands (see
 `design/potential-survey-mcp.md`).
 
 ### Layer 10: Tests and fixtures
+
+**Status (2026-04-27): substantially shipped for the layers
+that are in.** Manifest fixtures shipped 2026-04-25/26;
+`internal/signal/registry/pypi/` httptest-backed tests +
+`internal/ecosystem/resolver/pypi_test.go` mock-client tests
+shipped 2026-04-27 in `ad32c7f`. `python-dotenv` was the
+recorded fixture target. What's left lines up with what's
+unshipped at higher layers — a `poetry.lock` / `uv.lock`
+fixture lands when Phase C ships; collector fixtures land when
+Layer 5 reawakens.
 
 - `internal/manifest/pypi/testdata/` — sample `pyproject.toml`
   (PEP 621 + Poetry variants), sample `poetry.lock`, sample
@@ -734,35 +921,61 @@ Implication: a new signal type (`pypi_stdlib_shadow` or similar)
 that fires when the package name is a known stdlib module.
 Small, high-value, PyPI-specific.
 
-## Proposed phasing (not a schedule; a dependency order)
+## Phasing — what shipped, what's deferred
 
-Mirroring the npm A/B/C shape, applied to PyPI's complications:
+The original four-phase plan was structured around "ship npm
+parity for PyPI." That framing was reconsidered on 2026-04-27;
+the current state is recorded here.
 
-- **Phase A: Foundation.** Canonical URI acceptance (`parsePyPIURL`),
-  manifest detection entry, `pyproject.toml` PEP 621 parser,
-  `pkg:pypi/` → source resolver (without network — offline
-  path-rule resolver? no, PyPI has no hardcoded-path pattern like
-  Go's, so this IS network-backed), CLI dispatch wire-up,
-  `last_publish` + `maintainer_count` signals only.
-- **Phase B: Registry depth.** Poetry legacy `pyproject.toml`
-  parser, `requirements.txt` parser, `trusted_publishing` signal
-  (PEP 740 via simple API), `yanked_release_count`,
-  `sdist_present`. Decide on `weekly_downloads` via pypistats or
-  defer.
-- **Phase B.6: Longitudinal (deferred decision).** Evaluate
-  whether PyPI's `urls[].uploaded_by` field is populated enough
-  across real targets to support a `publish_origin_consistency`
-  analog. If yes, ship. If no, document the gap and skip.
-- **Phase C: Lockfile + graph.** `poetry.lock` parser + graph
-  extraction for reachability buckets. `uv.lock` follows. Other
-  lockfiles (`pdm.lock`, `Pipfile.lock`) ship as targets demand.
-- **Phase D: PyPI-unique signals.** `pypi_stdlib_shadow`,
-  `sdist_wheel_size_ratio`, `author_email_domain_match`. These
-  don't exist for npm — they're genuine value-add from PyPI's
-  attack-surface specifics.
+### Phase A — SHIPPED (2026-04-25 to 2026-04-27)
 
-Phases are independent-reviewable commits. Each phase's test suite
-green is the gate for the next.
+- Manifest detection entry (`e133043`)
+- `requirements.txt` parser (`c8c9e14`)
+- `pyproject.toml` PEP 621 + PEP 735 parser (`5ef6fc1`)
+- Poetry-as-third-handler (`d0808f7`)
+- Survey wiring (`0b6524c`)
+- **Source resolver via deterministic code (`ad32c7f`)** —
+  not in the original Phase A but landed alongside it because
+  the LLM-walks-pypi.org-via-WebFetch pattern was the obvious
+  forgery surface to close.
+- PEP 503 normalization wired into `CanonicalPackageURI`
+  (`ad32c7f`).
+
+### Phase B — REFRAMED, awaiting forcing function
+
+The original Phase B ("Registry depth: Poetry legacy parser,
+requirements.txt parser, trusted_publishing, yanked_release_count,
+sdist_present") split as follows:
+
+- Poetry legacy + requirements.txt → already shipped in Phase A.
+- `trusted_publishing` + `yanked_release_count` + `sdist_present`
+  → deferred to Layer 5 (see "Layer 5 reframed" decision and the
+  Layer 5 status above). When Layer 5 reawakens, the cut is the
+  PyPI-unique signal subset, not the npm-mirror set.
+
+### Phase B.6 — DROPPED
+
+`publish_origin_consistency` was the original Phase B.6 candidate.
+PyPI's `urls[].uploaded_by` is too spotty across the historical
+corpus to support a useful signal; the npm equivalent's value
+comes from `_npmUser`'s strong populated-everywhere guarantee
+that PyPI doesn't match. Not on the roadmap unless the registry
+introduces a stronger publisher field.
+
+### Phase C — UNCHANGED, awaiting demand
+
+Lockfile graph extraction (`poetry.lock`, `uv.lock`,
+`pdm.lock`, `Pipfile.lock`). Survey's reachability rendering
+degrades gracefully today via `ErrGraphUnavailable`; the
+forcing function is a user case where reachability buckets
+materially change a PyPI dep's verdict.
+
+### Phase D — UNCHANGED, awaiting demand
+
+The genuinely PyPI-unique signals that don't exist for npm:
+`pypi_stdlib_shadow`, `sdist_wheel_size_ratio`,
+`author_email_domain_match`. These are the highest-value
+half of any future Layer 5 cut (see Layer 5 status).
 
 ## Out of scope for initial PyPI cut
 
@@ -779,35 +992,67 @@ green is the gate for the next.
 
 ## Rough scope estimate
 
-Based on the npm shipped LOC as a calibration:
+Based on the npm shipped LOC as a calibration. Updated
+2026-04-27 to mark what's shipped against the original
+estimates:
 
-| Piece | npm LOC (code + tests) | PyPI estimate |
-|---|---|---|
-| Manifest parser | 722 | ~1,200 (more formats) |
-| Registry client | 969 | ~700 (fewer endpoints; more careful JSON shape) |
-| Signal collector | 1,412 | ~1,000 (fewer longitudinal signals initially) |
-| Source resolver | 161 | ~200 (more `project_urls` variation) |
-| CLI dispatch + survey | ~10 | ~10 |
-| Signal-type registry entries | 7 entries | 5-7 new entries |
-| Testdata fixtures | small | modest |
-| **Total** | **~3,300 LOC** | **~3,100 LOC** |
+| Piece | npm LOC (code + tests) | PyPI estimate | Shipped |
+|---|---|---|---|
+| Manifest parser | 722 | ~1,200 (more formats) | ✓ across multiple commits 2026-04-25/26 |
+| Registry client | 969 | ~700 (fewer endpoints; more careful JSON shape) | partial — ~580 LOC for the source-resolution slice (`ad32c7f`); rest deferred to Layer 5 |
+| Signal collector | 1,412 | ~1,000 (fewer longitudinal signals initially) | deferred behind forcing function |
+| Source resolver | 161 | ~200 (more `project_urls` variation) | ✓ ~560 LOC including tests (`ad32c7f`) — heavier than estimate because `project_urls` priority list + home_page fallback needed more test coverage than expected |
+| CLI dispatch + survey | ~10 | ~10 | survey ✓; collector dispatch deferred with Layer 5 |
+| Signal-type registry entries | 7 entries | 5-7 new entries (PyPI-unique cut) | deferred with Layer 5 |
+| Testdata fixtures | small | modest | ✓ for shipped layers |
+| **Total** | **~3,300 LOC** | **~3,100 LOC** for full parity | **~3,800 LOC shipped to date** (manifest + thin-slice client + resolver + tests); Layer 5's tight cut would add ~1,500 more |
 
-Not a smaller change than npm was; just a differently-shaped one.
+Layer 6 ended up heavier than the 200 LOC estimate (~560
+including tests) because the `project_urls` free-form-map
+priority lookup needed more coverage than a single-key field
+read. Layer 4 thin slice came in lighter than the 700 LOC
+estimate (~580) because it ships only `GetProjectInfo`, not
+the full per-version + `/simple/<name>/` surface.
 
-## Recommended next steps if we schedule this
+## Recommended next steps
 
-1. Fix the `security-review-v1.md` → `security-review-python-v1.md`
-   rename as a standalone commit (consistency bug; unblocks nothing
-   but removes ambiguity while we plan).
-2. Write the Phase-A-scoped implementation plan as a sibling doc
-   (`design/pypi-plan.txt`, structural parallel to `npm-plan.txt`).
-3. TDD the Phase A stack: `parsePyPIURL` first (single-file change;
-   regression-free), then manifest parser, then client + collector,
-   then resolver, then CLI wire-up. Each commit individually testable
-   against public PyPI.
-4. Target package for the end-to-end verification run: `python-dotenv`
-   (small, well-known, has a clean `pyproject.toml`, has active
-   releases, single maintainer → exercises the thin-maintainer case).
+The original four-step list is superseded — Phase A shipped, the
+Layer 5 collector is deferred behind a forcing function, the
+`python-dotenv` target became the Layer 6 test fixture. What
+remains:
+
+1. **`security-review-v1.md` → `security-review-python-v1.md`
+   rename** (Layer 8). Standalone consistency fix — it's the
+   Python-specific template but the filename has no language
+   marker, unlike the Go and Rust templates. Unblocks nothing
+   directly but removes ambiguity. ~10-line commit (the rename
+   plus the dispatch table at `cmd/signatory/handoff.go:1306-1307`).
+
+2. **Layer 1 host-anchoring tests** for `parsePyPIURL`. The
+   helper exists at `target.go:415` and normalizes correctly
+   when called, but it doesn't have the `pypi.org.attacker.com`
+   lookalike-rejection coverage `parseNpmjsURL` has. Add the
+   tests, fix anything the tests catch, wire it into the
+   `ResolveTarget` URL-input acceptance branch so
+   `https://pypi.org/project/<name>/` works as a CLI input.
+
+3. **Watch for Layer 5 forcing function in dogfood runs.** A
+   PyPI conclusion that mechanical signals (`trusted_publishing`,
+   `pypi_stdlib_shadow`, `sdist_present`/`sdist_wheel_size_ratio`,
+   `yanked_release_count`) would have caught is the trigger to
+   ship the relevant subset. Until that surfaces, the
+   LLM-analyst-only path is the v0.1 model for PyPI signal
+   collection, and `signatory_analyze`'s soft-fail on missing
+   Layer 1 (`a72cbe0`) keeps the user-facing path clean.
+
+4. **When Layer 5 ships**, extend `internal/signal/registry/pypi/`
+   additively (the package was structured for this) — add
+   `Releases` and `Distribution` to `wire.go`, add
+   `GetProjectVersion` and `GetSimpleIndex` to `client.go`,
+   then `collector.go` against the PyPI-unique signal cut.
+   Layer 6's resolver wiring stays stable across the transition;
+   Layer 7's CLI dispatch is a one-line addition at
+   `cmd/signatory/collectors.go:80`.
 
 ## References
 

@@ -1,53 +1,31 @@
 # Signatory: Roadmap
 
-Last updated: 2026-04-21, after accepting [`agent-facing-contract.md`](agent-facing-contract.md).
-
-## V0.1 — Shipped
-
-- **CLI skeleton + core data model.** Canonical URI resolution, target-form acceptance, tier model (including `rejected`).
-- **SQLite store.** Migrations, append-only analyses, WAL + busy-timeout for safe concurrent access.
-- **Survey command.** Parses `go.mod`, resolves tiers, renders human + JSON output.
-- **npm ecosystem provider.** Phase A/B/C + B.6 longitudinal signals + manifest parser. Registry client, source resolution, signal collection, survey routing.
-- **go.mod manifest parser.** Dependency enumeration for Go projects.
-- **MCP server.** 8 read-only tools (`signatory_analyze`, `signatory_signals`, `signatory_detail`, `signatory_show_analyses`, `signatory_show_conclusions`, `signatory_show_methodology`, `signatory_survey`, `signatory_ingest_analysis`) and 6 resources. Shape differs from the original scoping — mutations are CLI-side, reads are MCP-side, reflecting what dogfood actually needed.
-- **`signatory serve`.** Pipeline message service with start/stop/status/restart/logs subcommands.
-- **`signatory handoff`.** Security / provenance / synthesist templates, `--network-precheck` (now npm + Go aware via M3), `--clone-dir`, `--deposit-to` (posts rendered handoff directly into a pipeline session, replacing the former `--json` + curl shell-glue path).
-- **`signatory ingest` + `format-check`.** Analyst output validation and ingestion.
-- **`/analyze` skill.** LLM-orchestrated pipeline: session → handoff → parallel analyst dispatch → verify → synthesize.
-- **Git signal collector.** Identity signals (mailmap, domain, concentration), commit-signing, tag-signing, first-commit-date.
-- **v0.1 architectural invariants** (Invariant 1–4) with CI enforcement.
-- **109+ tests** with race detection, pre-commit hooks (gofmt + vet + race).
-- **Agent-facing-contract M1** — `pkg:<eco>/<name>@<version>` first-class grammar with per-version identity; `--version` override with conflict detection. Per-version burns fall out for free.
-- **Agent-facing-contract M5** — `--rationale-file`, `--reason-file`, `--intake-file` for multi-line inputs (path or `-` for stdin). Replaces bash-heredoc gymnastics for agent invocations.
-- **Agent-facing-contract M4** — `posture unset`, `burn remove`, `--dry-run` on all mutators, `EX_USAGE` (64) exit codes on flag conflicts. Soft-delete semantics with audit-log preservation. (ingest withdraw deferred — separate narrower commit.)
-- **Agent-facing-contract M3** — `internal/ecosystem/resolver/` registry with pluggable `Resolver` interface. npm + Go resolvers shipped; `applyNetworkPrecheck` routes every `pkg:<eco>/` target through the registry. Go uses offline path-prefix rules covering github.com/, golang.org/x/, gopkg.in/.
-- **Agent-facing-contract M2** — identity-indexed storage. `analyst_outputs` gains `collected_from_entity_id` (migration v7). `IngestAnalystOutput` accepts `WithPrimaryTarget(uri)` to index under the caller's identity while capturing the analyst-stated target as collected_from. `ListAnalystOutputs` walks both URIs so `pkg:npm/X` and its resolved `repo:github/Y` find the same analysis. CLI `ingest --as`; MCP `signatory_ingest_analysis` `collected_from`.
-- **Agent-facing-contract M7** — `signatory summary` verb (CLI + MCP). One-call view: canonical URI + related URIs + posture snapshot + burn snapshot + per-analyst rollup with severity-bucketed conclusion counts. Replaces the cross-tool flail (show-analyses → show-conclusions → posture get → burn list) yesterday's synthesist dogfood exposed. Composes on top of M2's cross-URI walk so related identities surface both directions.
-- **Agent-facing-contract M6** — synthesist contract. Shipped 2026-04-21 as five sub-milestones (M6a-e, see [`m6-synthesis-contract.md`](m6-synthesis-contract.md)):
-  - **M6a** — `SynthesisSupplement` struct on `AnalystOutput`; validator-gated to synthesist role (prefix `signatory-synthesis`); migration v8 adds `synthesis_supplement_json` + denormalized `proposed_tier` / `proposed_version_scope` columns; `GetSynthesisProposal` helper.
-  - **M6b** — `internal/synthesis/` evidence assembler: sibling to summary but returns full conclusion bodies, positive absences, observations, and cross-URI hops for the synthesist handoff. D9 cross-pollination filter (no prior syntheses in the evidence) enforced at the data layer.
-  - **M6c** — `signatory handoff synthesist` now inlines the full structured evidence as `{EVIDENCE_JSON}`. Synthesist template rewritten around "inputs = evidence block"; D9 independence-rule fence added to all 6 analyst/synthesist templates with a CI-enforced presence check. `signatory handoff` refuses to emit a synthesist handoff against a target with zero analyses.
-  - **M6d** — `signatory posture accept <output-id>` promotes a synthesist's proposed posture into a recorded posture row, with optional `--tier` / `--version` / `--rationale` overrides. Deviations are captured in the audit detail as `proposed_*` fields (presence = deviation); `accepted_from_synthesis_id` links every accepted posture back to its source synthesis.
-  - **M6e** — `signatory show-synthesis <output-id>` renders a synthesis output as markdown (the filestore markdown is now a view, not the source). `/analyze` skill Step 4 flips synthesist to land via MCP ingest; Step 5 routes through `posture accept`. Synthesist allowed-tools tightened to `WebFetch mcp__signatory__signatory_ingest_analysis` — CI-enforced.
+Last updated: 2026-04-27
 
 ## V0.1 — Remaining
 
 V0.1 blocks until every item in this section is complete. Order within each subsection is load-bearing; order across subsections is not.
 
-### Agent-facing contract milestones
+### Installation and Verification
 
-All seven milestones shipped (M1, M2, M3, M4, M5, M6, M7 — see Shipped section above). Remaining follow-ups:
+We need to create the easiest possible path for a new user to clone or fork the repo and begin using signatory through /analyze and the CLI. This needs to be documented and verified. The day one experience is critical.
 
-- **Follow-up: ingest withdraw.** Narrower commit on top of M4. analyst_outputs carries append-only triggers from v3, so marking an output INGEST_ERROR needs a sibling-table design (analyst_output_withdrawals) meaningfully different from the posture/burn withdrawal shape. Deferred intentionally; current needs covered.
-- ~~**Follow-up: /analyze skill update to pass --as.**~~ Shipped 2026-04-21. Both analyst prompts now carry `collected_from: "{TARGET}"` when calling `signatory_ingest_analysis`; the orchestrator substitutes `$TARGET` into the prompt at dispatch time. Step 3 verification now queries under `$TARGET` to match. Closes the M2 dogfood loop.
+### Improve economics
 
-### Ecosystem providers
+Our goal is to push as much as possible toward the mechanical and deterministic collection of signals. Filtering, vetting, error-correction &c. need to be the province of Go code, not the LLM analyst steps. Reducing token spends and clock time is critical. If an analyst does WebFetch just to check something it could acquire from the database, that is a bug. If an analyst does a network operation for something that is already local, that is a bug. If an analyst re-clones a repo, that *may* be a bug. If an analyst uses `curl`, that is a bug if we have surfaced the signal or pattern before -- it is a cache miss from our local db.
 
-- **PyPI ecosystem provider.** `requirements.txt`, `setup.py`, `pyproject.toml` parsers. PyPI registry client + source resolution. Second-highest-risk ecosystem after npm. Can ship in parallel with contract milestones — different file tree.
+### Add additional signals
 
-### Reliability investigations (dogfood-surfaced)
+Add as many valuable signals as we can brainstorm to the mechanical collectors.
 
-- ~~**Synthesist WebFetch TLS flake.**~~ **Resolved 2026-04-22 (Option B, capability restoration).** 3 of 4 synthesist dispatches since M6c failed with `unable to verify the first certificate` on WebFetch against the pipeline service while sibling analyst WebFetches in the same session succeeded. **Mechanism:** `NODE_EXTRA_CA_CERTS` is exported as `$(mkcert -CAROOT)/rootCA.pem` — the shell substitutes at profile-load time, so Claude Code inherits a literal filesystem path. Node's TLS stack calls `fs.readFileSync` on that path at every HTTPS handshake to build the trust chain. M6e stripped Read/Glob/Grep from synthesist allowed-tools, removing the capability required to satisfy that syscall — CA chain fails to build, mkcert's localhost cert fails system-trust-store verification, WebFetch reports the observed error. **Fix:** restored `Read Glob Grep` with explicit instruction-layer D9 enforcement (SKILL.md prompt forbids browsing filestore / prior analyses). Verified by `/analyze github.com/google/uuid` end-to-end run, synthesist WebFetch succeeded first try. **Escalation path** if D9 instruction-layer enforcement drifts: Option A (new `signatory_fetch_handoff` MCP tool over stdio, ~100 LOC) — fully scoped in [`open-architecture-question.md`](open-architecture-question.md). See `sync/KAIZEN.md` 2026-04-22 synthesist-TLS entry for per-run detail and the instruction-drift observation (synthesist used Grep on `enums.go` during uuid run — template-level fix: inline enum vocabulary in the synthesis handoff).
+### Validate through dogfood
+
+Dogfooding has already shown gaps between user expectations, data formats, knowledge and interaction flows.
+We need to perform test cycles, both LLM-driven and manual, to validate our system and our assumptions, and then iterate.
+
+### Guard against unexpected behavior
+
+The LLM and MCP surfaces are prone to entering unexpected data. Our storage layer and ingestion layers need to refuse malformed requests, pass those errors up the stack, and present a clear error. We should *expect* that interaction may be incorrect, as the LLM acts as a fuzzer regardless of instructions. Docs are a guideline. Our code is the rule.
 
 ### Packaging / polish
 
@@ -55,6 +33,7 @@ These are nice-to-have and may slip to v0.1.1 if the contract milestones take lo
 
 - Signal TTL/expiry — cache works but doesn't auto-expire
 - Docker packaging — `go install` works but Docker is the stated MVP target
+- Rust and cargo support: this needs to be planned and scoped.
 
 ## V0.2 — Planned
 
