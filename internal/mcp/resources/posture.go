@@ -7,6 +7,7 @@ package resources
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -125,7 +126,7 @@ func queryPostureAnchor(ctx context.Context, db *sql.DB, order string) (*posture
 		`SELECT entity_id, set_at FROM postures ORDER BY set_at %s LIMIT 1`, order)
 	var entityID, setAt string
 	err := db.QueryRowContext(ctx, q).Scan(&entityID, &setAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
