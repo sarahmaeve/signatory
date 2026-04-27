@@ -10,8 +10,12 @@
 //
 // Subcommands:
 //
-//	dogfood-metrics serve                      start the OTLP/HTTP receiver
+//	dogfood-metrics serve                      start the OTLP/HTTP receiver (foreground)
+//	dogfood-metrics start                      start the receiver as a background daemon
+//	dogfood-metrics stop                       stop the background receiver
+//	dogfood-metrics restart                    stop + start
 //	dogfood-metrics hook --event <name>        process a Claude Code hook event from stdin
+//	dogfood-metrics list-sessions              list known sessions, newest last-seen first
 //	dogfood-metrics report <session-id>        render per-session markdown report
 package main
 
@@ -32,8 +36,16 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		runServe(os.Args[2:])
+	case "start":
+		runStartCmd(os.Args[2:])
+	case "stop":
+		runStopCmd(os.Args[2:])
+	case "restart":
+		runRestartCmd(os.Args[2:])
 	case "hook":
 		runHookCmd(os.Args[2:])
+	case "list-sessions":
+		runListSessionsCmd(os.Args[2:])
 	case "report":
 		runReportCmd(os.Args[2:])
 	case "-h", "--help", "help":
@@ -49,9 +61,13 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "dogfood-metrics: signatory's OTLP/HTTP receiver for /analyze telemetry")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  dogfood-metrics serve [-addr :4318] [-out-dir dogfood-metrics/raw]")
-	fmt.Fprintln(os.Stderr, "  dogfood-metrics hook  --event <name> [-out-dir dogfood-metrics/raw]")
-	fmt.Fprintln(os.Stderr, "  dogfood-metrics report [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics serve         [-addr :4318] [-out-dir dogfood-metrics/raw]    (foreground)")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics start         [-addr :4318] [-out-dir dogfood-metrics/raw]    (background)")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics stop          [-out-dir dogfood-metrics/raw]")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics restart       [-addr :4318] [-out-dir dogfood-metrics/raw]")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics hook          --event <name> [-out-dir dogfood-metrics/raw]")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics list-sessions [-in-dir dogfood-metrics/raw]")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics report        [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "See design/agent-otel.md for architecture.")
 }
@@ -113,6 +129,19 @@ func runHookCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "dogfood-hook: %v\n", err)
 	}
 	os.Exit(0)
+}
+
+// runListSessionsCmd is the entry point for the `list-sessions`
+// subcommand. Scans inDir, prints a sorted table to stdout.
+func runListSessionsCmd(args []string) {
+	fs := flag.NewFlagSet("list-sessions", flag.ExitOnError)
+	inDir := fs.String("in-dir", "dogfood-metrics/raw", "directory containing hooks-*.jsonl and traces.jsonl")
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
+	if err := runListSessions(*inDir, os.Stdout); err != nil {
+		log.Fatalf("list-sessions: %v", err)
+	}
 }
 
 // runReportCmd is the entry point for the `report` subcommand.

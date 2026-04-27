@@ -34,8 +34,10 @@ type otlpScopeSpan struct {
 }
 
 type otlpSpan struct {
-	Name       string   `json:"name"`
-	Attributes []otlpKV `json:"attributes"`
+	Name              string   `json:"name"`
+	StartTimeUnixNano string   `json:"startTimeUnixNano"`
+	EndTimeUnixNano   string   `json:"endTimeUnixNano"`
+	Attributes        []otlpKV `json:"attributes"`
 }
 
 // otlpKV is OTLP's attribute encoding: each attribute is a

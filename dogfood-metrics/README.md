@@ -20,19 +20,55 @@ rounds that informed it.
 | Piece | Where |
 |---|---|
 | OTLP/HTTP/JSON receiver | `cmd/dogfood-metrics serve` |
+| Background daemon mode | `cmd/dogfood-metrics start` / `stop` / `restart` |
 | Claude Code hook entry point | `scripts/dogfood-hook.sh` |
 | Hook event classifier (Go) | `cmd/dogfood-metrics hook` |
 | Claude Code wiring (env + hooks) | `.claude/settings.json` |
+| Session listing | `cmd/dogfood-metrics list-sessions` |
 | Per-session report generator | `cmd/dogfood-metrics report <id>` |
 | End-to-end smoke driver | `cmd/dogfood-metrics-smoke` |
 
 ## Subcommand summary
 
 ```
-dogfood-metrics serve  [-addr :4318] [-out-dir dogfood-metrics/raw]
-dogfood-metrics hook   --event PreToolUse [-out-dir dogfood-metrics/raw]
-dogfood-metrics report [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>
+dogfood-metrics serve         [-addr :4318] [-out-dir dogfood-metrics/raw]    (foreground)
+dogfood-metrics start         [-addr :4318] [-out-dir dogfood-metrics/raw]    (background daemon)
+dogfood-metrics stop          [-out-dir dogfood-metrics/raw]
+dogfood-metrics restart       [-addr :4318] [-out-dir dogfood-metrics/raw]
+dogfood-metrics hook          --event PreToolUse [-out-dir dogfood-metrics/raw]
+dogfood-metrics list-sessions [-in-dir dogfood-metrics/raw]
+dogfood-metrics report        [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>
 ```
+
+### Daemon lifecycle (start / stop / restart)
+
+`serve` runs the receiver in the foreground (good for one-off
+captures and CI-like contexts). `start` / `stop` / `restart`
+manage a detached background process so you don't need to keep
+a terminal open.
+
+State lives in `<out-dir>/`:
+- `.receiver.pid` — PID of the running daemon (gitignored)
+- `.receiver.log` — receiver stdout + stderr (gitignored)
+
+Behavior:
+- `start` refuses to launch a second daemon if one is already
+  running for that out-dir
+- `start` waits up to 5s for the receiver to bind, then reports
+  failure (and kills the half-started child) if it didn't
+- `stop` SIGTERMs the daemon, waits up to 5s, escalates to
+  SIGKILL if needed, then removes the PID file
+- `restart` does best-effort stop then start (not-running is
+  fine) with a 500ms pause between for the port to release
+- `stop` against a stale PID file (process is already dead)
+  cleans up the file and returns the not-running status
+
+### list-sessions
+
+Scans `<in-dir>` for both hook JSONL files and OTLP traces,
+joins on session id, prints a sorted table newest-last-seen
+first. Use it to find the right session id before
+`report <session-id>`.
 
 The receiver:
 - Listens on `:4318` (configurable via `-addr`)
@@ -115,10 +151,9 @@ has picked up `.claude/settings.json`:
    traces to the receiver (writes to `raw/traces.jsonl` and
    `raw/logs.jsonl`).
 
-3. **After a session**, render the report. The session id is in
-   the hook filename:
+3. **After a session**, find the session id and render the report:
    ```bash
-   ls dogfood-metrics/raw/hooks-*.jsonl
+   go run ./cmd/dogfood-metrics list-sessions     # shows all known sessions, newest first
    go run ./cmd/dogfood-metrics report <session-id>
    open dogfood-metrics/sessions/<session-id>/report.md
    ```
