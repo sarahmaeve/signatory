@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -273,24 +274,84 @@ func renderClassificationTable(b *strings.Builder, agg *aggregated) {
 }
 
 // renderExternalCalls is the cache-miss-candidate section. Per
-// ROADMAP "improve economics," each entry is something to review
-// for "did we have this in the local DB?"
+// ROADMAP "improve economics," each truly-external entry is
+// something to review for "did we have this in the local DB?"
+//
+// Loopback URLs (127.0.0.1, localhost, [::1]) are filtered out
+// — they're typically signatory's own pipeline service or local
+// dev tooling, not cache-miss candidates. Their count surfaces
+// separately so reviewers don't lose visibility (per dogfood-
+// errors entry "report classifier under-categorizes external_web").
 func renderExternalCalls(b *strings.Builder, agg *aggregated) {
 	b.WriteString("## External calls (cache-miss candidates)\n\n")
 	b.WriteString("Per the ROADMAP \"improve economics\" subsection: external calls\n")
 	b.WriteString("to data we already have are bugs. Review each entry below — if\n")
 	b.WriteString("the data should have been in the local DB, file a\n")
 	b.WriteString("missing-collector gap.\n\n")
-	if len(agg.ExternalCalls) == 0 {
-		b.WriteString("no external calls in this session\n\n")
-		return
-	}
-	b.WriteString("| Tool | Detail |\n")
-	b.WriteString("|---|---|\n")
+
+	// Partition into truly-external vs loopback.
+	var external, loopback []hookEvent
 	for _, ev := range agg.ExternalCalls {
-		fmt.Fprintf(b, "| %s | %s |\n", ev.ToolName, ev.Detail)
+		if isLoopbackURL(ev.Detail) {
+			loopback = append(loopback, ev)
+		} else {
+			external = append(external, ev)
+		}
+	}
+
+	if len(external) == 0 {
+		b.WriteString("no external calls in this session\n")
+	} else {
+		b.WriteString("| Tool | Detail |\n")
+		b.WriteString("|---|---|\n")
+		for _, ev := range external {
+			fmt.Fprintf(b, "| %s | %s |\n", ev.ToolName, ev.Detail)
+		}
+	}
+
+	if len(loopback) > 0 {
+		// Suffix line with the loopback count so reviewers see the
+		// total volume of "external_web" classification but know it
+		// excludes local-pipeline / dev-tooling traffic.
+		fmt.Fprintf(b, "\n_(%d loopback call%s excluded — local pipeline service / dev tooling)_\n",
+			len(loopback), pluralS(len(loopback)))
 	}
 	b.WriteString("\n")
+}
+
+// isLoopbackURL returns true when the URL targets a loopback
+// host (127.0.0.1, localhost, IPv6 ::1). Used to filter
+// localhost traffic out of the cache-miss-candidate list — a
+// signatory pipeline service fetch is loopback-by-design, not a
+// "the LLM reached for the network when it should have used the
+// store" event.
+//
+// Unparseable URLs return false (treat as external — better to
+// over-report a non-URL entry than to silently swallow it).
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	// IPv4 127.0.0.0/8 and bracket-form IPv6 ::1 already covered;
+	// other forms (e.g., "0.0.0.0", "0:0:0:0:0:0:0:1") are
+	// non-canonical and rare enough that we don't extend the list
+	// pre-emptively. Add cases when a real URL trips us up.
+	return false
+}
+
+// pluralS returns "s" when n != 1, the empty string otherwise.
+// Tiny helper for the loopback-count suffix line.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // renderSourceReads is the underspecification-candidate section.

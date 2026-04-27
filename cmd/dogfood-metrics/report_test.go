@@ -171,6 +171,71 @@ func TestReport_SourceReadsListed(t *testing.T) {
 	assert.Contains(t, report, "cmd/signatory/main.go")
 }
 
+// TestReport_FiltersLoopbackFromExternalCalls covers the
+// dogfood-errors entry "report classifier under-categorizes
+// external_web." WebFetch calls to loopback hosts (127.0.0.1,
+// localhost, [::1]) are local pipeline / dev-tooling traffic,
+// not cache-miss-candidate external network calls. The report
+// excludes them from the "External calls" table and surfaces
+// the count separately so reviewers don't lose visibility.
+func TestReport_FiltersLoopbackFromExternalCalls(t *testing.T) {
+	t.Parallel()
+	hooks := `{"ts":"2026-04-27T15:00:00Z","event":"PreToolUse","session_id":"sess-LB","tool_name":"WebFetch","classification":"external_web","detail":"https://github.com/owner/repo","cwd":"/x"}
+{"ts":"2026-04-27T15:00:01Z","event":"PreToolUse","session_id":"sess-LB","tool_name":"WebFetch","classification":"external_web","detail":"https://127.0.0.1:21517/api/sessions/abc/messages?role=security","cwd":"/x"}
+{"ts":"2026-04-27T15:00:02Z","event":"PreToolUse","session_id":"sess-LB","tool_name":"WebFetch","classification":"external_web","detail":"http://localhost:8080/internal","cwd":"/x"}
+{"ts":"2026-04-27T15:00:03Z","event":"PreToolUse","session_id":"sess-LB","tool_name":"WebFetch","classification":"external_web","detail":"https://[::1]:9000/local","cwd":"/x"}
+{"ts":"2026-04-27T15:00:04Z","event":"PreToolUse","session_id":"sess-LB","tool_name":"WebFetch","classification":"external_web","detail":"https://api.deps.dev/v3/pkg/X","cwd":"/x"}`
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "hooks-sess-LB.jsonl"), []byte(hooks+"\n"), 0o644))
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-LB", dir, outDir))
+	report := readReport(t, outDir, "sess-LB")
+
+	// Real external URLs SHOULD appear in the table.
+	assert.Contains(t, report, "github.com/owner/repo",
+		"true external URL must remain in External calls table")
+	assert.Contains(t, report, "api.deps.dev/v3/pkg/X",
+		"true external URL must remain in External calls table")
+
+	// Loopback URLs MUST NOT appear in the table — that's the bug fix.
+	assert.NotContains(t, report, "127.0.0.1:21517",
+		"127.0.0.1 loopback URL should be filtered out of External calls")
+	assert.NotContains(t, report, "localhost:8080",
+		"localhost URL should be filtered out of External calls")
+	assert.NotContains(t, report, "[::1]:9000",
+		"IPv6 loopback URL should be filtered out of External calls")
+
+	// But the count of excluded loopback calls is surfaced
+	// separately so reviewers don't silently lose visibility.
+	assert.Regexp(t, `\(3 loopback (call|fetch)s? excluded`, report,
+		"loopback exclusion count must be surfaced beneath the table")
+}
+
+// TestReport_LoopbackOnlyShowsZeroCount — when ALL external_web
+// events are loopback, the External Calls table is empty and the
+// "no external calls" placeholder text shouldn't lie. The
+// loopback count surfaces so the reviewer knows there WAS web
+// activity, just none of it cache-miss-relevant.
+func TestReport_LoopbackOnlyShowsZeroCount(t *testing.T) {
+	t.Parallel()
+	hooks := `{"ts":"2026-04-27T15:00:00Z","event":"PreToolUse","session_id":"sess-LBO","tool_name":"WebFetch","classification":"external_web","detail":"https://127.0.0.1:21517/x","cwd":"/x"}
+{"ts":"2026-04-27T15:00:01Z","event":"PreToolUse","session_id":"sess-LBO","tool_name":"WebFetch","classification":"external_web","detail":"https://localhost:8080/y","cwd":"/x"}`
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "hooks-sess-LBO.jsonl"), []byte(hooks+"\n"), 0o644))
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-LBO", dir, outDir))
+	report := readReport(t, outDir, "sess-LBO")
+
+	assert.Contains(t, report, "no external calls",
+		"all-loopback session should still report 'no external calls'")
+	assert.Regexp(t, `\(2 loopback`, report,
+		"loopback count must surface even when no truly-external calls remain")
+}
+
 // TestReport_HandlesNoHookFile — if a session has OTEL traces but
 // no hook events (e.g., the receiver was running but the
 // PreToolUse hook wasn't registered yet), the report still

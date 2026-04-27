@@ -172,6 +172,129 @@ Each item has:
   - Whether traces are batched and have a flush interval that
     we'd need to wait through.
 
+### dogfood-metrics report classifier under-categorizes external_web
+
+- **Found:** 2026-04-27, hook stream from /analyze session
+  `107ec35f-eb38-4b5d-93b2-7afb8121a735` (target:
+  `go.opentelemetry.io/proto`).
+- **Severity:** should-fix — it skews the cache-miss-candidate
+  list, which is the load-bearing signal for the ROADMAP
+  "improve economics" subsection. False positives in that list
+  waste reviewer attention.
+- **Where:** `cmd/dogfood-metrics/report.go`
+  `renderExternalCalls`. Hook classifier
+  (`cmd/dogfood-metrics/hook.go`) intentionally stays coarse;
+  fine-grained classification belongs in the report so it can
+  evolve without rewriting historical JSONL.
+- **Symptom:** of 19 `external_web` events in that session, 4
+  were WebFetch calls to `127.0.0.1:21517` (signatory's
+  pipeline service for handoff fetches — see
+  `architecture_webfetch_constraint` memory). These are
+  loopback, not true external network calls — but they show
+  up in the "External calls (cache-miss candidates)" table
+  alongside the legitimate github.com / api.deps.dev / etc.
+  evidence-gathering fetches. Reviewer can't tell at a
+  glance which entries are the actual cache-miss candidates.
+- **Related sub-issue (out of scope for first fix):** one of
+  the 4 loopback fetches was a duplicate of an earlier one
+  within 18 seconds (provenance handoff fetched at 22:53:06
+  and again at 22:53:24). Same URL, same session, no apparent
+  reason. The classifier should eventually surface
+  duplicate-fetch events as a "retry without backoff"
+  signal, but that's a follow-up — first close the localhost
+  hole.
+- **Sketch (first fix):** in
+  `report.go.renderExternalCalls`, treat events with detail
+  matching loopback hosts (`127.0.0.1`, `localhost`, `[::1]`)
+  as local-not-external. Exclude them from the table. Add a
+  one-line "(N loopback calls excluded as local pipeline
+  service / dev tooling)" beneath the table for transparency
+  so the count is still visible. Tests pin the loopback
+  filter + the count line.
+- **Sketch (follow-up — not this fix):** add same-URL-within-N-
+  seconds duplicate detection in the report renderer.
+  Surface as a separate "Repeat fetches (retry candidates)"
+  table below the main External Calls table.
+
+### Handoff templates don't surface valid enum values for analysis JSON
+
+- **Found:** 2026-04-27, same /analyze session as above.
+  Source-read events flagged 2 reads of
+  `internal/exchange/types.go` and `internal/exchange/enums.go`.
+- **Severity:** should-fix — every underspecification adds
+  tokens (the analyst loads + parses Go source), time (extra
+  tool turns), and risk (analyst guesses the wrong enum
+  value).
+- **Where:** `templates/handoffs/security-review-v1.md`,
+  `templates/handoffs/provenance-review-v1.md`, possibly
+  `synthesis-v1.md`. Source of truth lives in
+  `internal/exchange/{types.go,enums.go}`.
+- **Symptom:** analyst agents producing the v1-schema JSON
+  output need to know the valid enum values for fields like
+  signal_type, posture, severity, etc. The handoff templates
+  describe in prose what each field MEANS but don't enumerate
+  the valid values. So the analyst (per the dogfood data) goes
+  to the source to find them. Per the design/agent-otel.md
+  framing, source reads are an underspecification signal: if
+  the analyst needed to read internal/, the handoff didn't tell
+  it what it needed.
+- **Sketch:** for each enum the analysis JSON references,
+  embed the valid values directly in the handoff template as a
+  reference table or fenced code block. Re-run /analyze on a
+  similar target after the fix and confirm the source reads of
+  `internal/exchange/` go to zero. This is a clean
+  measurable-impact dogfood loop: the metric (source-read
+  count) directly corresponds to the fix.
+- **Bonus value:** this becomes a regression test for the
+  dogfood instrumentation itself. We should be able to
+  measure that a v0.1 fix moves a v0.1 metric. If the metric
+  doesn't move, either the fix is wrong or our
+  instrumentation is wrong — both worth knowing.
+
+### /analyze produces an unexpected number of ingest_analysis calls
+
+- **Found:** 2026-04-27, same /analyze session as above.
+  14 distinct `mcp__signatory__signatory_ingest_analysis`
+  tool calls (all with unique `tool_use_id`s) spread across
+  the 22:56 → 23:15 window — not the "ingest at the end"
+  pattern.
+- **Severity:** nice-to-have — probably benign behavior we
+  just don't yet understand, but worth a closer look in case
+  it's a retry loop wasting tool turns.
+- **Where:** the /analyze skill's orchestration logic
+  (skill prompt content), or the analyst output → ingest
+  retry path in `internal/mcp/tools/ingest_analysis.go`.
+- **Symptom:** one /analyze run produced 14 ingest calls.
+  Typical /analyze should be ~2–3 (security analyst output,
+  provenance analyst output, optionally synthesis). Either:
+  (a) the orchestrator legitimately produced 14 distinct
+  analyst outputs (would be unusual — what would they all
+  be?), or (b) the same outputs are being re-ingested after
+  schema-validation failures and retries (idempotency catches
+  the dup at the store level, but the call still costs a tool
+  turn + LLM context).
+- **Blocking gap:** our hook classifier doesn't capture the
+  `target` or `output_id` arguments passed to
+  ingest_analysis. The data lives in the hook payload's
+  `tool_input` field; the classifier just doesn't surface it.
+  Without that, we can't tell which session was being
+  ingested or whether the same output was re-ingested.
+- **Sketch:**
+  - Extend `cmd/dogfood-metrics/hook.go` `classify()` to
+    capture key arguments for high-volume MCP tools — for
+    `signatory_ingest_analysis` specifically, surface the
+    `target` and `output_id` (or `analysis_session_id`) into
+    the hook event's `detail` field.
+  - With that data, re-run /analyze and look at the 14-ish
+    ingests by target. If they're all the same target →
+    retry pattern. If they're different → fan-out worth
+    understanding (and maybe filing as a separate
+    investigation).
+  - This is also a useful general improvement: the report's
+    "Tool-call classification" section would be more
+    actionable if local_db rows showed argument summaries
+    instead of just the bare tool name.
+
 ## Pending verifications
 
 Items where a fix has shipped but live end-to-end verification
