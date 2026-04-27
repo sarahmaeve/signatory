@@ -224,6 +224,51 @@ func TestHook_HandlesMalformedInput(t *testing.T) {
 	assert.Equal(t, "malformed", out["event"])
 }
 
+// TestHook_PrefersPayloadEventOverFlag — when Claude Code includes
+// hook_event_name in the stdin JSON (round 6 verification confirms
+// it always does on current versions), use that as the canonical
+// event identifier in the output line. The --event flag remains as
+// a fallback for older Claude Code versions where the payload
+// might omit the field, but the payload value wins when present.
+func TestHook_PrefersPayloadEventOverFlag(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":      "sess-payload",
+		"cwd":             "/x",
+		"hook_event_name": "PostToolUse", // payload says PostToolUse
+		"tool_name":       "Bash",
+		"tool_input":      map[string]any{"command": "ls"},
+		"tool_use_id":     "tu-p",
+	})
+	// --event arg says PreToolUse; payload wins.
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+	out := parseLine(t, readFirstLine(t, dir, "sess-payload"))
+	assert.Equal(t, "PostToolUse", out["event"],
+		"payload's hook_event_name should override --event flag value")
+}
+
+// TestHook_FallsBackToFlagWhenPayloadOmitsEvent — older Claude
+// Code or other hook-protocol senders might not include
+// hook_event_name. In that case the --event flag is what we
+// fall back to.
+func TestHook_FallsBackToFlagWhenPayloadOmitsEvent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-fallback",
+		"cwd":         "/x",
+		"tool_name":   "Bash",
+		"tool_input":  map[string]any{"command": "ls"},
+		"tool_use_id": "tu-f",
+		// no hook_event_name field
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+	out := parseLine(t, readFirstLine(t, dir, "sess-fallback"))
+	assert.Equal(t, "PreToolUse", out["event"],
+		"missing hook_event_name should fall back to --event flag value")
+}
+
 // TestHook_TimestampIsISO8601UTC — the ts field must be RFC 3339
 // with a trailing Z so per-session reports can sort events by
 // arrival without timezone math.

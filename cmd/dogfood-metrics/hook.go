@@ -17,18 +17,28 @@ import (
 const maxDetailLength = 200
 
 // hookInputEnvelope models the JSON Claude Code passes on hook
-// stdin. Round-3 verification confirmed these fields are always
-// present: session_id, cwd, transcript_path, plus event-specific
-// (tool_name + tool_input + tool_use_id for PreToolUse).
+// stdin. Round-3 + round-6 verification confirmed these fields
+// are always present: session_id, cwd, transcript_path,
+// hook_event_name, plus event-specific (tool_name + tool_input
+// + tool_use_id for PreToolUse).
 //
-// We deliberately use json.RawMessage for tool_input rather than a
-// concrete shape — the per-tool field set varies (Bash has command,
-// Read has file_path, WebFetch has url, MCP tools have arbitrary
-// shapes) and we extract per-tool fields downstream.
+// HookEventName is preferred over the runHook `event` parameter
+// when present — it's the canonical event identifier from
+// Claude Code itself, vs the value we passed via --event in the
+// hook config. We keep --event as a fallback for compatibility
+// with older Claude Code versions where hook_event_name might
+// not surface.
+//
+// We deliberately use json.RawMessage for tool_input rather
+// than a concrete shape — the per-tool field set varies (Bash
+// has command, Read has file_path, WebFetch has url, MCP tools
+// have arbitrary shapes) and we extract per-tool fields
+// downstream.
 type hookInputEnvelope struct {
 	SessionID      string          `json:"session_id"`
 	CWD            string          `json:"cwd"`
 	TranscriptPath string          `json:"transcript_path"`
+	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
@@ -69,9 +79,17 @@ func runHook(r io.Reader, outDir, event string, now time.Time) error {
 
 	classification, detail := classify(env.CWD, env.ToolName, env.ToolInput)
 
+	// Prefer the canonical event name from Claude Code's payload
+	// (round 6); fall back to the --event flag for older Claude
+	// Code versions where hook_event_name might not be present.
+	resolvedEvent := env.HookEventName
+	if resolvedEvent == "" {
+		resolvedEvent = event
+	}
+
 	ev := hookEvent{
 		Timestamp:      now.UTC().Format(time.RFC3339),
-		Event:          event,
+		Event:          resolvedEvent,
 		SessionID:      env.SessionID,
 		ToolUseID:      env.ToolUseID,
 		ToolName:       env.ToolName,

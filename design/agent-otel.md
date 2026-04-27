@@ -37,6 +37,8 @@ round corrected a load-bearing assumption from the prior:
 | 2 | OTEL exporter options (`otlp` / `console` / `prometheus` / `none`) | **No native file exporter exists.** `otlp` is network-only, `console` is unstructured text |
 | 3 | Hook payload includes `session_id` + `transcript_path`, OTEL `session.id` resource attribute matches hook `session_id`, MCP tool calls under subagents nest correctly under the subagent span, `OTEL_LOG_TOOL_DETAILS=1` exposes `full_command` for Bash | Round 1 said hooks didn't have `transcript_path`; round 3 confirmed they do. Stop-hook end-of-session aggregates ARE possible (deferred for now) |
 | 4 | `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` is first-class supported (not experimental); standard OTLP/HTTP paths `/v1/traces` and `/v1/logs`; wire bodies follow OTLP JSON Mapping spec strictly (`resourceSpans` / `resourceLogs` top-level); 202 Accepted on success | **Trace export requires `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`** — the OTEL config itself is stable, but trace data (which we need for per-subagent attribution) is beta-gated. Compression behavior is undocumented — receiver must handle both gzipped and ungzipped bodies defensively |
+| 5 (live, 2026-04-27) | First real capture against `claude` launched in another window. Hooks fired correctly (settings.json read), receiver was reachable, OTEL trace stream stayed empty | **Initial blame attributed to settings.json `env` block scope.** Round 6 contradicts that — see Round 6 row. The env-block claim in this row is **suspect and pending proper diagnosis**, NOT a confirmed fact. The wrapper script `scripts/dogfood-claude.sh` was added as a defensive workaround; whether it's actually needed depends on Round 6's investigation |
+| 6 (2026-04-27) | All telemetry config verified against current docs (env var names, span names, attribute names, token field names, OTLP wire shape). Plus: hook payload includes `hook_event_name` (Round 1 missed it; useful — we now prefer it over the `--event` flag); `SubagentStop` event DOES exist (Round 1 wrongly said no); PreToolUse blocking via `hookSpecificOutput.permissionDecision` (top-level `decision` is deprecated, we don't block so non-issue); token attributes confirmed as `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` on `claude_code.llm_request` — unblocks slice 5 design | **Live docs say settings.json `env` block applies to "every session," which the verifying agent read as including Claude Code's own process.** Our Round 5 symptom contradicts this. Per the project's discipline (don't blame the upstream until you've ruled out your own reading, your own implementation, and your own testing), the conflict is a flag that one of those three is wrong. To investigate properly when we get to it: (a) verify the env block reaches Claude Code's process (e.g., have the spawned `claude` print `os.environ` somehow), (b) verify the OTEL exporter is initialized (some other startup signal), (c) verify the receiver actually rejects nothing (e.g., introduce a deliberate test span). Don't rewrite the wrapper script's rationale until that diagnosis is done |
 
 Cross-cutting confirmations from round 3:
 
@@ -80,8 +82,12 @@ initial plan, then dropped on review:
 ## Architecture
 
 ```
-Claude Code session
-  ├─ env: CLAUDE_CODE_ENABLE_TELEMETRY=1
+Claude Code session  (launched via scripts/dogfood-claude.sh,
+                      which exports the env vars below before exec'ing claude;
+                      see "Round 5" — settings.json env block doesn't reach
+                      Claude Code's own process, only its subprocesses)
+  ├─ env (must be SHELL-EXPORTED, not just in settings.json):
+  │       CLAUDE_CODE_ENABLE_TELEMETRY=1
   │       CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # required for trace export
   │       OTEL_TRACES_EXPORTER=otlp
   │       OTEL_LOGS_EXPORTER=otlp
@@ -108,6 +114,13 @@ cmd/dogfood-metrics report <session-id>
 **Receiver must handle gzipped bodies.** Claude Code's compression
 behavior is undocumented; check `Content-Encoding: gzip` on each
 incoming request and decompress before JSON parsing.
+
+**The `.claude/settings.json` `env` block is left in place** even
+though it doesn't reach Claude Code's own process. It DOES apply
+to subprocesses Claude Code spawns (Bash tool calls, hook scripts),
+where these `OTEL_*` vars are harmless. Removing it would lose the
+documentation value of "here's what env Claude Code expects,"
+which a future maintainer reading the settings would want to see.
 
 ## Per-subagent attribution
 

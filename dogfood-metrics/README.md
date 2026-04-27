@@ -137,26 +137,54 @@ retired in favor of this driver.
 
 ## Live capture (against a real Claude Code session)
 
-Once everything is committed and `/hooks` (or session restart)
-has picked up `.claude/settings.json`:
+Pre-flight (once per dev environment):
 
-1. **In one terminal**, start the receiver:
+```bash
+make install          # puts dogfood-metrics on $PATH
+```
+
+Per capture:
+
+1. **Start the receiver as a background daemon.** Run from
+   anywhere — it writes to `dogfood-metrics/raw/` relative to
+   its CWD by default, so do this from the repo root.
    ```bash
-   go run ./cmd/dogfood-metrics serve
+   dogfood-metrics start
+   # → receiver started: PID NNNN, listening on :4318, logging to dogfood-metrics/raw/.receiver.log
    ```
 
-2. **In another terminal**, run Claude Code in this project as
-   normal. The hook fires per tool call (writes to
-   `raw/hooks-<session>.jsonl`), and Claude Code emits OTEL
-   traces to the receiver (writes to `raw/traces.jsonl` and
-   `raw/logs.jsonl`).
-
-3. **After a session**, find the session id and render the report:
+2. **In another terminal, launch Claude Code via the wrapper:**
    ```bash
-   go run ./cmd/dogfood-metrics list-sessions     # shows all known sessions, newest first
-   go run ./cmd/dogfood-metrics report <session-id>
+   cd /Users/sarah/git/signatory
+   ./scripts/dogfood-claude.sh
+   ```
+   The wrapper exports the OTEL env vars in the shell before
+   exec'ing `claude`, plus pings the receiver as a pre-flight
+   check (so you find out immediately if the daemon isn't up).
+   The `.claude/settings.json` env block declares the same
+   vars; whether THAT block alone is sufficient to enable
+   telemetry is an open question (round 5 capture didn't
+   produce traces despite the block being read for hooks; round
+   6 found the docs claim it should — see design/agent-otel.md).
+   The wrapper works regardless of how that resolves.
+
+3. **Run any /analyze (or just use Claude as normal).** Hook
+   events land in `raw/hooks-<session>.jsonl` per tool call;
+   OTEL traces land in `raw/traces.jsonl`.
+
+4. **After the session ends, render the report:**
+   ```bash
+   dogfood-metrics list-sessions       # newest session at top
+   dogfood-metrics report <session-id>
    open dogfood-metrics/sessions/<session-id>/report.md
    ```
+
+5. **Stop the receiver when you're done capturing:**
+   ```bash
+   dogfood-metrics stop
+   ```
+   (Or leave it running across sessions — it'll keep
+   accumulating data into the same out-dir.)
 
 The report's "External calls" section is the cache-miss-candidate
 list per the ROADMAP "improve economics" subsection. The
