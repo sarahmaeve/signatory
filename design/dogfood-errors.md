@@ -67,6 +67,111 @@ Each item has:
   the existing CLI verb but on the MCP side. Independent of any
   bug fix; it's a feature add that closes a real gap.
 
+### dogfood-metrics OTEL trace stream not flowing from new sessions
+
+- **Found:** 2026-04-27, first live capture against
+  dogfood-metrics with a fresh `claude` session
+  (`107ec35f-eb38-4b5d-93b2-7afb8121a735`) launched in another
+  terminal after slice 4 landed.
+- **Severity:** must-fix (blocks the entire OTEL stream that
+  dogfood-metrics was built to capture; without it the report
+  has no Subagent Activity / Cost / Performance data — only the
+  hook-derived Tool-call Classification + External Calls +
+  Source Reads sections).
+- **Where:** unknown; pending diagnosis. Possible layers (in
+  the order of "least to most upstream," per the project's
+  discipline of NOT defaulting to "Claude Code is broken"):
+  (a) our reading of the docs, (b) our setup / receiver, (c)
+  our testing methodology, (d) Claude Code itself. Each
+  diagnostic step below distinguishes one layer.
+- **Symptom:** the new session shows hook events landing in
+  `dogfood-metrics/raw/hooks-<id>.jsonl` (so
+  `.claude/settings.json` IS being read for the hooks block).
+  Receiver is reachable — `curl -X POST
+  http://localhost:4318/v1/traces` returns 202 from any shell.
+  But `dogfood-metrics/raw/traces.jsonl` contains zero spans
+  for the new session id. So either traces aren't being sent,
+  or they're going somewhere other than localhost:4318.
+- **Worked-around for now:** `scripts/dogfood-claude.sh`
+  exports the OTEL env vars in the launching shell before
+  exec'ing `claude`. This is a defensive belt-and-suspenders —
+  it works regardless of whether the underlying issue is in
+  settings.json scope, our setup, or upstream. It's NOT a
+  diagnosis of the cause.
+- **Sketch (diagnostic plan):** work through each step in
+  order. Stop at the first definitive answer.
+
+  **Step 1 — Re-verify the docs reading.** Round 6 quoted "env
+  block applies to every session" and the verifying agent
+  interpreted that as "applies to Claude Code's process AND
+  subprocesses." Re-fetch the live settings.md doc and read
+  the LITERAL text without that interpretation. If the doc is
+  silent on whether "session" includes Claude Code's own
+  process or only its subprocesses, the interpretation chain
+  is the problem and our blame in earlier rounds is unfounded.
+
+  **Step 2 — Verify env vars actually reach Claude Code's
+  process.** Two probes:
+
+  - From a clean shell (no exports), launch `claude` directly
+    (NOT via the wrapper). Inside, run a Bash tool call
+    `printenv | grep -E '^(CLAUDE_CODE|OTEL)'`. Whatever
+    appears is the env of a SUBPROCESS Claude Code spawned —
+    confirms the settings.json env block reaches subprocess
+    level (the part of the docs that's clear).
+
+  - To check Claude Code's OWN process env, on macOS:
+    `ps eww $(pgrep -n claude) | tr ' ' '\n' | grep -E '^(CLAUDE_CODE|OTEL)'`.
+    If those vars are absent, the env block does NOT propagate
+    to Claude Code's own startup environment — the symptom
+    matches and the wrapper script is the right fix. If they
+    ARE present, the bug is downstream (exporter init, network
+    path, or upstream).
+
+  **Step 3 — Verify the OTEL exporter is initialized inside
+  Claude Code.** If env vars are present but no traces flow,
+  the exporter might be silently failing to initialize. Probe
+  candidates:
+
+  - Run `claude --debug` (or whatever the current debug-mode
+    flag is) and grep the output for "telemetry," "otlp,"
+    "exporter."
+
+  - Check `~/.claude/` for any startup log file. The MCP
+    server logs there; possibly the OTEL exporter does too.
+
+  - From inside Claude Code, do something that should
+    DEFINITELY emit a trace (a tool call or LLM turn) and
+    immediately check the receiver log (`tail -f
+    dogfood-metrics/raw/.receiver.log`). No incoming request
+    means the exporter never tried.
+
+  **Step 4 — Verify the receiver isn't silently dropping.**
+  Currently every `traces.jsonl` line is a request body
+  verbatim. A 202-returning request that doesn't land
+  on disk would point at our receiver code:
+
+  - `lsof -i :4318` while Claude Code is active — confirms
+    whether anything from claude's PID is connecting.
+
+  - `tcpdump -i lo0 'port 4318'` (macOS) — sees packets
+    regardless of receiver behavior.
+
+  **Step 5 — Only after 1–4 are inconclusive: file upstream.**
+  At that point we have a real reproducer ("env vars set, no
+  exporter activity in claude --debug, no packets on the
+  wire") and can write a minimal report. Until then, any
+  upstream-blame is speculation.
+
+- **What we know we DON'T know:**
+  - Whether `.claude/settings.json`'s env block actually
+    reaches Claude Code's own process environment.
+  - Whether Claude Code emits any startup signal when
+    telemetry initializes (or when it fails to).
+  - Where Claude Code logs telemetry-related diagnostics.
+  - Whether traces are batched and have a flush interval that
+    we'd need to wait through.
+
 ## Pending verifications
 
 Items where a fix has shipped but live end-to-end verification

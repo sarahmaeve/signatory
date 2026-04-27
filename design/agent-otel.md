@@ -229,7 +229,16 @@ Each slice is a self-contained, individually-reviewable commit.
   confirming at install time that the env var name is current —
   beta-gated APIs sometimes get renamed. If the trace stream is
   empty in slice 1 testing, the env var is the first thing to
-  check.
+  check. (Round 6 confirmed the name against current docs.)
+- **First live capture failed to produce traces** despite the
+  receiver being reachable and the hook block of
+  `.claude/settings.json` working correctly. The env-block
+  scope conflict between Round 5 (symptom) and Round 6 (docs)
+  is unresolved. **Diagnostic plan + ordered hypothesis list
+  is captured in `design/dogfood-errors.md` under "dogfood-
+  metrics OTEL trace stream not flowing from new sessions."**
+  Don't rewrite the wrapper-script rationale or revise Round 5
+  here until that diagnosis runs.
 - **Stop-hook end-of-session aggregates.** Round 3 confirmed
   `transcript_path` is in hook payloads; we could use the Stop hook
   to emit a session-end summary directly without waiting for the
