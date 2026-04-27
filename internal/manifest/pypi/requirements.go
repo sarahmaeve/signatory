@@ -3,6 +3,7 @@ package pypi
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,16 @@ import (
 // stopping with a clear error beats blowing the stack.
 const maxIncludeDepth = 5
 
+// maxRequirementsBytes caps untrusted requirements.txt input. Each
+// file (the top-level entry point AND every -r-included child) is
+// bounded independently — the depth cap stops cycles, but without a
+// per-file size cap a single huge child file can still drive
+// unbounded allocation. Real-world pip-compile output for large
+// projects runs well under 16 KiB; 64 KiB leaves comfortable
+// headroom while ruling out adversarial input. Adjust if a real
+// project legitimately exceeds it.
+const maxRequirementsBytes = 64 * 1024
+
 // ErrIncludeOutOfScope is returned when a -r include directive
 // resolves to a path outside the original requirements file's
 // directory tree (absolute path, .. traversal, or any combination
@@ -28,6 +39,12 @@ var ErrIncludeOutOfScope = errors.New("requirements include points outside file 
 // more than maxIncludeDepth levels deep. Real projects don't nest
 // this many levels; cycles and pathological cases do.
 var ErrIncludeDepthExceeded = errors.New("requirements include depth exceeded")
+
+// ErrFileTooLarge is returned when a requirements.txt file (top-
+// level or -r-included) exceeds maxRequirementsBytes. Wrapping with
+// %w lets callers errors.Is for the specific cap-trip case without
+// matching string-prose.
+var ErrFileTooLarge = errors.New("requirements file exceeds size cap")
 
 // ParseRequirements reads a pip requirements.txt file at path and
 // returns the dependencies it declares. The file's directory
@@ -68,9 +85,28 @@ func parseAtDepth(path, scopeRoot string, depth int) ([]manifest.Dep, error) {
 		return nil, fmt.Errorf("%w: at depth %d (file: %s)", ErrIncludeDepthExceeded, depth, path)
 	}
 
-	data, err := os.ReadFile(path) //nolint:gosec // G304: caller-supplied or include-resolved path validated against scopeRoot before reaching this read
+	// Open once and read with a size-bounded LimitReader. Same
+	// pattern as parsePyProject: the LimitReader caps bytes from
+	// the SAME open file handle, so there's no os.Stat → os.ReadFile
+	// TOCTOU window where a small file could be swapped for a
+	// larger one between the size check and the read.
+	fh, err := os.Open(path) //nolint:gosec // G304: caller-supplied or include-resolved path validated against scopeRoot before reaching this read; bytes capped by LimitReader below
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+	defer fh.Close() //nolint:errcheck // read-only file; close cannot fail meaningfully
+
+	// Read up to maxRequirementsBytes+1 bytes. If we got the +1,
+	// the file exceeds the cap. The cap fires per-file, so a -r
+	// chain of N moderately-sized files is fine; one huge file
+	// (top-level or included) is not.
+	data, err := io.ReadAll(io.LimitReader(fh, maxRequirementsBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+	if len(data) > maxRequirementsBytes {
+		return nil, fmt.Errorf("%w: %s (cap: %d bytes)",
+			ErrFileTooLarge, path, maxRequirementsBytes)
 	}
 
 	lines := splitContinuations(string(data))

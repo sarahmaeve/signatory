@@ -503,3 +503,76 @@ func TestParseRequirements_Boto3Shaped(t *testing.T) {
 	assert.Equal(t, "==306", byName["pywin32"].Version,
 		"environment marker on pywin32 must be stripped, version preserved")
 }
+
+// --- Size cap --------------------------------------------------------------
+
+func TestParseRequirements_FileTooLarge(t *testing.T) {
+	t.Parallel()
+	// Top-level requirements.txt at maxRequirementsBytes + 1 must
+	// reject before parsing. The cap mirrors pyproject.toml's:
+	// requirements.txt has the same DoS shape (unbounded read into
+	// memory) and parse cost grows with content size.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.txt")
+
+	padding := make([]byte, maxRequirementsBytes+1)
+	for i := range padding {
+		padding[i] = '#'
+	}
+	require.NoError(t, os.WriteFile(path, padding, 0o600))
+
+	_, err := ParseRequirements(path)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrFileTooLarge,
+		"size-cap error must use the exported sentinel so callers can errors.Is")
+}
+
+func TestParseRequirements_AtSizeCap(t *testing.T) {
+	t.Parallel()
+	// File at exactly maxRequirementsBytes must parse normally — the
+	// cap rejects strictly above, not at. Locks the boundary so a
+	// future fencepost (>= vs >) cannot slip through. Companion to
+	// TestParseRequirements_FileTooLarge.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.txt")
+
+	header := []byte("requests==2.31.0\n")
+	pad := make([]byte, maxRequirementsBytes-len(header))
+	for i := range pad {
+		pad[i] = '#'
+	}
+	content := append(header, pad...) //nolint:gocritic // intentional fresh slice; do not extend `header`
+	require.Equal(t, maxRequirementsBytes, len(content),
+		"test setup: content must be exactly at cap")
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+
+	deps, err := ParseRequirements(path)
+	require.NoError(t, err, "file at exact cap must parse, not be rejected")
+	require.Len(t, deps, 1, "the one real dep before the comment pad must surface")
+	assert.Equal(t, "requests", deps[0].Name)
+}
+
+func TestParseRequirements_IncludedFileTooLarge(t *testing.T) {
+	t.Parallel()
+	// The security concern from the review: `-r` chains read each
+	// included file with no per-file cap. A small main file that
+	// `-r`s an oversized child must still reject — the cap covers
+	// the recursive read sites, not just the entry point.
+	dir := t.TempDir()
+	main := filepath.Join(dir, "requirements.txt")
+	child := filepath.Join(dir, "huge.txt")
+
+	require.NoError(t, os.WriteFile(main,
+		[]byte("-r huge.txt\n"), 0o600))
+
+	padding := make([]byte, maxRequirementsBytes+1)
+	for i := range padding {
+		padding[i] = '#'
+	}
+	require.NoError(t, os.WriteFile(child, padding, 0o600))
+
+	_, err := ParseRequirements(main)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrFileTooLarge,
+		"oversized -r-included file must trip the size cap, not be silently slurped")
+}
