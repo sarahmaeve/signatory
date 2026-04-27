@@ -40,14 +40,16 @@ COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-.PHONY: help install install-hooks check test lint fmt-check smoke
+.PHONY: help install install-hooks check vet test lint fmt-check smoke
 
 help:  ## Show available targets.
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-install:  ## Install signatory to $GOBIN with a git-derived version stamp.
+install:  ## Install signatory + dogfood-metrics to $GOBIN.
 	@echo "installing signatory $(VERSION) ($(COMMIT))"
 	go install -ldflags "$(LDFLAGS)" ./cmd/signatory
+	@echo "installing dogfood-metrics"
+	go install ./cmd/dogfood-metrics
 
 # install-hooks wires the .githooks/ directory into this clone's git
 # config so the pre-commit hook (gofmt + vet + test -race) actually
@@ -69,13 +71,16 @@ vet:  ## Run `go vet` — quick static checks beyond what the compiler does.
 test:  ## Run the full test suite with the race detector.
 	go test -race -count=1 ./...
 
-# `make lint` currently reports ~32 pre-existing issues in non-MCP code
-# (defer Close errcheck + two staticcheck nits). See design/pendingfix.md.
-# The MCP packages themselves are clean; narrow with
-#   golangci-lint run ./internal/mcp/...
-# while iterating on MCP work. lint is NOT in `make check` for exactly
-# this reason — CI doesn't gate on it, and we don't want the pre-existing
-# backlog to make `make check` useless as a pre-commit signal.
+# `make lint` runs golangci-lint across the whole tree. There's a
+# known baseline of pre-existing issues in non-MCP code (defer Close
+# errcheck + a couple of staticcheck nits) that aren't tracked in a
+# central file today — when one annoys you enough to fix, fix it in
+# the same commit as your in-range work (per the "fix gofmt drift in
+# files I touch" rule). The MCP packages themselves are clean; narrow
+# with `golangci-lint run ./internal/mcp/...` while iterating there.
+# lint is NOT in `make check` for exactly this reason — CI doesn't
+# gate on it, and we don't want the pre-existing backlog to make
+# `make check` useless as a pre-commit signal.
 lint:  ## Run golangci-lint on the whole tree (has known baseline noise; see comment).
 	golangci-lint run ./...
 
@@ -87,5 +92,10 @@ fmt-check:  ## Verify gofmt has no pending changes (does not rewrite files).
 		exit 1; \
 	fi
 
-smoke:  ## End-to-end stdio MCP driver (builds its own binary; no install required).
+# `make smoke` runs the project's end-to-end smoke drivers. Each
+# driver builds its own target binary into a tempdir and exercises it
+# as a real subprocess — not unit tests, not requiring an install.
+# Add new entries here when a new cmd/*-smoke driver lands.
+smoke:  ## Run all end-to-end smoke drivers (MCP + dogfood-metrics).
 	go run ./cmd/smoke-mcp
+	go run ./cmd/dogfood-metrics-smoke
