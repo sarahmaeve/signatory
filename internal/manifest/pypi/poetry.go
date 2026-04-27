@@ -2,7 +2,7 @@ package pypi
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
@@ -92,7 +92,7 @@ func extractPoetryDeps(p *poetryTable) (*poetryProjectMeta, []manifest.Dep, erro
 	for name := range p.Group {
 		groupNames = append(groupNames, name)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 	for _, name := range groupNames {
 		groupDeps, err := convertPoetryDeps(p.Group[name].Dependencies, false)
 		if err != nil {
@@ -120,7 +120,7 @@ func convertPoetryDeps(raw map[string]any, filterPython bool) ([]manifest.Dep, e
 	for n := range raw {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	deps := make([]manifest.Dep, 0, len(raw))
 	for _, name := range names {

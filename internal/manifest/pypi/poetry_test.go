@@ -124,6 +124,26 @@ mylib = { url = "https://example.com/mylib-1.0.tar.gz" }
 	assert.Empty(t, deps[0].CanonicalURI)
 }
 
+// TestParsePyProject_Poetry_FileDependency: explicit file= source →
+// pypi-local. Closes a coverage gap flagged by the test-quality
+// review: hasNonRegistryMarker recognizes four keys (git/path/url/file),
+// three of which were tested. A regression that dropped "file" from
+// the marker list would have shipped silently without this test.
+func TestParsePyProject_Poetry_FileDependency(t *testing.T) {
+	t.Parallel()
+	path := writePyProject(t, `[tool.poetry]
+name = "x"
+
+[tool.poetry.dependencies]
+mylib = { file = "../dist/mylib-1.0.tar.gz" }
+`)
+	_, deps, err := parsePyProject(path)
+	require.NoError(t, err)
+	require.Len(t, deps, 1)
+	assert.Equal(t, "pypi-local", deps[0].Ecosystem)
+	assert.Empty(t, deps[0].CanonicalURI)
+}
+
 // TestParsePyProject_Poetry_FiltersPythonRuntimePin documents
 // that python in [tool.poetry.dependencies] populates EcoVersion
 // (when PEP 621 absent) and is NEVER a Dep, regardless of value shape.

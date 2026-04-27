@@ -3,9 +3,10 @@ package pypi
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 
 	"github.com/BurntSushi/toml"
 
@@ -23,14 +24,29 @@ import (
 const maxPyProjectBytes = 64 * 1024
 
 // errNoModernFormat is the package-private control-flow signal
-// that parsePyProject couldn't find either PEP 621 [project] or
-// PEP 735 [dependency-groups] tables. The dispatcher consumes
-// this and (until Commit 6 lands the Poetry parser) translates
-// it into the user-facing ErrPyProjectTOMLNotYetSupported.
+// that parsePyProject couldn't find ANY of the three recognized
+// table sets — neither PEP 621 [project], nor PEP 735
+// [dependency-groups], nor [tool.poetry]. The dispatcher consumes
+// this and translates it into the user-facing
+// ErrPyProjectTOMLNotYetSupported (now a slight misnomer since
+// pyproject.toml IS supported; the error fires only on files
+// with NONE of the three recognized table sets, e.g. a file
+// with just [build-system]).
 //
 // Lowercase because no caller outside this package needs to
 // distinguish it from any other parse error.
-var errNoModernFormat = errors.New("pyproject.toml has neither [project] nor [dependency-groups] table")
+var errNoModernFormat = errors.New("pyproject.toml has no recognized [project], [dependency-groups], or [tool.poetry] table")
+
+// PEP 735 condition sentinels. Wrapped with %w so the test suite
+// (and future callers) can errors.Is against the condition rather
+// than substring-matching the prose. Each sentinel covers exactly
+// one spec-mandated error condition; the prose carries the
+// diagnostic content (group name, include target).
+var (
+	errPEP735DuplicateGroup   = errors.New("PEP 735: duplicate normalized group name")
+	errPEP735UndefinedInclude = errors.New("PEP 735: include of undefined group")
+	errPEP735Cycle            = errors.New("PEP 735: cycle in include resolution")
+)
 
 // pyProjectFile is the TOML-decoder target for the slice of
 // pyproject.toml signatory cares about. Every field is optional
@@ -82,19 +98,27 @@ type dependencyGroups map[string][]any
 // Enforces maxPyProjectBytes as a front-line size cap before
 // invoking the TOML decoder.
 func parsePyProject(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
-	stat, err := os.Stat(path)
+	// Open once and read with a size-bounded LimitReader. This
+	// avoids the os.Stat → os.ReadFile TOCTOU window where a
+	// small file could be swapped for a larger one between the
+	// size check and the read; the LimitReader caps bytes from
+	// the SAME open file handle, so the check and the use are
+	// the same operation.
+	fh, err := os.Open(path) //nolint:gosec // G304: caller-supplied manifest path validated by survey/Detect; bytes capped by LimitReader below
 	if err != nil {
-		return manifest.ProjectInfo{}, nil, fmt.Errorf("stat %q: %w", path, err)
+		return manifest.ProjectInfo{}, nil, fmt.Errorf("open %q: %w", path, err)
 	}
-	if stat.Size() > maxPyProjectBytes {
-		return manifest.ProjectInfo{}, nil, fmt.Errorf(
-			"pyproject.toml too large: %d bytes (cap: %d) at %s",
-			stat.Size(), maxPyProjectBytes, path)
-	}
+	defer fh.Close() //nolint:errcheck // read-only file; close cannot fail meaningfully
 
-	data, err := os.ReadFile(path) //nolint:gosec // G304: caller-supplied manifest path validated by survey/Detect; size-capped above
+	// Read up to maxPyProjectBytes+1 bytes. If we got the +1, the
+	// file exceeds the cap and we reject before decoding.
+	data, err := io.ReadAll(io.LimitReader(fh, maxPyProjectBytes+1))
 	if err != nil {
 		return manifest.ProjectInfo{}, nil, fmt.Errorf("read %q: %w", path, err)
+	}
+	if len(data) > maxPyProjectBytes {
+		return manifest.ProjectInfo{}, nil, fmt.Errorf("%w: %s (cap: %d bytes)",
+			ErrFileTooLarge, path, maxPyProjectBytes)
 	}
 
 	var f pyProjectFile
@@ -183,7 +207,7 @@ func parsePEP621Dependencies(p *projectTable) []manifest.Dep {
 	for name := range p.OptionalDependencies {
 		groupNames = append(groupNames, name)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 	for _, group := range groupNames {
 		for _, spec := range p.OptionalDependencies[group] {
 			if d, ok := parsePEP508Requirement(spec); ok {
@@ -219,9 +243,8 @@ func flattenDependencyGroups(rawGroups dependencyGroups) ([]manifest.Dep, error)
 	for name, entries := range rawGroups {
 		norm := pep503Normalize(name)
 		if existing, dup := originalName[norm]; dup {
-			return nil, fmt.Errorf(
-				"PEP 735: duplicate normalized group name %q (from original names %q and %q)",
-				norm, existing, name)
+			return nil, fmt.Errorf("%w: %q (from original names %q and %q)",
+				errPEP735DuplicateGroup, norm, existing, name)
 		}
 		originalName[norm] = name
 		byNorm[norm] = entries
@@ -234,13 +257,18 @@ func flattenDependencyGroups(rawGroups dependencyGroups) ([]manifest.Dep, error)
 	for n := range byNorm {
 		groupNames = append(groupNames, n)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 
 	var allDeps []manifest.Dep
 	for _, normName := range groupNames {
 		deps, err := resolveGroup(normName, byNorm, map[string]bool{})
 		if err != nil {
-			return nil, err
+			// Breadcrumb the outer iteration group so a deep cycle
+			// or undefined-include error names BOTH the entry point
+			// and the inner failure point. Without this, a user
+			// reading the log sees only the inner name and has to
+			// reverse-engineer how resolution got there.
+			return nil, fmt.Errorf("group %q: %w", normName, err)
 		}
 		allDeps = append(allDeps, deps...)
 	}
@@ -256,14 +284,14 @@ func flattenDependencyGroups(rawGroups dependencyGroups) ([]manifest.Dep, error)
 // cycle detection.
 func resolveGroup(normName string, byNorm map[string][]any, visited map[string]bool) ([]manifest.Dep, error) {
 	if visited[normName] {
-		return nil, fmt.Errorf("PEP 735: cycle in include resolution at group %q", normName)
+		return nil, fmt.Errorf("%w: at group %q", errPEP735Cycle, normName)
 	}
 	visited[normName] = true
 	defer delete(visited, normName)
 
 	entries, ok := byNorm[normName]
 	if !ok {
-		return nil, fmt.Errorf("PEP 735: include of undefined group %q", normName)
+		return nil, fmt.Errorf("%w: %q", errPEP735UndefinedInclude, normName)
 	}
 
 	var deps []manifest.Dep

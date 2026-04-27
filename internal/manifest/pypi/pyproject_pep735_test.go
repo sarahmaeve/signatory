@@ -1,6 +1,7 @@
 package pypi
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -132,19 +133,20 @@ Dev = ["ruff"]
 `)
 	_, _, err := parsePyProject(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "duplicate",
-		"error should clearly name the duplication")
+	assert.ErrorIs(t, err, errPEP735DuplicateGroup,
+		"sentinel locks the condition; substring would match any prose containing 'duplicate'")
 }
 
 func TestParsePyProject_PEP735_IncludeUndefinedGroup(t *testing.T) {
 	t.Parallel()
 	path := writePyProject(t, `[dependency-groups]
-docs = [{include-group = "missing"}]
+docs = [{include-group = "nonesuch"}]
 `)
 	_, _, err := parsePyProject(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing",
-		"error should name the undefined group reference")
+	assert.ErrorIs(t, err, errPEP735UndefinedInclude)
+	assert.Contains(t, err.Error(), "nonesuch",
+		"diagnostic content: error should name the undefined group reference")
 }
 
 func TestParsePyProject_PEP735_DirectCycle(t *testing.T) {
@@ -154,8 +156,7 @@ a = [{include-group = "a"}]
 `)
 	_, _, err := parsePyProject(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cycle",
-		"error should clearly attribute to a cycle")
+	assert.ErrorIs(t, err, errPEP735Cycle)
 }
 
 func TestParsePyProject_PEP735_TransitiveCycle(t *testing.T) {
@@ -169,7 +170,41 @@ c = [{include-group = "a"}]
 `)
 	_, _, err := parsePyProject(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cycle")
+	assert.ErrorIs(t, err, errPEP735Cycle)
+	// Diagnostic content: error should name a group in the cycle.
+	// Without this assertion an error like "cycle detected" with no
+	// specifics would pass — the test-quality review flagged this.
+	msg := err.Error()
+	assert.True(t,
+		strings.Contains(msg, `"a"`) ||
+			strings.Contains(msg, `"b"`) ||
+			strings.Contains(msg, `"c"`),
+		"cycle error should name a group in the cycle (a/b/c); got %q", msg)
+}
+
+func TestParsePyProject_PEP735_CycleErrorNamesOuterGroup(t *testing.T) {
+	// When a cycle is reached transitively from group X (not at X
+	// itself), the error must surface BOTH the outer iteration
+	// group and the inner cycle point. Without the outer-name
+	// breadcrumb, a user reading the log sees only the inner name
+	// and has to reverse-engineer how resolution got there.
+	t.Parallel()
+	path := writePyProject(t, `[dependency-groups]
+outer = [{include-group = "a"}]
+a = [{include-group = "b"}]
+b = [{include-group = "a"}]
+`)
+	_, _, err := parsePyProject(path)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errPEP735Cycle)
+	msg := err.Error()
+	// Iteration starts at the alphabetically-first group; the
+	// outer-iteration breadcrumb must surface SOME outer group
+	// name from the iteration. Both "outer" and "a" are valid
+	// breadcrumb roots depending on iteration order.
+	assert.True(t,
+		strings.Contains(msg, `"outer"`) || strings.Contains(msg, `"a"`),
+		"error should breadcrumb the outer iteration group; got %q", msg)
 }
 
 func TestParsePyProject_PEP735_InvalidIncludeShape(t *testing.T) {

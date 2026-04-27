@@ -171,8 +171,34 @@ func TestParsePyProject_FileTooLarge(t *testing.T) {
 
 	_, _, err := parsePyProject(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "too large",
-		"size-cap error should clearly name the limit")
+	assert.ErrorIs(t, err, ErrFileTooLarge,
+		"size-cap error must use the package's exported sentinel; mirrors requirements.go")
+}
+
+func TestParsePyProject_AtSizeCap(t *testing.T) {
+	t.Parallel()
+	// File at exactly maxPyProjectBytes must parse normally — the
+	// cap rejects strictly above, not at. This locks in the
+	// boundary so a future fencepost slip (>= vs >) cannot slip
+	// through undetected. Companion to TestParsePyProject_FileTooLarge.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyproject.toml")
+
+	header := []byte("[project]\nname = \"atcap\"\n")
+	// Pad with '#' bytes — the run after the final newline is
+	// treated as one EOF-terminated comment by the TOML parser.
+	pad := make([]byte, maxPyProjectBytes-len(header))
+	for i := range pad {
+		pad[i] = '#'
+	}
+	content := append(header, pad...) //nolint:gocritic // intentional fresh slice; do not extend `header`
+	require.Equal(t, maxPyProjectBytes, len(content),
+		"test setup: content must be exactly at cap")
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+
+	info, _, err := parsePyProject(path)
+	require.NoError(t, err, "file at exact cap must parse, not be rejected")
+	assert.Equal(t, "atcap", info.Name)
 }
 
 func TestParsePyProject_FileNotFound(t *testing.T) {
