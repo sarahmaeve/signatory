@@ -90,6 +90,7 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 						agg.spansByParentID[sp.ParentSpanID] = append(
 							agg.spansByParentID[sp.ParentSpanID],
 							inspectChildSpan{
+								SpanID:    sp.SpanID,
 								Name:      sp.Name,
 								SessionID: spanSessionID,
 								TraceID:   sp.TraceID,
@@ -230,11 +231,12 @@ type inspectDispatchSpan struct {
 }
 
 // inspectChildSpan summarizes one span found via parentSpanId
-// during file traversal. Three fields suffice for the renderer's
-// purposes: name (so it can distinguish an llm_request from a
-// nested tool span), sessionID (so it can report continuity), and
-// traceID (so it can report whether the trace fragmented).
+// during file traversal. SpanID is the child's own span ID — load-
+// bearing for transitive descent (the BFS needs it to recurse),
+// not just for attribution. Name/sessionID/traceID drive the
+// continuity verdicts and the per-name filtering in the BFS.
 type inspectChildSpan struct {
+	SpanID    string
 	Name      string
 	SessionID string
 	TraceID   string
@@ -381,8 +383,15 @@ func renderTraceCorrelation(b *strings.Builder, agg *inspectAggregated) {
 
 	if len(agg.dispatchesInSession) > 0 {
 		b.WriteString("### Subagent dispatches (this session)\n\n")
-		b.WriteString("| Dispatch span | Subagent type | Children | Session continuity | Trace continuity |\n")
-		b.WriteString("|---|---|---|---|---|\n")
+		b.WriteString("Direct children = spans with parentSpanId == dispatch.spanId.\n")
+		b.WriteString("Transitive llm_requests = every claude_code.llm_request reachable\n")
+		b.WriteString("from this dispatch via parentSpanId chains. The transitive\n")
+		b.WriteString("count is the cross-check for the per-agent economics table —\n")
+		b.WriteString("a single dispatch's transitive llm count equals that agent's\n")
+		b.WriteString("Calls in the report's by-agent rollup; multiple dispatches of\n")
+		b.WriteString("the same subagent_type sum.\n\n")
+		b.WriteString("| Dispatch span | Subagent type | Direct children | Transitive llm_requests | Session continuity | Trace continuity |\n")
+		b.WriteString("|---|---|---|---|---|---|\n")
 		for _, d := range agg.dispatchesInSession {
 			children := agg.spansByParentID[d.SpanID]
 
@@ -399,6 +408,16 @@ func renderTraceCorrelation(b *strings.Builder, agg *inspectAggregated) {
 				return c.TraceID
 			})
 
+			// Transitive llm_request descendants: BFS the
+			// spansByParentID graph from this dispatch's spanId,
+			// counting every node where the underlying span name
+			// is claude_code.llm_request. Decoupled from
+			// session/trace continuity classification because the
+			// answer to "how many LLM calls did this agent
+			// make" is structural, independent of whether spans
+			// stayed in-session.
+			transitiveLLM := countTransitiveLLMRequests(d.SpanID, agg.spansByParentID)
+
 			spanIDDisplay := d.SpanID
 			if spanIDDisplay == "" {
 				spanIDDisplay = "(unknown)"
@@ -406,11 +425,59 @@ func renderTraceCorrelation(b *strings.Builder, agg *inspectAggregated) {
 				spanIDDisplay = spanIDDisplay[:12]
 			}
 
-			fmt.Fprintf(b, "| %s | %s | %d | %s | %s |\n",
-				spanIDDisplay, d.SubagentType, len(children), sessionVerdict, traceVerdict)
+			fmt.Fprintf(b, "| %s | %s | %d | %d | %s | %s |\n",
+				spanIDDisplay, d.SubagentType, len(children), transitiveLLM, sessionVerdict, traceVerdict)
 		}
 		b.WriteString("\n")
 	}
+}
+
+// countTransitiveLLMRequests returns the count of
+// claude_code.llm_request spans reachable from rootSpanID via the
+// parent-pointer graph encoded in spansByParentID. BFS over the
+// graph, terminating when the frontier is empty.
+//
+// Symmetric with the per-agent attribution algorithm in
+// report.go's attributeAgent (which walks the OPPOSITE direction:
+// a child looking up for a dispatch ancestor). This one walks
+// down from a dispatch enumerating its descendants. Both
+// algorithms see the same graph; the cross-check that the per-
+// agent table's Calls equals this transitive count (or sums to
+// it across multiple dispatches of the same subagent_type) is the
+// invariant a future refactor would break loudly via diverging
+// numbers.
+//
+// Visited set guards against cycles. Well-formed OTLP traces
+// don't have any, but a corrupt parentSpanId pointing at an
+// ancestor would otherwise spin forever; the cost of the visited
+// map is trivial.
+func countTransitiveLLMRequests(rootSpanID string, spansByParentID map[string][]inspectChildSpan) int {
+	if rootSpanID == "" {
+		return 0
+	}
+	count := 0
+	visited := map[string]bool{rootSpanID: true}
+	frontier := []string{rootSpanID}
+	for len(frontier) > 0 {
+		next := frontier[0]
+		frontier = frontier[1:]
+		for _, child := range spansByParentID[next] {
+			if child.Name == "claude_code.llm_request" {
+				count++
+			}
+			// Recurse into every child regardless of name —
+			// non-llm spans (Bash, Read, nested Task) can have
+			// llm_request descendants. Skip already-visited
+			// nodes; without SpanID, fall back to skipping (rare
+			// in practice but defensible).
+			if child.SpanID == "" || visited[child.SpanID] {
+				continue
+			}
+			visited[child.SpanID] = true
+			frontier = append(frontier, child.SpanID)
+		}
+	}
+	return count
 }
 
 // classifyContinuity reports, for a set of child spans, whether

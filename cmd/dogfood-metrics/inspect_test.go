@@ -276,6 +276,59 @@ func TestInspect_TraceCorrelation_DispatchSpanLinkage(t *testing.T) {
 		"dispatch row must report child-span count")
 }
 
+// TestInspect_TraceCorrelation_TransitiveLLMCount: each dispatch
+// row reports the count of llm_request spans transitively
+// descended from the dispatch — not just direct children. This
+// is the cross-check surface for the per-agent economics table:
+// a dispatch's transitive llm_request count should equal the
+// "Calls" column for that subagent_type bucket (when there's
+// only one dispatch of that type) or contribute to it (when
+// there are several).
+//
+// Without this column, a discrepancy between the report's
+// per-agent Calls count and the operator's intuition would
+// require ad-hoc trace probing to debug. The column makes the
+// attribution math visible in the diagnostic.
+func TestInspect_TraceCorrelation_TransitiveLLMCount(t *testing.T) {
+	t.Parallel()
+	// Fixture chosen so direct-children count differs from
+	// transitive-llm count: DSP1 has 1 direct child (TL1), and 3
+	// transitive llm_request descendants (one direct, two
+	// grandchildren via TL1). If the renderer were emitting just
+	// direct-children counts in the new column, the regex below
+	// would fail with the wrong number — that's the contract.
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]},"scopeSpans":[{"spans":[`+
+			// Dispatch span
+			`{"name":"claude_code.tool","spanId":"DSP1","attributes":[`+
+			`{"key":"subagent_type","value":{"stringValue":"code-review"}}`+
+			`]},`+
+			// Direct llm_request child of DSP1
+			`{"name":"claude_code.llm_request","spanId":"LLM1","parentSpanId":"DSP1","attributes":[]},`+
+			// Direct tool-span child of DSP1
+			`{"name":"claude_code.tool","spanId":"TL1","parentSpanId":"DSP1","attributes":[]},`+
+			// Two grandchild llm_requests via TL1
+			`{"name":"claude_code.llm_request","spanId":"LLM2","parentSpanId":"TL1","attributes":[]},`+
+			`{"name":"claude_code.llm_request","spanId":"LLM3","parentSpanId":"TL1","attributes":[]},`+
+			// Sibling unrelated to DSP1 — must not contribute
+			`{"name":"claude_code.tool","spanId":"OTHER","attributes":[]}`+
+			`]}]}]}`,
+	)
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	// Direct children of DSP1: 2 (LLM1 + TL1).
+	// Transitive llm_request descendants: 3 (LLM1, LLM2, LLM3).
+	// Adjacent columns share their separator pipe in markdown
+	// table syntax — `| 2 | 3 |` is "pipe, 2, pipe, 3, pipe", not
+	// "| 2 |" followed by "| 3 |". The regex matches the
+	// shared-separator form so a wrong direct count or wrong
+	// transitive count would diverge from the pattern visibly.
+	assert.Regexp(t, `code-review \| 2 \| 3 \|`, got,
+		"dispatch row must report direct children AND transitive llm_request count as separate columns; transitive must be 3 (LLM1+LLM2+LLM3) when direct children is 2")
+}
+
 // TestInspect_TraceCorrelation_ReportsSessionContinuity: the
 // dispatch-children check distinguishes "all children share parent
 // session.id" (the current Claude Code shape) from "children fork
