@@ -182,6 +182,51 @@ the session id) — no `2>/dev/null` redirect to peel off.
 **Unfilled placeholders** (`INTAKE_QUESTION`, `TARGET_ROLE`) are
 expected and acceptable. Do NOT stop to fill them. Proceed.
 
+## Step 1b — Refresh Layer-1 signals against the cloned target
+
+Layer 1 (mechanistic collectors) populates the local store with
+the registry / GitHub-API / git data the analysts need. Without
+this step, dispatched analysts see an empty `signatory_signals`
+result and reach for `gh api` / `curl` / `WebFetch` to do the
+collection themselves — duplicating cached data and inflating
+the run's external-call count. Pre-Step-1b dogfood runs averaged
+~10 external API calls per session; this step closes most of
+that gap.
+
+Run it AFTER Step 1's handoff (the clone Step 1 produces is
+required by the github + git collectors) and BEFORE Step 2's
+analyst dispatch (so the store is populated when the analysts
+read it).
+
+```bash
+# TARGET_NAME is already set by Step 1 (basename derivation
+# matches what handoff --clone-dir wrote).
+signatory analyze --refresh \
+  --path "filestore/clones/$TARGET_NAME" \
+  "$TARGET"
+```
+
+**What runs per ecosystem** (verified per-target):
+
+- `pkg:golang/...` (vanity Go path or canonical purl): gopublish +
+  github + git + repofiles. Full coverage.
+- `pkg:npm/...` (bare or scoped): npm + github + git + repofiles
+  after npm-registry repo resolution stamps `entity.URL`.
+- `pkg:pypi/...`: pypi + github + git + repofiles after PyPI
+  project-URL resolution stamps `entity.URL`.
+- `repo:github/...`: github + git + repofiles. NOTE: when the
+  cloned repo is a Go module (`go.mod` present), `signatory
+  analyze` emits a stderr hint recommending the
+  `pkg:golang/<modpath>` form for full Go-publish provenance
+  signals. The hint is informational; don't stop the pipeline.
+
+**Failure handling.** If `--refresh` errors (network, 404 on the
+package registry, clone-origin mismatch), surface the error and
+STOP — do not proceed to Step 2. Dispatching analysts against a
+half-populated signal store reproduces exactly the failure mode
+this step is meant to prevent. The `--refresh` path is loud-fail
+by design; trust its error rather than retrying.
+
 ## Step 2 — Dispatch analyst agents IN PARALLEL
 
 Spawn two agents in a single message. Each agent:
