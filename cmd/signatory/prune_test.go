@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,6 +12,63 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
+
+// setConfirmPrompt swaps the package-level confirmPrompt with the
+// supplied stub for the duration of the test. Restores the original
+// in t.Cleanup so other tests in the package don't see the override.
+func setConfirmPrompt(t *testing.T, fn func(scopeLabel string) bool) {
+	t.Helper()
+	prev := confirmPrompt
+	confirmPrompt = fn
+	t.Cleanup(func() { confirmPrompt = prev })
+}
+
+// TestPromptConfirmation pins the answer-parsing contract: only
+// case-insensitive "y" or "yes" (with optional surrounding whitespace)
+// counts as confirmation. Anything else — empty input, unrelated
+// strings, EOF, "no" — falls through to "do not proceed."
+//
+// The intent is "fail safe": the only way to authorize a destructive
+// prune is to type something unambiguously affirmative. A user who
+// hits Enter accidentally, or a script feeding empty stdin, gets
+// cancellation by default.
+func TestPromptConfirmation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"lowercase y", "y\n", true},
+		{"uppercase Y", "Y\n", true},
+		{"lowercase yes", "yes\n", true},
+		{"uppercase YES", "YES\n", true},
+		{"mixed case Yes", "Yes\n", true},
+		{"trimmed whitespace", "  yes  \n", true},
+
+		// Anything else cancels.
+		{"empty (just enter)", "\n", false},
+		{"explicit no", "n\n", false},
+		{"explicit NO", "NO\n", false},
+		{"unrelated text", "maybe\n", false},
+		{"starts with y but isn't y/yes", "yolo\n", false},
+		{"EOF (no input at all)", "", false},
+		{"whitespace only", "   \n", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			got := promptConfirmation(&out, strings.NewReader(tc.input), "test scope")
+			assert.Equal(t, tc.want, got,
+				"input %q must produce confirmed=%v", tc.input, tc.want)
+			assert.Contains(t, out.String(), "test scope",
+				"prompt must mention the scope label so the operator can verify the action's target before answering")
+		})
+	}
+}
 
 // pruneAnalystOutput builds a minimally-valid analyst output for
 // prune test fixtures. Distinct from ingestSynthesisForAccept's
@@ -74,15 +133,17 @@ func TestPruneEntity_DryRunNoWrites(t *testing.T) {
 	assert.Equal(t, entityID, entity.ID)
 }
 
-// TestPruneEntity_YesAppliesDelete: with --yes, the entity and
+// TestPruneEntity_DestructiveAppliesDelete: with --destructive AND
+// the operator confirming via the [y/N] prompt, the entity and
 // every child row goes away.
-func TestPruneEntity_YesAppliesDelete(t *testing.T) {
+func TestPruneEntity_DestructiveAppliesDelete(t *testing.T) {
 	g := newTestGlobals(t)
 	_ = ingestForPrune(t, g, "pkg:npm/apply-test", "external-sec-v1", "2026-04-23T10:00:00Z")
 
+	setConfirmPrompt(t, func(_ string) bool { return true })
 	cmd := &PruneEntityCmd{
-		Target: "pkg:npm/apply-test",
-		Yes:    true,
+		Target:      "pkg:npm/apply-test",
+		Destructive: true,
 	}
 	require.NoError(t, cmd.Run(g))
 
@@ -92,7 +153,36 @@ func TestPruneEntity_YesAppliesDelete(t *testing.T) {
 	defer s.Close() //nolint:errcheck // test cleanup
 	_, err = s.FindEntityByURI(ctx, "pkg:npm/apply-test")
 	assert.ErrorIs(t, err, store.ErrNotFound,
-		"--yes must delete the entity")
+		"--destructive + confirmed prompt must delete the entity")
+}
+
+// TestPruneEntity_DestructiveCancelledByPrompt: --destructive is
+// passed but the operator types "n" (or anything non-affirmative)
+// at the [y/N] prompt. The entity must remain.
+//
+// This is the second-lock guarantee — passing --destructive on the
+// command line is necessary but NOT sufficient; the interactive
+// confirmation is the final gate.
+func TestPruneEntity_DestructiveCancelledByPrompt(t *testing.T) {
+	g := newTestGlobals(t)
+	entityID := ingestForPrune(t, g, "pkg:npm/cancel-test", "external-sec-v1", "2026-04-23T10:30:00Z")
+
+	setConfirmPrompt(t, func(_ string) bool { return false })
+	cmd := &PruneEntityCmd{
+		Target:      "pkg:npm/cancel-test",
+		Destructive: true,
+	}
+	require.NoError(t, cmd.Run(g),
+		"cancel-at-prompt must exit cleanly, not error — the operator chose to bail out")
+
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	entity, err := s.FindEntityByURI(ctx, "pkg:npm/cancel-test")
+	require.NoError(t, err, "cancelled prune must NOT delete the entity")
+	assert.Equal(t, entityID, entity.ID,
+		"the entity must be the same row that was seeded — confirmation gate is the second lock past --destructive")
 }
 
 // TestPruneEntity_UnknownTarget errors cleanly with a message that
@@ -102,7 +192,8 @@ func TestPruneEntity_YesAppliesDelete(t *testing.T) {
 func TestPruneEntity_UnknownTarget(t *testing.T) {
 	g := newTestGlobals(t)
 
-	cmd := &PruneEntityCmd{Target: "pkg:npm/does-not-exist", Yes: true}
+	setConfirmPrompt(t, func(_ string) bool { return true })
+	cmd := &PruneEntityCmd{Target: "pkg:npm/does-not-exist", Destructive: true}
 	err := cmd.Run(g)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no entity matches")
@@ -117,7 +208,8 @@ func TestPruneEntity_ByUUID(t *testing.T) {
 	g := newTestGlobals(t)
 	entityID := ingestForPrune(t, g, "pkg:npm/by-uuid-test", "external-sec-v1", "2026-04-23T11:00:00Z")
 
-	cmd := &PruneEntityCmd{Target: entityID, Yes: true}
+	setConfirmPrompt(t, func(_ string) bool { return true })
+	cmd := &PruneEntityCmd{Target: entityID, Destructive: true}
 	require.NoError(t, cmd.Run(g))
 
 	ctx := t.Context()
@@ -137,7 +229,8 @@ func TestPruneVersioned_NoVersionedRows(t *testing.T) {
 	// Ingest an unversioned target so the entity table isn't empty.
 	_ = ingestForPrune(t, g, "pkg:npm/already-clean", "external-sec-v1", "2026-04-23T12:00:00Z")
 
-	cmd := &PruneVersionedCmd{Yes: true}
+	setConfirmPrompt(t, func(_ string) bool { return true })
+	cmd := &PruneVersionedCmd{Destructive: true}
 	require.NoError(t, cmd.Run(g), "clean store must produce no-op success, not an error")
 }
 
@@ -170,7 +263,8 @@ func TestPruneVersioned_DeletesLegacyRows(t *testing.T) {
 	}))
 	s.Close() //nolint:errcheck // test cleanup
 
-	cmd := &PruneVersionedCmd{Yes: true}
+	setConfirmPrompt(t, func(_ string) bool { return true })
+	cmd := &PruneVersionedCmd{Destructive: true}
 	require.NoError(t, cmd.Run(g))
 
 	s, err = g.OpenStore(ctx)

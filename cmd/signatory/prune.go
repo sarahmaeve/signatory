@@ -4,16 +4,61 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
+// confirmPrompt is the function the prune subcommands invoke to ask
+// the operator "are you really sure?" before applying a destructive
+// plan. Package-level variable so tests can swap in a stub that
+// returns the desired answer without driving real stdin.
+//
+// Default reads from os.Stdin / os.Stdout via promptConfirmation. The
+// real-stdin path is the only one a non-test caller hits; tests use
+// setConfirmPrompt (see prune_test.go) to inject a deterministic
+// stub.
+var confirmPrompt = func(scopeLabel string) bool {
+	return promptConfirmation(os.Stdout, os.Stdin, scopeLabel)
+}
+
+// promptConfirmation prints a "[y/N]" prompt naming scopeLabel,
+// reads one line of input from in, and returns true only when that
+// line is an unambiguous affirmative ("y" or "yes", case-insensitive,
+// surrounding whitespace ignored). Anything else — including empty
+// input, EOF, or text that starts with 'y' but isn't y/yes — returns
+// false.
+//
+// Fail-safe by design: the only way to authorize a destructive prune
+// is to type something explicitly affirmative. A stray Enter, a
+// script feeding empty stdin, or a piped close all yield "do not
+// proceed." Per design discussion 2026-04-28: scripted use must
+// adapt (pipe `yes`); the CLI itself does not provide a non-prompt
+// shortcut.
+func promptConfirmation(out io.Writer, in io.Reader, scopeLabel string) bool {
+	fmt.Fprintf(out, "Proceed with destructive prune for %s? [y/N]: ", scopeLabel)
+	var input string
+	if _, err := fmt.Fscanln(in, &input); err != nil {
+		// EOF, blank line, or scan error all collapse to "do not
+		// proceed." Fscanln treats a blank line as an "unexpected
+		// newline" error; that's the correct branch here.
+		return false
+	}
+	answer := strings.TrimSpace(strings.ToLower(input))
+	return answer == "y" || answer == "yes"
+}
+
 // PruneCmd groups the destructive-cleanup verbs. Each subcommand
 // defaults to dry-run: prints the plan, exits without writing.
-// `--yes` applies the plan inside a single transaction with the
-// append-only triggers temporarily suspended.
+// `--destructive` reveals the plan AND prompts the operator with an
+// interactive [y/N] confirmation; the apply path runs only when the
+// operator types "y" or "yes." There is no scripted-bypass flag —
+// piping `yes` to stdin is the only way to automate; this is a
+// deliberate fail-safe choice.
 //
 // Design shape mirrors PostureCmd / CertsCmd: a dispatcher struct
 // whose fields are individual subcommand structs. Keeps the kong
@@ -22,6 +67,10 @@ import (
 //
 // Safety:
 //
+//   - Two locks before any data mutation: --destructive must be
+//     explicitly passed AND the interactive [y/N] must be answered
+//     affirmatively. Either omitted, the command exits without
+//     writes.
 //   - The apply path is all-or-nothing per invocation — a failed
 //     trigger reinstall rolls back the entire delete.
 //   - Migrations already back up the DB before every schema change;
@@ -43,8 +92,8 @@ type PruneCmd struct {
 // shorthand, versioned or not — so the UX matches every other
 // target-taking verb (posture, burn, analyze).
 type PruneEntityCmd struct {
-	Target string `arg:"" help:"Entity to delete. Accepts canonical URIs (pkg:/repo:/identity:/org:/patch:), GitHub shorthand (owner/repo), and entity UUIDs. Versioned URIs look up the UNVERSIONED entity under Plan A — pass the UUID if you want the versioned row specifically."`
-	Yes    bool   `help:"Skip the dry-run preview and delete immediately. Required for scripts; interactive invocations should run without --yes first to see the plan."`
+	Target      string `arg:"" help:"Entity to delete. Accepts canonical URIs (pkg:/repo:/identity:/org:/patch:), GitHub shorthand (owner/repo), and entity UUIDs. Versioned URIs look up the UNVERSIONED entity under Plan A — pass the UUID if you want the versioned row specifically."`
+	Destructive bool   `help:"Reveal the plan AND prompt for confirmation before applying. Without this flag the command runs in inform-only (dry-run) mode and exits without writes. Even with the flag, the interactive [y/N] prompt must be answered affirmatively."`
 }
 
 func (cmd *PruneEntityCmd) Run(globals *Globals) error {
@@ -60,7 +109,7 @@ func (cmd *PruneEntityCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	return runPrune(ctx, s, []string{entityID}, cmd.Yes, fmt.Sprintf("entity %q", cmd.Target))
+	return runPrune(ctx, s, []string{entityID}, cmd.Destructive, fmt.Sprintf("entity %q", cmd.Target))
 }
 
 // resolvePruneTarget turns a user-supplied target into an entity
@@ -134,7 +183,7 @@ func looksLikeUUID(s string) bool {
 // rows, that's a data-shape we can inspect via `signatory
 // show-analyses` before expanding the scan.
 type PruneVersionedCmd struct {
-	Yes bool `help:"Skip the dry-run preview and delete immediately."`
+	Destructive bool `help:"Reveal the plan AND prompt for confirmation before applying. Without this flag the command runs in inform-only (dry-run) mode."`
 }
 
 func (cmd *PruneVersionedCmd) Run(globals *Globals) error {
@@ -154,7 +203,7 @@ func (cmd *PruneVersionedCmd) Run(globals *Globals) error {
 		return nil
 	}
 
-	return runPrune(ctx, s, ids, cmd.Yes, fmt.Sprintf("%d versioned entities", len(ids)))
+	return runPrune(ctx, s, ids, cmd.Destructive, fmt.Sprintf("%d versioned entities", len(ids)))
 }
 
 // --- orphans --------------------------------------------------------------
@@ -164,7 +213,7 @@ func (cmd *PruneVersionedCmd) Run(globals *Globals) error {
 // to keep an entity alive — audit is observation, not a reason to
 // exist.
 type PruneOrphansCmd struct {
-	Yes bool `help:"Skip the dry-run preview and delete immediately."`
+	Destructive bool `help:"Reveal the plan AND prompt for confirmation before applying. Without this flag the command runs in inform-only (dry-run) mode."`
 }
 
 func (cmd *PruneOrphansCmd) Run(globals *Globals) error {
@@ -184,15 +233,29 @@ func (cmd *PruneOrphansCmd) Run(globals *Globals) error {
 		return nil
 	}
 
-	return runPrune(ctx, s, ids, cmd.Yes, fmt.Sprintf("%d orphan entities", len(ids)))
+	return runPrune(ctx, s, ids, cmd.Destructive, fmt.Sprintf("%d orphan entities", len(ids)))
 }
 
 // --- shared plan/apply loop ----------------------------------------------
 
-// runPrune computes the plan, prints it, and either exits (dry run)
-// or applies (when yes=true). Centralizes the UX so every prune
-// subcommand renders the same "here's what would happen" preview.
-func runPrune(ctx context.Context, s store.Store, entityIDs []string, yes bool, scopeLabel string) error {
+// runPrune computes the plan, prints it, and routes through the
+// two-lock safety gate before any data mutation:
+//
+//  1. Without `destructive=true`, exits in inform-only (dry-run)
+//     mode after printing the plan. Operator sees what would happen
+//     and re-runs with --destructive to advance.
+//
+//  2. With `destructive=true`, prints the plan, prompts the operator
+//     for an interactive [y/N] confirmation, and applies only when
+//     confirmPrompt returns true. The prompt is the second lock —
+//     even an operator who has typed --destructive must affirm
+//     after seeing the plan rendered.
+//
+// Centralizes the UX so every prune subcommand renders the same
+// "here's what would happen + are you sure?" flow. The confirmPrompt
+// indirection is the testing seam (see setConfirmPrompt in
+// prune_test.go).
+func runPrune(ctx context.Context, s store.Store, entityIDs []string, destructive bool, scopeLabel string) error {
 	plan, err := s.PlanPruneEntities(ctx, entityIDs)
 	if err != nil {
 		return fmt.Errorf("plan prune: %w", err)
@@ -200,13 +263,18 @@ func runPrune(ctx context.Context, s store.Store, entityIDs []string, yes bool, 
 
 	renderPrunePlan(plan, scopeLabel)
 
-	if !yes {
+	if !destructive {
 		fmt.Println()
-		fmt.Println("Dry-run only. Re-run with --yes to apply.")
+		fmt.Println("Dry-run only. Re-run with --destructive to apply (you'll be prompted to confirm).")
 		return nil
 	}
 
 	fmt.Println()
+	if !confirmPrompt(scopeLabel) {
+		fmt.Println("Cancelled — no changes written.")
+		return nil
+	}
+
 	fmt.Printf("Applying prune for %s …\n", scopeLabel)
 	report, err := s.PruneEntities(ctx, entityIDs)
 	if err != nil {
