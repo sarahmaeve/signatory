@@ -361,3 +361,111 @@ func TestApplyConsolidation_EmptyPlanIsNoOp(t *testing.T) {
 	assert.Equal(t, 0, report.RenamedCount)
 	assert.Empty(t, report.RowsByTable)
 }
+
+// TestApplyConsolidation_MergeRetargetsAllFKReferences exercises every
+// table that holds an FK pointing at entities(id), to catch the
+// 2026-04-28 dogfood bug where a stub's analysis_session row blocked
+// the merge's DELETE with "FOREIGN KEY constraint failed (787)."
+//
+// Per the schema (sqlite_master pragma_foreign_key_list), the FK
+// references are:
+//
+//	signals.entity_id
+//	burns.entity_id
+//	postures.entity_id
+//	dependency_observations.entity_id
+//	dependency_observations.project_id
+//	analyst_outputs.entity_id
+//	analyst_outputs.collected_from_entity_id
+//	analysis_sessions.entity_id
+//	signal_resolutions.entity_id
+//
+// audit_log.entity_id is also retargeted (no hard FK constraint, but
+// the audit trail should follow the entity it documents).
+//
+// This test seeds a row in EACH of the FK-bearing tables pointing at
+// the stub, runs the merge, and asserts:
+//   - merge succeeds (no FK constraint failures)
+//   - stub entity is gone
+//   - every FK column now points at the canonical entity instead
+//
+// Pre-fix this test would fail at the analysis_sessions step with the
+// same "constraint failed" the dogfood operator hit.
+func TestApplyConsolidation_MergeRetargetsAllFKReferences(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	stub := seedConsolidationEntity(t, s, "repo:github/MixedCase/Repo")
+	canonical := seedConsolidationEntity(t, s, "repo:github/mixedcase/repo")
+
+	// Seed an analysis_session pointing at the stub (the dogfood-
+	// surfaced bug case). Uses CreateAnalysisSession so the row is
+	// well-formed; we only need its entity_id to point at stub.
+	require.NoError(t, s.CreateAnalysisSession(ctx, &profile.AnalysisSession{
+		ID:        profile.NewEntityID(),
+		EntityID:  stub,
+		TargetURI: "repo:github/MixedCase/Repo",
+		InvokedBy: "test",
+		StartedAt: time.Now().UTC(),
+		Status:    profile.AnalysisSessionInProgress,
+	}))
+
+	// Seed a dependency_observations row that uses entity_id (in
+	// addition to project_id, which the prior tests covered).
+	require.NoError(t, s.AppendDependencyObservations(ctx, []profile.DependencyObservation{
+		{
+			ID:         profile.NewEntityID(),
+			ProjectID:  canonical, // some other entity
+			EntityID:   stub,      // <-- this one points at the stub
+			Version:    "1.0.0",
+			Direct:     true,
+			ObservedAt: time.Now().UTC(),
+		},
+	}))
+
+	// Seed an audit_log row pointing at the stub. No FK so the merge
+	// won't fail without retargeting these, but the post-merge state
+	// would have an orphaned audit entry — which is bad for the
+	// canonical entity's audit history.
+	require.NoError(t, s.AppendAuditEntry(ctx, &profile.AuditEntry{
+		ID:        profile.NewEntityID(),
+		Timestamp: time.Now().UTC(),
+		Actor:     "test",
+		Action:    "test-action",
+		EntityID:  stub,
+		Detail:    "{}",
+	}))
+
+	plan, err := s.ListDuplicateFragmentations(ctx)
+	require.NoError(t, err)
+	require.Len(t, plan.Ops, 1)
+
+	report, err := s.ApplyConsolidation(ctx, plan)
+	require.NoError(t, err,
+		"merge must succeed — every FK-bearing table must be retargeted before the source entity is deleted")
+	assert.Equal(t, 1, report.MergedCount)
+
+	// Stub is gone — DELETE didn't fail on any FK.
+	_, err = s.GetEntity(ctx, stub)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// Every FK column now points at canonical, not stub.
+	checks := []struct {
+		query string
+		label string
+	}{
+		{`SELECT COUNT(*) FROM analysis_sessions WHERE entity_id = ?`, "analysis_sessions.entity_id"},
+		{`SELECT COUNT(*) FROM dependency_observations WHERE entity_id = ?`, "dependency_observations.entity_id"},
+		{`SELECT COUNT(*) FROM audit_log WHERE entity_id = ?`, "audit_log.entity_id"},
+	}
+	for _, c := range checks {
+		var stillStub int
+		require.NoError(t, s.db.QueryRowContext(ctx, c.query, stub).Scan(&stillStub))
+		assert.Equal(t, 0, stillStub, "%s must NOT reference the deleted stub post-merge", c.label)
+
+		var nowCanonical int
+		require.NoError(t, s.db.QueryRowContext(ctx, c.query, canonical).Scan(&nowCanonical))
+		assert.GreaterOrEqual(t, nowCanonical, 1, "%s must be retargeted to canonical", c.label)
+	}
+}

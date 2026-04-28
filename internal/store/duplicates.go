@@ -220,6 +220,14 @@ func hasGoEcoPrefix(s string) bool {
 // merge op's ChildCounts so the plan renderer can show the operator
 // what's about to move. Same per-table label scheme as PruneReport
 // uses for consistency in CLI output.
+//
+// Must cover every table that holds a row referencing entities(id),
+// otherwise applyMerge's DELETE FROM entities will fail with
+// "FOREIGN KEY constraint failed (787)" — surfaced 2026-04-28
+// dogfood when an analysis_session row blocked a BurntSushi/toml
+// merge. The set is derived from `pragma_foreign_key_list` over
+// every table; audit_log is included even though it lacks a hard FK
+// (see applyMerge for the rationale).
 func (s *SQLite) countChildFKs(ctx context.Context, entityID string) (map[string]int, error) {
 	tables := []struct {
 		query string
@@ -231,6 +239,10 @@ func (s *SQLite) countChildFKs(ctx context.Context, entityID string) (map[string
 		{`SELECT COUNT(*) FROM burns WHERE entity_id = ?`, "burns"},
 		{`SELECT COUNT(*) FROM signals WHERE entity_id = ?`, "signals"},
 		{`SELECT COUNT(*) FROM dependency_observations WHERE project_id = ?`, "dependency_observations"},
+		{`SELECT COUNT(*) FROM dependency_observations WHERE entity_id = ?`, "dependency_observations (entity_id)"},
+		{`SELECT COUNT(*) FROM analysis_sessions WHERE entity_id = ?`, "analysis_sessions"},
+		{`SELECT COUNT(*) FROM signal_resolutions WHERE entity_id = ?`, "signal_resolutions"},
+		{`SELECT COUNT(*) FROM audit_log WHERE entity_id = ?`, "audit_log"},
 	}
 	counts := map[string]int{}
 	for _, t := range tables {
@@ -326,6 +338,16 @@ func applyMerge(ctx context.Context, tx *sql.Tx, op ConsolidationOp, report *Con
 	dstID := op.CanonicalSibling.ID
 
 	// Each retarget: UPDATE child SET col = dstID WHERE col = srcID.
+	//
+	// The set must cover every FK-bearing column referencing entities(id)
+	// (per pragma_foreign_key_list) plus audit_log.entity_id (no hard FK
+	// but we retarget for cleanliness — orphan audit entries pointing at
+	// a deleted UUID dirty the canonical entity's history). Surfaced
+	// 2026-04-28 dogfood: a missing analysis_sessions retarget caused
+	// the BurntSushi/toml merge's DELETE to fail with FOREIGN KEY
+	// constraint failed (787). The fail-fast + per-op tx rollback meant
+	// the operator's earlier-applied ops stayed safe; only the failed
+	// op rolled back.
 	retargets := []struct {
 		query string
 		label string
@@ -336,6 +358,10 @@ func applyMerge(ctx context.Context, tx *sql.Tx, op ConsolidationOp, report *Con
 		{`UPDATE burns SET entity_id = ? WHERE entity_id = ?`, "burns"},
 		{`UPDATE signals SET entity_id = ? WHERE entity_id = ?`, "signals"},
 		{`UPDATE dependency_observations SET project_id = ? WHERE project_id = ?`, "dependency_observations"},
+		{`UPDATE dependency_observations SET entity_id = ? WHERE entity_id = ?`, "dependency_observations (entity_id)"},
+		{`UPDATE analysis_sessions SET entity_id = ? WHERE entity_id = ?`, "analysis_sessions"},
+		{`UPDATE signal_resolutions SET entity_id = ? WHERE entity_id = ?`, "signal_resolutions"},
+		{`UPDATE audit_log SET entity_id = ? WHERE entity_id = ?`, "audit_log"},
 	}
 	for _, r := range retargets {
 		res, err := tx.ExecContext(ctx, r.query, dstID, srcID)
