@@ -428,6 +428,31 @@ func (s *SQLite) GetPosture(ctx context.Context, entityID string, version string
 	return scanPosture(row)
 }
 
+// HasPostures reports whether an entity has at least one active
+// (non-withdrawn) posture row. Used by LookupEntity's weight-aware
+// alternate walk to prefer posture-bearing rows over thin
+// (analyses-only or empty) rows in the cross-row fragmentation case.
+//
+// Cheaper than GetPostures when the caller only needs the boolean —
+// EXISTS-shaped query, no row materialization, single round-trip.
+// Returns (false, nil) when the entity has no active postures, NOT
+// ErrNotFound — "no postures" is a normal state (newly-ingested
+// entity, posture withdrawn, etc.), not a missing-row condition.
+func (s *SQLite) HasPostures(ctx context.Context, entityID string) (bool, error) {
+	var got int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM postures
+		 WHERE entity_id = ? AND withdrawn_at = ''
+		 LIMIT 1`, entityID).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // GetPostures returns all active (non-withdrawn) postures for an
 // entity, ordered newest-first by set_at. The CLI uses this to
 // implement "latest + hint about other versions" display.

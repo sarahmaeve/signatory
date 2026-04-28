@@ -28,9 +28,13 @@ type Store interface {
 
 	// Posture operations (versioned). WithdrawPosture is the soft-
 	// delete counterpart to SetPosture; reads filter out withdrawn
-	// rows by default.
+	// rows by default. HasPostures is the boolean shortcut used by
+	// LookupEntity's weight-aware alternate walk — cheaper than
+	// GetPostures when the caller only needs "any active posture?"
+	// rather than the full list.
 	GetPosture(ctx context.Context, entityID string, version string) (*profile.Posture, error)
 	GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error)
+	HasPostures(ctx context.Context, entityID string) (bool, error)
 	SetPosture(ctx context.Context, posture *profile.Posture) error
 	WithdrawPosture(ctx context.Context, entityID, version, withdrawnBy, reason string, at time.Time) error
 

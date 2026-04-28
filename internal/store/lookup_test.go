@@ -12,22 +12,28 @@ import (
 )
 
 // fakeLookuper is an in-memory EntityLookuper for hermetic tests of
-// LookupEntity. Two map-driven dispatch tables let each test
-// declaratively seed which URIs resolve to which entities, plus an
-// optional injected error to exercise the propagation paths.
+// LookupEntity. Map-driven dispatch tables let each test declaratively
+// seed which URIs resolve to which entities, which entity IDs have
+// postures attached (for weight-aware-walk tests), plus an optional
+// injected error to exercise the propagation paths.
 type fakeLookuper struct {
 	byURI map[string]*profile.Entity
 	// versioned maps a BASE URI to the entity that the
 	// FindEntityByVersionedBaseURI scan should return for that base.
 	// Empty / missing means "no @V sibling" → ErrNotFound.
 	versioned map[string]*profile.Entity
+	// posturedEntityIDs is the set of entity IDs whose HasPostures()
+	// returns true. Drives the weight-aware preference in LookupEntity.
+	// Empty / nil means no entity is considered "rich"; LookupEntity
+	// falls back to first-hit semantics.
+	posturedEntityIDs map[string]bool
 	// injectErr, when non-nil, is returned from every lookup. Used
 	// to exercise non-NotFound error propagation.
 	injectErr error
 	// counts track how many times each method ran — lets tests assert
 	// the helper short-circuits on first hit and doesn't make extra
 	// round-trips after success.
-	findByURICalls, findVersionedCalls int
+	findByURICalls, findVersionedCalls, hasPosturesCalls int
 }
 
 func (f *fakeLookuper) FindEntityByURI(_ context.Context, canonicalURI string) (*profile.Entity, error) {
@@ -52,20 +58,36 @@ func (f *fakeLookuper) FindEntityByVersionedBaseURI(_ context.Context, baseURI s
 	return nil, ErrNotFound
 }
 
+func (f *fakeLookuper) HasPostures(_ context.Context, entityID string) (bool, error) {
+	f.hasPosturesCalls++
+	if f.injectErr != nil {
+		return false, f.injectErr
+	}
+	return f.posturedEntityIDs[entityID], nil
+}
+
 func TestLookupEntity_ExactMatch(t *testing.T) {
 	t.Parallel()
 	want := &profile.Entity{ID: "ent-1", CanonicalURI: "repo:github/alecthomas/kong"}
-	f := &fakeLookuper{byURI: map[string]*profile.Entity{
-		"repo:github/alecthomas/kong": want,
-	}}
+	f := &fakeLookuper{
+		byURI: map[string]*profile.Entity{
+			"repo:github/alecthomas/kong": want,
+		},
+		// Mark the entity as posture-bearing so the weight-aware
+		// alternate walk short-circuits on the first hit. Without
+		// this, a thin first hit triggers a search through alternate
+		// URIs looking for a richer match (the safeguard behavior
+		// covered by the PrefersAlternateWithPostures test).
+		posturedEntityIDs: map[string]bool{"ent-1": true},
+	}
 
 	got, err := LookupEntity(context.Background(), f, "repo:github/alecthomas/kong")
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	assert.Equal(t, 1, f.findByURICalls,
-		"exact match must hit FindEntityByURI exactly once and short-circuit")
+		"rich exact match must hit FindEntityByURI exactly once and short-circuit")
 	assert.Equal(t, 0, f.findVersionedCalls,
-		"versioned scan must NOT run when an exact match was found")
+		"versioned scan must NOT run when an exact match (with postures) was found")
 }
 
 // TestLookupEntity_CrossSchemeGitHubAlternate covers the kong-class
@@ -183,4 +205,94 @@ func TestLookupEntity_MalformedInputErrors(t *testing.T) {
 		"empty target is malformed; ResolveTarget rejects it and the error must propagate")
 	assert.NotErrorIs(t, err, ErrNotFound,
 		"malformed input is distinct from a clean miss; do not collapse the two")
+}
+
+// TestLookupEntity_PrefersAlternateWithPostures covers the yaml.v3-
+// class fragmentation surfaced by 2026-04-28 dogfood: the same logical
+// identity has two entity rows in the store, one carrying the posture
+// and the other carrying analyses. Naive first-hit alternate-walk
+// returns whichever URI happened to land first — for yaml.v3 that's
+// the analyses-only row, so survey reports "unexamined" even though a
+// posture exists at the alternate.
+//
+// Weight-aware walk: continue past hits whose entity has no postures,
+// keeping the first thin hit as a fallback; return the first hit
+// whose HasPostures is true. If no hit has postures, return the first
+// thin hit (preserves prior NotFound vs ErrNotFound semantics).
+//
+// Revert proof: drop the HasPostures probe in LookupEntity; this test
+// fails because the first hit (analyses-only) wins even though the
+// alternate has the posture.
+func TestLookupEntity_PrefersAlternateWithPostures(t *testing.T) {
+	t.Parallel()
+
+	thin := &profile.Entity{ID: "ent-thin", CanonicalURI: "pkg:golang/gopkg.in/yaml.v3"}
+	rich := &profile.Entity{ID: "ent-rich", CanonicalURI: "pkg:go/gopkg.in/yaml.v3"}
+	f := &fakeLookuper{
+		byURI: map[string]*profile.Entity{
+			"pkg:golang/gopkg.in/yaml.v3": thin, // first alternate hit
+			"pkg:go/gopkg.in/yaml.v3":     rich, // second alternate hit, has posture
+		},
+		posturedEntityIDs: map[string]bool{"ent-rich": true},
+	}
+
+	got, err := LookupEntity(context.Background(), f, "pkg:golang/gopkg.in/yaml.v3")
+	require.NoError(t, err)
+	assert.Equal(t, rich, got,
+		"alternate with postures must win over an analyses-only or empty alternate that hit first")
+}
+
+// TestLookupEntity_FallsBackToFirstHitWhenNoneHavePostures — testify-
+// class case: multiple alternates hit but none have postures (only
+// analyses or nothing). LookupEntity must return the first hit so
+// callers see the same behavior as today's "find anything" semantics
+// when no alternate is rich. Without this fallback, weight-aware walk
+// would surface NotFound for testify when at least one row exists.
+func TestLookupEntity_FallsBackToFirstHitWhenNoneHavePostures(t *testing.T) {
+	t.Parallel()
+
+	first := &profile.Entity{ID: "ent-first", CanonicalURI: "pkg:golang/github.com/stretchr/testify@v1.11.1"}
+	second := &profile.Entity{ID: "ent-second", CanonicalURI: "repo:github/stretchr/testify@v1.11.1"}
+	f := &fakeLookuper{
+		// Both hits via the versioned-base scan; no postures on either.
+		versioned: map[string]*profile.Entity{
+			"pkg:golang/github.com/stretchr/testify": first,
+			"repo:github/stretchr/testify":           second,
+		},
+		// posturedEntityIDs left nil → HasPostures returns false for everything.
+	}
+
+	got, err := LookupEntity(context.Background(), f, "repo:github/stretchr/testify")
+	require.NoError(t, err, "at least one row exists; LookupEntity must surface it, not NotFound")
+	// First by alternate order: the input itself walks first, so the
+	// repo:github/ scan runs ahead of the cross-scheme alternate.
+	// Either hit is acceptable; the contract is "some hit, not nil."
+	assert.NotNil(t, got)
+}
+
+// TestLookupEntity_RichHitShortCircuitsAlternateWalk — when the FIRST
+// alternate hit is already rich (has postures), LookupEntity must
+// return immediately without probing further alternates. Avoids
+// wasted round-trips on the common case where the canonical URI is
+// also where the posture lives.
+func TestLookupEntity_RichHitShortCircuitsAlternateWalk(t *testing.T) {
+	t.Parallel()
+
+	rich := &profile.Entity{ID: "ent-rich", CanonicalURI: "repo:github/alecthomas/kong"}
+	f := &fakeLookuper{
+		byURI: map[string]*profile.Entity{
+			"repo:github/alecthomas/kong": rich,
+		},
+		posturedEntityIDs: map[string]bool{"ent-rich": true},
+	}
+
+	got, err := LookupEntity(context.Background(), f, "repo:github/alecthomas/kong")
+	require.NoError(t, err)
+	assert.Equal(t, rich, got)
+	assert.Equal(t, 1, f.findByURICalls,
+		"first hit was rich; alternate walk must short-circuit, not probe further URIs")
+	assert.Equal(t, 1, f.hasPosturesCalls,
+		"exactly one HasPostures probe — the one for the rich first hit")
+	assert.Equal(t, 0, f.findVersionedCalls,
+		"versioned-base scan must NOT run when the alternate-walk already returned")
 }

@@ -11,9 +11,16 @@ import (
 // here (rather than coupling the helper to the full Store interface)
 // so callers with smaller subsets — and tests with hand-written fakes —
 // can use the helper without satisfying every Store method.
+//
+// HasPostures is the "richness" probe used by the weight-aware
+// alternate walk. Returns true when the entity has at least one
+// non-withdrawn posture row attached. Used by LookupEntity to prefer
+// posture-bearing alternates over thin (analyses-only or empty)
+// alternates in the cross-row fragmentation case.
 type EntityLookuper interface {
 	FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error)
 	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
+	HasPostures(ctx context.Context, entityID string) (bool, error)
 }
 
 // LookupEntity finds an entity matching target, walking the canonical-
@@ -21,27 +28,37 @@ type EntityLookuper interface {
 // fallback logic so survey, MCP summary, and other lookup-side surfaces
 // share the same equivalence rules.
 //
-// target may be a canonical URI (e.g. `pkg:go/golang.org/x/mod`) or a
-// raw user input (e.g. `golang.org/x/mod`, `alecthomas/kong`,
+// target may be a canonical URI (e.g. `pkg:golang/golang.org/x/mod`)
+// or a raw user input (e.g. `golang.org/x/mod`, `alecthomas/kong`,
 // `https://github.com/foo/bar`). Both route through profile.ResolveTarget
 // to get the canonical form; ResolveTarget owns vanity-Go-path detection,
 // github shorthand parsing, and case-folding.
 //
-// Order:
+// Walk order and weight-aware preference:
 //
-//  1. Walk profile.AlternateURIs and try each via FindEntityByURI.
-//     First exact-match wins.
+//  1. Walk profile.AlternateURIs through FindEntityByURI. For each
+//     hit, probe HasPostures. If postures exist, return immediately
+//     (rich hit short-circuits). If not, remember the first hit as
+//     a fallback and keep walking.
 //  2. For each unversioned alternate, fall back to
 //     FindEntityByVersionedBaseURI to catch the testify-class M1
 //     violation (entity row exists at <base>@V but caller queried
-//     <base>). Skipping alternates that already carry @V — those
-//     were tried verbatim in step 1, and a scan for "versions of
-//     this version" has no useful semantics.
+//     <base>). Same posture-preference rule.
+//  3. If nothing rich was found but at least one thin hit was seen,
+//     return that thin hit. Otherwise ErrNotFound.
+//
+// The weight-aware step is a safeguard against cross-row fragmentation
+// surfaced by 2026-04-28 dogfood: yaml.v3 had its posture at one
+// alternate URI and analyses at another, so naive first-hit walk
+// returned the analyses-only row and survey reported "unexamined"
+// despite the posture existing. Preferring posture-bearing hits
+// resolves that without consolidating the rows. The full structural
+// fix (consolidate via migration v13) remains the right long-term move.
 //
 // Errors:
 //
 //   - ResolveTarget errors propagate verbatim (malformed input).
-//   - Non-ErrNotFound errors from the lookups short-circuit the walk
+//   - Non-ErrNotFound errors from any lookup short-circuit the walk
 //     and propagate (DB closed, etc).
 //   - When every step misses, returns ErrNotFound — same sentinel
 //     callers would have seen from a direct FindEntityByURI, so
@@ -54,13 +71,39 @@ func LookupEntity(ctx context.Context, s EntityLookuper, target string) (*profil
 
 	alternates := profile.AlternateURIs(resolved.CanonicalURI)
 
-	for _, uri := range alternates {
-		ent, lookupErr := s.FindEntityByURI(ctx, uri)
-		if lookupErr == nil {
+	// firstThinHit holds the earliest-by-walk-order hit whose entity
+	// has no postures. Returned as the fallback if no rich hit is
+	// found anywhere in the walk.
+	var firstThinHit *profile.Entity
+
+	considerHit := func(ent *profile.Entity) (*profile.Entity, error) {
+		hasPostures, err := s.HasPostures(ctx, ent.ID)
+		if err != nil {
+			return nil, err
+		}
+		if hasPostures {
 			return ent, nil
 		}
-		if !errors.Is(lookupErr, ErrNotFound) {
+		if firstThinHit == nil {
+			firstThinHit = ent
+		}
+		return nil, nil
+	}
+
+	for _, uri := range alternates {
+		ent, lookupErr := s.FindEntityByURI(ctx, uri)
+		if errors.Is(lookupErr, ErrNotFound) {
+			continue
+		}
+		if lookupErr != nil {
 			return nil, lookupErr
+		}
+		rich, err := considerHit(ent)
+		if err != nil {
+			return nil, err
+		}
+		if rich != nil {
+			return rich, nil
 		}
 	}
 
@@ -70,13 +113,23 @@ func LookupEntity(ctx context.Context, s EntityLookuper, target string) (*profil
 			continue
 		}
 		ent, lookupErr := s.FindEntityByVersionedBaseURI(ctx, base)
-		if lookupErr == nil {
-			return ent, nil
+		if errors.Is(lookupErr, ErrNotFound) {
+			continue
 		}
-		if !errors.Is(lookupErr, ErrNotFound) {
+		if lookupErr != nil {
 			return nil, lookupErr
+		}
+		rich, err := considerHit(ent)
+		if err != nil {
+			return nil, err
+		}
+		if rich != nil {
+			return rich, nil
 		}
 	}
 
+	if firstThinHit != nil {
+		return firstThinHit, nil
+	}
 	return nil, ErrNotFound
 }

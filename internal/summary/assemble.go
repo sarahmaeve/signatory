@@ -28,6 +28,10 @@ type AssemblerStore interface {
 	// caller passed an unversioned URI but the store row exists only
 	// at <base>@V (the testify-class M1 violation).
 	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
+	// HasPostures backs LookupEntity's weight-aware preference for
+	// posture-bearing alternates over thin (analyses-only or empty)
+	// alternates in cross-row fragmentation cases.
+	HasPostures(ctx context.Context, entityID string) (bool, error)
 	GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error)
 	GetBurn(ctx context.Context, entityID string) (*profile.Burn, error)
 	ListAnalystOutputs(ctx context.Context, filter store.AnalystOutputFilter) ([]store.AnalystOutputSummary, error)

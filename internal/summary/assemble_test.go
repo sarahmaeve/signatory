@@ -61,6 +61,14 @@ func (f *fakeStore) FindEntityByVersionedBaseURI(_ context.Context, baseURI stri
 	}
 	return nil, store.ErrNotFound
 }
+
+// HasPostures returns true when the seeded posture slice is non-
+// empty. Drives LookupEntity's weight-aware alternate walk; tests
+// that don't care can leave postures nil and get the "thin entity"
+// behavior naturally.
+func (f *fakeStore) HasPostures(_ context.Context, _ string) (bool, error) {
+	return len(f.postures) > 0, nil
+}
 func (f *fakeStore) GetPostures(_ context.Context, _ string) ([]profile.Posture, error) {
 	return f.postures, f.posturesErr
 }
