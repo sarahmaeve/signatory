@@ -229,10 +229,37 @@ type aggregated struct {
 	SessionSpansByID     map[string]otlpSpan
 	DispatchSubagentByID map[string]string
 
+	// OrderedDispatchSpanIDs lists dispatch span IDs in file
+	// order (which, for current Claude Code, equals dispatch
+	// chronological order — the receiver writes spans as they
+	// arrive and orchestrator-side Task dispatches are
+	// sequential). Used to position-pair against the
+	// chronologically-ordered list of subagent_dispatch hook
+	// events so the per-agent rollup can use the description
+	// the orchestrator wrote as the bucket key.
+	OrderedDispatchSpanIDs []string
+
+	// DispatchLabelByID is the per-dispatch bucket key the
+	// per-agent rollup uses, populated by pairing
+	// OrderedDispatchSpanIDs against the session's
+	// subagent_dispatch hook events. Falls through to
+	// DispatchSubagentByID for dispatches that didn't pair
+	// (hook receiver not running, more dispatches than hook
+	// events, etc.). Empty map on sessions with no hook data —
+	// the rollup falls back entirely to subagent_type in that
+	// case.
+	DispatchLabelByID map[string]string
+
 	// Hook-derived. Populated by loadHooks.
 	ClassificationCounts map[string]int
 	ExternalCalls        []hookEvent
 	SourceReads          []hookEvent
+
+	// SubagentDispatchEvents is the ordered list of
+	// subagent_dispatch hook events for this session, in arrival
+	// (chronological) order. Used by pairDispatchLabels to
+	// position-match against OrderedDispatchSpanIDs.
+	SubagentDispatchEvents []hookEvent
 
 	HasHookData  bool
 	HasTraceData bool
@@ -255,6 +282,7 @@ func runReport(sessionID, inDir, outDir string) error {
 		EconomicsByAgent:      map[string]*agentEconomics{},
 		SessionSpansByID:      map[string]otlpSpan{},
 		DispatchSubagentByID:  map[string]string{},
+		DispatchLabelByID:     map[string]string{},
 		ClassificationCounts:  map[string]int{},
 	}
 
@@ -264,6 +292,15 @@ func runReport(sessionID, inDir, outDir string) error {
 	if err := loadHooks(filepath.Join(inDir, "hooks-"+sessionID+".jsonl"), agg); err != nil {
 		return fmt.Errorf("load hooks: %w", err)
 	}
+
+	// Pair dispatch spans with their hook events (by position)
+	// so the per-agent rollup can use the orchestrator's
+	// description as the bucket key instead of the
+	// near-useless general-purpose subagent_type. Must run
+	// AFTER both loadTraces and loadHooks have populated their
+	// ordered slices, and BEFORE aggregateAgentEconomics builds
+	// the buckets.
+	pairDispatchLabels(agg)
 
 	// Per-agent attribution runs after loadTraces has populated the
 	// session span index. Single pass over llm_request spans, each
@@ -369,9 +406,13 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 							// at it. Empty SpanID would silently
 							// drop the dispatch from attribution
 							// — defended by the indexing guard
-							// above.
+							// above. Also append to the ordered
+							// list so the post-load pairing
+							// against hook events can find this
+							// dispatch's chronological position.
 							if sp.SpanID != "" {
 								agg.DispatchSubagentByID[sp.SpanID] = st
+								agg.OrderedDispatchSpanIDs = append(agg.OrderedDispatchSpanIDs, sp.SpanID)
 							}
 						}
 					}
@@ -441,14 +482,20 @@ func aggregateAgentEconomics(agg *aggregated) {
 		return
 	}
 
-	// First pass: count dispatch spans per subagent_type. Decoupled
-	// from llm_request attribution because a dispatch with zero
-	// child llm_requests still exists and should appear in the
-	// table (otherwise an agent that did all its work via
-	// non-LLM-request side effects — unlikely but possible —
-	// would silently disappear).
-	for _, st := range agg.DispatchSubagentByID {
-		stats := getOrInitAgent(agg, st)
+	// First pass: count dispatch spans, bucketed by the same key
+	// the second pass attributes llm_requests to (label first,
+	// subagent_type fallback). Decoupled from llm_request
+	// attribution because a dispatch with zero child llm_requests
+	// still exists and should appear in the table (otherwise an
+	// agent that did all its work via non-LLM-request side
+	// effects — unlikely but possible — would silently
+	// disappear).
+	for spanID, subagentType := range agg.DispatchSubagentByID {
+		bucket := subagentType
+		if label, ok := agg.DispatchLabelByID[spanID]; ok {
+			bucket = label
+		}
+		stats := getOrInitAgent(agg, bucket)
 		stats.Dispatches++
 	}
 
@@ -473,8 +520,15 @@ func aggregateAgentEconomics(agg *aggregated) {
 }
 
 // attributeAgent walks sp's parent chain to find the nearest
-// dispatch span. Returns that dispatch's subagent_type, or
-// agentOrchestrator when no dispatch is found before the chain
+// dispatch span. Returns the per-dispatch BUCKET KEY:
+//
+//   - DispatchLabelByID[pid] when present (hook description, the
+//     orchestrator's per-purpose label like "Provenance review")
+//   - DispatchSubagentByID[pid] otherwise (raw subagent_type
+//     from the dispatch span — useful in older sessions or when
+//     hook events were missing)
+//
+// agentOrchestrator if no dispatch is found before the chain
 // terminates.
 //
 // "Nearest" not "outermost" is deliberate. The user's economic
@@ -491,6 +545,13 @@ func attributeAgent(sp otlpSpan, agg *aggregated) string {
 	pid := sp.ParentSpanID
 	maxHops := len(agg.SessionSpansByID) + 1
 	for i := 0; i < maxHops && pid != ""; i++ {
+		// Prefer the hook-derived label over the raw
+		// subagent_type. Both indices are keyed by the same
+		// dispatch span IDs; the label is just the more
+		// informative bucket key when available.
+		if label, ok := agg.DispatchLabelByID[pid]; ok {
+			return label
+		}
 		if subagentType, ok := agg.DispatchSubagentByID[pid]; ok {
 			return subagentType
 		}
@@ -609,9 +670,46 @@ func loadHooks(path string, agg *aggregated) error {
 			agg.ExternalCalls = append(agg.ExternalCalls, ev)
 		case "signatory_source":
 			agg.SourceReads = append(agg.SourceReads, ev)
+		case "subagent_dispatch":
+			agg.SubagentDispatchEvents = append(agg.SubagentDispatchEvents, ev)
 		}
 	}
 	return scanner.Err()
+}
+
+// pairDispatchLabels populates agg.DispatchLabelByID by pairing
+// the chronologically-ordered dispatch span list against the
+// chronologically-ordered subagent_dispatch hook events. The Nth
+// dispatch span gets the Nth hook event's detail as its bucket
+// key.
+//
+// Position-pairing rather than identity-keyed join because the
+// dispatch span has no tool_use_id attribute (verified via
+// inspect's full attribute dump) and the hook event has no
+// span_id field. Both lists are written in the same
+// chronological order by Claude Code (orchestrator-side Task
+// dispatches are sequential), so position is reliable.
+//
+// Mismatched counts: when there are more dispatches than hook
+// events, the excess dispatches' DispatchLabelByID stays unset
+// — the per-agent rollup falls back to subagent_type for them.
+// Excess hook events are ignored (no span to attribute to).
+//
+// If Claude Code ever dispatches Task in parallel, position-
+// pairing breaks. Inspect's "Subagent dispatch visibility"
+// section makes that breakage debuggable: a discrepancy between
+// hook event order and dispatch span order would surface as
+// nonsensical bucket labels in the report.
+func pairDispatchLabels(agg *aggregated) {
+	n := min(len(agg.OrderedDispatchSpanIDs), len(agg.SubagentDispatchEvents))
+	for i := range n {
+		spanID := agg.OrderedDispatchSpanIDs[i]
+		detail := agg.SubagentDispatchEvents[i].Detail
+		if detail == "" {
+			continue
+		}
+		agg.DispatchLabelByID[spanID] = detail
+	}
 }
 
 // render produces the markdown report. Section order is fixed —

@@ -678,6 +678,134 @@ func TestReport_AgentEconomics_TotalConservation(t *testing.T) {
 		"agent-economics TOTAL must equal sum of orchestrator + all subagent buckets")
 }
 
+// fixtureAgentEconomicsHooks pairs with fixtureAgentEconomics —
+// two Agent hook events whose timestamps and order match the two
+// dispatch spans (D1, D2) in the trace fixture. The descriptions
+// here are the per-purpose labels the report's per-agent rollup
+// MUST use as bucket keys, replacing the previous bucket-by-
+// subagent_type behavior.
+//
+// The 1st hook event lines up with D1 (provenance-review →
+// "Provenance review"). The 2nd lines up with D2
+// (security-review-go → "Security audit (Go)"). Position-
+// pairing is the join semantics: the Nth Agent hook event
+// matches the Nth dispatch span in chronological order.
+const fixtureAgentEconomicsHooks = `{"ts":"2026-04-27T15:00:00Z","event":"PreToolUse","session_id":"agent-sess","tool_use_id":"tu-D1","tool_name":"Agent","classification":"subagent_dispatch","detail":"Provenance review","tool_input_keys":["description","prompt","subagent_type"]}
+{"ts":"2026-04-27T15:00:01Z","event":"PreToolUse","session_id":"agent-sess","tool_use_id":"tu-D2","tool_name":"Agent","classification":"subagent_dispatch","detail":"Security audit (Go)","tool_input_keys":["description","prompt","subagent_type"]}`
+
+// writeRawDirAgent writes the agent-economics fixtures to a temp
+// raw dir under the agent-sess session id (different from
+// fixtureHooksA's sess-A). Kept separate so existing tests
+// against fixtureTraces don't accidentally pick up these new
+// hook events.
+func writeRawDirAgent(t *testing.T, traces, hooks string) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "traces.jsonl"), []byte(traces+"\n"), 0o644))
+	if hooks != "" {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "hooks-agent-sess.jsonl"), []byte(hooks+"\n"), 0o644))
+	}
+	return dir
+}
+
+// TestReport_AgentEconomics_UsesHookDescriptionsAsBucketKeys:
+// when the session's hooks file contains subagent_dispatch
+// events, their `detail` field replaces subagent_type as the
+// per-agent bucket key. This is the "general-purpose
+// distinguishes nothing" fix — the Task tool dispatches all
+// carry subagent_type=general-purpose; only the description
+// distinguishes provenance from security from synthesis.
+//
+// Position-pairing: 1st dispatch span ↔ 1st Agent hook event,
+// 2nd ↔ 2nd. Verified by asserting both descriptions appear as
+// row labels in the per-agent table.
+func TestReport_AgentEconomics_UsesHookDescriptionsAsBucketKeys(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDirAgent(t, fixtureAgentEconomics, fixtureAgentEconomicsHooks)
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// Both human-readable descriptions appear as row labels in
+	// the per-agent table. (The raw subagent_type values like
+	// "provenance-review" still appear in the unrelated
+	// "Subagent dispatches" raw-counts section — that's a
+	// different table; we don't assert against it.)
+	agentSection := extractSection(report, "## LLM economics — by agent", "##")
+	assert.Contains(t, agentSection, "Provenance review",
+		"per-agent rollup must use the hook description for the first dispatch")
+	assert.Contains(t, agentSection, "Security audit (Go)",
+		"per-agent rollup must use the hook description for the second dispatch")
+	// In the per-agent section specifically, the raw
+	// subagent_type bucket key must NOT appear as a row label —
+	// hook-derived labels supersede it for bucketing.
+	assert.NotContains(t, agentSection, "provenance-review",
+		"per-agent section must use description, not raw subagent_type, when hooks are present")
+}
+
+// extractSection slices the report.md text from `header` up to
+// (but not including) the next line beginning with `nextPrefix`.
+// Used by tests that need to assert ONLY against one section's
+// content — the broader report contains many tables and a regex
+// against the whole thing would otherwise match an unrelated
+// occurrence.
+func extractSection(report, header, nextPrefix string) string {
+	_, rest, ok := strings.Cut(report, header)
+	if !ok {
+		return ""
+	}
+	if before, _, ok := strings.Cut(rest, "\n"+nextPrefix); ok {
+		return before
+	}
+	return rest
+}
+
+// TestReport_AgentEconomics_FallsBackWhenHooksMissing: when no
+// hooks file exists for the session, the per-agent rollup falls
+// back to bucketing by subagent_type. Same guarantee as before
+// the hook-description integration — historic sessions without
+// the description-capturing hook still produce a meaningful
+// rollup, just at lower fidelity.
+func TestReport_AgentEconomics_FallsBackWhenHooksMissing(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDirAgent(t, fixtureAgentEconomics, "") // no hooks
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// With no hook events, the rollup falls back to subagent_type
+	// values from the dispatch spans. Both expected.
+	assert.Contains(t, report, "provenance-review",
+		"missing hooks must fall back to subagent_type from the dispatch span")
+	assert.Contains(t, report, "security-review-go",
+		"missing hooks must fall back to subagent_type for the second dispatch too")
+}
+
+// TestReport_AgentEconomics_FallsBackPerDispatchWhenHookCountMismatch:
+// hook events and dispatch spans don't have to be 1:1 in
+// principle — receiver may have started mid-session, or hooks
+// may not fire on a particular dispatch path. Position-pairing
+// uses min(N_dispatches, N_hook_events); excess dispatches fall
+// back to their subagent_type, excess hook events are ignored
+// (they won't have a span to attribute to anyway).
+func TestReport_AgentEconomics_FallsBackPerDispatchWhenHookCountMismatch(t *testing.T) {
+	t.Parallel()
+	// Only ONE hook event for TWO dispatches.
+	hooksOneEvent := `{"ts":"2026-04-27T15:00:00Z","event":"PreToolUse","session_id":"agent-sess","tool_use_id":"tu-D1","tool_name":"Agent","classification":"subagent_dispatch","detail":"Provenance review","tool_input_keys":["description","prompt","subagent_type"]}`
+	rawDir := writeRawDirAgent(t, fixtureAgentEconomics, hooksOneEvent)
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// 1st dispatch (D1) gets its description.
+	assert.Contains(t, report, "Provenance review",
+		"first dispatch pairs with its hook event by position")
+	// 2nd dispatch (D2) falls back to subagent_type because no
+	// hook event remains.
+	assert.Contains(t, report, "security-review-go",
+		"second dispatch falls back to subagent_type when hook events run out")
+}
+
 // readReport reads the rendered report.md from the out-dir
 // session-id subdir.
 func readReport(t *testing.T, outDir, sessionID string) string {

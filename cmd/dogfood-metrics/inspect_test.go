@@ -189,6 +189,68 @@ func TestInspect_SpanLevelSessionMatch_ContributesToDistributions(t *testing.T) 
 		"attribute-key table must surface the keys present on span-level-matched spans")
 }
 
+// TestInspect_DispatchVisibility_RendersHookEvents: when the
+// hooks file for the requested session contains
+// subagent_dispatch events, inspect surfaces them in a new
+// section listing each event's detail and the captured
+// tool_input_keys. This is the empirical-verification surface
+// for the next dogfood: if the hook payload's tool_input shape
+// matches our assumption, descriptions land in the table and
+// the keys row reads "description, prompt, subagent_type"; if
+// the shape differs, the discrepancy is visible without
+// needing to re-run.
+//
+// Hook events are loaded from hooks-<sessionID>.jsonl alongside
+// traces.jsonl in the same inDir; missing file is fine
+// (the report tooling handles trace-only sessions identically).
+func TestInspect_DispatchVisibility_RendersHookEvents(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]},"scopeSpans":[{"spans":[{"name":"claude_code.tool","attributes":[]}]}]}]}`,
+	)
+	// Drop a hooks file alongside the traces file. Two
+	// dispatches: one with description, one falling back.
+	hooksPath := filepath.Join(dir, "hooks-S1.jsonl")
+	hooksContent := `{"ts":"2026-04-28T19:37:00Z","event":"PreToolUse","session_id":"S1","tool_use_id":"tu1","tool_name":"Agent","classification":"subagent_dispatch","detail":"Provenance review","tool_input_keys":["description","prompt","subagent_type"]}
+{"ts":"2026-04-28T19:38:00Z","event":"PreToolUse","session_id":"S1","tool_use_id":"tu2","tool_name":"Agent","classification":"subagent_dispatch","detail":"general-purpose","tool_input_keys":["prompt","subagent_type"]}
+`
+	require.NoError(t, os.WriteFile(hooksPath, []byte(hooksContent), 0o600))
+
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	assert.Contains(t, got, "## Subagent dispatch visibility",
+		"new section header must land when hook events for the session exist")
+	// First dispatch: description present, all three keys.
+	assert.Contains(t, got, "Provenance review")
+	assert.Contains(t, got, "description, prompt, subagent_type",
+		"key inventory must render as a comma-separated list so the operator sees what fields actually arrived")
+	// Second dispatch: fallback to subagent_type.
+	assert.Contains(t, got, "general-purpose")
+	assert.Contains(t, got, "prompt, subagent_type",
+		"second dispatch's key inventory must reflect the absence of description")
+}
+
+// TestInspect_DispatchVisibility_HookFileMissing: no hooks file
+// for the session is fine. The dispatch-visibility section is
+// simply omitted; the existing trace-correlation section still
+// renders. Symmetric with the report's "trace data without hook
+// data" tolerance.
+func TestInspect_DispatchVisibility_HookFileMissing(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]},"scopeSpans":[{"spans":[{"name":"claude_code.tool","attributes":[]}]}]}]}`,
+	)
+	// No hooks file written.
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	assert.NotContains(t, got, "## Subagent dispatch visibility",
+		"section must be omitted when no hook data exists for the session")
+}
+
 // TestInspect_MissingFile_ReportsCleanly: the inspect tool surfaces
 // missing-file as a diagnosis, not a stack trace.
 func TestInspect_MissingFile_ReportsCleanly(t *testing.T) {

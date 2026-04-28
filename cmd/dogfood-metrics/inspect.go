@@ -171,7 +171,41 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 		return fmt.Errorf("scan traces.jsonl: %w", err)
 	}
 
+	// Best-effort hook load: missing file is fine (the receiver
+	// may not have been registered). We surface what we have.
+	loadInspectHooks(filepath.Join(inDir, "hooks-"+sessionID+".jsonl"), agg)
+
 	return renderInspect(w, agg)
+}
+
+// loadInspectHooks reads the per-session hook JSONL file and
+// captures every subagent_dispatch event for inspect's
+// "Subagent dispatch visibility" section. Missing file is not an
+// error — the section simply omits when there's nothing to show.
+//
+// Decoupled from the report's loadHooks because inspect cares
+// about a different slice of the data: the visibility section
+// needs the captured tool_input_keys (which the report ignores)
+// and ignores the classification counts (which the report
+// renders separately).
+func loadInspectHooks(path string, agg *inspectAggregated) {
+	f, err := os.Open(path) //nolint:gosec // G304: path constructed from caller-controlled inDir
+	if err != nil {
+		return
+	}
+	defer f.Close() //nolint:errcheck // close after read; err not actionable
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 4*1024), 1*1024*1024)
+	for scanner.Scan() {
+		var ev hookEvent
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev.Classification == "subagent_dispatch" {
+			agg.subagentDispatchEvents = append(agg.subagentDispatchEvents, ev)
+		}
+	}
 }
 
 // inspectAggregated holds the per-batch / per-span counts and the
@@ -217,6 +251,13 @@ type inspectAggregated struct {
 	spansBySessionAcrossFile map[string]int
 	dispatchesInSession      []inspectDispatchSpan
 	spansByParentID          map[string][]inspectChildSpan
+
+	// Subagent-dispatch hook events (classification ==
+	// "subagent_dispatch") captured for the "Subagent dispatch
+	// visibility" section. Empty (nil) when the hooks file is
+	// missing or contains no Agent dispatches; renderer omits
+	// the whole section in that case.
+	subagentDispatchEvents []hookEvent
 }
 
 // inspectDispatchSpan summarizes one Task-tool span that carried
@@ -314,6 +355,7 @@ func renderInspect(w io.Writer, agg *inspectAggregated) error {
 	}
 
 	renderTraceCorrelation(&b, agg)
+	renderDispatchVisibility(&b, agg)
 
 	if agg.sampleSpan != nil {
 		b.WriteString("## Sample span (first matching this session)\n\n")
@@ -478,6 +520,54 @@ func countTransitiveLLMRequests(rootSpanID string, spansByParentID map[string][]
 		}
 	}
 	return count
+}
+
+// renderDispatchVisibility writes the "Subagent dispatch
+// visibility" section: one row per subagent_dispatch hook event
+// for the requested session, showing the per-dispatch detail
+// (description / subagent_type fallback / "(unspecified)") plus
+// the SET of keys present in the captured tool_input.
+//
+// This is the empirical-validation surface for the per-agent
+// rollup's bucket-key assumption. The Task tool_input shape is
+// vendor-implementation-defined in Claude Code's hook reference;
+// dumping the actual key inventory next to the extracted detail
+// lets the operator see at a glance whether description-as-label
+// is reaching us, fall-back-to-subagent_type fired, or some
+// shape we didn't anticipate arrived (in which case the keys
+// list will reveal what fields ARE there).
+//
+// Skipped entirely when there are no hook events — keeps the
+// output clean for trace-only sessions.
+func renderDispatchVisibility(b *strings.Builder, agg *inspectAggregated) {
+	if len(agg.subagentDispatchEvents) == 0 {
+		return
+	}
+	b.WriteString("## Subagent dispatch visibility\n\n")
+	b.WriteString("Per-dispatch hook events captured for this session. The\n")
+	b.WriteString("\"Detail\" column is what the report's per-agent rollup\n")
+	b.WriteString("buckets on (description if present, else subagent_type,\n")
+	b.WriteString("else \"(unspecified)\"). The \"Input keys\" column lists the\n")
+	b.WriteString("ACTUAL field names in the captured tool_input — pin this\n")
+	b.WriteString("against the hook docs after each Claude Code update so a\n")
+	b.WriteString("schema drift surfaces immediately rather than silently\n")
+	b.WriteString("breaking the per-agent classifier.\n\n")
+	b.WriteString("| # | Tool use ID | Detail | Input keys |\n")
+	b.WriteString("|---|---|---|---|\n")
+	for i, ev := range agg.subagentDispatchEvents {
+		// Truncate long IDs for table-readability — the full
+		// value is in the JSONL file if needed for join work.
+		idDisplay := ev.ToolUseID
+		if len(idDisplay) > 16 {
+			idDisplay = idDisplay[:16] + "…"
+		}
+		keysDisplay := strings.Join(ev.ToolInputKeys, ", ")
+		if keysDisplay == "" {
+			keysDisplay = "(none)"
+		}
+		fmt.Fprintf(b, "| %d | %s | %s | %s |\n", i+1, idDisplay, ev.Detail, keysDisplay)
+	}
+	b.WriteString("\n")
 }
 
 // classifyContinuity reports, for a set of child spans, whether

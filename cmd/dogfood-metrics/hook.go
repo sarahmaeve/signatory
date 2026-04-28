@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -46,15 +47,27 @@ type hookInputEnvelope struct {
 
 // hookEvent is the line we write to disk per hook invocation.
 // JSONL format: one event per line.
+//
+// ToolInputKeys is populated only for subagent_dispatch events
+// (tool_name == "Agent"); it carries the SET of keys present in
+// the raw tool_input JSON, sorted for stable rendering. The
+// purpose is empirical visibility into the Task tool's input
+// shape — Claude Code's hook docs declare tool_input as a
+// stable wrapper but leave the per-tool inner shape vendor-
+// implementation-defined. If a future build adds, removes, or
+// renames a key (e.g., description → label), inspect surfaces
+// the change immediately instead of hiding it behind a silent
+// classifier fallback.
 type hookEvent struct {
-	Timestamp      string `json:"ts"`
-	Event          string `json:"event"`
-	SessionID      string `json:"session_id,omitempty"`
-	ToolUseID      string `json:"tool_use_id,omitempty"`
-	ToolName       string `json:"tool_name,omitempty"`
-	Classification string `json:"classification,omitempty"`
-	Detail         string `json:"detail,omitempty"`
-	CWD            string `json:"cwd,omitempty"`
+	Timestamp      string   `json:"ts"`
+	Event          string   `json:"event"`
+	SessionID      string   `json:"session_id,omitempty"`
+	ToolUseID      string   `json:"tool_use_id,omitempty"`
+	ToolName       string   `json:"tool_name,omitempty"`
+	Classification string   `json:"classification,omitempty"`
+	Detail         string   `json:"detail,omitempty"`
+	CWD            string   `json:"cwd,omitempty"`
+	ToolInputKeys  []string `json:"tool_input_keys,omitempty"`
 }
 
 // runHook is the testable core of the hook subcommand. Reads JSON
@@ -96,6 +109,15 @@ func runHook(r io.Reader, outDir, event string, now time.Time) error {
 		Classification: classification,
 		Detail:         truncate(detail, maxDetailLength),
 		CWD:            env.CWD,
+	}
+
+	// Capture the input-key inventory for Agent dispatches only.
+	// This is the visibility surface inspect renders so the next
+	// dogfood validates the assumption that
+	// tool_input.description carries the per-purpose label.
+	// Keys are sorted for stable output across runs.
+	if env.ToolName == "Agent" {
+		ev.ToolInputKeys = extractToolInputKeys(env.ToolInput)
 	}
 
 	filename := "hooks-malformed.jsonl"
@@ -177,9 +199,62 @@ func classify(cwd, toolName string, toolInput json.RawMessage) (classification, 
 		path := jsonField(toolInput, "file_path")
 		return classifyReadPath(cwd, path), path
 
+	case toolName == "Agent":
+		// Subagent dispatch via the Task tool. The detail field
+		// becomes the per-purpose label the report's per-agent
+		// rollup buckets on. Three-tier fallback because the
+		// Task tool_input shape is vendor-implementation-defined
+		// (PreToolUse hook docs declare tool_input shape as
+		// stable but per-tool keys as unknown):
+		//
+		//   1. description — the 3-5 word task summary the
+		//      orchestrator wrote, the most informative label
+		//   2. subagent_type — coarse but still distinguishes
+		//      general-purpose from Plan / Explore / etc.
+		//   3. "(unspecified)" — sentinel so empty-key collisions
+		//      don't silently merge unrelated dispatches
+		//
+		// All three paths classify as "subagent_dispatch" so the
+		// report's per-agent rollup finds them by classification
+		// regardless of which fallback fired.
+		if desc := jsonField(toolInput, "description"); desc != "" {
+			return "subagent_dispatch", desc
+		}
+		if st := jsonField(toolInput, "subagent_type"); st != "" {
+			return "subagent_dispatch", st
+		}
+		return "subagent_dispatch", "(unspecified)"
+
 	default:
 		return "local_other", toolName
 	}
+}
+
+// extractToolInputKeys returns the sorted list of top-level keys
+// in the tool_input JSON object. Empty input or non-object input
+// returns nil. Used to populate hookEvent.ToolInputKeys for
+// Agent dispatches — the visibility surface that lets the next
+// dogfood reveal what the Task tool's input shape actually is.
+//
+// Sorted output keeps inspect's rendered table stable across
+// runs even when Claude Code re-orders the wire fields.
+func extractToolInputKeys(toolInput json.RawMessage) []string {
+	if len(toolInput) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(toolInput, &m); err != nil {
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // classifyBashCommand applies prefix/contains rules to the raw

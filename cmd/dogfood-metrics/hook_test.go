@@ -286,3 +286,157 @@ func TestHook_TimestampIsISO8601UTC(t *testing.T) {
 	out := parseLine(t, readFirstLine(t, dir, "sess-t"))
 	assert.Equal(t, "2026-04-27T15:00:00Z", out["ts"])
 }
+
+// ----- Subagent dispatch (Task / Agent tool) classification -----
+//
+// The Task tool's tool_input shape is documented at the
+// user-facing tool API level (description, prompt, subagent_type)
+// but NOT pinned by Claude Code's hook reference at the inner-
+// shape level. These tests cover the three fallback tiers of
+// what the classifier extracts as the per-dispatch detail:
+//
+//  1. tool_input.description present  → use it
+//  2. only tool_input.subagent_type   → use that as a coarse label
+//  3. neither                          → "(unspecified)"
+//
+// All three paths classify as "subagent_dispatch" so the report's
+// per-agent rollup can find them by classification regardless of
+// which fallback fired. The tool_input_keys field in the recorded
+// event is populated unconditionally for Agent invocations so the
+// next dogfood's inspect output surfaces what fields actually
+// arrived (validates / invalidates the assumption above without
+// re-running the dogfood twice).
+
+// TestHook_ClassifiesAgent_WithDescription: the happy path —
+// Claude Code's PreToolUse passes through the description field
+// the orchestrator wrote when calling Task. Detail is the
+// description verbatim; classification is "subagent_dispatch".
+func TestHook_ClassifiesAgent_WithDescription(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-d",
+		"cwd":         "/x",
+		"tool_name":   "Agent",
+		"tool_use_id": "tu-d",
+		"tool_input": map[string]any{
+			"description":   "Provenance review",
+			"subagent_type": "general-purpose",
+			"prompt":        "long prompt body...",
+		},
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+
+	out := parseLine(t, readFirstLine(t, dir, "sess-d"))
+	assert.Equal(t, "subagent_dispatch", out["classification"],
+		"Agent tool calls must classify as subagent_dispatch so the report's per-agent rollup can find them")
+	assert.Equal(t, "Provenance review", out["detail"],
+		"detail must be the description verbatim — that's the per-purpose label the orchestrator chose")
+}
+
+// TestHook_ClassifiesAgent_FallbackToSubagentType: when
+// tool_input has subagent_type but no description (e.g., a
+// Claude Code build that doesn't expose description, or a
+// hand-crafted Task call without one), we fall back to the
+// agent type. Less informative than the description but still
+// better than a blank label — at least the report's bucket key
+// distinguishes "general-purpose" from "Plan" or "Explore".
+func TestHook_ClassifiesAgent_FallbackToSubagentType(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-st",
+		"cwd":         "/x",
+		"tool_name":   "Agent",
+		"tool_use_id": "tu-st",
+		"tool_input": map[string]any{
+			"subagent_type": "Plan",
+			"prompt":        "design the migration",
+		},
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+
+	out := parseLine(t, readFirstLine(t, dir, "sess-st"))
+	assert.Equal(t, "subagent_dispatch", out["classification"])
+	assert.Equal(t, "Plan", out["detail"],
+		"absent description, fall back to subagent_type — coarse but still a bucket key")
+}
+
+// TestHook_ClassifiesAgent_FallbackToUnspecified: neither
+// description nor subagent_type present. Use a sentinel string
+// so the report's per-agent rollup has SOMETHING to bucket on
+// rather than an empty key colliding with other empty keys.
+func TestHook_ClassifiesAgent_FallbackToUnspecified(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-u",
+		"cwd":         "/x",
+		"tool_name":   "Agent",
+		"tool_use_id": "tu-u",
+		"tool_input":  map[string]any{},
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+
+	out := parseLine(t, readFirstLine(t, dir, "sess-u"))
+	assert.Equal(t, "subagent_dispatch", out["classification"])
+	assert.Equal(t, "(unspecified)", out["detail"],
+		"empty tool_input must produce a sentinel detail, not an empty string that would collide with other empty-detail events")
+}
+
+// TestHook_AgentDispatch_CapturesInputKeys: every Agent
+// invocation records the SET of keys present in tool_input as a
+// JSON array on the event. This is the visibility surface the
+// inspect tool reads to surface "what fields actually arrived" —
+// if a Claude Code build emits a key shape we didn't anticipate,
+// the operator sees it without having to capture raw JSON
+// separately. Uses sorted-string output for stable ordering.
+//
+// Non-Agent tool calls do NOT populate this field (omitempty);
+// Bash invocations have a single key (`command`) which doesn't
+// add value to surface and would just bloat hook lines.
+func TestHook_AgentDispatch_CapturesInputKeys(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-k",
+		"cwd":         "/x",
+		"tool_name":   "Agent",
+		"tool_use_id": "tu-k",
+		"tool_input": map[string]any{
+			"description":   "x",
+			"subagent_type": "general-purpose",
+			"prompt":        "y",
+		},
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+
+	out := parseLine(t, readFirstLine(t, dir, "sess-k"))
+	keys, ok := out["tool_input_keys"].([]any)
+	require.True(t, ok, "tool_input_keys must be present on Agent dispatches and decode as an array")
+	// Sorted: description, prompt, subagent_type.
+	require.Len(t, keys, 3)
+	assert.Equal(t, "description", keys[0])
+	assert.Equal(t, "prompt", keys[1])
+	assert.Equal(t, "subagent_type", keys[2])
+}
+
+// TestHook_NonAgent_OmitsInputKeys: keys-capture is Agent-only.
+// Bash hook events should not gain a tool_input_keys field.
+func TestHook_NonAgent_OmitsInputKeys(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	in := mkInput(t, map[string]any{
+		"session_id":  "sess-b",
+		"cwd":         "/x",
+		"tool_name":   "Bash",
+		"tool_use_id": "tu-b",
+		"tool_input":  map[string]any{"command": "ls"},
+	})
+	require.NoError(t, runHook(bytes.NewReader(in), dir, "PreToolUse", fixedNow))
+
+	out := parseLine(t, readFirstLine(t, dir, "sess-b"))
+	_, present := out["tool_input_keys"]
+	assert.False(t, present,
+		"tool_input_keys must be omitted on non-Agent events — it's noise outside the Agent diagnostic")
+}
