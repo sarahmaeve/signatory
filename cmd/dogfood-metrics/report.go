@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,39 +51,109 @@ type otlpKV struct {
 	Value otlpKVValue `json:"value"`
 }
 
+// otlpKVValue covers the small set of OTLP attribute-value types
+// the report reads. The proto3-canonical OTLP-JSON encoding writes
+// int64 as a decimal STRING under `intValue` (to preserve precision
+// past 2^53), but in practice some producers emit it as a JSON
+// NUMBER instead. Storing the raw JSON bytes here lets stringAttr
+// strip-quotes-if-string-else-return-bytes handle both shapes
+// uniformly. Pre-fix (when this was a plain `string`), the
+// number-form failed to decode and broke 651 of 658 batches in
+// real Claude Code traces.
 type otlpKVValue struct {
-	StringValue string `json:"stringValue"`
+	StringValue string          `json:"stringValue,omitempty"`
+	IntValue    json.RawMessage `json:"intValue,omitempty"`
+	BoolValue   *bool           `json:"boolValue,omitempty"`
 }
 
-// stringAttr returns the stringValue for the named key, or "" if
-// not present.
+// stringAttr returns a value's string form for the named key, or
+// "" if not present. Coerces across OTLP's typed value
+// representations:
+//
+//   - stringValue → returned verbatim.
+//   - intValue (whether JSON-encoded as a string `"1234"` or as a
+//     bare number `1234`) → returned as decimal string, suitable
+//     for parseStringInt.
+//   - boolValue → "true" or "false".
+//
+// Coercion to a single string lets the report's downstream parsers
+// stay shape-agnostic — every numeric attribute reads the same way
+// regardless of which OTLP type the producer chose, and either
+// JSON encoding the producer used.
 func stringAttr(attrs []otlpKV, key string) string {
 	for _, a := range attrs {
-		if a.Key == key {
+		if a.Key != key {
+			continue
+		}
+		if a.Value.StringValue != "" {
 			return a.Value.StringValue
 		}
+		if len(a.Value.IntValue) > 0 {
+			// json.RawMessage holds the literal bytes. For string
+			// form (`"1234"`) we trim the surrounding quotes; for
+			// number form (`1234`) the bytes are already the
+			// decimal representation.
+			s := strings.Trim(string(a.Value.IntValue), `"`)
+			return s
+		}
+		if a.Value.BoolValue != nil {
+			if *a.Value.BoolValue {
+				return "true"
+			}
+			return "false"
+		}
+		return ""
 	}
 	return ""
 }
 
-// subagentStats aggregates span counts per query_source. The
-// breakdown by span-name kind (llm_request vs tool) makes the
-// "where is this subagent spending its turns" question answerable.
-type subagentStats struct {
-	LLMRequests int
-	ToolCalls   int
+// modelEconomics aggregates token + duration totals per LLM model.
+// Driven entirely by `claude_code.llm_request` spans' attributes.
+//
+// Cache token semantics (per Anthropic's prompt-caching docs):
+//
+//   - InputTokens         — non-cached input tokens (paid full price)
+//   - CacheCreationTokens — input tokens written to the cache
+//     (also paid full price; turn N pays so
+//     turns N+1..N+TTL get the cache_read price)
+//   - CacheReadTokens     — input tokens served from the cache
+//     (charged at ~10% of normal input rate)
+//   - OutputTokens        — generated output tokens
+//
+// The "cache hit ratio" we render is CacheRead / (InputTokens +
+// CacheCreation + CacheRead) — the fraction of input-side tokens
+// that the cache absorbed.
+type modelEconomics struct {
+	Calls               int
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	TotalDurationMs     int64
+	TotalTTFTMs         int64
+	TTFTSamples         int // count of spans where ttft_ms parsed cleanly; mean = TotalTTFTMs / TTFTSamples
 }
 
 // aggregated carries everything the markdown renderer needs.
 // Built once from disk inputs, consumed by render().
 type aggregated struct {
-	SessionID            string
-	SpansBySubagent      map[string]*subagentStats
+	SessionID string
+
+	// Trace-derived counts. Populated by loadTraces.
+	InteractionCount      int
+	LLMRequestCount       int
+	ToolCallCount         int
+	ToolNameCounts        map[string]int // by `tool_name` attribute on claude_code.tool spans
+	SubagentDispatchTypes map[string]int // by `subagent_type` attribute on claude_code.tool spans
+	EconomicsByModel      map[string]*modelEconomics
+
+	// Hook-derived. Populated by loadHooks.
 	ClassificationCounts map[string]int
 	ExternalCalls        []hookEvent
 	SourceReads          []hookEvent
-	HasHookData          bool
-	HasTraceData         bool
+
+	HasHookData  bool
+	HasTraceData bool
 }
 
 // runReport reads OTLP-JSON traces and hook events from inDir,
@@ -95,9 +166,11 @@ type aggregated struct {
 // typo doesn't silently render an empty report.
 func runReport(sessionID, inDir, outDir string) error {
 	agg := &aggregated{
-		SessionID:            sessionID,
-		SpansBySubagent:      map[string]*subagentStats{},
-		ClassificationCounts: map[string]int{},
+		SessionID:             sessionID,
+		ToolNameCounts:        map[string]int{},
+		SubagentDispatchTypes: map[string]int{},
+		EconomicsByModel:      map[string]*modelEconomics{},
+		ClassificationCounts:  map[string]int{},
 	}
 
 	if err := loadTraces(filepath.Join(inDir, "traces.jsonl"), sessionID, agg); err != nil {
@@ -124,8 +197,27 @@ func runReport(sessionID, inDir, outDir string) error {
 
 // loadTraces streams the traces.jsonl file line by line. Each
 // line is one ExportTraceServiceRequest (OTLP/HTTP/JSON spec).
-// We filter resourceSpans by session.id resource attribute and
-// aggregate matching spans into agg.
+//
+// Filters spans for sessionID by checking BOTH the resource-level
+// `session.id` attribute and the SPAN-level `session.id` attribute.
+// The span-level form is what current Claude Code OTEL emits
+// (verified 2026-04-28 via dogfood-metrics inspect — see commit
+// 83248f8); the resource-level fallback exists because some older
+// SDK builds and the original v0.1 fixtures placed it there.
+//
+// Span-name dispatch:
+//
+//   - claude_code.interaction      — counts toward agg.InteractionCount
+//   - claude_code.llm_request      — counts toward agg.LLMRequestCount
+//     AND adds to agg.EconomicsByModel
+//     (input/output/cache tokens, ms)
+//   - claude_code.tool             — counts toward agg.ToolCallCount,
+//     bumps agg.ToolNameCounts[tool_name],
+//     and (when subagent_type is set)
+//     bumps agg.SubagentDispatchTypes
+//   - claude_code.tool.execution   — IGNORED (sub-span of `tool`;
+//     counting it would double-count)
+//   - claude_code.tool.blocked_on_user — IGNORED (sub-span of `tool`)
 //
 // Missing file is NOT an error — a session may have hook data
 // without trace data (e.g., the receiver wasn't running).
@@ -150,32 +242,82 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 			continue
 		}
 		for _, rs := range batch.ResourceSpans {
-			if stringAttr(rs.Resource.Attributes, "session.id") != sessionID {
-				continue
-			}
+			resSessionID := stringAttr(rs.Resource.Attributes, "session.id")
 			for _, ss := range rs.ScopeSpans {
 				for _, sp := range ss.Spans {
+					// Match by either level — see method-doc.
+					if resSessionID != sessionID && stringAttr(sp.Attributes, "session.id") != sessionID {
+						continue
+					}
 					agg.HasTraceData = true
-					qs := stringAttr(sp.Attributes, "query_source")
-					if qs == "" {
-						qs = "(unknown)"
-					}
-					stats, ok := agg.SpansBySubagent[qs]
-					if !ok {
-						stats = &subagentStats{}
-						agg.SpansBySubagent[qs] = stats
-					}
 					switch sp.Name {
+					case "claude_code.interaction":
+						agg.InteractionCount++
 					case "claude_code.llm_request":
-						stats.LLMRequests++
+						agg.LLMRequestCount++
+						aggregateEconomics(agg, sp)
 					case "claude_code.tool":
-						stats.ToolCalls++
+						agg.ToolCallCount++
+						if name := stringAttr(sp.Attributes, "tool_name"); name != "" {
+							agg.ToolNameCounts[name]++
+						}
+						if st := stringAttr(sp.Attributes, "subagent_type"); st != "" {
+							agg.SubagentDispatchTypes[st]++
+						}
 					}
 				}
 			}
 		}
 	}
 	return scanner.Err()
+}
+
+// aggregateEconomics adds one llm_request span's token + duration
+// totals into the per-model bucket in agg. The model key prefers
+// `gen_ai.request.model` (OTEL semantic-conventions name) and falls
+// back to the simpler `model` attribute when absent.
+//
+// All the numeric attributes are stringValue-typed in OTLP-JSON, so
+// we parseInt with errors-as-zero — a missing or malformed value
+// doesn't break aggregation; it just contributes nothing.
+func aggregateEconomics(agg *aggregated, sp otlpSpan) {
+	model := stringAttr(sp.Attributes, "gen_ai.request.model")
+	if model == "" {
+		model = stringAttr(sp.Attributes, "model")
+	}
+	if model == "" {
+		model = "(unknown)"
+	}
+	stats, ok := agg.EconomicsByModel[model]
+	if !ok {
+		stats = &modelEconomics{}
+		agg.EconomicsByModel[model] = stats
+	}
+	stats.Calls++
+	stats.InputTokens += parseStringInt(stringAttr(sp.Attributes, "input_tokens"))
+	stats.OutputTokens += parseStringInt(stringAttr(sp.Attributes, "output_tokens"))
+	stats.CacheReadTokens += parseStringInt(stringAttr(sp.Attributes, "cache_read_tokens"))
+	stats.CacheCreationTokens += parseStringInt(stringAttr(sp.Attributes, "cache_creation_tokens"))
+	stats.TotalDurationMs += parseStringInt(stringAttr(sp.Attributes, "duration_ms"))
+	if ttft := parseStringInt(stringAttr(sp.Attributes, "ttft_ms")); ttft > 0 {
+		stats.TotalTTFTMs += ttft
+		stats.TTFTSamples++
+	}
+}
+
+// parseStringInt parses s as an int64, returning 0 on empty or
+// malformed input. OTLP-JSON encodes numeric attribute values as
+// strings; we accept that shape uniformly here so the aggregation
+// loop stays branch-free per attribute.
+func parseStringInt(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // loadHooks streams the hook JSONL file for this session and
@@ -222,7 +364,10 @@ func render(agg *aggregated) string {
 	fmt.Fprintf(&b, "# Dogfood report — session %s\n\n", agg.SessionID)
 	fmt.Fprintf(&b, "Generated: %s\n\n", time.Now().UTC().Format(time.RFC3339))
 
-	renderSubagentTable(&b, agg)
+	renderSessionActivity(&b, agg)
+	renderLLMEconomics(&b, agg)
+	renderToolDistribution(&b, agg)
+	renderSubagentDispatches(&b, agg)
 	renderClassificationTable(&b, agg)
 	renderExternalCalls(&b, agg)
 	renderSourceReads(&b, agg)
@@ -230,26 +375,169 @@ func render(agg *aggregated) string {
 	return b.String()
 }
 
-// renderSubagentTable writes the per-subagent span counts. Sorted
-// alphabetically by query_source for stable output.
-func renderSubagentTable(b *strings.Builder, agg *aggregated) {
-	b.WriteString("## Subagent activity\n\n")
+// renderSessionActivity writes the high-level activity summary —
+// counts of interactions, LLM requests, and tool calls. Replaces
+// the previous "Subagent activity" section, which was specced
+// against a `query_source` attribute Claude Code's OTEL output
+// doesn't actually emit (verified 2026-04-28 via dogfood-metrics
+// inspect; see commit 83248f8).
+func renderSessionActivity(b *strings.Builder, agg *aggregated) {
+	b.WriteString("## Session activity\n\n")
 	if !agg.HasTraceData {
 		b.WriteString("no trace spans recorded\n\n")
 		return
 	}
-	keys := make([]string, 0, len(agg.SpansBySubagent))
-	for k := range agg.SpansBySubagent {
+	fmt.Fprintf(b, "- %d user interaction(s)\n", agg.InteractionCount)
+	fmt.Fprintf(b, "- %d LLM request(s)\n", agg.LLMRequestCount)
+	fmt.Fprintf(b, "- %d tool call(s)\n", agg.ToolCallCount)
+	if subagentCount := sumIntMap(agg.SubagentDispatchTypes); subagentCount > 0 {
+		fmt.Fprintf(b, "- %d subagent dispatch(es) — see Subagent dispatches section\n", subagentCount)
+	}
+	b.WriteString("\n")
+}
+
+// renderLLMEconomics writes the per-model token + duration table.
+// Drawn from `claude_code.llm_request` spans' attributes; absent
+// trace data renders the section header plus a no-data note so
+// readers don't assume "missing section" means "missing feature."
+//
+// Cache hit ratio is CacheRead / (Input + CacheCreation + CacheRead)
+// — the share of input-side tokens served from cache. Formula
+// surfaced inline in the rendered output so a reader inspecting a
+// surprisingly-high or surprisingly-low ratio can verify what
+// they're looking at.
+func renderLLMEconomics(b *strings.Builder, agg *aggregated) {
+	b.WriteString("## LLM economics\n\n")
+	if len(agg.EconomicsByModel) == 0 {
+		b.WriteString("no LLM request spans recorded\n\n")
+		return
+	}
+	models := make([]string, 0, len(agg.EconomicsByModel))
+	for m := range agg.EconomicsByModel {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	b.WriteString("| Model | Calls | Input | Output | Cache read | Cache create | Total ms | Mean TTFT ms |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+
+	var totals modelEconomics
+	for _, m := range models {
+		s := agg.EconomicsByModel[m]
+		ttft := "—"
+		if s.TTFTSamples > 0 {
+			ttft = fmt.Sprintf("%d", s.TotalTTFTMs/int64(s.TTFTSamples))
+		}
+		fmt.Fprintf(b, "| %s | %d | %d | %d | %d | %d | %d | %s |\n",
+			m, s.Calls, s.InputTokens, s.OutputTokens,
+			s.CacheReadTokens, s.CacheCreationTokens,
+			s.TotalDurationMs, ttft)
+
+		totals.Calls += s.Calls
+		totals.InputTokens += s.InputTokens
+		totals.OutputTokens += s.OutputTokens
+		totals.CacheReadTokens += s.CacheReadTokens
+		totals.CacheCreationTokens += s.CacheCreationTokens
+		totals.TotalDurationMs += s.TotalDurationMs
+		totals.TotalTTFTMs += s.TotalTTFTMs
+		totals.TTFTSamples += s.TTFTSamples
+	}
+
+	// Aggregate row only when more than one model surfaced — for a
+	// single-model session the totals row is just visual noise.
+	if len(models) > 1 {
+		ttft := "—"
+		if totals.TTFTSamples > 0 {
+			ttft = fmt.Sprintf("%d", totals.TotalTTFTMs/int64(totals.TTFTSamples))
+		}
+		fmt.Fprintf(b, "| **TOTAL** | %d | %d | %d | %d | %d | %d | %s |\n",
+			totals.Calls, totals.InputTokens, totals.OutputTokens,
+			totals.CacheReadTokens, totals.CacheCreationTokens,
+			totals.TotalDurationMs, ttft)
+	}
+	b.WriteString("\n")
+
+	// Cache hit ratio across the session, formula explicit.
+	denom := totals.InputTokens + totals.CacheCreationTokens + totals.CacheReadTokens
+	if denom > 0 {
+		ratio := float64(totals.CacheReadTokens) / float64(denom) * 100
+		fmt.Fprintf(b, "Cache hit ratio: %.1f%% — `cache_read / (input + cache_creation + cache_read)`\n\n", ratio)
+	}
+}
+
+// renderToolDistribution writes the per-tool-name count table.
+// Surfaces "where is the orchestrator spending its tool calls"
+// without depending on subagent attribution (which lives in
+// separate sessions, see renderSubagentDispatches's note).
+func renderToolDistribution(b *strings.Builder, agg *aggregated) {
+	b.WriteString("## Tool calls by name\n\n")
+	if len(agg.ToolNameCounts) == 0 {
+		b.WriteString("no tool spans recorded (or no `tool_name` attribute on the spans)\n\n")
+		return
+	}
+	type kv struct {
+		name  string
+		count int
+	}
+	rows := make([]kv, 0, len(agg.ToolNameCounts))
+	for k, v := range agg.ToolNameCounts {
+		rows = append(rows, kv{k, v})
+	}
+	// Sort by count descending, ties broken by name ascending — most
+	// significant entries surface first; ties stay deterministic.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].count != rows[j].count {
+			return rows[i].count > rows[j].count
+		}
+		return rows[i].name < rows[j].name
+	})
+
+	b.WriteString("| Tool | Count |\n|---|---|\n")
+	for _, r := range rows {
+		fmt.Fprintf(b, "| %s | %d |\n", r.name, r.count)
+	}
+	b.WriteString("\n")
+}
+
+// renderSubagentDispatches writes the per-subagent-type count table.
+// Drawn from `claude_code.tool` spans where `subagent_type` is set
+// — those are the Task-tool spawns where the orchestrator dispatched
+// a subagent. The subagent's OWN activity (its tool calls, its LLM
+// requests) lives in a SEPARATE Claude session with its own
+// session.id, and would be reported separately by running the
+// report against that session id.
+func renderSubagentDispatches(b *strings.Builder, agg *aggregated) {
+	b.WriteString("## Subagent dispatches\n\n")
+	if len(agg.SubagentDispatchTypes) == 0 {
+		b.WriteString("none — this session did not spawn subagents via the Task tool\n\n")
+		return
+	}
+	keys := make([]string, 0, len(agg.SubagentDispatchTypes))
+	for k := range agg.SubagentDispatchTypes {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	b.WriteString("| Subagent | LLM requests | Tool calls |\n")
-	b.WriteString("|---|---|---|\n")
+
+	b.WriteString("| Subagent type | Dispatches |\n|---|---|\n")
 	for _, k := range keys {
-		s := agg.SpansBySubagent[k]
-		fmt.Fprintf(b, "| %s | %d | %d |\n", k, s.LLMRequests, s.ToolCalls)
+		fmt.Fprintf(b, "| %s | %d |\n", k, agg.SubagentDispatchTypes[k])
 	}
 	b.WriteString("\n")
+	b.WriteString("Each subagent runs in its own Claude session with a separate\n")
+	b.WriteString("`session.id`; running this report against that session ID\n")
+	b.WriteString("surfaces the subagent's own activity (tool calls, LLM\n")
+	b.WriteString("requests, etc.). Cross-session correlation is not yet\n")
+	b.WriteString("automated — `dogfood-metrics list-sessions` shows all\n")
+	b.WriteString("sessions in the file.\n\n")
+}
+
+// sumIntMap returns the sum of values in a string→int map.
+func sumIntMap(m map[string]int) int {
+	var total int
+	for _, v := range m {
+		total += v
+	}
+	return total
 }
 
 // renderClassificationTable writes the tool-call breakdown.
