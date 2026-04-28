@@ -16,6 +16,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
+	pypiregistry "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -275,6 +276,34 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			// gives operators a stored trail; analysis continues with
 			// whatever signals the npm collector can still provide.
 			_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, resolveErr)
+		}
+	}
+
+	// PyPI parallel to the npm resolution above. Same shape, same
+	// failure semantics — closes the gap surfaced by the 2026-04-28
+	// ms dogfood audit where pkg:pypi/ targets reached the analysts
+	// with no resolved github source, so the github + git collectors
+	// silently skipped and the analysts went to upstream APIs.
+	if entity.Type == profile.EntityPackage && entity.Ecosystem == "pypi" && entity.URL == "" {
+		if resolveErr := resolvePyPIRepo(ctx, s, entity, globals); resolveErr != nil {
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"pypi-registry",
+				resolveErr.Error(),
+				true,
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
+
+			if cmd.Refresh {
+				_, _ = fmt.Fprintf(stderr, "warning: pypi repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh pypi repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: pypi repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, resolveErr)
 		}
 	}
@@ -706,6 +735,52 @@ func resolveNpmRepo(ctx context.Context, s store.Store, entity *profile.Entity, 
 	if repoURL == "" {
 		// Package doesn't declare a github-hosted repository. Nothing
 		// to stamp; stay silent. Downstream dispatch will skip the
+		// github + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
+}
+
+// resolvePyPIRepo is the PyPI parallel to resolveNpmRepo. Same
+// shape: query the registry for a project, walk its declared
+// project_urls (and the legacy home_page fallback) for a github
+// source, normalize, stamp on the entity, persist.
+//
+// Failure modes match the npm equivalent: registry-fetch errors
+// (network, 5xx, body cap) return wrapped errors so the caller's
+// --refresh path can fail loud. Returns nil with entity.URL
+// unchanged when the project has no resolvable github source —
+// distinct from a fetch failure, lets downstream isGitHostedEntity
+// gracefully skip the github + git collectors.
+//
+// Lives in analyze.go for the same reason resolveNpmRepo does:
+// repo resolution is orchestration, not signal collection. The
+// pypi package's ResolveRepoURL handles the project_urls priority
+// walk and github-URL normalization.
+func resolvePyPIRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	packageName := strings.TrimPrefix(entity.CanonicalURI, "pkg:pypi/")
+	if packageName == "" || packageName == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not a pypi package URI", entity.CanonicalURI)
+	}
+
+	client := pypiregistry.NewClient()
+	if globals != nil && globals.PypiRegistryURL != "" {
+		client = pypiregistry.NewClientWithBaseURL(globals.PypiRegistryURL)
+	}
+
+	repoURL, err := client.ResolveRepoURL(ctx, packageName)
+	if err != nil {
+		return fmt.Errorf("query pypi registry: %w", err)
+	}
+	if repoURL == "" {
+		// No github-hosted repository declared in project_urls or
+		// home_page. Stay silent; downstream dispatch will skip the
 		// github + git collectors via isGitHostedEntity.
 		return nil
 	}

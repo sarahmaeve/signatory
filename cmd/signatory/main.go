@@ -164,6 +164,15 @@ type Globals struct {
 	// (https://registry.npmjs.org). Tests point this at an httptest
 	// server so analyze runs don't hit the live npm registry.
 	NpmRegistryURL string
+
+	// PypiRegistryURL overrides the base URL for PyPI registry
+	// calls made during analyze-orchestration repo resolution (the
+	// PyPI parallel to NpmRegistryURL — closes the v0.1 gap where
+	// pkg:pypi/ targets had no project_urls→github resolution and
+	// downstream github+git collectors silently skipped). Empty
+	// means the production registry (https://pypi.org). Tests
+	// point this at an httptest server.
+	PypiRegistryURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
