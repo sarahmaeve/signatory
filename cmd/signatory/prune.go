@@ -80,9 +80,10 @@ func promptConfirmation(out io.Writer, in io.Reader, scopeLabel string) bool {
 //     no-op migration (none exist in v0.1 but future schema bumps
 //     will cover this).
 type PruneCmd struct {
-	Entity    PruneEntityCmd    `cmd:"" help:"Delete one entity (by canonical URI or UUID) plus every child row referencing it."`
-	Versioned PruneVersionedCmd `cmd:"" help:"Bulk-delete all entities whose canonical_uri carries a @V version suffix (pre-v10 fragmented rows). Scoped npm packages are NOT matched."`
-	Orphans   PruneOrphansCmd   `cmd:"" help:"Delete entities that have no child rows in any direct-child table (no analyses, postures, burns, signals, dependency_observations)."`
+	Entity     PruneEntityCmd     `cmd:"" help:"Delete one entity (by canonical URI or UUID) plus every child row referencing it."`
+	Versioned  PruneVersionedCmd  `cmd:"" help:"Bulk-delete all entities whose canonical_uri carries a @V version suffix (pre-v10 fragmented rows). Scoped npm packages are NOT matched."`
+	Orphans    PruneOrphansCmd    `cmd:"" help:"Delete entities that have no child rows in any direct-child table (no analyses, postures, burns, signals, dependency_observations)."`
+	Duplicates PruneDuplicatesCmd `cmd:"" help:"Consolidate non-canonical entity rows: case-fold collisions, pkg:go→pkg:golang ecosystem-prefix drift, and pre-v10 @V-suffixed entity rows. Sibling exists → retarget FKs and delete; no sibling → rename in place."`
 }
 
 // --- entity ---------------------------------------------------------------
@@ -234,6 +235,131 @@ func (cmd *PruneOrphansCmd) Run(globals *Globals) error {
 	}
 
 	return runPrune(ctx, s, ids, cmd.Destructive, fmt.Sprintf("%d orphan entities", len(ids)))
+}
+
+// --- duplicates -----------------------------------------------------------
+
+// PruneDuplicatesCmd consolidates non-canonical entity rows. Three
+// fragmentation classes (per the audit captured 2026-04-28 dogfood):
+//
+//   - case-fold: repo:/identity:/org:/patch: schemes whose
+//     constructors lowercase. A non-lowercase row is non-canonical.
+//   - ecosystem-prefix: pkg:go/<path> → pkg:golang/<path> (purl spec).
+//   - versioned-entity: <base>@V → <base> (Plan-A canonicalization).
+//
+// For each detected non-canonical row, the action is either:
+//
+//   - merge: a canonical sibling already exists. The non-canonical
+//     row's child FK references retarget to the sibling, then the
+//     non-canonical row is deleted. Self-referential collected_from
+//     links the merge would create are NULLed (M2 invariant).
+//
+//   - rename: no canonical sibling. The non-canonical row's
+//     canonical_uri is updated in place; child FKs unchanged.
+//
+// Same two-lock safety pattern as the other prune verbs:
+// --destructive plus an interactive [y/N] confirmation. Without
+// either, exits in inform-only (dry-run) mode after printing the plan.
+type PruneDuplicatesCmd struct {
+	Destructive bool `help:"Reveal the consolidation plan AND prompt for confirmation before applying. Without this flag the command runs in inform-only (dry-run) mode and exits without writes."`
+}
+
+func (cmd *PruneDuplicatesCmd) Run(globals *Globals) error {
+	ctx := context.Background()
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+
+	plan, err := s.ListDuplicateFragmentations(ctx)
+	if err != nil {
+		return fmt.Errorf("list duplicate fragmentations: %w", err)
+	}
+	if len(plan.Ops) == 0 {
+		fmt.Println("No duplicate URI fragmentations found. The store is canonical.")
+		return nil
+	}
+
+	renderConsolidationPlan(plan)
+
+	if !cmd.Destructive {
+		fmt.Println()
+		fmt.Println("Dry-run only. Re-run with --destructive to apply (you'll be prompted to confirm).")
+		return nil
+	}
+
+	scopeLabel := fmt.Sprintf("%d duplicate URI consolidation(s)", len(plan.Ops))
+	fmt.Println()
+	if !confirmPrompt(scopeLabel) {
+		fmt.Println("Cancelled — no changes written.")
+		return nil
+	}
+
+	fmt.Printf("Applying consolidation for %s …\n", scopeLabel)
+	report, err := s.ApplyConsolidation(ctx, plan)
+	if err != nil {
+		return fmt.Errorf("apply consolidation: %w", err)
+	}
+	renderConsolidationResult(report)
+	return nil
+}
+
+// renderConsolidationPlan prints a human-readable preview of the
+// merge/rename ops. Mirrors renderPrunePlan's shape (one entity per
+// line, child counts inline) but distinguishes merge from rename
+// inline since they're semantically different operations.
+func renderConsolidationPlan(plan *store.ConsolidationPlan) {
+	fmt.Println("Consolidation plan: duplicate URI fragmentations")
+	fmt.Println("─────────────────────────────────────")
+
+	// Sort ops by source canonical_uri for stable output (the listing
+	// is already in canonical_uri sort order, but defensive: render
+	// always sorts).
+	ops := append([]store.ConsolidationOp(nil), plan.Ops...)
+	sort.Slice(ops, func(i, j int) bool {
+		return ops[i].Source.CanonicalURI < ops[j].Source.CanonicalURI
+	})
+
+	for _, op := range ops {
+		switch op.Action {
+		case store.ConsolidationActionMerge:
+			fmt.Printf("  [merge / %s] %s\n", op.Class, op.Source.CanonicalURI)
+			fmt.Printf("      → into %s\n", op.CanonicalURI)
+			// Per-child-table FK retarget counts.
+			keys := make([]string, 0, len(op.ChildCounts))
+			for k := range op.ChildCounts {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				fmt.Printf("        %s: %d FK(s) retarget\n", k, op.ChildCounts[k])
+			}
+		case store.ConsolidationActionRename:
+			fmt.Printf("  [rename / %s] %s\n", op.Class, op.Source.CanonicalURI)
+			fmt.Printf("      → %s\n", op.CanonicalURI)
+		}
+	}
+	fmt.Println("─────────────────────────────────────")
+	fmt.Printf("Total: %d op(s)\n", len(ops))
+}
+
+// renderConsolidationResult prints the post-apply summary.
+func renderConsolidationResult(report *store.ConsolidationReport) {
+	fmt.Println("Consolidation complete.")
+	fmt.Printf("  merged:  %d\n", report.MergedCount)
+	fmt.Printf("  renamed: %d\n", report.RenamedCount)
+	if len(report.RowsByTable) > 0 {
+		fmt.Println("Rows touched:")
+		keys := make([]string, 0, len(report.RowsByTable))
+		for k := range report.RowsByTable {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-40s %d\n", k, report.RowsByTable[k])
+		}
+	}
 }
 
 // --- shared plan/apply loop ----------------------------------------------

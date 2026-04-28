@@ -234,6 +234,127 @@ func TestPruneVersioned_NoVersionedRows(t *testing.T) {
 	require.NoError(t, cmd.Run(g), "clean store must produce no-op success, not an error")
 }
 
+// TestPruneDuplicates_FreshStoreReportsNothingToDo: a canonical-only
+// store produces a friendly "store is canonical" message and exits
+// without prompting. Critical for the no-op case — operators should
+// be able to run `prune duplicates` defensively without it being
+// noisy.
+func TestPruneDuplicates_FreshStoreReportsNothingToDo(t *testing.T) {
+	g := newTestGlobals(t)
+	// Seed only canonical entities — no fragmentation.
+	_ = ingestForPrune(t, g, "pkg:npm/canonical-only", "external-sec-v1", "2026-04-28T10:00:00Z")
+
+	cmd := &PruneDuplicatesCmd{Destructive: true}
+	// confirmPrompt deliberately not stubbed — must not be called
+	// when there are zero ops, otherwise the operator sees a prompt
+	// they can't usefully answer.
+	require.NoError(t, cmd.Run(g),
+		"canonical-only store must produce no-op success without prompting")
+}
+
+// TestPruneDuplicates_DryRunNoWrites: with no flag (and no confirm
+// stub), the command must NOT mutate the store. Mirrors the
+// dry-run guarantee of the other prune subcommands.
+func TestPruneDuplicates_DryRunNoWrites(t *testing.T) {
+	g := newTestGlobals(t)
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+
+	// Seed a case-fold fragmentation: stub at mixed-case + canonical
+	// at lowercase.
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "stub", CanonicalURI: "repo:github/MixedCase/Repo",
+		Type: profile.EntityProject, ShortName: "Repo",
+	}))
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "canonical", CanonicalURI: "repo:github/mixedcase/repo",
+		Type: profile.EntityProject, ShortName: "repo",
+	}))
+	s.Close() //nolint:errcheck // test cleanup
+
+	cmd := &PruneDuplicatesCmd{} // Destructive deliberately false.
+	require.NoError(t, cmd.Run(g))
+
+	// Both rows must still exist.
+	s, err = g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	_, err = s.GetEntity(ctx, "stub")
+	require.NoError(t, err, "dry-run must NOT delete the stub entity")
+	_, err = s.GetEntity(ctx, "canonical")
+	require.NoError(t, err, "dry-run must NOT touch the canonical sibling either")
+}
+
+// TestPruneDuplicates_DestructiveAppliesMerge: with --destructive
+// and a confirmed prompt, the case-fold fragmentation collapses
+// into the canonical row. End state: one entity at the canonical
+// URI; the stub is gone.
+func TestPruneDuplicates_DestructiveAppliesMerge(t *testing.T) {
+	g := newTestGlobals(t)
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "stub", CanonicalURI: "repo:github/MixedCase/Repo",
+		Type: profile.EntityProject, ShortName: "Repo",
+	}))
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "canonical", CanonicalURI: "repo:github/mixedcase/repo",
+		Type: profile.EntityProject, ShortName: "repo",
+	}))
+	s.Close() //nolint:errcheck // test cleanup
+
+	setConfirmPrompt(t, func(_ string) bool { return true })
+	cmd := &PruneDuplicatesCmd{Destructive: true}
+	require.NoError(t, cmd.Run(g))
+
+	s, err = g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+
+	_, err = s.GetEntity(ctx, "stub")
+	assert.ErrorIs(t, err, store.ErrNotFound, "merge applied — stub must be gone")
+	canonical, err := s.GetEntity(ctx, "canonical")
+	require.NoError(t, err)
+	assert.Equal(t, "repo:github/mixedcase/repo", canonical.CanonicalURI)
+}
+
+// TestPruneDuplicates_DestructiveCancelledByPrompt: the second-lock
+// guarantee — even with --destructive, "n" at the prompt leaves the
+// store untouched. Same shape as the case for `prune entity`.
+func TestPruneDuplicates_DestructiveCancelledByPrompt(t *testing.T) {
+	g := newTestGlobals(t)
+	ctx := t.Context()
+	s, err := g.OpenStore(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "stub", CanonicalURI: "repo:github/MixedCase/Repo",
+		Type: profile.EntityProject, ShortName: "Repo",
+	}))
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "canonical", CanonicalURI: "repo:github/mixedcase/repo",
+		Type: profile.EntityProject, ShortName: "repo",
+	}))
+	s.Close() //nolint:errcheck // test cleanup
+
+	setConfirmPrompt(t, func(_ string) bool { return false })
+	cmd := &PruneDuplicatesCmd{Destructive: true}
+	require.NoError(t, cmd.Run(g),
+		"cancel-at-prompt must exit cleanly, not error")
+
+	s, err = g.OpenStore(ctx)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	_, err = s.GetEntity(ctx, "stub")
+	require.NoError(t, err,
+		"cancelled consolidation must NOT delete the stub")
+	_, err = s.GetEntity(ctx, "canonical")
+	require.NoError(t, err)
+}
+
 // TestPruneVersioned_DeletesLegacyRows: a pre-v10-shaped versioned
 // entity (created manually to simulate dogfood data) gets removed
 // by `prune versioned`. Scoped npm packages in the same store are

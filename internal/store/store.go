@@ -95,6 +95,15 @@ type Store interface {
 	ListVersionedEntities(ctx context.Context) ([]string, error)
 	ListOrphanEntities(ctx context.Context) ([]string, error)
 
+	// Duplicate-fragmentation operations — `signatory prune duplicates`.
+	// ListDuplicateFragmentations is read-only and produces a plan
+	// the operator inspects in dry-run mode; ApplyConsolidation runs
+	// the merge/rename ops transactionally with append-only triggers
+	// suspended. See internal/store/duplicates.go for the rules and
+	// edge cases (case-fold, ecosystem-prefix, versioned-entity).
+	ListDuplicateFragmentations(ctx context.Context) (*ConsolidationPlan, error)
+	ApplyConsolidation(ctx context.Context, plan *ConsolidationPlan) (*ConsolidationReport, error)
+
 	// Analysis session operations — the durable audit identity for
 	// each /analyze run. Link analyst outputs to a session by
 	// passing WithAnalysisSession to IngestAnalystOutput; the
