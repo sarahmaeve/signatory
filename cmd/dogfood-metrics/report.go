@@ -125,6 +125,39 @@ func stringAttr(attrs []otlpKV, key string) string {
 	return ""
 }
 
+// agentEconomics aggregates token + duration totals per "agent" —
+// either the orchestrator (the session's user-facing Claude
+// instance) or a specific subagent type that was dispatched via
+// the Task tool. Per-model details live in modelEconomics; this
+// type slices the same data the OTHER way: by who was running.
+//
+// The orchestrator slot uses the constant agentOrchestrator
+// ("(orchestrator)") so it sorts before every real subagent type
+// in the rendered table (parens beat letters in ASCII).
+//
+// Why a separate aggregation: when work moves between agents
+// (e.g., provenance offloading more to security-review), per-model
+// numbers stay flat but per-agent shifts visibly. Conservation
+// invariant: orchestrator + sum(per-agent) = session total
+// matching the per-model TOTAL row. The test
+// TestReport_AgentEconomics_TotalConservation pins this.
+type agentEconomics struct {
+	Agent               string
+	Dispatches          int // count of dispatch spans attributed to this agent (0 for orchestrator)
+	Calls               int
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	TotalDurationMs     int64
+}
+
+// agentOrchestrator is the bucket key for LLM requests with no
+// dispatch ancestor. The leading paren keeps it sorted before
+// real subagent_type values like "provenance-review" or
+// "security-review-go" in the rendered table.
+const agentOrchestrator = "(orchestrator)"
+
 // modelEconomics aggregates token + duration totals per LLM model.
 // Driven entirely by `claude_code.llm_request` spans' attributes.
 //
@@ -173,6 +206,29 @@ type aggregated struct {
 	SubagentDispatchTypes map[string]int // by `subagent_type` attribute on claude_code.tool spans
 	EconomicsByModel      map[string]*modelEconomics
 
+	// EconomicsByAgent slices the same llm_request data by "who
+	// was running" instead of by model. Populated by
+	// aggregateAgentEconomics, which runs after loadTraces has
+	// built the per-session span index. Key is either
+	// agentOrchestrator ("(orchestrator)") or a subagent_type
+	// string emitted by Claude Code (e.g., "provenance-review").
+	EconomicsByAgent map[string]*agentEconomics
+
+	// Per-session span index — built during loadTraces, consumed
+	// by aggregateAgentEconomics. Keyed by spanId; only spans
+	// matching the requested session are stored, since per-agent
+	// attribution is a within-session walk (the trace-correlation
+	// work confirmed Task dispatches don't fork to a new
+	// session.id).
+	//
+	// SessionSpansByID gives parent-pointer access for the walk;
+	// DispatchSubagentByID is a fast "is this span a dispatch?"
+	// lookup, populated for every claude_code.tool span carrying
+	// subagent_type. Both maps are nil on a session with no trace
+	// data (HasTraceData == false).
+	SessionSpansByID     map[string]otlpSpan
+	DispatchSubagentByID map[string]string
+
 	// Hook-derived. Populated by loadHooks.
 	ClassificationCounts map[string]int
 	ExternalCalls        []hookEvent
@@ -196,6 +252,9 @@ func runReport(sessionID, inDir, outDir string) error {
 		ToolNameCounts:        map[string]int{},
 		SubagentDispatchTypes: map[string]int{},
 		EconomicsByModel:      map[string]*modelEconomics{},
+		EconomicsByAgent:      map[string]*agentEconomics{},
+		SessionSpansByID:      map[string]otlpSpan{},
+		DispatchSubagentByID:  map[string]string{},
 		ClassificationCounts:  map[string]int{},
 	}
 
@@ -205,6 +264,12 @@ func runReport(sessionID, inDir, outDir string) error {
 	if err := loadHooks(filepath.Join(inDir, "hooks-"+sessionID+".jsonl"), agg); err != nil {
 		return fmt.Errorf("load hooks: %w", err)
 	}
+
+	// Per-agent attribution runs after loadTraces has populated the
+	// session span index. Single pass over llm_request spans, each
+	// walking up parentSpanId until it hits a dispatch ancestor or
+	// runs out of parents (orchestrator). See aggregateAgentEconomics.
+	aggregateAgentEconomics(agg)
 
 	if !agg.HasTraceData && !agg.HasHookData {
 		return fmt.Errorf("no traces or hook events found for session %q", sessionID)
@@ -276,6 +341,16 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 						continue
 					}
 					agg.HasTraceData = true
+
+					// Index every session-matching span so the
+					// per-agent aggregator can walk parent chains.
+					// SpanID is non-empty in any well-formed OTLP
+					// payload; treat empty as "skip the index" so a
+					// malformed batch doesn't poison the lookup.
+					if sp.SpanID != "" {
+						agg.SessionSpansByID[sp.SpanID] = sp
+					}
+
 					switch sp.Name {
 					case "claude_code.interaction":
 						agg.InteractionCount++
@@ -289,6 +364,15 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 						}
 						if st := stringAttr(sp.Attributes, "subagent_type"); st != "" {
 							agg.SubagentDispatchTypes[st]++
+							// Record the dispatch in the per-agent
+							// lookup so the parent-walk can stop
+							// at it. Empty SpanID would silently
+							// drop the dispatch from attribution
+							// — defended by the indexing guard
+							// above.
+							if sp.SpanID != "" {
+								agg.DispatchSubagentByID[sp.SpanID] = st
+							}
 						}
 					}
 				}
@@ -328,6 +412,112 @@ func aggregateEconomics(agg *aggregated, sp otlpSpan) {
 	if ttft := parseStringInt(stringAttr(sp.Attributes, "ttft_ms")); ttft > 0 {
 		stats.TTFTSamples = append(stats.TTFTSamples, ttft)
 	}
+}
+
+// aggregateAgentEconomics walks every llm_request span in the
+// session's span index and attributes its tokens/duration to the
+// nearest dispatch ancestor's subagent_type — or to
+// agentOrchestrator if no dispatch is found in the parent chain.
+//
+// The walk is bounded: in addition to terminating when parentSpanID
+// is empty or unknown, a hop counter caps iteration at the size of
+// the index (no well-formed OTLP trace has cycles, but
+// defense-in-depth costs nothing and a corrupt parentSpanId
+// pointing at itself would otherwise spin forever).
+//
+// Per-agent dispatch counts are also bumped here — that's
+// independent of LLM economics but lives on the same struct so
+// the rendered table has a "Dispatches" column without a second
+// pass.
+//
+// Conservation invariant: the sum of orchestrator + per-agent
+// economics equals the per-model TOTAL (i.e., the session
+// total). aggregateAgentEconomics partitions the SAME llm_request
+// spans aggregateEconomics already aggregated, just bucketed
+// differently. Test TestReport_AgentEconomics_TotalConservation
+// pins this.
+func aggregateAgentEconomics(agg *aggregated) {
+	if !agg.HasTraceData || len(agg.SessionSpansByID) == 0 {
+		return
+	}
+
+	// First pass: count dispatch spans per subagent_type. Decoupled
+	// from llm_request attribution because a dispatch with zero
+	// child llm_requests still exists and should appear in the
+	// table (otherwise an agent that did all its work via
+	// non-LLM-request side effects — unlikely but possible —
+	// would silently disappear).
+	for _, st := range agg.DispatchSubagentByID {
+		stats := getOrInitAgent(agg, st)
+		stats.Dispatches++
+	}
+
+	// Second pass: walk each llm_request's parent chain and
+	// attribute. Skipped spans (no SpanID, or no parentSpanId AND
+	// no other ancestors) flow to the orchestrator bucket — that
+	// matches the "root-attached llm_request belongs to the user-
+	// facing Claude" intuition.
+	for _, sp := range agg.SessionSpansByID {
+		if sp.Name != "claude_code.llm_request" {
+			continue
+		}
+		agentKey := attributeAgent(sp, agg)
+		stats := getOrInitAgent(agg, agentKey)
+		stats.Calls++
+		stats.InputTokens += parseStringInt(stringAttr(sp.Attributes, "input_tokens"))
+		stats.OutputTokens += parseStringInt(stringAttr(sp.Attributes, "output_tokens"))
+		stats.CacheReadTokens += parseStringInt(stringAttr(sp.Attributes, "cache_read_tokens"))
+		stats.CacheCreationTokens += parseStringInt(stringAttr(sp.Attributes, "cache_creation_tokens"))
+		stats.TotalDurationMs += parseStringInt(stringAttr(sp.Attributes, "duration_ms"))
+	}
+}
+
+// attributeAgent walks sp's parent chain to find the nearest
+// dispatch span. Returns that dispatch's subagent_type, or
+// agentOrchestrator when no dispatch is found before the chain
+// terminates.
+//
+// "Nearest" not "outermost" is deliberate. The user's economic
+// concern is "where did the work go" — if the synthesizer
+// dispatches a code-reviewer that does the actual LLM work, the
+// reviewer's tokens belong to the code-reviewer bucket, not to
+// the synthesizer's. A future "topmost ancestor" mode would be a
+// flag, not a default.
+//
+// Hop counter caps iteration at len(SessionSpansByID); a
+// well-formed OTLP trace has no cycles, but a corrupt
+// parentSpanId pointing back at itself would otherwise spin.
+func attributeAgent(sp otlpSpan, agg *aggregated) string {
+	pid := sp.ParentSpanID
+	maxHops := len(agg.SessionSpansByID) + 1
+	for i := 0; i < maxHops && pid != ""; i++ {
+		if subagentType, ok := agg.DispatchSubagentByID[pid]; ok {
+			return subagentType
+		}
+		parent, ok := agg.SessionSpansByID[pid]
+		if !ok {
+			// Parent isn't in our session index — could be a
+			// dropped span, a cross-session reference (we already
+			// filter to session, so this is rare), or simply the
+			// trace's root. Treat as orchestrator.
+			break
+		}
+		pid = parent.ParentSpanID
+	}
+	return agentOrchestrator
+}
+
+// getOrInitAgent returns the per-agent economics struct for
+// agentKey, lazily creating it on first access. Centralizes the
+// init so both the dispatch-count pass and the llm_request pass
+// can populate the same map without re-implementing the lookup.
+func getOrInitAgent(agg *aggregated, agentKey string) *agentEconomics {
+	stats, ok := agg.EconomicsByAgent[agentKey]
+	if !ok {
+		stats = &agentEconomics{Agent: agentKey}
+		agg.EconomicsByAgent[agentKey] = stats
+	}
+	return stats
 }
 
 // percentile returns the p-th percentile of a slice of int64
@@ -435,6 +625,7 @@ func render(agg *aggregated) string {
 
 	renderSessionActivity(&b, agg)
 	renderLLMEconomics(&b, agg)
+	renderAgentEconomics(&b, agg)
 	renderToolDistribution(&b, agg)
 	renderSubagentDispatches(&b, agg)
 	renderClassificationTable(&b, agg)
@@ -535,6 +726,82 @@ func renderLLMEconomics(b *strings.Builder, agg *aggregated) {
 		ratio := float64(totals.CacheReadTokens) / float64(denom) * 100
 		fmt.Fprintf(b, "Cache hit ratio: %.1f%% — `cache_read / (input + cache_creation + cache_read)`\n\n", ratio)
 	}
+}
+
+// renderAgentEconomics writes the per-agent rollup table —
+// orchestrator + per-subagent_type buckets, with a TOTAL row that
+// is the conservation invariant (orchestrator + sum(subagents) =
+// session total).
+//
+// The user's framing for this section: if provenance's spend goes
+// down, did total cost actually drop, or did the work shift to
+// another agent? The TOTAL row answers that — it stays flat under
+// work-shift, drops under genuine efficiency.
+//
+// Skipped entirely when there's no trace data; section header
+// still lands so the section's absence is documented rather than
+// silent.
+//
+// Sort order: orchestrator row first (the "(orchestrator)" key
+// sorts before any real subagent_type via leading paren), then
+// subagent rows alphabetically. Matches what an operator scanning
+// for one specific agent would expect.
+func renderAgentEconomics(b *strings.Builder, agg *aggregated) {
+	b.WriteString("## LLM economics — by agent\n\n")
+	if len(agg.EconomicsByAgent) == 0 {
+		b.WriteString("no LLM request spans recorded\n\n")
+		return
+	}
+
+	b.WriteString("Per-agent attribution: each `claude_code.llm_request` is\n")
+	b.WriteString("attributed to the nearest dispatch ancestor's `subagent_type`,\n")
+	b.WriteString("or to `(orchestrator)` when no dispatch is in the parent\n")
+	b.WriteString("chain. The TOTAL row is the conservation invariant — if the\n")
+	b.WriteString("number stays flat while a per-agent number drops, the work\n")
+	b.WriteString("moved to another agent rather than getting cheaper.\n\n")
+
+	keys := make([]string, 0, len(agg.EconomicsByAgent))
+	for k := range agg.EconomicsByAgent {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	b.WriteString("| Agent | Dispatches | Calls | Input | Output | Cache read | Cache create | Total ms |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+
+	var totals agentEconomics
+	for _, k := range keys {
+		s := agg.EconomicsByAgent[k]
+		// Orchestrator row reports "—" for dispatches: it's the
+		// dispatcher, not a dispatchee, so the column is meaningless
+		// for that row. Real subagent rows show the count.
+		dispatches := strconv.Itoa(s.Dispatches)
+		if k == agentOrchestrator {
+			dispatches = "—"
+		}
+		fmt.Fprintf(b, "| %s | %s | %d | %d | %d | %d | %d | %d |\n",
+			k, dispatches, s.Calls, s.InputTokens, s.OutputTokens,
+			s.CacheReadTokens, s.CacheCreationTokens, s.TotalDurationMs)
+
+		totals.Calls += s.Calls
+		totals.InputTokens += s.InputTokens
+		totals.OutputTokens += s.OutputTokens
+		totals.CacheReadTokens += s.CacheReadTokens
+		totals.CacheCreationTokens += s.CacheCreationTokens
+		totals.TotalDurationMs += s.TotalDurationMs
+		totals.Dispatches += s.Dispatches
+	}
+
+	// TOTAL row: the conservation surface. Always emitted, even
+	// when only the orchestrator bucket exists — single-bucket
+	// sessions still benefit from the "this is the session total"
+	// label, and the assertion that it matches the per-model
+	// TOTAL is the fastest-to-spot regression-detection test for
+	// future refactors.
+	fmt.Fprintf(b, "| **TOTAL** | %d | %d | %d | %d | %d | %d | %d |\n",
+		totals.Dispatches, totals.Calls, totals.InputTokens, totals.OutputTokens,
+		totals.CacheReadTokens, totals.CacheCreationTokens, totals.TotalDurationMs)
+	b.WriteString("\n")
 }
 
 // renderToolDistribution writes the per-tool-name count table.

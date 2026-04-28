@@ -517,6 +517,167 @@ func TestReport_ErrorsOnUnknownSession(t *testing.T) {
 		"error should name the session id the user asked for")
 }
 
+// ----- Per-agent economics -----
+//
+// The 2026-04-28 trace-correlation work confirmed that current
+// Claude Code does NOT fork a separate session.id on Task
+// dispatch — children stay in the parent's session.id and traceId,
+// nested only via parentSpanId. Per-agent attribution therefore is
+// a parent-pointer walk WITHIN the session: an llm_request span
+// belongs to subagent type X iff its nearest ancestor (via
+// parentSpanId) carrying subagent_type=X is in the dispatch chain.
+// LLM requests with no dispatch ancestor are the orchestrator's.
+
+// fixtureAgentEconomics is a hand-built session with three
+// distinct LLM-request shapes that exercise the per-agent
+// attribution algorithm:
+//
+//   - llm_request "L1" — root-attached (no parent), orchestrator
+//   - dispatch "D1"    — subagent_type=provenance-review
+//   - llm_request "L2" — parent=D1, attribute to provenance-review
+//   - dispatch "D2"    — subagent_type=security-review-go
+//   - llm_request "L3" — parent=D2, attribute to security-review-go
+//   - llm_request "L4" — parent=tool-span "T1" whose parent=D2,
+//     attribute to security-review-go (transitive)
+//   - tool span "T1"   — parent=D2, no LLM economics
+//
+// Tokens chosen so the buckets sum cleanly:
+//
+//	orchestrator: 1000+500
+//	provenance:    100+ 50
+//	security:      200+100  AND   80+ 40   = 280+140
+//	TOTAL:        1660+790
+const fixtureAgentEconomics = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},"scopeSpans":[{"spans":[` +
+	// L1 — orchestrator-direct llm_request, no parent.
+	`{"name":"claude_code.llm_request","spanId":"L1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"1000"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"500"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"3000"}}` +
+	`]},` +
+	// D1 — provenance-review dispatch.
+	`{"name":"claude_code.tool","spanId":"D1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Task"}},` +
+	`{"key":"subagent_type","value":{"stringValue":"provenance-review"}}` +
+	`]},` +
+	// L2 — direct child of D1.
+	`{"name":"claude_code.llm_request","spanId":"L2","parentSpanId":"D1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"100"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"50"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"500"}}` +
+	`]},` +
+	// D2 — security-review-go dispatch.
+	`{"name":"claude_code.tool","spanId":"D2","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Task"}},` +
+	`{"key":"subagent_type","value":{"stringValue":"security-review-go"}}` +
+	`]},` +
+	// L3 — direct child of D2.
+	`{"name":"claude_code.llm_request","spanId":"L3","parentSpanId":"D2","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"200"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"100"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"800"}}` +
+	`]},` +
+	// T1 — tool span whose parent is D2 (a Read inside the security agent's work).
+	`{"name":"claude_code.tool","spanId":"T1","parentSpanId":"D2","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Read"}}` +
+	`]},` +
+	// L4 — child of T1, transitively descended from D2.
+	`{"name":"claude_code.llm_request","spanId":"L4","parentSpanId":"T1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"80"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"40"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"400"}}` +
+	`]}` +
+	`]}]}]}`
+
+// TestReport_AgentEconomics_OrchestratorRow: an llm_request with
+// no parent (or a parent that doesn't lead to any dispatch span)
+// is attributed to "(orchestrator)". L1 in fixtureAgentEconomics
+// is parent-less; its 1000+500 tokens land in the orchestrator
+// row.
+func TestReport_AgentEconomics_OrchestratorRow(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDir(t, fixtureAgentEconomics, "")
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	assert.Contains(t, report, "## LLM economics — by agent",
+		"new section header must land")
+	// Orchestrator row contains its 1000 input + 500 output.
+	assert.Regexp(t, `\(orchestrator\).*1000.*500`, report,
+		"orchestrator row must surface root-attached llm_request tokens")
+}
+
+// TestReport_AgentEconomics_DirectChild: an llm_request whose
+// parentSpanId IS a dispatch span gets attributed to that
+// dispatch's subagent_type. L2's parent is D1
+// (provenance-review).
+func TestReport_AgentEconomics_DirectChild(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDir(t, fixtureAgentEconomics, "")
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	assert.Regexp(t, `provenance-review.*100.*50`, report,
+		"direct child llm_request must attribute to its dispatch's subagent_type")
+}
+
+// TestReport_AgentEconomics_TransitiveAttribution: an llm_request
+// whose parent is a NON-dispatch span (Read tool) but whose
+// grandparent IS a dispatch span attributes to the grandparent's
+// subagent_type. L4 → T1 → D2; L4's tokens belong to
+// security-review-go.
+//
+// This is the load-bearing case: subagents in real Claude Code
+// don't make LLM requests as direct children of the dispatch
+// span — there's typically a tool/llm_request stack between. A
+// naive "parent must be dispatch" check would miss these and
+// silently undercount per-agent spend.
+func TestReport_AgentEconomics_TransitiveAttribution(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDir(t, fixtureAgentEconomics, "")
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// security-review-go bucket should sum L3 (200+100) and L4 (80+40)
+	// to 280 input + 140 output. Match both numbers in the same row.
+	assert.Regexp(t, `security-review-go.*280.*140`, report,
+		"transitive descendants of a dispatch span must attribute to that subagent_type")
+}
+
+// TestReport_AgentEconomics_TotalConservation: the TOTAL row
+// equals the per-model TOTAL across the LLM-economics-by-model
+// table. If the user's "shifted from one agent to another"
+// concern materializes, this is the row whose number is supposed
+// to stay constant — pinned by test so a future refactor can't
+// silently break the conservation invariant.
+func TestReport_AgentEconomics_TotalConservation(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDir(t, fixtureAgentEconomics, "")
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// Sum of orchestrator(1000+500) + provenance(100+50) +
+	// security(280+140) = 1380 input + 690 output. The
+	// per-model table for this fixture (single model) reports
+	// the same numbers in its own TOTAL row.
+	assert.Regexp(t, `\*\*TOTAL\*\*.*1380.*690`, report,
+		"agent-economics TOTAL must equal sum of orchestrator + all subagent buckets")
+}
+
 // readReport reads the rendered report.md from the out-dir
 // session-id subdir.
 func readReport(t *testing.T, outDir, sessionID string) string {
