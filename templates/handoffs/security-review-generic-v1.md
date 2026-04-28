@@ -175,7 +175,24 @@ traversal, credential handling. Two medium conclusions...
 ### Schema precision — validator traps
 
 The validator rejects shapes that mostly-look-right. Copy values
-verbatim rather than inventing alternatives from memory.
+verbatim rather than inventing alternatives from memory. Dogfood
+observation (2026-04-28 go-humanize): the security analyst
+hallucinated `methodology_trace: [{step, action}]` (an array of
+step records) where the schema requires
+`MethodologyCatalog{source, notes, patterns[]}`; iterated through
+validator errors to recover.
+
+**`analyst_id` is locked. Do NOT abbreviate.**
+
+The canonical value for the security role is exactly
+`signatory-security-v1`. Common drift: `signatory-security`
+(missing `-v1`), `security-analyst`, bare `security`. The
+validator accepts any non-empty string, but the
+analysis-session rollup matches against `expected_analysts` and
+reports non-canonical values as "unexpected" — making the
+substantive output invisible to the rollup query. Copy the full
+`signatory-security-v1` string verbatim into
+`attribution.analyst_id`.
 
 **Enum values (match exactly):**
 
@@ -201,8 +218,50 @@ verbatim rather than inventing alternatives from memory.
 - `methodology_trace` is optional — OMIT the field if you have no
   patterns. `[]` (wrong type — expected object) and
   `{"patterns": []}` (missing required `source`) are both rejected.
-  If you have patterns: `{"source": {"analyst_id": "...",
-  "model": "...", "invoked_at": "..."}, "patterns": [...]}`.
+  Complete shape (every field shown is required for a non-empty
+  trace; copy this skeleton if you have patterns to declare):
+
+  ```json
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "signatory-security-v1",
+      "model": "<your model>",
+      "invoked_at": "<RFC3339 timestamp>"
+    },
+    "notes": "optional analyst commentary about the catalog",
+    "patterns": [
+      {
+        "id": "P001",
+        "signal_group": "hygiene",
+        "description": "shell invocations that interpolate user input without quoting",
+        "collector_hint": {
+          "grep_precision": "high",
+          "reasoning_depth": "one_hop",
+          "miss_mode": "false_negative_heavy"
+        }
+      }
+    ]
+  }
+  ```
+
+  `signal_group` is free-form but the canonical values are
+  `vitality`, `governance`, `publication`, `hygiene`,
+  `criticality`. `collector_hint.grep_precision` is
+  `high|narrows|useless`. `collector_hint.reasoning_depth` is
+  `none|one_hop|multi_hop`. `collector_hint.miss_mode` is
+  optional; when present it's
+  `balanced|false_positive_heavy|false_negative_heavy`.
+
+**Common alt-shapes that fail validation** (these look plausible
+but the validator rejects):
+
+- `methodology_trace: [{step, action}]` — methodology is an
+  object with `{source, patterns}`, not an array of step records.
+- `citations: ["src/foo.ext:12"]` — citations are objects, not
+  strings. Use `{"path": "src/foo.ext", "line_start": 12}`.
+- `severity: "high"` — severity is `{default: "high"}`.
+- `attribution.analyst_id: "security"` — see callout above;
+  must be `signatory-security-v1`.
 
 ### Ingesting via signatory_ingest_analysis
 

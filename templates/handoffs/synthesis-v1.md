@@ -278,6 +278,49 @@ simplify the shape to get past validation — the required fields
 (`proposed_posture.tier`, `proposed_posture.rationale_summary`,
 `reasoning`, `summary`) are load-bearing.
 
+### Schema precision — validator traps
+
+Dogfood observation (2026-04-28 go-humanize): the synthesist
+hallucinated alt-shapes that look plausible but fail validation.
+Copy the example above verbatim; use these notes as a
+sanity-check before ingest.
+
+**`analyst_id` is locked. Do NOT abbreviate.**
+
+The canonical value for the synthesis role is exactly
+`signatory-synthesis-v1`. Common drift: `signatory-synthesis`
+(missing `-v1`), `synthesis`, `synthesist`. The validator accepts
+any non-empty string, but the analysis-session rollup matches
+against `expected_analysts` and reports non-canonical values as
+"unexpected" — making the substantive output invisible to the
+rollup query. Copy the full `signatory-synthesis-v1` string
+verbatim into `attribution.analyst_id`.
+
+**Common alt-shapes that fail validation** (these are not in the
+schema; the validator rejects):
+
+- `overall_posture: "trusted-for-now"` — there is no
+  `overall_posture` field. Use
+  `synthesis_supplement.proposed_posture.tier`.
+- `aggregate_severity: ...` — synthesis outputs do not carry a
+  severity field. Severity belongs on analyst conclusions
+  (Layer 2); synthesis is Layer 3 and reasons about the set of
+  conclusions, not a synthesized severity.
+- `key_findings: [...]` — there is no `key_findings` field. The
+  schema's pointer-list back to specific analyst conclusions is
+  `synthesis_supplement.key_conclusion_refs`, where each entry
+  is `{output_id, conclusion_local_id, weight,
+  forgery_resistance, relevance_note?}`.
+- `findings: [...]` or `conclusions: [...]` on synthesis output —
+  synthesis does not produce new conclusions. Reasoning
+  references existing analyst F-IDs; the conclusions list stays
+  empty.
+
+**`tier` is locked.** One of: `vetted-frozen`, `trusted-for-now`,
+`rejected`, `unknown-provenance`, `unexamined`. Do not invent
+tier values — the validator rejects e.g., `cautious-trust` or
+`under-review`.
+
 ## Stop conditions
 
 Stop and report rather than producing a weak synthesis when:

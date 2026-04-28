@@ -263,9 +263,22 @@ signing are based on GitHub API verification flags only.
 
 The validator rejects shapes that mostly-look-right. Copy values
 verbatim rather than inventing alternatives from memory. Dogfood
-observation (2026-04-23 gin run): the provenance analyst iterated
-four times to converge on valid JSON — every retry was on one of
-these traps.
+observation (2026-04-23 gin, 2026-04-28 go-humanize): the
+provenance analyst iterated four-plus times to converge on valid
+JSON — every retry was on one of these traps.
+
+**`analyst_id` is locked. Do NOT abbreviate.**
+
+The canonical value for the provenance role is exactly
+`signatory-provenance-v1`. Common drift the dogfood store has
+captured: `signatory-provenance` (missing `-v1`),
+`provenance-analyst`, bare `provenance`. The validator accepts
+any non-empty string here, but the analysis-session rollup
+matches against the `expected_analysts` list and reports
+non-canonical values as "unexpected" — making the substantive
+output invisible to the rollup query. Copy the full
+`signatory-provenance-v1` string verbatim into
+`attribution.analyst_id`.
 
 **Enum values (match exactly):**
 
@@ -291,8 +304,50 @@ these traps.
 - `methodology_trace` is optional — OMIT the field if you have no
   patterns. `[]` (wrong type — expected object) and
   `{"patterns": []}` (missing required `source`) are both rejected.
-  If you have patterns: `{"source": {"analyst_id": "...",
-  "model": "...", "invoked_at": "..."}, "patterns": [...]}`.
+  Complete shape (every field shown is required for a non-empty
+  trace; copy this skeleton if you have patterns to declare):
+
+  ```json
+  "methodology_trace": {
+    "source": {
+      "analyst_id": "signatory-provenance-v1",
+      "model": "<your model>",
+      "invoked_at": "<RFC3339 timestamp>"
+    },
+    "notes": "optional analyst commentary about the catalog",
+    "patterns": [
+      {
+        "id": "P001",
+        "signal_group": "publication",
+        "description": "Whether the latest tag is a signed annotated tag (verified GPG signature)",
+        "collector_hint": {
+          "grep_precision": "high",
+          "reasoning_depth": "none",
+          "miss_mode": "false_negative_heavy"
+        }
+      }
+    ]
+  }
+  ```
+
+  `signal_group` is free-form but the canonical values are
+  `vitality`, `governance`, `publication`, `hygiene`,
+  `criticality`. `collector_hint.grep_precision` is
+  `high|narrows|useless`. `collector_hint.reasoning_depth` is
+  `none|one_hop|multi_hop`. `collector_hint.miss_mode` is
+  optional; when present it's
+  `balanced|false_positive_heavy|false_negative_heavy`.
+
+**Common alt-shapes that fail validation** (paste as-is at your
+own risk; these all look plausible but the validator rejects):
+
+- `methodology_trace: [{step, action}]` — methodology is an
+  object with `{source, patterns}`, not an array of step records.
+- `citations: ["src/main.go:12"]` — citations are objects, not
+  strings. Use `{"path": "src/main.go", "line_start": 12}`.
+- `severity: "high"` — severity is `{default: "high"}`.
+- `attribution.analyst_id: "provenance"` — see callout above;
+  must be `signatory-provenance-v1`.
 
 ### Ingesting via signatory_ingest_analysis
 
