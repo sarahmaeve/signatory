@@ -281,6 +281,160 @@ require github.com/alecthomas/kong v1.15.0
 		"TotalPostures counts every posture on the entity regardless of version")
 }
 
+// TestRun_VersionedEntityFallback covers the testify-class M1
+// violation surfaced by 2026-04-27 dogfood: store has the entity at a
+// versioned URI (e.g. `repo:github/stretchr/testify@v1.11.1`), survey
+// passes the unversioned base URI (the gomod parser's output), and
+// the exact-match lookup misses. LookupEntity's versioned-base-scan
+// fallback must turn this into a hit so survey reports the entity's
+// trust state instead of `not-in-store`.
+//
+// Revert proof: replace the LookupEntity call in resolveDep with a
+// direct FindEntityByURI; this test fails because the M1-violation
+// entity is invisible.
+func TestRun_VersionedEntityFallback(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/m1-fallback
+
+go 1.25.1
+
+require github.com/stretchr/testify v1.11.1
+`)
+
+	s := openTestStore(t)
+	// Entity row sits at the versioned URI (M1 violation). Posture is
+	// attached so the row counts as "resolved" for the user.
+	e := seedEntity(t, s, "repo:github/stretchr/testify@v1.11.1")
+	seedPosture(t, s, e.ID, "v1.11.1", profile.PostureTrustedForNow,
+		"vetted at this version")
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierTrustedForNow, d.Tier,
+		"the @V entity must be discoverable from a base-URI lookup; otherwise the row is invisible to survey")
+}
+
+// TestRun_VanityGoPathFallback covers entry 3 for golang.org/x/mod:
+// signal-collection pipelines vanity-resolve the import path at
+// ingest time and store the entity at `repo:github/golang/Y`, but
+// gomod's parser produces the import-path form `pkg:go/golang.org/x/Y`.
+// LookupEntity's alternate-walk must bridge those forms so survey
+// finds the entity regardless of which writer recorded it.
+func TestRun_VanityGoPathFallback(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/vanity-fallback
+
+go 1.25.1
+
+require golang.org/x/mod v0.35.0
+`)
+
+	s := openTestStore(t)
+	// Store has the vanity-resolved github form; survey will look up
+	// the import-path form and must reach this row via alternates.
+	e := seedEntity(t, s, "repo:github/golang/mod")
+	seedPosture(t, s, e.ID, "v0.35.0", profile.PostureTrustedForNow,
+		"vanity-resolved by signal pipeline")
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierTrustedForNow, d.Tier,
+		"vanity-resolved github entity must be reachable from the import-path form survey passes")
+}
+
+// TestRun_NoVersionPosture_PromotedAsVerdict — pinned v1.15.0 and
+// the store has a single posture with an empty Version field. A
+// no-version posture is a global verdict that covers all versions
+// (see the trust-policy doc: "version==” is the unconstrained-
+// version posture, applies whenever no exact match exists"), so
+// survey must report its tier directly rather than falling
+// through to "unexamined" with an OtherVersions parenthetical.
+//
+// Surfaced by 2026-04-27 dogfood: kong rendered as "[?]
+// unexamined ( trusted-for-now; 1 posture on record)" — both
+// checks were running, the version-matched check won the tier
+// slot, and the any-posture check populated the parenthetical.
+// The result was a contradictory two-faced row that undermines
+// trust in the survey output.
+//
+// Revert proof: remove the no-version-posture branch in
+// resolveDep; this test fails because d.Tier would be
+// TierUnexamined and d.OtherVersions would be non-nil.
+func TestRun_NoVersionPosture_PromotedAsVerdict(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/no-version-posture
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:github/alecthomas/kong")
+	seedPosture(t, s, e.ID, "", profile.PostureTrustedForNow,
+		"broad endorsement covers all versions")
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierTrustedForNow, d.Tier,
+		"no-version posture covers all versions; tier must reflect it, not 'unexamined'")
+	assert.Equal(t, "", d.PostureVersion,
+		"PostureVersion mirrors the matched posture's Version field — empty for the no-version case")
+	assert.Contains(t, d.PostureRationale, "broad endorsement",
+		"rationale from the no-version posture must surface so renderers can show 'why'")
+	assert.Nil(t, d.OtherVersions,
+		"a matched no-version posture is the verdict, not 'another version'; surfacing OtherVersions reproduces the dogfood contradiction")
+
+	// NeedsReview must NOT include this entity — the verdict is
+	// resolved (trusted-for-now), not pending review.
+	assert.Empty(t, r.Summary.NeedsReview,
+		"resolved-tier dep must not appear in NeedsReview")
+}
+
+// TestRun_NoVersionPosture_VersionedMatchStillWins — when the store
+// has BOTH a no-version posture AND a version-specific posture for
+// the queried version, the version-specific posture wins. The
+// no-version branch is the fallback, not the override.
+func TestRun_NoVersionPosture_VersionedMatchStillWins(t *testing.T) {
+	t.Parallel()
+
+	path := writeGoMod(t, `module github.com/example/both-postures
+
+go 1.25.1
+
+require github.com/alecthomas/kong v1.15.0
+`)
+
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:github/alecthomas/kong")
+	seedPosture(t, s, e.ID, "", profile.PostureTrustedForNow,
+		"broad endorsement (no version)")
+	seedPosture(t, s, e.ID, "v1.15.0", profile.PostureVettedFrozen,
+		"deep review of this exact version")
+
+	r, err := Run(context.Background(), s, path)
+	require.NoError(t, err)
+
+	require.Len(t, r.Deps, 1)
+	d := r.Deps[0]
+	assert.Equal(t, TierVettedFrozen, d.Tier,
+		"version-specific posture must beat the no-version fallback when both are present")
+	assert.Equal(t, "v1.15.0", d.PostureVersion)
+	assert.Contains(t, d.PostureRationale, "deep review")
+}
+
 // TestRun_OtherVersions_NilWhenNoPostures covers the baseline:
 // an entity in the store with NO postures resolves to
 // TierUnexamined with OtherVersions == nil. Distinct from the
@@ -781,7 +935,6 @@ func TestRun_PyProjectTOML_Poetry_Hybrid_SmokeFixture(t *testing.T) {
 func TestParseGraph_PyPIReturnsGraphUnavailable(t *testing.T) {
 	t.Parallel()
 	for _, base := range []string{"requirements.txt", "pyproject.toml", "setup.py"} {
-		base := base
 		t.Run(base, func(t *testing.T) {
 			t.Parallel()
 			_, err := parseGraph(context.Background(), filepath.Join("/some/dir", base))

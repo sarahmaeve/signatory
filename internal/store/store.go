@@ -14,6 +14,10 @@ type Store interface {
 	// Entity operations
 	GetEntity(ctx context.Context, id string) (*profile.Entity, error)
 	FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error)
+	// FindEntityByVersionedBaseURI returns any entity whose canonical_uri
+	// matches `baseURI@<something>`. Lookup-side fallback for pre-Plan-A
+	// versioned-entity rows; see SQLite implementation for ordering rules.
+	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
 	PutEntity(ctx context.Context, entity *profile.Entity) error
 
 	// Signal operations (append-only)

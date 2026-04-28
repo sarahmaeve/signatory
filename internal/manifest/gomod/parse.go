@@ -23,6 +23,7 @@ import (
 	"golang.org/x/mod/modfile"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
+	"github.com/sarahmaeve/signatory/internal/profile"
 )
 
 // Parse reads the go.mod at path and returns ProjectInfo + Deps.
@@ -131,6 +132,7 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 // canonical URI.
 //
 //	github.com/owner/repo        → repo:github/owner/repo
+//	github.com/Owner/Repo        → repo:github/owner/repo    (case-folded)
 //	github.com/owner/repo/sub/x  → repo:github/owner/repo    (strip subpackage)
 //	gopkg.in/yaml.v3             → pkg:go/gopkg.in/yaml.v3
 //	modernc.org/sqlite           → pkg:go/modernc.org/sqlite
@@ -140,6 +142,13 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 // like "github.com/foo/bar/subdir" but the repository is
 // "github.com/foo/bar". The canonical entity is the repo, not
 // the subdirectory.
+//
+// Case folding for GitHub paths: GitHub treats owner/name as
+// case-insensitive at the API and clone layer, so equivalent
+// references (BurntSushi/toml, burntsushi/toml, BURNTSUSHI/TOML)
+// must collapse to one canonical URI. Delegated to
+// profile.CanonicalRepoURI to keep the canonical form in one
+// place — see its doc comment for the underlying invariant.
 //
 // Empty input returns empty output; the caller decides how to
 // handle that (survey will surface an unanalyzable dep).
@@ -151,7 +160,7 @@ func canonicalizeGoImportPath(importPath string) string {
 	if strings.HasPrefix(importPath, githubPrefix) {
 		parts := strings.SplitN(importPath[len(githubPrefix):], "/", 3)
 		if len(parts) >= 2 {
-			return "repo:github/" + parts[0] + "/" + parts[1]
+			return profile.CanonicalRepoURI("github", parts[0], parts[1])
 		}
 		// Malformed: "github.com/" with no owner. Fall through to
 		// the pkg:go/ form so the raw input is preserved.
@@ -283,8 +292,8 @@ func splitModulePathVersion(s string) (canonical string, hasVersion bool) {
 	if s == "" {
 		return "", false
 	}
-	if at := strings.IndexByte(s, '@'); at >= 0 {
-		return canonicalizeGoImportPath(s[:at]), true
+	if path, _, ok := strings.Cut(s, "@"); ok {
+		return canonicalizeGoImportPath(path), true
 	}
 	return canonicalizeGoImportPath(s), false
 }

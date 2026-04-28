@@ -151,6 +151,73 @@ func TestFindEntityByURI_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
+// TestFindEntityByVersionedBaseURI covers the lookup-side fallback
+// for the testify-class M1 violation: caller passes a base URI but
+// the store row exists at <base>@<version>. The exact-match
+// FindEntityByURI misses; this scan finds any versioned-suffix
+// match so callers can still surface analyses/postures.
+//
+// Returns ErrNotFound when no <base>@* row exists. Returns the
+// lexicographically-first match when multiple do — deterministic
+// for testing without a "most populated" tiebreaker scan that
+// would cost an extra round-trip.
+//
+// The scan must NOT match the base URI itself; that's a separate
+// case handled by FindEntityByURI. Distinguishing here lets the
+// helper layer (LookupEntity) cleanly try base-then-versioned in
+// that order.
+func TestFindEntityByVersionedBaseURI(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Seed three entity shapes:
+	//   - One bare base URI (no @V) — must NOT be returned.
+	//   - One @V entity where the base URI does not exist as its own row.
+	//   - One base URI WITH multiple @V siblings — exercise the
+	//     deterministic ordering.
+	require.NoError(t, s.PutEntity(ctx, testEntity("ent-bare", "repo:github/bare-org/bare-repo", "bare-repo", now)))
+	require.NoError(t, s.PutEntity(ctx, testEntity("ent-testify", "repo:github/stretchr/testify@v1.11.1", "testify", now)))
+	require.NoError(t, s.PutEntity(ctx, testEntity("ent-multi-1", "pkg:npm/X@1.0.0", "X", now)))
+	require.NoError(t, s.PutEntity(ctx, testEntity("ent-multi-2", "pkg:npm/X@2.0.0", "X", now)))
+
+	t.Run("returns the @V entity when base alone has no row", func(t *testing.T) {
+		got, err := s.FindEntityByVersionedBaseURI(ctx, "repo:github/stretchr/testify")
+		require.NoError(t, err)
+		assert.Equal(t, "ent-testify", got.ID,
+			"scan must surface the version-suffixed row when the base URI has no own row")
+	})
+
+	t.Run("does NOT match the bare base URI itself", func(t *testing.T) {
+		_, err := s.FindEntityByVersionedBaseURI(ctx, "repo:github/bare-org/bare-repo")
+		assert.ErrorIs(t, err, ErrNotFound,
+			"a bare base URI without @V siblings must surface as NotFound; the scan is for versioned alternates only")
+	})
+
+	t.Run("returns NotFound when no entity matches the base", func(t *testing.T) {
+		_, err := s.FindEntityByVersionedBaseURI(ctx, "repo:github/never/seen")
+		assert.ErrorIs(t, err, ErrNotFound)
+	})
+
+	t.Run("multiple @V siblings — first lexicographic wins", func(t *testing.T) {
+		got, err := s.FindEntityByVersionedBaseURI(ctx, "pkg:npm/X")
+		require.NoError(t, err)
+		// Both ent-multi-1 (1.0.0) and ent-multi-2 (2.0.0) match; the
+		// lexicographic-first canonical_uri (`pkg:npm/X@1.0.0`) wins.
+		assert.Equal(t, "ent-multi-1", got.ID)
+		assert.Equal(t, "pkg:npm/X@1.0.0", got.CanonicalURI)
+	})
+
+	t.Run("base URI with embedded @ in path-prefix is not over-matched", func(t *testing.T) {
+		// Guards against a naive SQL LIKE 'baseURI%' implementation
+		// that would also match URIs whose canonical_uri continues
+		// with non-@ characters. Required: only @V suffixes match.
+		_, err := s.FindEntityByVersionedBaseURI(ctx, "repo:github/stretchr/testif")
+		assert.ErrorIs(t, err, ErrNotFound,
+			"prefix-only matches without an @ separator must NOT count — would route lookups to unrelated entities sharing a URI prefix")
+	})
+}
+
 // TestFindEntityByURI_UniquenessEnforced verifies the unique index on
 // canonical_uri prevents two entities from sharing the same URI.
 func TestFindEntityByURI_UniquenessEnforced(t *testing.T) {

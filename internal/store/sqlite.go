@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // SQL driver registration.
@@ -185,6 +186,38 @@ func (s *SQLite) GetEntity(ctx context.Context, id string) (*profile.Entity, err
 func (s *SQLite) FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+entityColumns+` FROM entities WHERE canonical_uri = ?`, canonicalURI)
+	return scanEntity(row)
+}
+
+// FindEntityByVersionedBaseURI returns any entity whose canonical_uri
+// equals baseURI@<something>. It does NOT match the bare baseURI itself
+// — that's a separate case for FindEntityByURI. Used as a lookup-side
+// fallback for entities recorded under pre-Plan-A versioned URIs (e.g.
+// the testify M1 violation: caller passes `repo:github/stretchr/testify`
+// but the row lives at `repo:github/stretchr/testify@v1.11.1`).
+//
+// When multiple @V siblings match the same base, the lexicographically-
+// first canonical_uri wins. Deterministic and cheap; callers wanting
+// "the most populated" sibling pay a separate per-entity probe rather
+// than this scan doing a JOIN. Returns ErrNotFound when no match.
+//
+// SQL guards over-matching: the LIKE pattern requires the literal `@`
+// separator before any version characters, so a base URI like
+// `repo:github/foo/bar` does NOT match `repo:github/foo/barX` (which
+// would belong to a different entity). The escape clause ensures `@`
+// in the pattern is the literal `@` byte even if some future input
+// passed a string already containing pattern metacharacters.
+func (s *SQLite) FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error) {
+	// `\` escape on `_` and `%` so a base URI containing those bytes
+	// (defensive — none of our schemes do today, but a future scheme
+	// might) lookups remain literal.
+	escaper := strings.NewReplacer(`\`, `\\`, `_`, `\_`, `%`, `\%`)
+	pattern := escaper.Replace(baseURI) + `@%`
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+entityColumns+` FROM entities `+
+			`WHERE canonical_uri LIKE ? ESCAPE '\' `+
+			`ORDER BY canonical_uri `+
+			`LIMIT 1`, pattern)
 	return scanEntity(row)
 }
 

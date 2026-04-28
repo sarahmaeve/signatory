@@ -217,7 +217,13 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) (DepResult, 
 		return r, nil
 	}
 
-	entity, err := s.FindEntityByURI(ctx, d.CanonicalURI)
+	// LookupEntity walks the canonical-URI alternates (cross-scheme
+	// github, pkg:go ↔ pkg:golang, golang.org/x → repo:github/golang)
+	// and falls back to a versioned-base scan when the input is
+	// unversioned. Together these close the URI-fragmentation lookup
+	// gaps surfaced by 2026-04-27 dogfood (testify M1 leftover,
+	// golang.org/x/mod vanity-resolution mismatch).
+	entity, err := store.LookupEntity(ctx, s, d.CanonicalURI)
 	if errors.Is(err, store.ErrNotFound) {
 		r.Tier = TierNotInStore
 		return r, nil
@@ -257,11 +263,31 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) (DepResult, 
 		}
 	}
 
-	// Postures exist but none for this version. Return unexamined
-	// and carry an OtherVersionsSummary so renderers can surface
-	// the most-recent verdict on a different version plus a count
-	// of all postures on record. Visibility only — no
-	// recommendation.
+	// No exact-version match. A no-version posture (Version == "")
+	// is the unconstrained-version verdict — it covers all versions
+	// including this one. Promote it as the row's primary tier.
+	//
+	// Without this branch, the loop above misses (since
+	// p.Version == "" never equals a concrete d.Version like
+	// "v1.15.0") and we'd fall through to the OtherVersions
+	// summary, producing a contradictory "[?] unexamined
+	// (trusted-for-now; 1 posture on record)" row — the dogfood-
+	// surfaced bug from the 2026-04-27 walk against signatory's own
+	// go.mod.
+	for _, p := range postures {
+		if p.Version == "" {
+			r.Tier = postureTierToSurveyTier(p.Tier)
+			r.PostureVersion = p.Version
+			r.PostureRationale = p.Rationale
+			return r, nil
+		}
+	}
+
+	// Postures exist but only for OTHER specific versions (no
+	// no-version fallback either). Return unexamined and carry an
+	// OtherVersionsSummary so renderers can surface the most-recent
+	// verdict on a different version plus a count of all postures
+	// on record. Visibility only — no recommendation.
 	r.Tier = TierUnexamined
 	r.OtherVersions = summarizeOtherVersionPostures(postures)
 	return r, nil

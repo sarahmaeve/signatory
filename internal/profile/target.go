@@ -213,6 +213,42 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		}
 	}
 
+	// Discriminate Go vanity paths from github shorthand BEFORE falling
+	// through to NormalizeGitHubRepoInput. validPathSegment accepts dots
+	// in owner names, so without this branch "modernc.org/sqlite" would
+	// satisfy NormalizeGitHubRepoInput as owner=modernc.org, name=sqlite
+	// and produce repo:github/modernc.org/sqlite — the misclassification
+	// dogfood entry 1 surfaced.
+	//
+	// Discriminator: first path segment contains a `.`. GitHub
+	// usernames/orgs cannot contain `.` (per github.com's name rules —
+	// alphanumeric and hyphens only), so a dot in the first segment is
+	// unambiguous evidence of a vanity host. The "github.com/" prefix
+	// case is intentionally NOT excluded here — NormalizeGitHubRepoInput
+	// strips that prefix above any segment scanning, so by the time we
+	// reach this branch any github.com/ prefix has already been removed,
+	// leaving owner/repo where owner is bare.
+	//
+	// Output mirrors what the gomod parser produces for the same import
+	// path (pkg:go/<full-path>), keeping ResolveTarget and the parser in
+	// agreement on canonical form. Vanity-resolution to a github form
+	// (e.g. golang.org/x/Y → repo:github/golang/Y) is a lookup-side
+	// alternate handled elsewhere — see LookupEntity / AlternateURIs.
+	if firstSeg, _, ok := strings.Cut(bareInput, "/"); ok && firstSeg != "" &&
+		!strings.HasPrefix(bareInput, "github.com/") &&
+		!strings.HasPrefix(bareInput, "git@") &&
+		strings.ContainsRune(firstSeg, '.') {
+		canonicalURI := "pkg:go/" + bareInput
+		if requestedVersion != "" {
+			canonicalURI += "@" + requestedVersion
+		}
+		// Delegate to resolveCanonicalURI so the ShortName / Ecosystem /
+		// Version fields are set the same way they are for direct
+		// pkg:go/ inputs. Drift between the two paths is the bug class
+		// this consolidation prevents.
+		return resolveCanonicalURI(canonicalURI)
+	}
+
 	// Fall through to GitHub-shorthand parsing. Any form
 	// NormalizeGitHubRepoInput accepts gets promoted to a
 	// canonical repo: URI.
@@ -440,9 +476,7 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 	// Split on the first ':' to separate scheme from body. We
 	// know the URI starts with one of validURISchemes, so the
 	// colon exists and the scheme is well-known.
-	colon := strings.IndexByte(uri, ':')
-	scheme := uri[:colon]
-	body := uri[colon+1:]
+	scheme, body, _ := strings.Cut(uri, ":")
 	parts := strings.Split(body, "/")
 
 	// Every scheme needs at least one body segment. Empty body
@@ -474,9 +508,7 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		// the same shape as the pkg: case. Two `@` are not
 		// permitted (nested separators are ambiguous).
 		lastSeg := parts[len(parts)-1]
-		if atIdx := strings.IndexByte(lastSeg, '@'); atIdx >= 0 {
-			name := lastSeg[:atIdx]
-			version := lastSeg[atIdx+1:]
+		if name, version, ok := strings.Cut(lastSeg, "@"); ok {
 			if name == "" {
 				return nil, fmt.Errorf("repo URI %q: empty name before '@version'", uri)
 			}
@@ -490,6 +522,21 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 			out.Version = version
 		} else {
 			out.ShortName = lastSeg
+		}
+		// Case fold platform/owner/name to the canonical form
+		// CanonicalRepoURI produces. Without this, a caller passing
+		// `repo:github/BurntSushi/toml` (already-canonical-shaped but
+		// not yet case-folded) would survive validation unchanged
+		// and then fragment against entities the constructor created
+		// at the lowercased URI. The fold also normalizes
+		// `repo:GITHUB/...` → `repo:github/...` so the PlatformGitHub
+		// equality check below catches uppercase-platform inputs.
+		out.Platform = strings.ToLower(out.Platform)
+		out.Owner = strings.ToLower(out.Owner)
+		out.ShortName = strings.ToLower(out.ShortName)
+		out.CanonicalURI = CanonicalRepoURI(out.Platform, out.Owner, out.ShortName)
+		if out.Version != "" {
+			out.CanonicalURI += "@" + out.Version
 		}
 		if out.Platform == PlatformGitHub {
 			out.CloneURL = "https://github.com/" + out.Owner + "/" + out.ShortName
@@ -515,9 +562,7 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		// in its OWN segment and never collides with the version @.
 		lastIdx := len(parts) - 1
 		lastSeg := parts[lastIdx]
-		if atIdx := strings.IndexByte(lastSeg, '@'); atIdx >= 0 {
-			name := lastSeg[:atIdx]
-			version := lastSeg[atIdx+1:]
+		if name, version, ok := strings.Cut(lastSeg, "@"); ok {
 			if name == "" {
 				return nil, fmt.Errorf("pkg URI %q: empty name before '@version'", uri)
 			}
@@ -557,20 +602,37 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("%s URI %q: expected platform/name, got %d segment(s)", scheme, uri, len(parts))
 		}
-		out.Platform = parts[0]
-		out.ShortName = parts[len(parts)-1]
+		out.Platform = strings.ToLower(parts[0])
+		out.ShortName = strings.ToLower(parts[len(parts)-1])
+		// Rebuild CanonicalURI from the case-folded components so
+		// already-canonical-shaped inputs match what
+		// CanonicalIdentityURI / CanonicalOrgURI produce. See the
+		// repo case above for the full rationale.
+		if scheme == "identity" {
+			out.CanonicalURI = CanonicalIdentityURI(out.Platform, out.ShortName)
+		} else {
+			out.CanonicalURI = CanonicalOrgURI(out.Platform, out.ShortName)
+		}
 
 	case "patch":
 		// patch:<platform>/<owner>/<repo>/<id>
 		if len(parts) < 4 {
 			return nil, fmt.Errorf("patch URI %q: expected platform/owner/repo/id, got %d segment(s)", uri, len(parts))
 		}
-		out.Platform = parts[0]
-		out.Owner = parts[1]
+		// Case fold platform/owner/repo to match CanonicalPatchURI.
+		// The patch id (parts[3]) is preserved verbatim — patch ids
+		// are opaque tokens (PR/issue numbers on github, MR numbers
+		// on gitlab, etc.) and CanonicalPatchURI does not lowercase
+		// them.
+		out.Platform = strings.ToLower(parts[0])
+		out.Owner = strings.ToLower(parts[1])
+		repo := strings.ToLower(parts[2])
+		id := parts[3]
 		// ShortName renders as "repo#id" for human display —
 		// preserves both the repo and the patch number in one
 		// token without requiring callers to hand-compose.
-		out.ShortName = parts[2] + "#" + parts[3]
+		out.ShortName = repo + "#" + id
+		out.CanonicalURI = CanonicalPatchURI(out.Platform, out.Owner, repo, id)
 
 	default:
 		// Scheme is in validURISchemes but this switch doesn't

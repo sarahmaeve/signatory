@@ -30,13 +30,36 @@ type fakeStore struct {
 	severityByID map[string]SeverityCounts
 	relatedURIs  []string
 	relatedErr   error
+
+	// entityByURI / entityByVersionedBase let tests exercise the
+	// LookupEntity walk (alternate-URI fallback, versioned-base scan)
+	// without conflating "happy path" entity-driven tests with the
+	// route-each-URI-separately behavior. When non-nil, these maps
+	// override the entity / entityErr single-value fields.
+	entityByURI          map[string]*profile.Entity
+	entityByVersionedURI map[string]*profile.Entity
 }
 
-func (f *fakeStore) FindEntityByURI(_ context.Context, _ string) (*profile.Entity, error) {
+func (f *fakeStore) FindEntityByURI(_ context.Context, canonicalURI string) (*profile.Entity, error) {
+	if f.entityByURI != nil {
+		if e, ok := f.entityByURI[canonicalURI]; ok {
+			return e, nil
+		}
+		return nil, store.ErrNotFound
+	}
 	if f.entityErr != nil {
 		return nil, f.entityErr
 	}
 	return f.entity, nil
+}
+
+func (f *fakeStore) FindEntityByVersionedBaseURI(_ context.Context, baseURI string) (*profile.Entity, error) {
+	if f.entityByVersionedURI != nil {
+		if e, ok := f.entityByVersionedURI[baseURI]; ok {
+			return e, nil
+		}
+	}
+	return nil, store.ErrNotFound
 }
 func (f *fakeStore) GetPostures(_ context.Context, _ string) ([]profile.Posture, error) {
 	return f.postures, f.posturesErr
@@ -125,11 +148,79 @@ func TestAssemble_FullyPopulated(t *testing.T) {
 func TestAssemble_NotFound(t *testing.T) {
 	t.Parallel()
 
-	f := &fakeStore{entityErr: store.ErrNotFound}
+	// entityByURI present and empty → every FindEntityByURI returns
+	// ErrNotFound. This is more direct than entityErr=ErrNotFound now
+	// that the assembler delegates to LookupEntity, which walks
+	// alternates rather than honoring a single global error.
+	f := &fakeStore{entityByURI: map[string]*profile.Entity{}}
 	_, err := New(f).Assemble(context.Background(), "pkg:npm/ghost")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEntityNotFound)
 	assert.Contains(t, err.Error(), "pkg:npm/ghost")
+}
+
+// TestAssemble_VersionedEntityFallback — caller asks about the
+// unversioned form `repo:github/stretchr/testify`, but the only
+// store row for testify is at `repo:github/stretchr/testify@v1.11.1`
+// (the M1 violation surfaced by 2026-04-27 dogfood). The assembler's
+// LookupEntity delegation must fall through to the versioned-base
+// scan and surface the entity instead of NotFound.
+//
+// Revert proof: replace LookupEntity in Assemble with a direct
+// FindEntityByURI; this test fails because the M1-violation entity
+// is invisible to the unversioned base lookup.
+func TestAssemble_VersionedEntityFallback(t *testing.T) {
+	t.Parallel()
+
+	versioned := &profile.Entity{
+		ID:           "ent-tv",
+		CanonicalURI: "repo:github/stretchr/testify@v1.11.1",
+		Type:         profile.EntityProject,
+		ShortName:    "testify",
+	}
+	f := &fakeStore{
+		// Empty entityByURI ⇒ every exact-match misses.
+		entityByURI: map[string]*profile.Entity{},
+		// Versioned scan returns the testify@v1.11.1 entity for the
+		// base URI lookup.
+		entityByVersionedURI: map[string]*profile.Entity{
+			"repo:github/stretchr/testify": versioned,
+		},
+		// Real store returns ErrNotFound when no burn exists; mirror
+		// that here so the assembler's nil-burn branch fires correctly.
+		burnErr: store.ErrNotFound,
+	}
+
+	s, err := New(f).Assemble(context.Background(), "repo:github/stretchr/testify")
+	require.NoError(t, err, "M1-violation entity must surface via the versioned-base scan")
+	assert.Equal(t, "repo:github/stretchr/testify@v1.11.1", s.CanonicalURI,
+		"summary's CanonicalURI must reflect the entity actually found, not the input URI")
+	assert.Equal(t, "testify", s.ShortName)
+}
+
+// TestAssemble_VanityResolution — caller asks about the import-path
+// form `pkg:go/golang.org/x/mod`, but the store has it at
+// `repo:github/golang/mod` (signal-collection pipelines vanity-
+// resolve at ingest time). Cross-scheme alternate-walk must bridge.
+func TestAssemble_VanityResolution(t *testing.T) {
+	t.Parallel()
+
+	resolved := &profile.Entity{
+		ID:           "ent-mod",
+		CanonicalURI: "repo:github/golang/mod",
+		Type:         profile.EntityProject,
+		ShortName:    "mod",
+	}
+	f := &fakeStore{
+		entityByURI: map[string]*profile.Entity{
+			"repo:github/golang/mod": resolved,
+		},
+		burnErr: store.ErrNotFound,
+	}
+
+	s, err := New(f).Assemble(context.Background(), "pkg:go/golang.org/x/mod")
+	require.NoError(t, err, "vanity-resolved github form must be reachable from import-path lookup")
+	assert.Equal(t, "repo:github/golang/mod", s.CanonicalURI)
 }
 
 // TestAssemble_NoPostureNoBurn covers the common "entity exists

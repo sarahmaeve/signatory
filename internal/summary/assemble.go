@@ -23,6 +23,11 @@ var ErrEntityNotFound = errors.New("no entity matches target")
 // *store.SQLite, which satisfies this interface naturally.
 type AssemblerStore interface {
 	FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error)
+	// FindEntityByVersionedBaseURI lets the Assembler delegate to
+	// store.LookupEntity, which uses it as a final fallback when the
+	// caller passed an unversioned URI but the store row exists only
+	// at <base>@V (the testify-class M1 violation).
+	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
 	GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error)
 	GetBurn(ctx context.Context, entityID string) (*profile.Burn, error)
 	ListAnalystOutputs(ctx context.Context, filter store.AnalystOutputFilter) ([]store.AnalystOutputSummary, error)
@@ -55,23 +60,21 @@ func New(s AssemblerStore) *Assembler {
 func (a *Assembler) Assemble(ctx context.Context, targetURI string) (*Summary, error) {
 	// Plan-A canonicalization: `pkg:npm/X@V` postures live at the
 	// `pkg:npm/X` entity with version column = "V". Split the input
-	// URI so we can both fall back to the unversioned entity when
-	// the versioned one doesn't exist, AND pick the posture row
-	// whose version matches the @V suffix instead of "latest across
+	// URI so the posture-version match below picks the row whose
+	// version column matches the @V suffix instead of "latest across
 	// versions." Matches the posture set/get/unset/accept command
 	// normalization. See design/m6-synthesis-contract.md and
 	// 2026-04-21 dogfood.
 	baseURI, queryVersion := profile.SplitURIVersion(targetURI)
 
-	entity, err := a.Store.FindEntityByURI(ctx, targetURI)
-	if errors.Is(err, store.ErrNotFound) && queryVersion != "" && baseURI != targetURI {
-		// Versioned entity doesn't exist; try the unversioned form
-		// so a @V query can still surface a posture stored under
-		// the canonical unversioned identity. Common when /analyze
-		// was run against unversioned input and no versioned entity
-		// was ever materialized.
-		entity, err = a.Store.FindEntityByURI(ctx, baseURI)
-	}
+	// LookupEntity walks the canonical-URI alternates (cross-scheme
+	// github, pkg:go ↔ pkg:golang, golang.org/x → repo:github/golang)
+	// and falls back to a versioned-base scan as the final resort.
+	// Replaces the prior two-step (versioned → base) ad-hoc fallback
+	// — broader equivalence coverage closes the testify M1 violation
+	// and golang.org/x/mod vanity cases that the narrower fallback
+	// missed. See dogfood-errors entries 1, 2, 3.
+	entity, err := store.LookupEntity(ctx, a.Store, targetURI)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("%w: %q", ErrEntityNotFound, targetURI)

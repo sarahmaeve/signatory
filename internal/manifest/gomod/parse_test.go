@@ -30,6 +30,16 @@ func TestCanonicalizeGoImportPath(t *testing.T) {
 		{"github subpackage strips to repo", "github.com/stretchr/testify/assert", "repo:github/stretchr/testify"},
 		{"github deep subpackage strips to repo", "github.com/foo/bar/baz/qux", "repo:github/foo/bar"},
 
+		// GitHub case folding: owner/name lowercased to match the
+		// canonical form documented at profile.CanonicalRepoURI.
+		// Surfaced by dogfood: BurntSushi/toml in go.mod was producing
+		// repo:github/BurntSushi/toml while the store entity (and all
+		// 4 analyses) lived at repo:github/burntsushi/toml — survey
+		// reported "unexamined" because it hit a stub.
+		{"github mixed-case org", "github.com/BurntSushi/toml", "repo:github/burntsushi/toml"},
+		{"github all-caps", "github.com/FOO/BAR", "repo:github/foo/bar"},
+		{"github mixed-case subpackage", "github.com/BurntSushi/toml/cmd/tomlv", "repo:github/burntsushi/toml"},
+
 		// Vanity paths: preserved verbatim under pkg:go/ scheme.
 		{"vanity gopkg.in", "gopkg.in/yaml.v3", "pkg:go/gopkg.in/yaml.v3"},
 		{"vanity modernc.org", "modernc.org/sqlite", "pkg:go/modernc.org/sqlite"},

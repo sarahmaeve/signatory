@@ -420,6 +420,143 @@ func TestResolveTarget_PatchURI(t *testing.T) {
 		"patch URI should render as repo#id for human display")
 }
 
+// TestResolveTarget_VanityGoPaths pins the contract for non-github
+// Go module paths: ResolveTarget must produce the same pkg:go/...
+// canonical URI the gomod parser produces, not misclassify the
+// import-path's first segment as a github owner.
+//
+// Surfaced by dogfood entry 1: signatory_summary sent
+// "modernc.org/sqlite" through ResolveTarget and got
+// "repo:github/modernc.org/sqlite" — the github-shorthand fall-
+// through accepted "owner/repo"-shaped paths from any host. That's
+// a NotFound for any caller using the MCP surface to ask about a
+// vanity-Go-path entity, since the store rows are written by the
+// gomod parser at pkg:go/<full-path> and have no row at
+// repo:github/<vanity-host>/<name>.
+//
+// Vanity-resolution to a github form (golang.org/x/Y →
+// github.com/golang/Y) is a LOOKUP-side alternate, not a
+// canonicalization rule. Two reasons:
+//
+//  1. Most vanity hosts are terminal (gopkg.in, modernc.org, k8s.io
+//     under most aliases) — the import path IS the identity; there's
+//     no github "true name" to resolve to. Forcing every vanity
+//     through a github transformation only works for the small subset
+//     where it's defined.
+//
+//  2. The gomod parser, the analyst handoff template, and ResolveTarget
+//     must all agree on what canonical form to write. Picking pkg:go/
+//     keeps that agreement in one place; re-resolving live during
+//     parse would require either a hardcoded vanity table (incomplete
+//     by construction) or live HTTP fetches at parse time (rejected
+//     for offline reproducibility).
+//
+// LookupEntity is the surface that walks alternates.
+func TestResolveTarget_VanityGoPaths(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		input   string
+		wantURI string
+	}{
+		{"modernc.org terminal vanity", "modernc.org/sqlite", "pkg:go/modernc.org/sqlite"},
+		{"gopkg.in terminal vanity", "gopkg.in/yaml.v3", "pkg:go/gopkg.in/yaml.v3"},
+		{"golang.org/x organizational vanity (lookup-side resolves to github)", "golang.org/x/mod", "pkg:go/golang.org/x/mod"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.input)
+			require.NoError(t, err, "ResolveTarget(%q) should succeed", tc.input)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI,
+				"vanity Go path must produce the same pkg:go/<path> form the gomod parser produces; mismatched canonicalization fragments lookups across writers")
+		})
+	}
+}
+
+// TestResolveTarget_CanonicalRepoURICaseFolded verifies that when an
+// already-canonical-shaped repo: URI carries mixed-case owner/name
+// segments, ResolveTarget returns the lowercased canonical form —
+// matching what CanonicalRepoURI would have produced if the same
+// input had come in as "owner/name" shorthand.
+//
+// Surfaced by dogfood: a 4-analysis BurntSushi/toml entity at the
+// canonical (lowercase) URI was shadowed by a stub at the mixed-case
+// URI because the analyst-output ingest path used resolveCanonicalURI,
+// which validated mixed case as legal but didn't normalize it. The
+// case-divergence created two entity rows for what the docs at
+// CanonicalRepoURI explicitly say "must collapse to one canonical URI."
+//
+// Covers repo / identity / org / patch — every scheme whose
+// constructor in uri.go lowercases its inputs. (pkg: case handling is
+// ecosystem-specific and tested separately.)
+func TestResolveTarget_CanonicalRepoURICaseFolded(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		input     string
+		wantURI   string
+		wantOwner string
+		wantName  string
+	}{
+		{
+			"repo mixed-case org",
+			"repo:github/BurntSushi/toml",
+			"repo:github/burntsushi/toml",
+			"burntsushi", "toml",
+		},
+		{
+			"repo all-caps",
+			"repo:github/FOO/BAR",
+			"repo:github/foo/bar",
+			"foo", "bar",
+		},
+		{
+			"repo with mixed-case owner and version suffix",
+			"repo:github/BurntSushi/toml@v1.6.0",
+			"repo:github/burntsushi/toml@v1.6.0",
+			"burntsushi", "toml",
+		},
+		{
+			"identity mixed-case user",
+			"identity:github/AlecThomas",
+			"identity:github/alecthomas",
+			"", "alecthomas",
+		},
+		{
+			"org mixed-case",
+			"org:github/Stretchr",
+			"org:github/stretchr",
+			"", "stretchr",
+		},
+		{
+			"patch mixed-case owner and repo",
+			"patch:github/AlecThomas/Kong/593",
+			"patch:github/alecthomas/kong/593",
+			"alecthomas", "kong#593",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.input)
+			require.NoError(t, err, "ResolveTarget(%q) should succeed", tc.input)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI,
+				"CanonicalURI must be lowercased to match the constructors in uri.go")
+			if tc.wantOwner != "" {
+				assert.Equal(t, tc.wantOwner, got.Owner,
+					"Owner field must reflect the canonical (lowercased) form")
+			}
+			assert.Equal(t, tc.wantName, got.ShortName,
+				"ShortName field must reflect the canonical (lowercased) form")
+		})
+	}
+}
+
 func TestResolveTarget_NonGitHubPlatformInRepoURI(t *testing.T) {
 	// Non-github platforms in canonical form must resolve but
 	// carry an empty CloneURL — the CLI hasn't wired up clone for
