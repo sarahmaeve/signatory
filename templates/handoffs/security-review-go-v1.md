@@ -44,6 +44,23 @@ review; it is structured data in the signatory v1 schema.
 
 Previous reports do not corroborate new conclusions — only evidence does. Cite only source code you read, registry data you queried, or git history you inspected. Code comparison with other projects is fine; reading other analysts' conclusions is not — skip `filestore/analysis/` and `design/`.
 
+## Data sourcing — use signatory's cache first
+
+Before reaching for `gh api`, `curl`, `WebFetch` against forge/registry APIs, or other direct upstream calls, check whether signatory has the data cached. The MCP surface returns every signal already collected for the target — contributors, commit history, tags, owner profile, adoption metrics, CI presence, and the language-specific signals each ecosystem collector emits.
+
+Reach for these MCP tools first:
+
+- `signatory_summary target=<X>` — the breadth pass: posture, related identities, analyses-rollup. Always your starting point.
+- `signatory_signals target=<X>` — the cached signal records (every collector's output for this target).
+- `signatory_detail target=<X>` — entity metadata when you need short_name, ecosystem, URL.
+
+Reach for direct upstream APIs (`gh api`, `curl`, `WebFetch`) only when:
+
+1. The signal you need isn't in `signatory_signals` — when this happens, note the gap in your `round_notes` field so a future signal collector can close it. The dogfood-metrics report flags every direct upstream call as a cache-miss candidate; closing those gaps is how signatory's economics improve.
+2. You're verifying a specific claim that needs an independent fetch — e.g., the three-way SHA verification before pinning, which is by-design redundant.
+
+Each direct upstream call costs tokens (you load the response body), wall-clock time (sequential network round-trip), and rate-limit budget. The cache exists to reduce all three.
+
 ## Calibration notes
 
 **Treat severity as how-much-it-matters-to-a-developer-running-this,
