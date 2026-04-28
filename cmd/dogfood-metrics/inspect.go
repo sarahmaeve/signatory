@@ -38,10 +38,13 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 	defer f.Close() //nolint:errcheck
 
 	agg := &inspectAggregated{
-		sessionID:          sessionID,
-		spanNameCounts:     map[string]int{},
-		spanAttrKeysByName: map[string]map[string]int{},
-		resourceAttrKeys:   map[string]int{},
+		sessionID:                sessionID,
+		spanNameCounts:           map[string]int{},
+		spanAttrKeysByName:       map[string]map[string]int{},
+		resourceAttrKeys:         map[string]int{},
+		spansBySessionAcrossFile: map[string]int{},
+		dispatchesInSession:      nil,
+		spansByParentID:          map[string][]inspectChildSpan{},
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -59,6 +62,41 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 				for _, sp := range ss.Spans {
 					agg.totalSpansAllSessions++
 
+					// Trace-correlation pass: count every span by its
+					// session.id (resource OR span level — whichever
+					// has it), regardless of whether it matches the
+					// requested session. Lets the renderer surface the
+					// full session inventory in the file, so the
+					// operator sees what other sessions exist without
+					// running list-sessions separately.
+					spanSessionID := resSessionID
+					if spanSessionID == "" {
+						spanSessionID = stringAttr(sp.Attributes, "session.id")
+					}
+					if spanSessionID != "" {
+						agg.spansBySessionAcrossFile[spanSessionID]++
+					}
+
+					// Trace-correlation pass: index every span by its
+					// parentSpanId so the renderer can report each
+					// dispatch span's children efficiently. spanID
+					// being unique-within-trace, indexing by parentID
+					// across the whole file is the right grain — a
+					// dispatch span in the requested session may have
+					// children that report the same session.id (the
+					// usual case) or a forked session.id (hypothetical
+					// future Task semantics).
+					if sp.ParentSpanID != "" {
+						agg.spansByParentID[sp.ParentSpanID] = append(
+							agg.spansByParentID[sp.ParentSpanID],
+							inspectChildSpan{
+								Name:      sp.Name,
+								SessionID: spanSessionID,
+								TraceID:   sp.TraceID,
+							},
+						)
+					}
+
 					// Match by either resource OR span attribute. The
 					// report's filter today only checks resource;
 					// inspect surfaces both paths so the operator sees
@@ -67,6 +105,20 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 					matchedSpan := !matchedResource && stringAttr(sp.Attributes, "session.id") == sessionID
 					if !matchedResource && !matchedSpan {
 						continue
+					}
+
+					// Within the requested session: capture every
+					// dispatch span (subagent_type set) so the
+					// renderer can report per-dispatch child linkage.
+					if st := stringAttr(sp.Attributes, "subagent_type"); st != "" {
+						agg.dispatchesInSession = append(agg.dispatchesInSession,
+							inspectDispatchSpan{
+								SpanID:       sp.SpanID,
+								SubagentType: st,
+								SessionID:    spanSessionID,
+								TraceID:      sp.TraceID,
+							},
+						)
 					}
 
 					agg.matchingSpans++
@@ -145,6 +197,47 @@ type inspectAggregated struct {
 
 	// Sample span for hands-on inspection.
 	sampleSpan *otlpSpan
+
+	// Trace correlation — populated unconditionally across the file
+	// so the renderer can surface session inventory and per-dispatch
+	// child linkage. The 2026-04-28 dogfood verified that current
+	// Claude Code does NOT fork to a new session.id on Task
+	// dispatch; this aggregation makes that finding (and any future
+	// shape change) visible at a glance instead of requiring custom
+	// trace-file probing.
+	//
+	// spansBySessionAcrossFile counts every span in traces.jsonl by
+	// session.id (resource-level if present, otherwise span-level).
+	// dispatchesInSession lists every claude_code.tool span in the
+	// REQUESTED session that carries a subagent_type attribute.
+	// spansByParentID indexes every span across the file by its
+	// parentSpanId — used by the renderer to walk each dispatch's
+	// children and report session continuity.
+	spansBySessionAcrossFile map[string]int
+	dispatchesInSession      []inspectDispatchSpan
+	spansByParentID          map[string][]inspectChildSpan
+}
+
+// inspectDispatchSpan summarizes one Task-tool span that carried
+// subagent_type — i.e., a subagent dispatch from the requested
+// session. The spanId is the join key the renderer uses against
+// spansByParentID to find the children.
+type inspectDispatchSpan struct {
+	SpanID       string
+	SubagentType string
+	SessionID    string
+	TraceID      string
+}
+
+// inspectChildSpan summarizes one span found via parentSpanId
+// during file traversal. Three fields suffice for the renderer's
+// purposes: name (so it can distinguish an llm_request from a
+// nested tool span), sessionID (so it can report continuity), and
+// traceID (so it can report whether the trace fragmented).
+type inspectChildSpan struct {
+	Name      string
+	SessionID string
+	TraceID   string
 }
 
 // renderInspect emits the markdown diagnosis. Sections in order:
@@ -218,6 +311,8 @@ func renderInspect(w io.Writer, agg *inspectAggregated) error {
 		}
 	}
 
+	renderTraceCorrelation(&b, agg)
+
 	if agg.sampleSpan != nil {
 		b.WriteString("## Sample span (first matching this session)\n\n")
 		fmt.Fprintf(&b, "- name: `%s`\n", agg.sampleSpan.Name)
@@ -245,4 +340,105 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// renderTraceCorrelation emits the "Trace correlation" section:
+//
+//   - All session.ids present in the file with their span counts —
+//     so the operator can see every session at once and pick the
+//     right one without running list-sessions separately.
+//   - Per-dispatch child linkage table — for each subagent_type
+//     dispatch in the requested session, report child-span count
+//     plus whether children share the parent's session.id (the
+//     "session continuity" classification) and traceId. The 2026-
+//     04-28 verification showed children do share parent session.id
+//     in current Claude Code; if Task semantics ever fork, the
+//     "forked-session" rows will surface immediately.
+//
+// Skipped entirely when the file has no parentSpanId references
+// AND no dispatches in the requested session — there's nothing to
+// correlate, and an empty section would just be noise.
+func renderTraceCorrelation(b *strings.Builder, agg *inspectAggregated) {
+	if len(agg.spansBySessionAcrossFile) == 0 && len(agg.dispatchesInSession) == 0 {
+		return
+	}
+
+	b.WriteString("## Trace correlation\n\n")
+	b.WriteString("All session.ids in the trace file plus per-dispatch child\n")
+	b.WriteString("linkage. \"Same-session\" children stay in the parent\n")
+	b.WriteString("session.id (current Claude Code shape — Task does not\n")
+	b.WriteString("fork); \"forked\" rows would indicate a Task semantics\n")
+	b.WriteString("change worth investigating.\n\n")
+
+	if len(agg.spansBySessionAcrossFile) > 0 {
+		b.WriteString("### Sessions in this trace file\n\n")
+		b.WriteString("| Session | Spans |\n|---|---|\n")
+		for _, sid := range sortedKeys(agg.spansBySessionAcrossFile) {
+			fmt.Fprintf(b, "| %s | %d |\n", sid, agg.spansBySessionAcrossFile[sid])
+		}
+		b.WriteString("\n")
+	}
+
+	if len(agg.dispatchesInSession) > 0 {
+		b.WriteString("### Subagent dispatches (this session)\n\n")
+		b.WriteString("| Dispatch span | Subagent type | Children | Session continuity | Trace continuity |\n")
+		b.WriteString("|---|---|---|---|---|\n")
+		for _, d := range agg.dispatchesInSession {
+			children := agg.spansByParentID[d.SpanID]
+
+			// Classify children's session continuity. Three buckets:
+			//   - "no children" (orphan dispatch — surfaces dropped trace data)
+			//   - "same-session" (every child carries the parent's session.id)
+			//   - "forked: <id>" (some child carries a different session.id)
+			//
+			// Trace continuity is computed the same way against TraceID.
+			sessionVerdict := classifyContinuity(children, d.SessionID, "same-session", func(c inspectChildSpan) string {
+				return c.SessionID
+			})
+			traceVerdict := classifyContinuity(children, d.TraceID, "same-trace", func(c inspectChildSpan) string {
+				return c.TraceID
+			})
+
+			spanIDDisplay := d.SpanID
+			if spanIDDisplay == "" {
+				spanIDDisplay = "(unknown)"
+			} else if len(spanIDDisplay) > 12 {
+				spanIDDisplay = spanIDDisplay[:12]
+			}
+
+			fmt.Fprintf(b, "| %s | %s | %d | %s | %s |\n",
+				spanIDDisplay, d.SubagentType, len(children), sessionVerdict, traceVerdict)
+		}
+		b.WriteString("\n")
+	}
+}
+
+// classifyContinuity reports, for a set of child spans, whether
+// they all share the parent's value for some accessor (session.id
+// or trace.id). Returns one of:
+//
+//   - "no children" — empty children slice. The dispatch is in the
+//     trace data but its children aren't, which usually means trace
+//     data was dropped or the receiver wasn't running for the
+//     children's portion of the run.
+//   - sameLabel — every child has the same value as the parent.
+//     Caller provides the label ("same-session" or "same-trace")
+//     so the rendered table reads naturally per-column.
+//   - "forked: <other-value>" — one or more children carry a
+//     different value. Surfaces the FIRST distinct value so the
+//     operator can investigate without scanning the whole row set.
+//
+// Generic over the accessor function so session-continuity and
+// trace-continuity reuse the same logic.
+func classifyContinuity(children []inspectChildSpan, parentValue, sameLabel string, accessor func(inspectChildSpan) string) string {
+	if len(children) == 0 {
+		return "no children"
+	}
+	for _, c := range children {
+		v := accessor(c)
+		if v != parentValue {
+			return "forked: " + v
+		}
+	}
+	return sameLabel
 }

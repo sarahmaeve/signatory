@@ -200,3 +200,111 @@ func TestInspect_MissingFile_ReportsCleanly(t *testing.T) {
 	assert.Contains(t, err.Error(), "traces.jsonl",
 		"error must name the file the inspector tried to open")
 }
+
+// TestInspect_TraceCorrelation_ListsAllSessionsInFile: the inspect
+// tool surfaces every session.id present in the trace stream, not
+// just the requested one. Answers the operator question "are there
+// other sessions in this file my report could run against?" without
+// requiring a separate `list-sessions` invocation, AND lets the
+// operator see whether a Task-tool dispatch forked into a fresh
+// session.id (the hypothesis we tested 2026-04-28; in current
+// Claude Code, dispatches do NOT fork — children share parent
+// session.id).
+func TestInspect_TraceCorrelation_ListsAllSessionsInFile(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		// Session A — 2 spans
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]},"scopeSpans":[{"spans":[`+
+			`{"name":"claude_code.tool","attributes":[]},`+
+			`{"name":"claude_code.tool","attributes":[]}`+
+			`]}]}]}`,
+		// Session B — 1 span (different session.id, same trace file)
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"OTHER"}}]},"scopeSpans":[{"spans":[`+
+			`{"name":"claude_code.llm_request","attributes":[]}`+
+			`]}]}]}`,
+	)
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	// The new section header should appear.
+	assert.Contains(t, got, "## Trace correlation",
+		"trace-correlation section is the new diagnostic surface")
+	// Both sessions must be listed with their span counts so the
+	// operator can pick the right one.
+	assert.Contains(t, got, "| S1 | 2 |",
+		"trace correlation must list the requested session with its span count")
+	assert.Contains(t, got, "| OTHER | 1 |",
+		"trace correlation must list other sessions in the file too")
+}
+
+// TestInspect_TraceCorrelation_DispatchSpanLinkage: when a
+// claude_code.tool span carries subagent_type and other spans
+// reference it via parentSpanId, inspect surfaces the linkage.
+//
+// The 2026-04-28 dogfood verification showed children share the
+// parent's session.id (Task does NOT fork to a new session). This
+// test pins that finding into the inspect output: the operator
+// asking "did this dispatch fork or stay in the same session?"
+// gets the answer from the diagnostic, not from running custom
+// Python against the raw file.
+func TestInspect_TraceCorrelation_DispatchSpanLinkage(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]},"scopeSpans":[{"spans":[`+
+			// The dispatch span — has subagent_type, has its own spanId.
+			`{"name":"claude_code.tool","spanId":"dispatch01","traceId":"trace0001","attributes":[`+
+			`{"key":"subagent_type","value":{"stringValue":"provenance-review"}},`+
+			`{"key":"tool_name","value":{"stringValue":"Task"}}`+
+			`]},`+
+			// Two children whose parentSpanId points to the dispatch.
+			`{"name":"claude_code.llm_request","spanId":"child0001","parentSpanId":"dispatch01","traceId":"trace0001","attributes":[]},`+
+			`{"name":"claude_code.tool","spanId":"child0002","parentSpanId":"dispatch01","traceId":"trace0001","attributes":[]}`+
+			`]}]}]}`,
+	)
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	// The dispatch row surfaces subagent_type and child count. Both
+	// data points are actionable: subagent_type tells the operator
+	// which agent ran; child count tells them whether spans landed
+	// for that dispatch at all.
+	assert.Contains(t, got, "provenance-review",
+		"dispatch row must surface subagent_type so the operator sees which agent's work this is")
+	assert.Regexp(t, `provenance-review.*\| 2`, got,
+		"dispatch row must report child-span count")
+}
+
+// TestInspect_TraceCorrelation_ReportsSessionContinuity: the
+// dispatch-children check distinguishes "all children share parent
+// session.id" (the current Claude Code shape) from "children fork
+// to a different session.id" (the shape we'd need to handle if Task
+// semantics changed). Pinning the distinction in a test means the
+// inspect tool stays useful as a diagnostic across both shapes.
+func TestInspect_TraceCorrelation_ReportsSessionContinuity(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[{"key":"session.id","value":{"stringValue":"PARENT"}}]},"scopeSpans":[{"spans":[`+
+			// Dispatch — session=PARENT
+			`{"name":"claude_code.tool","spanId":"dispatchAA","traceId":"traceXX","attributes":[`+
+			`{"key":"subagent_type","value":{"stringValue":"general-purpose"}},`+
+			`{"key":"session.id","value":{"stringValue":"PARENT"}}`+
+			`]},`+
+			// Child stays in PARENT session.
+			`{"name":"claude_code.llm_request","spanId":"childAA01","parentSpanId":"dispatchAA","traceId":"traceXX","attributes":[`+
+			`{"key":"session.id","value":{"stringValue":"PARENT"}}`+
+			`]}`+
+			`]}]}]}`,
+	)
+	var out bytes.Buffer
+	require.NoError(t, runInspect("PARENT", dir, &out))
+	got := out.String()
+
+	// "session continuity" copy in the row tells the operator at a
+	// glance whether the children stayed in-session or forked. The
+	// exact word is the contract a future change to Task semantics
+	// would break loudly.
+	assert.Contains(t, got, "same-session",
+		"dispatch row must classify children as same-session vs forked so operator knows whether per-agent attribution requires walking spans or running against a different session.id")
+}

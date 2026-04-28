@@ -42,6 +42,22 @@ type otlpSpan struct {
 	StartTimeUnixNano string   `json:"startTimeUnixNano"`
 	EndTimeUnixNano   string   `json:"endTimeUnixNano"`
 	Attributes        []otlpKV `json:"attributes"`
+
+	// OTLP protocol-standard correlation IDs. Hex-encoded strings:
+	// TraceID is 16 bytes (32 hex), SpanID/ParentSpanID are 8 bytes
+	// (16 hex). Empty when absent (e.g., a root span has no parent).
+	//
+	// The report itself doesn't read these — span-name + session.id
+	// + per-attribute fields drive aggregation. They land here for
+	// dogfood-metrics inspect, which surfaces parent/child linkage
+	// to answer questions like "did this dispatch's children run
+	// under the parent session.id, or did they fork to a fresh
+	// session.id?" (verified 2026-04-28: in current Claude Code,
+	// children share the parent's session.id and traceId — Task
+	// dispatches do NOT fork to a separate session).
+	TraceID      string `json:"traceId"`
+	SpanID       string `json:"spanId"`
+	ParentSpanID string `json:"parentSpanId"`
 }
 
 // otlpKV is OTLP's attribute encoding: each attribute is a
