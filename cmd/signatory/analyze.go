@@ -234,6 +234,28 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		created = true
 	}
 
+	// Defensive backfill: an entity loaded from the store with an
+	// empty Ecosystem but a known one from the resolved target is
+	// either (a) data created by a pre-fix `ensureEntity` that
+	// omitted the field, or (b) a future entity-creation path
+	// that forgot it. Either way, the resolver guards below gate
+	// on entity.Ecosystem; without backfill they silently skip
+	// and Layer-1 collection emits zero signals (the 2026-04-28
+	// idna refresh meltdown). Persist the backfilled value so
+	// subsequent reads see it without re-running this branch.
+	if entity.Ecosystem == "" && resolved.Ecosystem != "" {
+		entity.Ecosystem = resolved.Ecosystem
+		entity.UpdatedAt = time.Now().UTC()
+		if err := s.PutEntity(ctx, entity); err != nil {
+			// Don't fail the run on a backfill persistence error —
+			// the in-memory entity carries the correct value through
+			// the rest of this invocation, just won't survive past
+			// it. Surface the warning so an operator notices.
+			_, _ = fmt.Fprintf(stderr, "warning: backfill ecosystem on %s failed: %v\n",
+				entity.CanonicalURI, err)
+		}
+	}
+
 	// Resolve the entity's upstream repo URL when it's an npm
 	// package that hasn't been resolved yet (A.5 in design/npm-plan.
 	// txt). The registry tells us where the package's source lives;

@@ -324,6 +324,134 @@ func TestFunctional_AnalyzeRefresh_PyPIFailurePropagates_Error(t *testing.T) {
 		"error message must name the pypi failure")
 }
 
+// ----- ensureEntity (posture.go) sets Ecosystem on creation -----
+//
+// Pre-fix bug discovered 2026-04-28 (idna refresh meltdown):
+// `ensureEntity` constructed entities without setting the
+// Ecosystem field, so a `signatory analysis begin pkg:pypi/idna`
+// (which calls ensureEntity to create the stub row) produced an
+// entity with ecosystem=''. Subsequent `signatory analyze
+// --refresh` saw the existing entity, skipped its create-block
+// (which DOES set Ecosystem), and the resolver guards
+// `entity.Ecosystem == "pypi"` failed → resolvePyPIRepo never
+// ran → 0 signals collected.
+//
+// The same bug affected pkg:npm/ targets identically. The fix
+// is one line in ensureEntity, but the absence of these tests
+// is what let the regression land.
+
+func TestEnsureEntity_SetsEcosystem_PkgPypi(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := ensureEntity(t.Context(), s, "pkg:pypi/idna")
+	require.NoError(t, err)
+	require.NotNil(t, entity)
+	assert.Equal(t, "pypi", entity.Ecosystem,
+		"ensureEntity must stamp Ecosystem on pkg:pypi/ creation; without it, downstream resolvePyPIRepo's guard fails and the entity stays unresolvable")
+
+	// Re-read to confirm the value persisted, not just lived in
+	// the returned struct.
+	reread, err := s.FindEntityByURI(t.Context(), "pkg:pypi/idna")
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", reread.Ecosystem,
+		"persisted Ecosystem must match — store row, not just in-memory struct")
+}
+
+func TestEnsureEntity_SetsEcosystem_PkgNpm(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := ensureEntity(t.Context(), s, "pkg:npm/ms")
+	require.NoError(t, err)
+	assert.Equal(t, "npm", entity.Ecosystem,
+		"ensureEntity must stamp Ecosystem on pkg:npm/ creation; same bug shape as pypi above")
+}
+
+func TestEnsureEntity_RepoScheme_EcosystemEmpty(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := ensureEntity(t.Context(), s, "github.com/dustin/go-humanize")
+	require.NoError(t, err)
+	// repo: scheme entities have no ecosystem in the v0.1 model;
+	// the field stays empty. This test pins that expectation so a
+	// future "fill ecosystem for repos too" change is a deliberate
+	// decision, not an accident.
+	assert.Equal(t, "", entity.Ecosystem,
+		"repo: scheme entities have no ecosystem — empty is correct")
+}
+
+// TestFunctional_AnalyzeRefresh_BackfillsEcosystemOnStaleEntity:
+// the defensive companion to the ensureEntity fix. Entities
+// created before the fix have Ecosystem=”. When `signatory
+// analyze --refresh` finds such an entity, it backfills
+// Ecosystem from the canonical URI before the resolver guards
+// run, so resolvePyPIRepo can fire on the existing row instead
+// of staying silent. Persists the backfilled value so subsequent
+// reads see it.
+//
+// This test would FAIL without both fixes: the entity stub is
+// pre-created with empty Ecosystem (mimicking the post-bug
+// state), and only the backfill makes the PyPI resolver match
+// its guard. Verifies the migration path for stale data without
+// requiring users to prune-and-rerun.
+func TestFunctional_AnalyzeRefresh_BackfillsEcosystemOnStaleEntity(t *testing.T) {
+	pypiSrv := pypiSrvSucceeding("https://github.com/kjd/idna")
+	defer pypiSrv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pre-create the entity with empty Ecosystem to mimic the
+	// pre-fix state: entity exists in store from an earlier
+	// `signatory analysis begin` run that omitted the field.
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:pypi/idna",
+			Type:         profile.EntityPackage,
+			ShortName:    "idna",
+			Ecosystem:    "", // ← THE BUG STATE
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:          dbPath,
+		Collectors:      []signal.Collector{newMockCollector()},
+		AuditFilePath:   filepath.Join(dir, "audit.log"),
+		PypiRegistryURL: pypiSrv.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:pypi/idna", Refresh: true}
+	err := cmd.Run(globals)
+	require.NoError(t, err, "analyze --refresh against a stale entity should backfill Ecosystem and proceed: %v", err)
+
+	// Re-read and verify both fields are now correct.
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:pypi/idna")
+	require.NoError(t, err)
+	assert.Equal(t, "pypi", entity.Ecosystem,
+		"empty Ecosystem on a stale pkg:pypi/ entity must be backfilled by analyze --refresh so the next run's resolver guards match")
+	assert.Equal(t, "https://github.com/kjd/idna", entity.URL,
+		"after Ecosystem backfill, resolvePyPIRepo must fire and stamp the github URL — proves the chain works end-to-end")
+}
+
 // ----- Gap 6c: stderr hint for Go modules analyzed via repo: form -----
 //
 // The dogfood audit identified a coverage gap: when a Go module

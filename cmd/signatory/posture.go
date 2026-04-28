@@ -372,9 +372,19 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 		CanonicalURI: resolved.CanonicalURI,
 		Type:         entityTypeForScheme(resolved.Scheme),
 		ShortName:    resolved.ShortName,
-		URL:          resolved.CloneURL, // empty for non-repo schemes
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
+		// Ecosystem MUST be stamped here for pkg: targets — the
+		// downstream `signatory analyze --refresh` resolver guards
+		// (resolveNpmRepo / resolvePyPIRepo) gate on this field
+		// and silently skip when it's empty. Pre-fix omission
+		// caused the 2026-04-28 idna refresh meltdown: entities
+		// landed with ecosystem='', the refresh skipped repo
+		// resolution, and Layer-1 collection emitted zero signals.
+		// resolved.Ecosystem is empty for non-pkg schemes (repo:,
+		// identity:, org:) — same as before for those.
+		Ecosystem: resolved.Ecosystem,
+		URL:       resolved.CloneURL, // empty for non-repo schemes
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.PutEntity(ctx, entity); err != nil {
 		return nil, fmt.Errorf("create entity: %w", err)
