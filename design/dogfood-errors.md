@@ -295,6 +295,177 @@ Each item has:
     actionable if local_db rows showed argument summaries
     instead of just the bare tool name.
 
+## Survey / MCP cross-reference (signatory dogfooded on its own go.mod)
+
+On 2026-04-27, ran `signatory survey` against signatory's own
+go.mod and cross-referenced each direct dep against the store
+via `signatory_summary` MCP calls. Result: 5 distinct bugs
+surfaced from a single 7-dep walk, all rooted in URI
+canonicalization gaps that have the same shape across multiple
+tools.
+
+For context, signatory's own direct deps + their actual store
+state:
+
+| Dep | Survey verdict | Store reality |
+|---|---|---|
+| BurntSushi/toml v1.6.0 | unexamined | trusted-for-now @ v1.6.0 (4 analyses) |
+| alecthomas/kong v1.15.0 | unexamined (note: 1 posture on record) | trusted-for-now (no-version posture, 5 analyses) |
+| google/uuid v1.6.0 | trusted-for-now | trusted-for-now @ v1.6.0 (3 analyses) |
+| stretchr/testify v1.11.1 | not-in-store | 4 analyses at versioned URIs |
+| golang.org/x/mod v0.35.0 | not-in-store | 2 analyses at `repo:github/golang/mod` (vanity-resolved) |
+| gopkg.in/yaml.v3 v3.0.1 | vetted-frozen | vetted-frozen (survey OK, summary tool fails) |
+| modernc.org/sqlite v1.49.1 | trusted-for-now | trusted-for-now (survey OK, summary tool fails) |
+
+### signatory_summary MCP tool can't resolve vanity Go paths
+
+- **Found:** 2026-04-27, MCP queries against signatory's own
+  store from this Claude Code session.
+- **Severity:** must-fix — false-negative for any caller using
+  `signatory_summary` with a vanity Go module path. Most
+  user-visible because LLM agents reach for this tool first
+  for "what do we know about X?" per the project's MCP
+  routing priority.
+- **Where:** `internal/mcp/tools/summary.go` (or wherever the
+  summary tool resolves the input target to a canonical URI).
+- **Symptom:** `signatory_summary target="modernc.org/sqlite"`
+  → `not_found: no entity matches target:
+  "repo:github/modernc.org/sqlite"`. The tool blindly
+  constructs `repo:github/<input>` instead of running the
+  same resolver chain that `signatory survey` uses (which DOES
+  find these entities — see the cross-reference table). Same
+  symptom for `golang.org/x/mod`, `gopkg.in/yaml.v3`,
+  `modernc.org/sqlite`.
+- **Sketch:** route the summary tool's target argument
+  through the same target-resolution pipeline as the CLI
+  (`profile.ResolveTarget` plus the resolver registry
+  introduced for Layer 6 PyPI work). When the resolved URI
+  doesn't match an entity, try alias lookup (related_uris)
+  before reporting NotFound. Add a regression test that hits
+  the three failing targets above.
+
+### signatory_summary doesn't fall back from versioned URI to base
+
+- **Found:** 2026-04-27, same exercise.
+- **Severity:** should-fix — testify is in the store but
+  invisible to MCP callers without explicit version knowledge.
+- **Where:** `internal/mcp/tools/summary.go` resolution path.
+- **Symptom:** `signatory_summary target="github.com/stretchr/testify"`
+  → `not_found: no entity matches target:
+  "repo:github/stretchr/testify"`. But the store has
+  `repo:github/stretchr/testify@v1.11.1` (4 analyses
+  attached). The version-stripped lookup never happens.
+- **Sketch:** when exact-match fails, call
+  `profile.SplitURIVersion` on the resolved target. If the
+  result has a non-empty version suffix, the input was
+  un-versioned and we tried the base URI without success;
+  scan the store for any version-suffixed match (existence
+  check, not all analyses) and surface that. If the input
+  WAS versioned and didn't match, try the base URI as
+  fallback (entities are supposed to live at base URI per
+  M1 — but see related entry below for testify which
+  violates that). Either direction should produce a hit
+  for testify.
+
+### signatory survey reports false 'not-in-store' verdicts
+
+- **Found:** 2026-04-27, same exercise.
+- **Severity:** must-fix — survey is the **first** thing a
+  user runs to see "what's covered?" and getting false
+  negatives means they re-vet things that are already vetted
+  (wasted tokens + wasted cycle time, exactly the ROADMAP
+  "improve economics" anti-pattern).
+- **Where:** the survey command (`cmd/signatory/survey.go` or
+  the underlying lookup helper). Same root cause as the two
+  MCP entries above — URI canonicalization happens in
+  multiple places and they don't all agree.
+- **Symptom:**
+  - testify v1.11.1 reports `not-in-store` despite 4
+    analyses existing at version-suffixed URIs. Survey's
+    lookup uses base URI; the entities are stored at
+    versioned URIs (separate bug — see entry below).
+  - golang.org/x/mod v0.35.0 reports `not-in-store` despite
+    2 analyses at `repo:github/golang/mod` (vanity-resolved
+    correctly at ingest time, just not at survey-lookup
+    time).
+- **Sketch:** unify URI canonicalization logic across (a)
+  the survey lookup, (b) the MCP summary tool, (c) the
+  ingest path. All three should use the same resolver chain
+  + alias lookup + version-stripping. Probably worth a
+  single helper `internal/profile.LookupEntity(target)` that
+  encapsulates the full chain and that all three call sites
+  delegate to.
+
+### signatory survey shows contradictory status for alecthomas/kong
+
+- **Found:** 2026-04-27, same exercise.
+- **Severity:** should-fix — confuses the reader, undermines
+  trust in the survey output.
+- **Where:** survey's per-row rendering (`cmd/signatory/survey.go`).
+- **Symptom:** the row reads
+  `[?] github.com/alecthomas/kong  v1.15.0  unexamined  ( trusted-for-now; 1 posture on record)`.
+  "unexamined" and "trusted-for-now" can't both be true. The
+  contradiction comes from two checks on the row:
+  - "Is there a posture for THIS version (v1.15.0)?" → no
+    (the posture has no version field, so version-matched
+    lookup fails).
+  - "Is there ANY posture on this entity?" → yes (a
+    no-version posture exists).
+  The row decides "unexamined" from the first check but adds
+  the second check as a parenthetical, producing the
+  contradiction.
+- **Sketch:** if a no-version posture exists, the row's
+  primary verdict should be the posture's tier
+  (`trusted-for-now`), not `unexamined`. Reserve the
+  `unexamined` rendering for the case where NO posture at
+  any version is on record. Optionally surface "(no
+  version-specific posture)" as a parenthetical so the
+  reader knows the posture wasn't pinned to v1.15.0.
+
+### testify entity stored at version-suffixed URI (M1 invariant violation)
+
+- **Found:** 2026-04-27, same exercise. Discovered while
+  investigating the two MCP entries above.
+- **Severity:** must-fix — quietly breaks burn / posture
+  lookups that target the unversioned URI for this entity.
+  Likely affects other entities ingested via the same path;
+  scope unknown until audited.
+- **Where:** ingest path (`internal/store/...` or
+  `internal/mcp/tools/ingest_analysis.go`). Per the M1
+  per-version-identity plan (search `agent-facing-contract.md`
+  for "Plan-A canonicalization"), entities should live at
+  the BASE URI; version belongs on the posture row, not the
+  entity URI.
+- **Symptom:** `signatory_show_analyses` returns analyses at
+  `repo:github/stretchr/testify@v1.11.1` AND
+  `pkg:golang/github.com/stretchr/testify@v1.11.1` — both
+  versioned entity URIs. Whereas BurntSushi/toml,
+  alecthomas/kong, google/uuid all live at unversioned URIs
+  (`repo:github/burntsushi/toml`, etc.) with version on the
+  posture row. testify is anomalous.
+- **Investigation step 1:** check the four analyses' ingest
+  timestamps and source paths:
+  - 2026-04-22T23:18:35Z `mcp:security-analyst`
+  - 2026-04-22T23:19:10Z `mcp:provenance-analyst`
+  - 2026-04-23T01:53:38Z `mcp:synthesist`
+  Were these ingested before the M1 work landed? If so, the
+  bug is "old data," not active code. Check git log for
+  ingest-path changes in that window.
+- **Investigation step 2:** if active code: the ingest path
+  needs to call `SplitURIVersion` and store the entity at
+  the base URI with the version going on the analysis row
+  (target_commit field is one place; version field is
+  another).
+- **Investigation step 3:** clean up the affected entities.
+  Either migrate (move analyses to the base-URI entity row)
+  or accept the historical inconsistency and let the
+  lookup-fallback fixes (the two MCP entries above) paper
+  over it.
+- **Audit scope:** `SELECT canonical_uri FROM entities
+  WHERE canonical_uri LIKE '%@v%'` will list every entity
+  with this shape. If only testify, easy fix. If many, the
+  ingest path needs the bigger fix.
+
 ## Pending verifications
 
 Items where a fix has shipped but live end-to-end verification
