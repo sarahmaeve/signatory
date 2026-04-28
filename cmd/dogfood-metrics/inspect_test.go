@@ -151,6 +151,44 @@ func TestInspect_AcrossSessions(t *testing.T) {
 	assert.Regexp(t, `spans matching session S1.*1`, got)
 }
 
+// TestInspect_SpanLevelSessionMatch_ContributesToDistributions —
+// when session.id appears on the span (not the resource), the spans
+// must still contribute to the name distribution + attribute-keys
+// tables. Otherwise the operator sees "filter diagnosis says 283
+// spans match via span-attribute fallback" but every other table is
+// empty, which is a worse diagnostic experience than "no data."
+//
+// Reproduces the live shape on session 40366063: 283 spans matched
+// only via span-level session.id; the original inspect impl reported
+// the count but couldn't show name distribution because those spans
+// failed the resource-level gate.
+func TestInspect_SpanLevelSessionMatch_ContributesToDistributions(t *testing.T) {
+	t.Parallel()
+	dir := writeTracesFile(t,
+		`{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[`+
+			`{"name":"claude_code.tool","attributes":[{"key":"session.id","value":{"stringValue":"S1"}},{"key":"tool.name","value":{"stringValue":"Bash"}}]},`+
+			`{"name":"claude_code.tool","attributes":[{"key":"session.id","value":{"stringValue":"S1"}},{"key":"tool.name","value":{"stringValue":"Read"}}]},`+
+			`{"name":"some_other_span","attributes":[{"key":"session.id","value":{"stringValue":"S1"}}]}`+
+			`]}]}]}`,
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, runInspect("S1", dir, &out))
+	got := out.String()
+
+	// All 3 spans match this session via the span-attribute fallback;
+	// distribution tables must reflect that, not be empty.
+	assert.Regexp(t, `spans matching session S1.*3`, got,
+		"span-level session matches must count toward the matching-spans header")
+	assert.Contains(t, got, "| claude_code.tool | 2 |",
+		"span name distribution must include the 2 claude_code.tool spans matched via span-level session.id")
+	assert.Contains(t, got, "| some_other_span | 1 |")
+	// Attribute keys table for claude_code.tool must include
+	// tool.name, even though the spans were matched at span level.
+	assert.Contains(t, got, "tool.name",
+		"attribute-key table must surface the keys present on span-level-matched spans")
+}
+
 // TestInspect_MissingFile_ReportsCleanly: the inspect tool surfaces
 // missing-file as a diagnosis, not a stack trace.
 func TestInspect_MissingFile_ReportsCleanly(t *testing.T) {

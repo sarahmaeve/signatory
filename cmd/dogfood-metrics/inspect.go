@@ -59,20 +59,23 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 				for _, sp := range ss.Spans {
 					agg.totalSpansAllSessions++
 
-					// Session match: report.go's first filter.
-					if resSessionID != sessionID {
-						// But also catch the case where session.id
-						// appears as a SPAN attribute instead of
-						// resource — a real-world OTEL-SDK shape
-						// drift worth surfacing.
-						if stringAttr(sp.Attributes, "session.id") == sessionID {
-							agg.sessionIDOnSpan++
-						}
+					// Match by either resource OR span attribute. The
+					// report's filter today only checks resource;
+					// inspect surfaces both paths so the operator sees
+					// what's there even when the report would drop it.
+					matchedResource := resSessionID == sessionID
+					matchedSpan := !matchedResource && stringAttr(sp.Attributes, "session.id") == sessionID
+					if !matchedResource && !matchedSpan {
 						continue
 					}
 
 					agg.matchingSpans++
-					agg.sessionMatchedSpans++
+					if matchedResource {
+						agg.sessionMatchedSpans++
+					}
+					if matchedSpan {
+						agg.sessionIDOnSpan++
+					}
 
 					// Track resource attr keys for matching spans.
 					for _, a := range rs.Resource.Attributes {
@@ -90,12 +93,16 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 						agg.spanAttrKeysByName[sp.Name][a.Key]++
 					}
 
-					// Filter diagnosis: report.go's later filters.
-					if sp.Name == "claude_code.llm_request" || sp.Name == "claude_code.tool" {
-						agg.nameFilterMatched++
-					}
-					if stringAttr(sp.Attributes, "query_source") != "" {
-						agg.querySourcePresent++
+					// Filter diagnosis: report.go's later filters,
+					// gated on the resource-level match (so the
+					// numbers track what report.go would report).
+					if matchedResource {
+						if sp.Name == "claude_code.llm_request" || sp.Name == "claude_code.tool" {
+							agg.nameFilterMatched++
+						}
+						if stringAttr(sp.Attributes, "query_source") != "" {
+							agg.querySourcePresent++
+						}
 					}
 
 					// Capture first matching span as the sample.
