@@ -1100,6 +1100,60 @@ func TestHandoff_NetworkPrecheck_PkgGoGithubDirect(t *testing.T) {
 	assert.Equal(t, "https://github.com/alecthomas/kong", cmd.Target)
 }
 
+// TestHandoff_NetworkPrecheck_PkgGolangResolvesViaRegistry — sibling
+// of TestHandoff_NetworkPrecheck_PkgGoResolvesViaRegistry but for the
+// purl-spec-canonical "pkg:golang/" form ResolveTarget now emits.
+//
+// Surfaced 2026-04-28 dogfood when /analyze on golang.org/x/sync hit
+// "no source resolver registered for ecosystem 'golang'". The
+// session's source-side migration (pkg:go → pkg:golang in gomod
+// parser + ResolveTarget vanity discriminator) was missing the
+// companion init at internal/ecosystem/resolver/gomod.go, which
+// registered only "go". This test is the regression guard; the fix
+// adds Default.Register("golang", ...) alongside the existing "go"
+// registration so both URI forms resolve cleanly.
+func TestHandoff_NetworkPrecheck_PkgGolangResolvesViaRegistry(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:golang/golang.org/x/sync",
+		Path:            "/tmp/sync",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/golang/sync", cmd.Target,
+		"pkg:golang target must rewrite the same way pkg:go does — both forms route through the Go resolver")
+}
+
+// TestHandoff_NetworkPrecheck_PkgGolangGithubDirect — purl-spec
+// counterpart of TestHandoff_NetworkPrecheck_PkgGoGithubDirect. An
+// analyst submitting the purl-canonical pkg:golang/github.com/X/Y
+// form must rewrite to the same source URL as the older pkg:go
+// form.
+func TestHandoff_NetworkPrecheck_PkgGolangGithubDirect(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:golang/github.com/alecthomas/kong",
+		Path:            "/tmp/kong",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/alecthomas/kong", cmd.Target)
+}
+
 // TestHandoff_NetworkPrecheck_PkgUnknownEcosystem verifies the error
 // path when a caller passes pkg:<eco>/ with no registered resolver.
 // Message names the supported ecosystems so the caller sees what's

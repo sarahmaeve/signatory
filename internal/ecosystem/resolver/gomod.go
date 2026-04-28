@@ -107,9 +107,7 @@ func gopkgInSource(rest string) (DeclaredSource, error) {
 	}
 
 	// Two-segment form: user/pkg.
-	if idx := strings.IndexByte(base, '/'); idx >= 0 {
-		user := base[:idx]
-		pkg := base[idx+1:]
+	if user, pkg, ok := strings.Cut(base, "/"); ok {
 		if user == "" || pkg == "" || strings.Contains(pkg, "/") {
 			return DeclaredSource{SelfReported: true}, nil
 		}
@@ -165,12 +163,23 @@ func takeTwoSegments(s string) (first, second string, ok bool) {
 // firstSegment returns the first "/"-delimited segment, or the whole
 // string if there's no slash. Empty string maps to empty.
 func firstSegment(s string) string {
-	if i := strings.IndexByte(s, '/'); i >= 0 {
-		return s[:i]
+	if first, _, ok := strings.Cut(s, "/"); ok {
+		return first
 	}
 	return s
 }
 
 func init() {
-	Default.Register("go", NewGoModResolver())
+	// Register under both "go" and "golang". The older signatory
+	// convention used "go" (matching internal ecosystem.EcosystemGo);
+	// the purl spec specifies "golang" as the canonical type
+	// identifier for Go modules, and that's what ResolveTarget now
+	// emits in resolved.Ecosystem after the 2026-04-28
+	// canonicalization migration. Registering under both keeps any
+	// pkg:go/ analyst handoff (backwards compat) and every
+	// pkg:golang/ ingest (current canonical) routing through the
+	// same resolver.
+	r := NewGoModResolver()
+	Default.Register("go", r)
+	Default.Register("golang", r)
 }
