@@ -26,6 +26,74 @@ var confirmPrompt = func(scopeLabel string) bool {
 	return promptConfirmation(os.Stdout, os.Stdin, scopeLabel)
 }
 
+// Decision is the per-op answer for `prune duplicates`'s interactive
+// walk. Mirrors the y/n/a/q vocabulary git-add-p uses:
+//
+//	DecisionApply              — apply this op, advance to the next
+//	DecisionSkip               — skip this op, advance to the next
+//	DecisionApplyAllRemaining  — apply this op AND every remaining op
+//	                             without further prompting (operator
+//	                             accepts the rest sight-unseen)
+//	DecisionQuit               — do not apply this op; stop the walk
+//	                             entirely. Earlier-applied ops stay
+//	                             applied (they were committed per-op).
+type Decision int
+
+const (
+	DecisionApply Decision = iota
+	DecisionSkip
+	DecisionApplyAllRemaining
+	DecisionQuit
+)
+
+// selectOpPrompt is the per-op decision function for
+// `prune duplicates`. Production reads from os.Stdin / os.Stdout via
+// promptSelectOp; tests substitute via setSelectOpPrompt.
+var selectOpPrompt = func(op store.ConsolidationOp) Decision {
+	return promptSelectOp(os.Stdout, os.Stdin, op)
+}
+
+// promptSelectOp prints a per-op summary plus a "[y/n/a/q]" prompt,
+// reads one line of input from in, and maps the answer to a
+// Decision. Recognized variants per Decision:
+//
+//	y / yes           → DecisionApply
+//	n / no            → DecisionSkip
+//	a / all           → DecisionApplyAllRemaining
+//	q / quit          → DecisionQuit
+//
+// Anything else — including empty input, EOF, or unrecognized text —
+// collapses to DecisionSkip. Fail-safe: the only way to authorize an
+// op is to type "y", "yes", or escalate via "a"/"all". Operators who
+// hit Enter accidentally, or pipe an empty stdin, get skip-by-
+// default (no destructive action).
+//
+// The prompt always echoes the op's source and canonical URI so the
+// operator can verify they're answering about THIS op, not the next
+// one. The plan rendering above the loop is the full picture; this
+// per-op echo is the local reminder.
+func promptSelectOp(out io.Writer, in io.Reader, op store.ConsolidationOp) Decision {
+	fmt.Fprintf(out, "  [%s / %s] %s → %s\n", op.Action, op.Class, op.Source.CanonicalURI, op.CanonicalURI)
+	fmt.Fprint(out, "  Apply? [y]es / [n]o / [a]ll-remaining / [q]uit: ")
+
+	var input string
+	if _, err := fmt.Fscanln(in, &input); err != nil {
+		return DecisionSkip
+	}
+	switch strings.TrimSpace(strings.ToLower(input)) {
+	case "y", "yes":
+		return DecisionApply
+	case "n", "no":
+		return DecisionSkip
+	case "a", "all":
+		return DecisionApplyAllRemaining
+	case "q", "quit":
+		return DecisionQuit
+	default:
+		return DecisionSkip
+	}
+}
+
 // promptConfirmation prints a "[y/N]" prompt naming scopeLabel,
 // reads one line of input from in, and returns true only when that
 // line is an unambiguous affirmative ("y" or "yes", case-insensitive,
@@ -285,23 +353,70 @@ func (cmd *PruneDuplicatesCmd) Run(globals *Globals) error {
 
 	if !cmd.Destructive {
 		fmt.Println()
-		fmt.Println("Dry-run only. Re-run with --destructive to apply (you'll be prompted to confirm).")
+		fmt.Println("Dry-run only. Re-run with --destructive to apply (you'll be prompted per op).")
 		return nil
 	}
 
-	scopeLabel := fmt.Sprintf("%d duplicate URI consolidation(s)", len(plan.Ops))
+	// Per-op interactive walk. Each op is committed in its own
+	// transaction (one ApplyConsolidation call per op), so a Quit
+	// after some applies leaves those applied — the operator can
+	// stop at any point without rolling back successes.
+	//
+	// applyAllRemaining short-circuits the prompt once the operator
+	// has typed "a"/"all": every subsequent op auto-applies.
 	fmt.Println()
-	if !confirmPrompt(scopeLabel) {
-		fmt.Println("Cancelled — no changes written.")
-		return nil
+	fmt.Println("Per-op selection. y=apply, n=skip, a=apply this and all remaining, q=quit (keeps earlier).")
+	fmt.Println()
+
+	aggregate := &store.ConsolidationReport{RowsByTable: map[string]int{}}
+	applyAllRemaining := false
+
+walk:
+	for _, op := range plan.Ops {
+		decision := DecisionApply
+		if !applyAllRemaining {
+			decision = selectOpPrompt(op)
+		}
+		switch decision {
+		case DecisionSkip:
+			fmt.Println("  → skipped")
+			fmt.Println()
+			continue
+		case DecisionQuit:
+			fmt.Println("  → quit; earlier-applied ops are kept, nothing further written.")
+			fmt.Println()
+			break walk
+		case DecisionApplyAllRemaining:
+			applyAllRemaining = true
+			fallthrough
+		case DecisionApply:
+			// Fall through to the per-op apply below.
+		}
+
+		// Apply this single op as its own transaction. ApplyConsolidation
+		// handles the trigger ceremony per call; running it once per op
+		// is slightly more SQL than batching, but it's the price of
+		// per-op commit semantics — a real Quit must not roll back the
+		// y-answered ops that came before it.
+		opPlan := &store.ConsolidationPlan{Ops: []store.ConsolidationOp{op}}
+		report, err := s.ApplyConsolidation(ctx, opPlan)
+		if err != nil {
+			return fmt.Errorf("apply op %s → %s: %w", op.Source.CanonicalURI, op.CanonicalURI, err)
+		}
+		aggregate.MergedCount += report.MergedCount
+		aggregate.RenamedCount += report.RenamedCount
+		for k, v := range report.RowsByTable {
+			aggregate.RowsByTable[k] += v
+		}
+		fmt.Println("  → applied")
+		fmt.Println()
 	}
 
-	fmt.Printf("Applying consolidation for %s …\n", scopeLabel)
-	report, err := s.ApplyConsolidation(ctx, plan)
-	if err != nil {
-		return fmt.Errorf("apply consolidation: %w", err)
+	if aggregate.MergedCount == 0 && aggregate.RenamedCount == 0 {
+		fmt.Println("No ops applied.")
+		return nil
 	}
-	renderConsolidationResult(report)
+	renderConsolidationResult(aggregate)
 	return nil
 }
 
