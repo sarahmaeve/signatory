@@ -17,6 +17,7 @@
 //	dogfood-metrics hook --event <name>        process a Claude Code hook event from stdin
 //	dogfood-metrics list-sessions              list known sessions, newest last-seen first
 //	dogfood-metrics report <session-id>        render per-session markdown report
+//	dogfood-metrics inspect <session-id>       diagnose what's IN traces.jsonl for a session
 package main
 
 import (
@@ -48,6 +49,8 @@ func main() {
 		runListSessionsCmd(os.Args[2:])
 	case "report":
 		runReportCmd(os.Args[2:])
+	case "inspect":
+		runInspectCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -68,6 +71,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics hook          --event <name> [-out-dir dogfood-metrics/raw]")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics list-sessions [-in-dir dogfood-metrics/raw]")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics report        [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>")
+	fmt.Fprintln(os.Stderr, "  dogfood-metrics inspect       [-in-dir dogfood-metrics/raw] <session-id>")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "See design/agent-otel.md for architecture.")
 }
@@ -166,4 +170,26 @@ func runReportCmd(args []string) {
 		log.Fatalf("report: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "report: wrote %s/%s/report.md\n", *outDir, sessionID)
+}
+
+// runInspectCmd is the entry point for the `inspect` subcommand.
+// Reads <in-dir>/traces.jsonl and writes a markdown diagnosis to
+// stdout describing the structure of the trace data for the given
+// session. Used to answer "why does the report say no trace spans
+// recorded?" without requiring shell-script archeology.
+func runInspectCmd(args []string) {
+	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
+	inDir := fs.String("in-dir", "dogfood-metrics/raw", "directory containing traces.jsonl")
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "inspect: exactly one positional argument required (session id)")
+		fmt.Fprintln(os.Stderr, "Usage: dogfood-metrics inspect <session-id> [-in-dir <dir>]")
+		os.Exit(2)
+	}
+	sessionID := fs.Arg(0)
+	if err := runInspect(sessionID, *inDir, os.Stdout); err != nil {
+		log.Fatalf("inspect: %v", err)
+	}
 }
