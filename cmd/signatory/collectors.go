@@ -14,6 +14,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
+	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
 )
@@ -75,11 +76,22 @@ var (
 func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts) ([]signal.Collector, error) {
 	var collectors []signal.Collector
 
-	// Ecosystem-specific registry collectors. npm is the only
-	// ecosystem wired through here at Phase A; PyPI and others land
-	// additively as each ecosystem's collector ships.
-	if entity != nil && entity.Ecosystem == "npm" {
-		collectors = append(collectors, npmcollector.NewCollector())
+	// Ecosystem-specific registry collectors. Each ecosystem's
+	// collector lands additively as it ships — npm and Go modules
+	// are the wired ecosystems today; PyPI and others come next.
+	//
+	// The Go collector matches both "golang" (purl-spec canonical,
+	// post-2026-04-28) and "go" (older signatory convention, kept
+	// for backwards compat with entities created before the URI
+	// canonicalization). Symmetric with the resolver registry's
+	// dual registration in internal/ecosystem/resolver/gomod.go.
+	if entity != nil {
+		switch entity.Ecosystem {
+		case "npm":
+			collectors = append(collectors, npmcollector.NewCollector())
+		case "golang", "go":
+			collectors = append(collectors, gopublishcollector.NewCollector())
+		}
 	}
 
 	// Git-hosted collectors. An entity qualifies when its URL is

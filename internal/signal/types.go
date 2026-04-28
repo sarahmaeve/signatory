@@ -198,6 +198,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"derivation method (rolling window, slope calculation) affects the shape classification",
 		},
 	},
+	"version_count": {
+		Type:              "version_count",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Number of published versions for a package, sourced from the registry's append-only version list.",
+		Caveats: []string{
+			"a single version with high adoption is healthy — count alone is not positive",
+			"high counts on a long-lived module reflect cumulative releases over time, not necessarily current activity — pair with last_publish",
+			"some Go modules use a v0 version stream indefinitely; count of major versions is not directly comparable across ecosystems",
+		},
+	},
 
 	// ================================================================
 	// Governance — "Who's responsible?"
@@ -434,6 +445,28 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"legitimate reasons to transition include maintainer handoff, CI pipeline migration, or a first adoption of trusted publishing — these produce false positives worth investigating, not dismissing",
 			"the axios 2026 forensic specifically called out the broken attestation chain as the detection-relevant fingerprint — this signal captures that shape across versions",
 			"the _npmUser.name field is the registry's publisher stamp and cannot be rewritten post-publish; it's higher-forgery-resistance than maintainer lists which are self-declared",
+		},
+	},
+	"transparency_log_present": {
+		Type:              "transparency_log_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Whether sum.golang.org's transparency log has a record for the (module, version) pair. Append-only and publicly auditable.",
+		Caveats: []string{
+			"a successful lookup proves the module/version was committed to a globally-auditable Merkle tree at publish time — extremely high forgery resistance",
+			"absence does not automatically mean tampering: pre-2019 versions, private modules, and proxy-only-cached modules can be absent for benign reasons; an honest investigation distinguishes",
+			"presence does not validate the source repository — it certifies that this hash was published, not that the hash matches a particular VCS commit",
+		},
+	},
+	"publish_origin": {
+		Type:              "publish_origin",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Proxy-declared VCS source for a Go module version: VCS, URL, ref, and commit hash from proxy.golang.org's @v/<version>.info Origin block.",
+		Caveats: []string{
+			"present only for modules published with go ≥ 1.20; older versions lack the Origin section and produce an absence",
+			"the Origin URL is the proxy's record of where the module was fetched from at publish time — cross-check against the entity's resolved repo URL to detect mismatches",
+			"the hash is a commit SHA; when paired with sum.golang.org's transparency log it gives a reproducible proof-of-fetch chain",
 		},
 	},
 
