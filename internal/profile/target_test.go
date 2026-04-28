@@ -145,7 +145,7 @@ func TestResolveTarget_VersionedPkgURI(t *testing.T) {
 		{"pkg:npm/express@4.18.2", "pkg:npm/express@4.18.2", "express", "4.18.2"},
 		{"pkg:npm/@types/node@20.0.0", "pkg:npm/@types/node@20.0.0", "node", "20.0.0"},
 		{"pkg:cargo/atuin@0.1.0", "pkg:cargo/atuin@0.1.0", "atuin", "0.1.0"},
-		{"pkg:go/golang.org/x/mod@v0.35.0", "pkg:go/golang.org/x/mod@v0.35.0", "mod", "v0.35.0"},
+		{"pkg:golang/golang.org/x/mod@v0.35.0", "pkg:golang/golang.org/x/mod@v0.35.0", "mod", "v0.35.0"},
 		// Pre-release and build metadata passes through verbatim —
 		// the grammar accepts whatever the ecosystem considers a
 		// version string, not just strict semver.
@@ -420,9 +420,125 @@ func TestResolveTarget_PatchURI(t *testing.T) {
 		"patch URI should render as repo#id for human display")
 }
 
+// TestResolveTarget_PkgGoDevURLs pins the contract for the
+// copy-paste-from-browser workflow against pkg.go.dev: a user who
+// hits `https://pkg.go.dev/<import-path>` and runs `signatory <verb>
+// <url>` should not have to know about purl syntax.
+//
+// Output is the same canonical form (pkg:golang/<import-path>) the
+// gomod parser produces and the design at design/entity-model-v2.md
+// names as "Standard purl." For github-hosted modules the
+// owner/repo segments are case-folded to align with
+// CanonicalRepoURI's lowercase invariant — github is case-insensitive
+// at the host layer, so two case-different URLs must collapse to one
+// canonical entity URI.
+//
+// Subpackage stripping for github hosts mirrors what gomod's
+// canonicalizeGoImportPath does: the user pastes "/<owner>/<repo>/sub"
+// and the canonical form is the module root, not the subpackage.
+//
+// Non-github vanity paths are preserved verbatim (no subpackage
+// stripping rule that generalizes — module boundaries depend on each
+// vanity host's resolver).
+func TestResolveTarget_PkgGoDevURLs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		input       string
+		wantURI     string
+		wantName    string
+		wantVersion string
+	}{
+		{
+			"github-hosted module",
+			"https://pkg.go.dev/github.com/alecthomas/kong",
+			"pkg:golang/github.com/alecthomas/kong",
+			"kong", "",
+		},
+		{
+			"github-hosted module with mixed-case owner/repo (case-folded)",
+			"https://pkg.go.dev/github.com/BurntSushi/toml",
+			"pkg:golang/github.com/burntsushi/toml",
+			"toml", "",
+		},
+		{
+			"github-hosted module @version",
+			"https://pkg.go.dev/github.com/stretchr/testify@v1.11.1",
+			"pkg:golang/github.com/stretchr/testify@v1.11.1",
+			"testify", "v1.11.1",
+		},
+		{
+			"github-hosted with subpackage strips to module root",
+			"https://pkg.go.dev/github.com/BurntSushi/toml/cmd/tomlv",
+			"pkg:golang/github.com/burntsushi/toml",
+			"toml", "",
+		},
+		{
+			"vanity gopkg.in",
+			"https://pkg.go.dev/gopkg.in/yaml.v3",
+			"pkg:golang/gopkg.in/yaml.v3",
+			"yaml.v3", "",
+		},
+		{
+			"vanity modernc.org",
+			"https://pkg.go.dev/modernc.org/sqlite",
+			"pkg:golang/modernc.org/sqlite",
+			"sqlite", "",
+		},
+		{
+			"organizational vanity golang.org/x",
+			"https://pkg.go.dev/golang.org/x/mod",
+			"pkg:golang/golang.org/x/mod",
+			"mod", "",
+		},
+		{
+			"http scheme accepted",
+			"http://pkg.go.dev/github.com/alecthomas/kong",
+			"pkg:golang/github.com/alecthomas/kong",
+			"kong", "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.input)
+			require.NoError(t, err, "ResolveTarget(%q) should succeed", tc.input)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI,
+				"pkg.go.dev URL must produce the purl-spec canonical form (pkg:golang/<path>) the gomod parser also emits")
+			assert.Equal(t, tc.wantName, got.ShortName,
+				"ShortName must be the module's last path segment for display")
+			assert.Equal(t, tc.wantVersion, got.Version,
+				"Version captures the @V suffix when present, empty otherwise")
+		})
+	}
+}
+
+// TestResolveTarget_PkgGoDevURLs_RejectsLookalikes — guards against
+// `pkg.go.dev.attacker.example/...` URLs sneaking through a naive
+// prefix-strip. Mirrors the npmjs.com lookalike guard in
+// TestResolveTarget_NpmjsURLs.
+func TestResolveTarget_PkgGoDevURLs_RejectsLookalikes(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"https://pkg.go.dev.attacker.example/github.com/foo/bar",
+		"https://example.com/pkg.go.dev/github.com/foo/bar",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(in)
+			assert.Error(t, err, "lookalike %q must NOT resolve as pkg.go.dev", in)
+		})
+	}
+}
+
 // TestResolveTarget_VanityGoPaths pins the contract for non-github
-// Go module paths: ResolveTarget must produce the same pkg:go/...
-// canonical URI the gomod parser produces, not misclassify the
+// Go module paths: ResolveTarget must produce the pkg:golang/<path>
+// canonical URI per the [purl spec](https://github.com/package-url/purl-spec)
+// and design/entity-model-v2.md "Standard purl," not misclassify the
 // import-path's first segment as a github owner.
 //
 // Surfaced by dogfood entry 1: signatory_summary sent
@@ -431,7 +547,7 @@ func TestResolveTarget_PatchURI(t *testing.T) {
 // through accepted "owner/repo"-shaped paths from any host. That's
 // a NotFound for any caller using the MCP surface to ask about a
 // vanity-Go-path entity, since the store rows are written by the
-// gomod parser at pkg:go/<full-path> and have no row at
+// gomod parser at pkg:golang/<full-path> and have no row at
 // repo:github/<vanity-host>/<name>.
 //
 // Vanity-resolution to a github form (golang.org/x/Y →
@@ -445,11 +561,12 @@ func TestResolveTarget_PatchURI(t *testing.T) {
 //     where it's defined.
 //
 //  2. The gomod parser, the analyst handoff template, and ResolveTarget
-//     must all agree on what canonical form to write. Picking pkg:go/
-//     keeps that agreement in one place; re-resolving live during
-//     parse would require either a hardcoded vanity table (incomplete
-//     by construction) or live HTTP fetches at parse time (rejected
-//     for offline reproducibility).
+//     must all agree on what canonical form to write. Picking
+//     pkg:golang/ matches the purl spec and keeps signatory's
+//     canonical form interoperable with SBOM tools (SPDX, CycloneDX,
+//     OSV); re-resolving live during parse would require either a
+//     hardcoded vanity table (incomplete by construction) or live
+//     HTTP fetches at parse time (rejected for offline reproducibility).
 //
 // LookupEntity is the surface that walks alternates.
 func TestResolveTarget_VanityGoPaths(t *testing.T) {
@@ -460,9 +577,9 @@ func TestResolveTarget_VanityGoPaths(t *testing.T) {
 		input   string
 		wantURI string
 	}{
-		{"modernc.org terminal vanity", "modernc.org/sqlite", "pkg:go/modernc.org/sqlite"},
-		{"gopkg.in terminal vanity", "gopkg.in/yaml.v3", "pkg:go/gopkg.in/yaml.v3"},
-		{"golang.org/x organizational vanity (lookup-side resolves to github)", "golang.org/x/mod", "pkg:go/golang.org/x/mod"},
+		{"modernc.org terminal vanity", "modernc.org/sqlite", "pkg:golang/modernc.org/sqlite"},
+		{"gopkg.in terminal vanity", "gopkg.in/yaml.v3", "pkg:golang/gopkg.in/yaml.v3"},
+		{"golang.org/x organizational vanity (lookup-side resolves to github)", "golang.org/x/mod", "pkg:golang/golang.org/x/mod"},
 	}
 
 	for _, tc := range cases {
@@ -471,7 +588,7 @@ func TestResolveTarget_VanityGoPaths(t *testing.T) {
 			got, err := ResolveTarget(tc.input)
 			require.NoError(t, err, "ResolveTarget(%q) should succeed", tc.input)
 			assert.Equal(t, tc.wantURI, got.CanonicalURI,
-				"vanity Go path must produce the same pkg:go/<path> form the gomod parser produces; mismatched canonicalization fragments lookups across writers")
+				"vanity Go path must produce the pkg:golang/<path> purl-spec form; mismatched canonicalization fragments lookups across writers")
 		})
 	}
 }

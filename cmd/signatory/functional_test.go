@@ -336,7 +336,7 @@ func TestFunctional_PostureSet_RationaleFromFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(rationalePath, []byte(rationaleBody+"\n"), 0o600))
 
 	cmd := &PostureSetCmd{
-		Target:        "pkg:go/golang.org/x/mod@v0.35.0",
+		Target:        "pkg:golang/golang.org/x/mod@v0.35.0",
 		Tier:          "vetted-frozen",
 		RationaleFile: rationalePath,
 	}
@@ -349,7 +349,7 @@ func TestFunctional_PostureSet_RationaleFromFile(t *testing.T) {
 	// Plan-A storage: `posture set X@V` routes the write to the
 	// UNVERSIONED entity with the posture row's version column
 	// populated. Look up by the stripped URI.
-	entity, err := s.FindEntityByURI(context.Background(), "pkg:go/golang.org/x/mod")
+	entity, err := s.FindEntityByURI(context.Background(), "pkg:golang/golang.org/x/mod")
 	require.NoError(t, err)
 	postures, err := s.GetPostures(context.Background(), entity.ID)
 	require.NoError(t, err)

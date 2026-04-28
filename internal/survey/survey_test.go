@@ -140,7 +140,7 @@ require github.com/davecgh/go-spew v1.1.1 // indirect
 
 	// Direct deps should be in NeedsReview; indirect should NOT.
 	assert.ElementsMatch(t,
-		[]string{"repo:github/alecthomas/kong", "pkg:go/gopkg.in/yaml.v3"},
+		[]string{"repo:github/alecthomas/kong", "pkg:golang/gopkg.in/yaml.v3"},
 		r.Summary.NeedsReview,
 		"direct deps in NeedsReview, indirect deps excluded")
 

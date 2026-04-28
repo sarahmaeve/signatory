@@ -143,6 +143,21 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return resolveCanonicalURI(uri)
 	}
 
+	// pkg.go.dev module/package URLs: copy-paste-from-browser
+	// convenience for Go modules. Output is the pkg:golang/<import-path>
+	// canonical form per the purl spec — the same form an analyst
+	// referencing the module by purl would produce, and the same form
+	// the gomod parser emits for non-github paths. Github-hosted
+	// modules get owner/repo case-folded and any subpackage segments
+	// stripped via canonicalGoModuleURI.
+	if importPath, goVersion, ok := parsePkgGoDevURL(s); ok {
+		uri := canonicalGoModuleURI(importPath)
+		if goVersion != "" {
+			uri += "@" + goVersion
+		}
+		return resolveCanonicalURI(uri)
+	}
+
 	// Guard against non-github URLs sneaking through
 	// NormalizeGitHubRepoInput's prefix-strip pipeline.
 	//
@@ -238,13 +253,13 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		!strings.HasPrefix(bareInput, "github.com/") &&
 		!strings.HasPrefix(bareInput, "git@") &&
 		strings.ContainsRune(firstSeg, '.') {
-		canonicalURI := "pkg:go/" + bareInput
+		canonicalURI := canonicalGoModuleURI(bareInput)
 		if requestedVersion != "" {
 			canonicalURI += "@" + requestedVersion
 		}
 		// Delegate to resolveCanonicalURI so the ShortName / Ecosystem /
 		// Version fields are set the same way they are for direct
-		// pkg:go/ inputs. Drift between the two paths is the bug class
+		// pkg:golang/ inputs. Drift between the two paths is the bug class
 		// this consolidation prevents.
 		return resolveCanonicalURI(canonicalURI)
 	}
@@ -643,4 +658,108 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 	}
 
 	return out, nil
+}
+
+// parsePkgGoDevURL recognizes pkg.go.dev module/package URLs and
+// extracts the import path plus an optional `@<version>` suffix.
+// Returns (importPath, version, true) on a match; version is empty
+// when no @V is present. Returns ("", "", false) on anything that
+// isn't a well-formed pkg.go.dev/<import-path> URL.
+//
+// Accepted shapes:
+//
+//	https://pkg.go.dev/github.com/owner/repo
+//	https://pkg.go.dev/github.com/owner/repo@v1.2.3
+//	https://pkg.go.dev/github.com/owner/repo/cmd/sub        (subpackage; importPath is full path)
+//	https://pkg.go.dev/golang.org/x/mod
+//	https://pkg.go.dev/gopkg.in/yaml.v3
+//	http://pkg.go.dev/...                                   (http variant)
+//
+// Host-anchoring rejects lookalike hosts like
+// "pkg.go.dev.attacker.example/..." by requiring an exact match on
+// "pkg.go.dev/" after the optional scheme strip. Mirrors the
+// isGitHubURL / parseNpmjsURL anchoring trick.
+//
+// Output is the import path verbatim — does NOT lowercase, does NOT
+// strip subpackages. Caller (canonicalGoModuleURI) applies those
+// transforms when constructing the canonical pkg:golang/ URI.
+func parsePkgGoDevURL(input string) (importPath, version string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+
+	rest, hostOK := strings.CutPrefix(s, "pkg.go.dev/")
+	if !hostOK || rest == "" {
+		return "", "", false
+	}
+
+	// Drop fragment and query — the pkg.go.dev UI adds these for
+	// version pickers, doc anchors, etc. Not part of the module
+	// identifier.
+	rest, _, _ = strings.Cut(rest, "#")
+	rest, _, _ = strings.Cut(rest, "?")
+	rest = strings.TrimSuffix(rest, "/")
+
+	if rest == "" {
+		return "", "", false
+	}
+
+	if path, ver, hasVersion := strings.Cut(rest, "@"); hasVersion {
+		if path == "" || ver == "" {
+			return "", "", false
+		}
+		// Reject nested @: a path with multiple @ separators is
+		// ambiguous (Go versions don't contain @, so the second one
+		// must be malformed input).
+		if strings.ContainsRune(ver, '@') {
+			return "", "", false
+		}
+		return path, ver, true
+	}
+	return rest, "", true
+}
+
+// canonicalGoModuleURI returns the pkg:golang/<canonical-path> form
+// for a Go import path, matching design/entity-model-v2.md's
+// "Standard purl" alignment with the [purl spec](https://github.com/package-url/purl-spec).
+//
+// Two cases:
+//
+//   - github-hosted (importPath starts with "github.com/"): owner/repo
+//     are case-folded to lowercase (github is case-insensitive at the
+//     host layer; lowercase is the canonical form per
+//     CanonicalRepoURI's invariant). Anything beyond owner/repo is
+//     stripped — the canonical entity is the Go module at its module
+//     root, not a subpackage docs page. Mirrors the subpackage
+//     stripping in gomod's canonicalizeGoImportPath.
+//
+//   - non-github vanity paths: returned verbatim under pkg:golang/.
+//     Module boundaries depend on each vanity host's resolver, so we
+//     don't try to identify a module root within the path; the full
+//     import path is the canonical identity.
+//
+// Empty input returns empty output; caller decides how to handle.
+//
+// Used by both ResolveTarget's vanity discriminator and the
+// pkg.go.dev URL parser so the two write paths stay in sync. The
+// gomod parser doesn't use this helper — it deliberately uses the
+// repo:github/ lens for github-hosted modules to support survey/CLI
+// repo-identity workflows. See the lens distinction in
+// design/entity-model-v2.md.
+func canonicalGoModuleURI(importPath string) string {
+	if importPath == "" {
+		return ""
+	}
+	const githubPrefix = "github.com/"
+	if rest, ok := strings.CutPrefix(importPath, githubPrefix); ok {
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return "pkg:golang/" + githubPrefix +
+				strings.ToLower(parts[0]) + "/" + strings.ToLower(parts[1])
+		}
+		// Malformed github prefix without owner+repo. Fall through to
+		// preserve the input as a verbatim pkg:golang/ path; the
+		// caller's downstream validation surfaces the real issue.
+	}
+	return "pkg:golang/" + importPath
 }

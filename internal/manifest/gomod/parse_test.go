@@ -40,16 +40,18 @@ func TestCanonicalizeGoImportPath(t *testing.T) {
 		{"github all-caps", "github.com/FOO/BAR", "repo:github/foo/bar"},
 		{"github mixed-case subpackage", "github.com/BurntSushi/toml/cmd/tomlv", "repo:github/burntsushi/toml"},
 
-		// Vanity paths: preserved verbatim under pkg:go/ scheme.
-		{"vanity gopkg.in", "gopkg.in/yaml.v3", "pkg:go/gopkg.in/yaml.v3"},
-		{"vanity modernc.org", "modernc.org/sqlite", "pkg:go/modernc.org/sqlite"},
-		{"vanity golang.org", "golang.org/x/mod", "pkg:go/golang.org/x/mod"},
-		{"vanity example.com", "example.com/widget", "pkg:go/example.com/widget"},
+		// Vanity paths: preserved verbatim under pkg:golang/ scheme,
+		// matching the purl-spec type identifier and design/entity-
+		// model-v2.md "Standard purl."
+		{"vanity gopkg.in", "gopkg.in/yaml.v3", "pkg:golang/gopkg.in/yaml.v3"},
+		{"vanity modernc.org", "modernc.org/sqlite", "pkg:golang/modernc.org/sqlite"},
+		{"vanity golang.org", "golang.org/x/mod", "pkg:golang/golang.org/x/mod"},
+		{"vanity example.com", "example.com/widget", "pkg:golang/example.com/widget"},
 
 		// Edge cases.
 		{"empty string", "", ""},
-		{"github prefix with no owner", "github.com/", "pkg:go/github.com/"},
-		{"github with only owner", "github.com/foo", "pkg:go/github.com/foo"},
+		{"github prefix with no owner", "github.com/", "pkg:golang/github.com/"},
+		{"github with only owner", "github.com/foo", "pkg:golang/github.com/foo"},
 	}
 
 	for _, tc := range cases {
@@ -120,8 +122,8 @@ func TestParse_Simple(t *testing.T) {
 	assert.Equal(t, "go", kong.Ecosystem)
 
 	yaml := byName["gopkg.in/yaml.v3"]
-	assert.Equal(t, "pkg:go/gopkg.in/yaml.v3", yaml.CanonicalURI,
-		"vanity paths should use pkg:go/ scheme")
+	assert.Equal(t, "pkg:golang/gopkg.in/yaml.v3", yaml.CanonicalURI,
+		"vanity paths should use pkg:golang/ scheme (purl spec)")
 	assert.True(t, yaml.Direct)
 
 	spew := byName["github.com/davecgh/go-spew"]
@@ -263,7 +265,7 @@ func writeFile(path, content string) error {
 // against representative `go mod graph` output: one root module
 // (no @version on the parent), several direct edges, a few
 // transitive edges. Locks in the canonical-URI conversion (github
-// → repo:, others → pkg:go/) and the root-detection rule
+// → repo:, others → pkg:golang/) and the root-detection rule
 // (parent without @version).
 func TestParseGoModGraphOutput_HappyPath(t *testing.T) {
 	t.Parallel()
@@ -283,7 +285,7 @@ github.com/alecthomas/kong@v1.15.0 github.com/pkg/errors@v0.9.1
 	require.Len(t, g.Edges, 6, "all six edges should be parsed")
 
 	// Spot-check one edge of each canonical-URI shape: github →
-	// repo:, vanity domain → pkg:go/, and a transitive edge
+	// repo:, vanity domain → pkg:golang/, and a transitive edge
 	// where the parent itself is non-root.
 	assert.Equal(t, manifest.Edge{
 		Parent: "repo:github/sarahmaeve/signatory",
@@ -291,10 +293,10 @@ github.com/alecthomas/kong@v1.15.0 github.com/pkg/errors@v0.9.1
 	}, g.Edges[0])
 	assert.Equal(t, manifest.Edge{
 		Parent: "repo:github/sarahmaeve/signatory",
-		Child:  "pkg:go/gopkg.in/yaml.v3",
+		Child:  "pkg:golang/gopkg.in/yaml.v3",
 	}, g.Edges[1])
 	assert.Equal(t, manifest.Edge{
-		Parent: "pkg:go/modernc.org/sqlite",
+		Parent: "pkg:golang/modernc.org/sqlite",
 		Child:  "repo:github/dustin/go-humanize",
 	}, g.Edges[3])
 }

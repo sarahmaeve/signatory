@@ -54,7 +54,7 @@ Every target-accepting entry point:
 
 - Accepts any form `profile.ResolveTarget` accepts.
 - Emits the canonical URI in structured responses (JSON, MCP return values, log lines).
-- If the input carries a version suffix (`pkg:npm/X@V`, `pkg:go/...@V`), the version parses into a dedicated field on the resolved target. `--version` is an override and errors loudly on conflict with the URI-embedded version.
+- If the input carries a version suffix (`pkg:npm/X@V`, `pkg:golang/...@V`), the version parses into a dedicated field on the resolved target. `--version` is an override and errors loudly on conflict with the URI-embedded version.
 - Never silently rewrites the caller's identity. If resolution hops from `pkg:X` to `repo:Y`, the response cites both: `{"target": "pkg:npm/X", "resolved_source": "repo:github/Y"}`.
 
 ### 3.2. Recorded identity

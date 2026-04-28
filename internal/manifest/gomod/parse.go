@@ -132,11 +132,11 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 // canonical URI.
 //
 //	github.com/owner/repo        → repo:github/owner/repo
-//	github.com/Owner/Repo        → repo:github/owner/repo    (case-folded)
-//	github.com/owner/repo/sub/x  → repo:github/owner/repo    (strip subpackage)
-//	gopkg.in/yaml.v3             → pkg:go/gopkg.in/yaml.v3
-//	modernc.org/sqlite           → pkg:go/modernc.org/sqlite
-//	example.com                  → pkg:go/example.com
+//	github.com/Owner/Repo        → repo:github/owner/repo        (case-folded)
+//	github.com/owner/repo/sub/x  → repo:github/owner/repo        (strip subpackage)
+//	gopkg.in/yaml.v3             → pkg:golang/gopkg.in/yaml.v3
+//	modernc.org/sqlite           → pkg:golang/modernc.org/sqlite
+//	example.com                  → pkg:golang/example.com
 //
 // Subpackage stripping for GitHub paths: Go allows import paths
 // like "github.com/foo/bar/subdir" but the repository is
@@ -149,6 +149,17 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 // must collapse to one canonical URI. Delegated to
 // profile.CanonicalRepoURI to keep the canonical form in one
 // place — see its doc comment for the underlying invariant.
+//
+// pkg:golang/ scheme: the gomod parser deliberately produces the
+// repo:github/ lens for github-hosted modules (the survey/CLI
+// repo-identity workflow) but the pkg:golang/ lens for non-github
+// vanity paths. pkg:golang/ matches the [purl spec](https://github.com/package-url/purl-spec)
+// type identifier for Go modules — see design/entity-model-v2.md
+// "Standard purl." Earlier versions of this parser emitted "pkg:go/"
+// (commit bfe5df8, 2026-04-20); that was an oversight against the
+// design-doc target and got corrected once the dogfood walk surfaced
+// it. Pre-existing pkg:go/ rows in the store are reachable via
+// profile.AlternateURIs as a backwards-compat alternate.
 //
 // Empty input returns empty output; the caller decides how to
 // handle that (survey will surface an unanalyzable dep).
@@ -163,9 +174,9 @@ func canonicalizeGoImportPath(importPath string) string {
 			return profile.CanonicalRepoURI("github", parts[0], parts[1])
 		}
 		// Malformed: "github.com/" with no owner. Fall through to
-		// the pkg:go/ form so the raw input is preserved.
+		// the pkg:golang/ form so the raw input is preserved.
 	}
-	return "pkg:go/" + importPath
+	return "pkg:golang/" + importPath
 }
 
 // isLocalPath returns true when a replace target is a filesystem

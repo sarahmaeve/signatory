@@ -13,8 +13,9 @@ Every target-accepting command accepts the same forms:
 | GitHub shorthand | `alecthomas/kong` |
 | Full URL | `https://github.com/alecthomas/kong` |
 | Canonical repo URI | `repo:github/alecthomas/kong` |
-| Package URI | `pkg:npm/express`, `pkg:go/golang.org/x/mod`, `pkg:cargo/atuin` |
-| Versioned package URI | `pkg:npm/invariant@2.2.4`, `pkg:go/golang.org/x/mod@v0.35.0` |
+| Package URI | `pkg:npm/express`, `pkg:golang/golang.org/x/mod`, `pkg:cargo/atuin` |
+| Versioned package URI | `pkg:npm/invariant@2.2.4`, `pkg:golang/golang.org/x/mod@v0.35.0` |
+| pkg.go.dev URL | `https://pkg.go.dev/github.com/alecthomas/kong`, `https://pkg.go.dev/golang.org/x/mod@v0.35.0` |
 | npmjs.com URL | `https://www.npmjs.com/package/express` |
 | npmjs.com version URL | `https://www.npmjs.com/package/invariant/v/2.2.4` |
 

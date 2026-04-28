@@ -71,11 +71,13 @@ type Dep struct {
 	// CanonicalURI is the signatory-internal identifier the store
 	// uses as entity.canonical_uri. Resolution rule (v0.1, Go):
 	//   - Go paths under github.com/ → "repo:github/owner/repo"
-	//   - Go paths elsewhere        → "pkg:go/<verbatim-path>"
+	//   - Go paths elsewhere        → "pkg:golang/<verbatim-path>"
 	//
-	// The pkg:go/ scheme preserves the go.mod-declared path
-	// literally — vanity paths (modernc.org/sqlite, gopkg.in/...)
-	// stay queryable under the same form the user would pass to
+	// The pkg:golang/ scheme matches the [purl spec](https://github.com/package-url/purl-spec)
+	// type identifier for Go modules and design/entity-model-v2.md
+	// "Standard purl" — preserves the go.mod-declared path literally
+	// so vanity paths (modernc.org/sqlite, gopkg.in/...) stay
+	// queryable under the same form the user would pass to
 	// signatory analyze.
 	CanonicalURI string
 

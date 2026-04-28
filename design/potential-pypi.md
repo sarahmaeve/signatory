@@ -247,7 +247,7 @@ complete ecosystem provider.
 | Direct vs indirect | Flatten deps+devDeps+peerDeps+optDeps; direct=true. Transitive from lockfile; direct=false. | `require` directives; `indirect` comment. |
 | Local/non-registry specs | `file:`, `git:`, `github:`, `http(s):`, `npm:`, `workspace:`, `portal:`, `link:` → `ecosystem="npm-local"` + empty URI | `replace` directives → local path detected as `ecosystem="go-local-replace"` |
 | Replace / override handling | n/a (lockfile carries resolved tree) | Yes — `replace` rewrites Name + CanonicalURI |
-| Canonical URI construction | `pkg:npm/` + validated name (or empty on malformed) | `repo:github/owner/repo` if github.com/; else `pkg:go/<full-path>` |
+| Canonical URI construction | `pkg:npm/` + validated name (or empty on malformed) | `repo:github/owner/repo` if github.com/; else `pkg:golang/<full-path>` |
 | Graph extraction (for survey reachability) | ✗ `manifest.ErrGraphUnavailable` | ✓ `ParseGraph` via `go mod graph` subprocess |
 
 **PyPI needs:** a whole `internal/manifest/pypi/` package. See §"PyPI-specific complications" for why this is larger than npm or Go.

@@ -325,8 +325,8 @@ func TestShortNameFromURI(t *testing.T) {
 		want string
 	}{
 		{"repo:github/sarahmaeve/signatory", "signatory"},
-		{"pkg:go/gopkg.in/yaml.v3", "yaml.v3"},
-		{"pkg:go/modernc.org/sqlite", "sqlite"},
+		{"pkg:golang/gopkg.in/yaml.v3", "yaml.v3"},
+		{"pkg:golang/modernc.org/sqlite", "sqlite"},
 		{"pkg:npm/express", "express"},
 		{"pkg:npm/@sindresorhus/is", "is"},
 		{"identity:github/alecthomas", "alecthomas"},
@@ -438,7 +438,7 @@ func TestSurvey_Human_IndirectRow_AwaitsTagUnderAll(t *testing.T) {
 				Tier: survey.TierUnexamined,
 			},
 			{
-				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:go/example.com/transitive-i", Direct: false},
+				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:golang/example.com/transitive-i", Direct: false},
 				Tier: survey.TierNotInStore,
 				Reachability: &survey.Reachability{
 					FromDirects: []string{"repo:github/example/u"},
@@ -479,7 +479,7 @@ func TestSurvey_Human_IndirectRow_InheritTagUnderAll(t *testing.T) {
 				Tier: survey.TierVettedFrozen,
 			},
 			{
-				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:go/example.com/transitive-i", Direct: false},
+				Dep:  manifest.Dep{Name: "transitive-i", CanonicalURI: "pkg:golang/example.com/transitive-i", Direct: false},
 				Tier: survey.TierNotInStore,
 				Reachability: &survey.Reachability{
 					FromDirects: []string{"repo:github/example/r"},
