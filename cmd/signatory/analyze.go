@@ -8,11 +8,13 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/identity"
+	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
@@ -307,6 +309,13 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 				entity.CanonicalURI, resolveErr)
 		}
 	}
+
+	// Nudge users analyzing a Go module via its github URL form
+	// (repo:github/X/Y) toward the canonical pkg:golang/<modpath>
+	// form, which gets the gopublish collector. No-op for
+	// non-Go-module repos and for entities already using pkg:golang.
+	// See maybeWarnGoModuleViaRepoForm for the full rationale.
+	maybeWarnGoModuleViaRepoForm(stderr, entity, cmd.Path)
 
 	_, _ = fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
 
@@ -745,6 +754,45 @@ func resolveNpmRepo(ctx context.Context, s store.Store, entity *profile.Entity, 
 		return fmt.Errorf("persist resolved URL on entity: %w", err)
 	}
 	return nil
+}
+
+// maybeWarnGoModuleViaRepoForm emits a stderr hint when the user
+// is analyzing a Go module via its github URL form
+// (`repo:github/X/Y`) instead of the canonical
+// `pkg:golang/<modpath>` form. The repo form misses go-publish
+// provenance signals because the gopublish collector's filter
+// is `entity.Ecosystem in {"golang","go"}` and repo-scheme
+// entities have no Ecosystem set.
+//
+// Triggers iff:
+//
+//   - entity uses the `repo:github/` scheme prefix
+//   - clonePath is non-empty and contains a parseable go.mod
+//   - the parsed go.mod declares a module path
+//
+// Otherwise: no-op. Informational; never blocks analysis. The
+// proper fix (URI canonicalization at resolve time) requires
+// network-dependent resolver work and is deferred — this is
+// the cheap nudge that surfaces the gap to users today.
+//
+// Closes Gap 6c from the 2026-04-28 ms dogfood audit; see
+// design/dogfood-errors.md (when it lands) for the trade-off
+// discussion that landed on "document and nudge" rather than
+// "rewrite the resolver."
+func maybeWarnGoModuleViaRepoForm(stderr io.Writer, entity *profile.Entity, clonePath string) {
+	if entity == nil || clonePath == "" {
+		return
+	}
+	if !strings.HasPrefix(entity.CanonicalURI, "repo:github/") {
+		return
+	}
+	info, _, err := gomod.Parse(filepath.Join(clonePath, "go.mod"))
+	if err != nil || info.Name == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr,
+		"note: %s declares Go module %q; analyze pkg:golang/%s for full Go-publish provenance signals\n",
+		entity.CanonicalURI, info.Name, info.Name)
 }
 
 // resolvePyPIRepo is the PyPI parallel to resolveNpmRepo. Same

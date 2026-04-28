@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -320,6 +322,106 @@ func TestFunctional_AnalyzeRefresh_PyPIFailurePropagates_Error(t *testing.T) {
 	require.Error(t, err, "PyPI registry failure during --refresh must propagate as an error")
 	assert.Contains(t, err.Error(), "pypi",
 		"error message must name the pypi failure")
+}
+
+// ----- Gap 6c: stderr hint for Go modules analyzed via repo: form -----
+//
+// The dogfood audit identified a coverage gap: when a Go module
+// is analyzed via its github URL form (repo:github/X/Y), the
+// gopublish collector's filter (Ecosystem in {"golang","go"})
+// doesn't match — repo: entities have no Ecosystem field set.
+// Result: the user gets github+git signals but not Go-publish
+// provenance (proxy.golang.org / sum.golang.org).
+//
+// The full fix is URI canonicalization (rewrite repo:github/X/Y
+// → pkg:golang/<modpath> at resolve time when the repo is a Go
+// module), but that's network-dependent resolver work. For now,
+// a stderr hint nudges users toward the canonical form when we
+// detect the situation post-clone.
+
+// TestWarnGoModuleViaRepoForm_EmitsHint: the cloned repo carries
+// a go.mod, the entity is repo:github/... — the hint MUST land.
+// Module path from go.mod appears in the suggested
+// pkg:golang/<modpath> form so the user can copy-paste.
+func TestWarnGoModuleViaRepoForm_EmitsHint(t *testing.T) {
+	clone := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(clone, "go.mod"),
+		[]byte("module github.com/dustin/go-humanize\n\ngo 1.21\n"),
+		0o600,
+	))
+
+	entity := &profile.Entity{
+		CanonicalURI: "repo:github/dustin/go-humanize",
+		Type:         profile.EntityProject,
+	}
+
+	var buf bytes.Buffer
+	maybeWarnGoModuleViaRepoForm(&buf, entity, clone)
+
+	got := buf.String()
+	assert.Contains(t, got, "github.com/dustin/go-humanize",
+		"hint must name the module path so the user can copy it")
+	assert.Contains(t, got, "pkg:golang/github.com/dustin/go-humanize",
+		"hint must give the canonical pkg:golang/<modpath> form to switch to")
+}
+
+// TestWarnGoModuleViaRepoForm_NoGoMod_NoHint: clone has no go.mod
+// (Python project, Rust project, plain repo). Hint must NOT
+// fire — we only nudge when the situation actually applies.
+func TestWarnGoModuleViaRepoForm_NoGoMod_NoHint(t *testing.T) {
+	clone := t.TempDir() // empty directory, no go.mod
+	entity := &profile.Entity{
+		CanonicalURI: "repo:github/foo/bar",
+		Type:         profile.EntityProject,
+	}
+
+	var buf bytes.Buffer
+	maybeWarnGoModuleViaRepoForm(&buf, entity, clone)
+
+	assert.Empty(t, buf.String(),
+		"non-Go projects must not emit the hint — no go.mod, no nudge")
+}
+
+// TestWarnGoModuleViaRepoForm_PkgGolang_NoHint: entity already
+// uses the canonical pkg:golang/ form. Hint must NOT fire — the
+// user is already doing the right thing.
+func TestWarnGoModuleViaRepoForm_PkgGolang_NoHint(t *testing.T) {
+	clone := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(clone, "go.mod"),
+		[]byte("module github.com/dustin/go-humanize\n"),
+		0o600,
+	))
+
+	entity := &profile.Entity{
+		CanonicalURI: "pkg:golang/github.com/dustin/go-humanize",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "golang",
+	}
+
+	var buf bytes.Buffer
+	maybeWarnGoModuleViaRepoForm(&buf, entity, clone)
+
+	assert.Empty(t, buf.String(),
+		"canonical form must not get the hint — user is already on the right path")
+}
+
+// TestWarnGoModuleViaRepoForm_NoClonePath_NoHint: --refresh
+// without --path (e.g., for non-git-hosted entities) leaves
+// clonePath empty. The detection can't run; the hint must NOT
+// fire (would emit a false positive otherwise).
+func TestWarnGoModuleViaRepoForm_NoClonePath_NoHint(t *testing.T) {
+	entity := &profile.Entity{
+		CanonicalURI: "repo:github/foo/bar",
+		Type:         profile.EntityProject,
+	}
+
+	var buf bytes.Buffer
+	maybeWarnGoModuleViaRepoForm(&buf, entity, "")
+
+	assert.Empty(t, buf.String(),
+		"empty clonePath means we can't detect; stay silent rather than guess")
 }
 
 // TestFunctional_AnalyzeRefresh_PyPIFailurePropagates_AbsenceSignal:
