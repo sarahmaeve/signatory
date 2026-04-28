@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/profile"
 )
 
 // ingestAll loads every fixture into a fresh DB and returns it.
@@ -364,6 +367,113 @@ func assertConclusionsEquivalent(t *testing.T, want, got []exchange.Conclusion) 
 			"conclusion[%d] related_conclusions", i)
 	}
 }
+
+// TestGetLatestSynthesisForEntity covers the read-side primitive that
+// backs the signatory_show_synthesis MCP tool. Three cases:
+//
+//  1. Multiple synthesis rounds for one entity → newest by ingested_at
+//     wins. Synthesis rows are not superseded, so "latest" is the
+//     canonical answer; multi-round synthesis (an analyst re-running
+//     over fresh inputs) gets the freshest take.
+//  2. Entity with analyst (non-synthesis) outputs but no synthesis row
+//     → ErrNotFound. "We have analyses but no synthesist verdict" is
+//     the same caller-facing answer as "no synthesis" — the tool
+//     surfaces this as `specified synthesis does not exist`.
+//  3. Empty entity ID → ErrNilInput, matching the contract every
+//     other store method that takes an ID has.
+func TestGetLatestSynthesisForEntity_LatestRoundWins(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	input := synthesisTestInput()
+	sess := newSessionFixture(t, s, input.Target)
+	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+
+	// First synthesis round: ingest with one summary, then bump the
+	// supplement to make a different content_hash and ingest a second
+	// round. The second has a later ingested_at and is the "latest"
+	// the helper must surface.
+	first, err := s.IngestAnalystOutput(ctx, input, "round-1",
+		WithAnalysisSession(sess.ID))
+	require.NoError(t, err)
+
+	// Brief pause so ingested_at differs second-precision-stably.
+	time.Sleep(1100 * time.Millisecond)
+
+	input2 := synthesisTestInput()
+	input2.SynthesisSupplement.Summary = "second-round summary, supersedes first"
+	input2.Attribution.Round = 2
+	second, err := s.IngestAnalystOutput(ctx, input2, "round-2",
+		WithAnalysisSession(sess.ID))
+	require.NoError(t, err)
+	require.NotEqual(t, first.OutputID, second.OutputID,
+		"second ingest must produce a distinct row (changed Summary changes content_hash)")
+
+	gotID, got, err := s.GetLatestSynthesisForEntity(ctx, first.EntityID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.SynthesisSupplement,
+		"GetLatestSynthesisForEntity must return a fully-hydrated AnalystOutput including SynthesisSupplement")
+	assert.Equal(t, second.OutputID, gotID,
+		"the output_id of the round-2 row must surface so MCP callers can navigate to that specific row")
+	assert.Equal(t, "second-round summary, supersedes first",
+		got.SynthesisSupplement.Summary,
+		"newest by ingested_at wins")
+	assert.Equal(t, 2, got.Attribution.Round)
+}
+
+func TestGetLatestSynthesisForEntity_EntityWithoutSynthesis(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// Seed an entity, then ingest a non-synthesis analyst output
+	// against it. No synthesis row should mean ErrNotFound for the
+	// "latest synthesis" lookup.
+	entity := &profile.Entity{
+		ID:           uuid.NewString(),
+		CanonicalURI: "pkg:npm/no-synthesis-here",
+		Type:         profile.EntityProject,
+		ShortName:    "no-synthesis-here",
+	}
+	require.NoError(t, s.PutEntity(ctx, entity))
+
+	nonSynth := &exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "signatory-security-v1",
+			Model:     "claude-test",
+			InvokedAt: "2026-04-21T00:00:00Z",
+		},
+		Target: "pkg:npm/no-synthesis-here",
+		Conclusions: []exchange.Conclusion{
+			{
+				ID: "F001", Verdict: "v", Rationale: "r",
+				Severity: exchange.Severity{Default: exchange.SeverityLow},
+				Category: "c",
+				Citations: []exchange.Citation{
+					{Path: "src/x.go", LineStart: ptrInt(1)},
+				},
+			},
+		},
+	}
+	_, err := s.IngestAnalystOutput(ctx, nonSynth, "non-synthesis-test")
+	require.NoError(t, err)
+
+	_, _, err = s.GetLatestSynthesisForEntity(ctx, entity.ID)
+	assert.ErrorIs(t, err, ErrNotFound,
+		"entity with only Layer-2 analyst outputs has no synthesis; ErrNotFound is the right sentinel")
+}
+
+func TestGetLatestSynthesisForEntity_EmptyEntityID(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	_, _, err := s.GetLatestSynthesisForEntity(ctx, "")
+	assert.ErrorIs(t, err, ErrNilInput,
+		"empty entityID is malformed; surface ErrNilInput consistently with other ID-taking methods")
+}
+
+// ptrInt returns a *int holding v. Local helper because conclusion
+// citations use *int for line numbers.
+func ptrInt(v int) *int { return &v }
 
 func derefStringPtr(s *string) string {
 	if s == nil {

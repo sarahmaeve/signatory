@@ -84,6 +84,15 @@ type Store interface {
 	// isn't a synthesis (both cases mean "no proposal to accept").
 	GetSynthesisProposal(ctx context.Context, outputID string) (*exchange.ProposedPosture, error)
 
+	// Latest-synthesis reader for an entity. Backs the
+	// signatory_show_synthesis MCP tool's target-path lookup:
+	// caller resolves a URI to an entity ID, this method finds the
+	// freshest synthesis row attached to it. Returns the output_id
+	// of the row plus the fully-hydrated *exchange.AnalystOutput
+	// (SynthesisSupplement populated). Returns ErrNotFound when no
+	// synthesis rows exist for the entity.
+	GetLatestSynthesisForEntity(ctx context.Context, entityID string) (string, *exchange.AnalystOutput, error)
+
 	// Prune operations — destructive cleanup paths. Each plan call
 	// is read-only and suitable for rendering a dry-run preview;
 	// the apply call executes the plan inside a single transaction

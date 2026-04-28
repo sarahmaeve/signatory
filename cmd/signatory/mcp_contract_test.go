@@ -53,6 +53,7 @@ var expectedMCPToolNames = []string{
 	"signatory_show_analyses",
 	"signatory_show_conclusions",
 	"signatory_show_methodology",
+	"signatory_show_synthesis",
 	"signatory_signals",
 	"signatory_summary",
 	"signatory_survey",

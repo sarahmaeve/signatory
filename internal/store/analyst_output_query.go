@@ -530,6 +530,54 @@ func (s *SQLite) ListRelatedURIs(ctx context.Context, entityID string) ([]string
 	return out, rows.Err()
 }
 
+// GetLatestSynthesisForEntity returns the most-recent synthesis output
+// (analyst_id starting with exchange.SynthesistAnalystIDPrefix) for
+// entityID. Returns the output_id of the row, plus the fully-
+// hydrated *exchange.AnalystOutput (SynthesisSupplement populated).
+// Backs the signatory_show_synthesis MCP tool's `target` path:
+// caller resolves a URI to an entity, this method fetches the
+// latest synthesis attached to it. The output_id surfaces in the
+// MCP response so callers can navigate to the specific row (e.g.
+// for `posture accept`).
+//
+// "Most recent" by ingested_at DESC. Synthesis rows are not super-
+// seded — the synthesist may produce a fresh round over new analyst
+// inputs, and the latest reflects the freshest take. Ties on
+// ingested_at break by id for stability across runs.
+//
+// Returns ErrNotFound when entityID names an entity with no
+// synthesis row (or no rows at all). Returns ErrNilInput on empty
+// entityID, matching the contract every other ID-taking store method
+// holds.
+//
+// Internally: one SELECT for the latest synthesis output_id, then
+// delegates to GetAnalystOutput to do the full multi-table
+// reconstruction. Avoids duplicating the row-decomposition logic.
+func (s *SQLite) GetLatestSynthesisForEntity(ctx context.Context, entityID string) (string, *exchange.AnalystOutput, error) {
+	if entityID == "" {
+		return "", nil, fmt.Errorf("%w: entityID required", ErrNilInput)
+	}
+	var outputID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM analyst_outputs
+		 WHERE entity_id = ?
+		   AND analyst_id LIKE ? || '%'
+		 ORDER BY ingested_at DESC, id DESC
+		 LIMIT 1`,
+		entityID, exchange.SynthesistAnalystIDPrefix).Scan(&outputID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("look up latest synthesis for entity %s: %w", entityID, err)
+	}
+	out, err := s.GetAnalystOutput(ctx, outputID)
+	if err != nil {
+		return "", nil, err
+	}
+	return outputID, out, nil
+}
+
 // GetSynthesisProposal returns the ProposedPosture recorded against a
 // synthesis output, reading only the denormalized proposed_tier /
 // proposed_version_scope columns plus the rationale_summary field
