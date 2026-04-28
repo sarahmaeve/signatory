@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,7 +149,8 @@ func TestReport_LLMEconomics_AcceptsIntValueEncoding(t *testing.T) {
 	require.NoError(t, runReport("sess-iv", rawDir, outDir))
 
 	report := readReport(t, outDir, "sess-iv")
-	assert.Regexp(t, `\| claude-test \| 1 \| 42 \| 7 \| 100 \| 0 \| 2500 \| 600 \|`, report,
+	// 1 ttft sample → p50 = p95 = 600.
+	assert.Regexp(t, `\| claude-test \| 1 \| 42 \| 7 \| 100 \| 0 \| 2500 \| 600 \| 600 \|`, report,
 		"intValue-encoded tokens must be parsed and aggregated; pre-fix the row would show all zeros")
 }
 
@@ -192,17 +194,111 @@ func TestReport_LLMEconomicsTokenAggregation(t *testing.T) {
 	require.NoError(t, runReport("sess-A", rawDir, outDir))
 
 	report := readReport(t, outDir, "sess-A")
-	// Per-model rows: opus first (alphabetical), then haiku.
+	// Per-model rows: haiku first (alphabetical), then opus. With
+	// 1 ttft sample each, p50 = p95 = the sample value.
 	assert.Regexp(t,
-		`\| claude-haiku-4-5 \| 1 \| 200 \| 100 \| 0 \| 0 \| 800 \| 300 \|`,
-		report, "haiku row must show 1 call, 200 input, 100 output, 0 cache, 800ms, ttft 300")
+		`\| claude-haiku-4-5 \| 1 \| 200 \| 100 \| 0 \| 0 \| 800 \| 300 \| 300 \|`,
+		report, "haiku row: 1 call, 200 input, 100 output, 0 cache, 800ms, ttft 300/300")
 	assert.Regexp(t,
-		`\| claude-opus-4-7 \| 1 \| 1000 \| 500 \| 8000 \| 200 \| 3500 \| 450 \|`,
-		report, "opus row must show 1 call, 1000 input, 500 output, 8000 cache_read, 200 cache_create, 3500ms, ttft 450")
-	// Aggregate row is the sum across models.
+		`\| claude-opus-4-7 \| 1 \| 1000 \| 500 \| 8000 \| 200 \| 3500 \| 450 \| 450 \|`,
+		report, "opus row: 1 call, 1000 input, 500 output, 8000 cache_read, 200 cache_create, 3500ms, ttft 450/450")
+	// Aggregate row sums counts/tokens but renders em-dashes for
+	// percentiles — cross-model latency comparison isn't meaningful
+	// (different models have different speeds), so the TOTAL row
+	// elides them by design.
 	assert.Regexp(t,
-		`\| \*\*TOTAL\*\* \| 2 \| 1200 \| 600 \| 8000 \| 200 \| 4300 \|`,
-		report, "TOTAL row sums per-model values across the 2 LLM requests")
+		`\| \*\*TOTAL\*\* \| 2 \| 1200 \| 600 \| 8000 \| 200 \| 4300 \| — \| — \|`,
+		report, "TOTAL row sums counts/tokens but renders em-dashes for percentile columns")
+}
+
+// TestReport_LLMEconomics_TTFTPercentiles: per-model TTFT
+// distribution surfaces as p50 (median) and p95 (tail), not just
+// a mean. Replaces the previous Mean TTFT column — for skewed
+// latency distributions the mean is a poor summary; the tail (p95)
+// is what determines whether a workflow feels fast or slow.
+//
+// Fixture: 10 TTFT samples per model so the percentile math is
+// exercised. The samples are crafted so:
+//   - p50 (5th of 10 by lower-mode definition) = 350
+//   - p95 (10th of 10) = 1200
+//
+// for the "claude-spread" model. Pre-fix the renderer reports a
+// mean only and this test fails for absence of percentile columns.
+func TestReport_LLMEconomics_TTFTPercentiles(t *testing.T) {
+	t.Parallel()
+	// 10 spans, ttft_ms varying so percentiles are non-trivial.
+	// Sorted: [100,150,200,250,300,350,400,500,750,1200]
+	// p50 (closest-rank, lower mode) = sorted[ceil(0.5*10)-1] = sorted[4] = 300
+	// p95 = sorted[ceil(0.95*10)-1] = sorted[9] = 1200
+	ttfts := []string{"100", "150", "200", "250", "300", "350", "400", "500", "750", "1200"}
+	var spans strings.Builder
+	for i, ttft := range ttfts {
+		if i > 0 {
+			spans.WriteString(",")
+		}
+		fmt.Fprintf(&spans, `{"name":"claude_code.llm_request","attributes":[{"key":"session.id","value":{"stringValue":"sess-pct"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-spread"}},{"key":"ttft_ms","value":{"intValue":"%s"}}]}`, ttft)
+	}
+	traces := `{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[` + spans.String() + `]}]}]}`
+	rawDir := writeRawDir(t, traces, "")
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-pct", rawDir, outDir))
+
+	report := readReport(t, outDir, "sess-pct")
+	// Header row: must have both TTFT p50 and TTFT p95 columns.
+	assert.Contains(t, report, "TTFT p50",
+		"latency table must include p50 (median) — robust to outliers")
+	assert.Contains(t, report, "TTFT p95",
+		"latency table must include p95 (tail) — surfaces the slow calls that dominate user-perceived latency")
+	// Data row: 10 calls, total ms = 0 (we didn't set duration_ms),
+	// p50=300, p95=1200.
+	assert.Regexp(t, `\| claude-spread \| 10 \| 0 \| 0 \| 0 \| 0 \| 0 \| 300 \| 1200 \|`, report,
+		"row must show p50=300 (5th-percentile by closest-rank) and p95=1200 (10th-percentile)")
+}
+
+// TestReport_LLMEconomics_TTFTPercentiles_SmallSample: when there
+// are fewer than 10 TTFT samples, p95 is statistically noisy. We
+// still render it (a coarse signal beats no signal), but the test
+// pins the small-sample behavior so the impl doesn't accidentally
+// elide it.
+func TestReport_LLMEconomics_TTFTPercentiles_SmallSample(t *testing.T) {
+	t.Parallel()
+	// 3 samples: 100, 200, 500. p50=200, p95=500 (both fall on
+	// the highest-rank index when N is small).
+	traces := `{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[` +
+		`{"name":"claude_code.llm_request","attributes":[{"key":"session.id","value":{"stringValue":"sess-small"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-3"}},{"key":"ttft_ms","value":{"intValue":"100"}}]},` +
+		`{"name":"claude_code.llm_request","attributes":[{"key":"session.id","value":{"stringValue":"sess-small"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-3"}},{"key":"ttft_ms","value":{"intValue":"500"}}]},` +
+		`{"name":"claude_code.llm_request","attributes":[{"key":"session.id","value":{"stringValue":"sess-small"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-3"}},{"key":"ttft_ms","value":{"intValue":"200"}}]}` +
+		`]}]}]}`
+	rawDir := writeRawDir(t, traces, "")
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-small", rawDir, outDir))
+
+	report := readReport(t, outDir, "sess-small")
+	// p50 of [100,200,500] = sorted[ceil(0.5*3)-1] = sorted[1] = 200
+	// p95 of [100,200,500] = sorted[ceil(0.95*3)-1] = sorted[2] = 500
+	assert.Regexp(t, `\| claude-3 \| 3 \| 0 \| 0 \| 0 \| 0 \| 0 \| 200 \| 500 \|`, report,
+		"3-sample distribution: p50=200, p95=500 by closest-rank")
+}
+
+// TestReport_LLMEconomics_TTFTPercentiles_NoSamples: a model with
+// no TTFT samples (e.g., spans without ttft_ms attribute) renders
+// percentile columns as "—" rather than 0, so the operator
+// distinguishes "fast first-token" from "no data."
+func TestReport_LLMEconomics_TTFTPercentiles_NoSamples(t *testing.T) {
+	t.Parallel()
+	traces := `{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[` +
+		`{"name":"claude_code.llm_request","attributes":[{"key":"session.id","value":{"stringValue":"sess-noTTFT"}},{"key":"gen_ai.request.model","value":{"stringValue":"claude-noTTFT"}}]}` +
+		`]}]}]}`
+	rawDir := writeRawDir(t, traces, "")
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-noTTFT", rawDir, outDir))
+
+	report := readReport(t, outDir, "sess-noTTFT")
+	assert.Regexp(t, `\| claude-noTTFT \| 1 \| 0 \| 0 \| 0 \| 0 \| 0 \| — \| — \|`, report,
+		"no-samples case must render em-dashes for both percentile columns, not zero")
 }
 
 // TestReport_LLMEconomics_CacheHitRatio: cache hit ratio surfaces

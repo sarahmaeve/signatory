@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,8 +132,16 @@ type modelEconomics struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalDurationMs     int64
-	TotalTTFTMs         int64
-	TTFTSamples         int // count of spans where ttft_ms parsed cleanly; mean = TotalTTFTMs / TTFTSamples
+
+	// TTFTSamples is the full distribution of time-to-first-token
+	// values, one entry per span where ttft_ms parsed cleanly.
+	// Stored verbatim so the renderer can compute p50 (median),
+	// p95 (tail), or any other quantile at output time. Mean is
+	// no longer tracked — for skewed latency distributions, mean
+	// is a poor summary; the median + tail tell the story the
+	// operator actually cares about. See renderLLMEconomics for
+	// the percentile algorithm.
+	TTFTSamples []int64
 }
 
 // aggregated carries everything the markdown renderer needs.
@@ -300,9 +310,52 @@ func aggregateEconomics(agg *aggregated, sp otlpSpan) {
 	stats.CacheCreationTokens += parseStringInt(stringAttr(sp.Attributes, "cache_creation_tokens"))
 	stats.TotalDurationMs += parseStringInt(stringAttr(sp.Attributes, "duration_ms"))
 	if ttft := parseStringInt(stringAttr(sp.Attributes, "ttft_ms")); ttft > 0 {
-		stats.TotalTTFTMs += ttft
-		stats.TTFTSamples++
+		stats.TTFTSamples = append(stats.TTFTSamples, ttft)
 	}
+}
+
+// percentile returns the p-th percentile of a slice of int64
+// samples using the closest-rank method (the simplest and most
+// commonly understood definition for small samples). Returns 0 and
+// false when samples is empty.
+//
+// Closest-rank: for percentile p (0 < p ≤ 100), the index is
+// ceil(p/100 * N) - 1, clamped to [0, N-1]. For N=10 samples and
+// p=50, index = ceil(5)-1 = 4 → the 5th sample. For p=95, index =
+// ceil(9.5)-1 = 9 → the 10th sample.
+//
+// Caller is responsible for sorting the slice first; this avoids
+// repeated sorts when computing multiple percentiles back-to-back.
+func percentile(sortedSamples []int64, p float64) (int64, bool) {
+	n := len(sortedSamples)
+	if n == 0 {
+		return 0, false
+	}
+	idx := int(math.Ceil(p/100*float64(n))) - 1
+	idx = max(idx, 0)
+	if idx >= n {
+		idx = n - 1
+	}
+	return sortedSamples[idx], true
+}
+
+// sortInt64s sorts a slice of int64 in place, ascending. Tiny
+// adapter so the renderer reads cleanly — slices.Sort at the call
+// site would obscure the intent.
+func sortInt64s(s []int64) {
+	slices.Sort(s)
+}
+
+// formatPercentile renders a percentile cell for the LLM economics
+// table. Returns "—" (em-dash) when the sample slice is empty so
+// rows for models that recorded zero ttft_ms attributes still align
+// with the rest of the table.
+func formatPercentile(sortedSamples []int64, p float64) string {
+	v, ok := percentile(sortedSamples, p)
+	if !ok {
+		return "—"
+	}
+	return strconv.FormatInt(v, 10)
 }
 
 // parseStringInt parses s as an int64, returning 0 on empty or
@@ -418,20 +471,29 @@ func renderLLMEconomics(b *strings.Builder, agg *aggregated) {
 	}
 	sort.Strings(models)
 
-	b.WriteString("| Model | Calls | Input | Output | Cache read | Cache create | Total ms | Mean TTFT ms |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+	// Percentile columns surface the latency distribution. p50 (the
+	// median) is robust to outliers in a way mean isn't; p95 (the
+	// tail) is what determines whether the workflow feels fast —
+	// the slowest LLM calls are the bottleneck for sequential
+	// orchestrator turns. Cross-model latency comparison isn't
+	// meaningful (different models have different speeds), so the
+	// TOTAL row elides percentiles in favor of em-dashes.
+	b.WriteString("| Model | Calls | Input | Output | Cache read | Cache create | Total ms | TTFT p50 | TTFT p95 |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|\n")
 
 	var totals modelEconomics
 	for _, m := range models {
 		s := agg.EconomicsByModel[m]
-		ttft := "—"
-		if s.TTFTSamples > 0 {
-			ttft = fmt.Sprintf("%d", s.TotalTTFTMs/int64(s.TTFTSamples))
-		}
-		fmt.Fprintf(b, "| %s | %d | %d | %d | %d | %d | %d | %s |\n",
+		// Sort the per-model samples once; both percentile lookups
+		// reuse the sorted slice. Sorts in place — modelEconomics
+		// is a per-render artifact, mutating it is fine.
+		sortInt64s(s.TTFTSamples)
+		p50 := formatPercentile(s.TTFTSamples, 50)
+		p95 := formatPercentile(s.TTFTSamples, 95)
+		fmt.Fprintf(b, "| %s | %d | %d | %d | %d | %d | %d | %s | %s |\n",
 			m, s.Calls, s.InputTokens, s.OutputTokens,
 			s.CacheReadTokens, s.CacheCreationTokens,
-			s.TotalDurationMs, ttft)
+			s.TotalDurationMs, p50, p95)
 
 		totals.Calls += s.Calls
 		totals.InputTokens += s.InputTokens
@@ -439,21 +501,15 @@ func renderLLMEconomics(b *strings.Builder, agg *aggregated) {
 		totals.CacheReadTokens += s.CacheReadTokens
 		totals.CacheCreationTokens += s.CacheCreationTokens
 		totals.TotalDurationMs += s.TotalDurationMs
-		totals.TotalTTFTMs += s.TotalTTFTMs
-		totals.TTFTSamples += s.TTFTSamples
 	}
 
 	// Aggregate row only when more than one model surfaced — for a
 	// single-model session the totals row is just visual noise.
 	if len(models) > 1 {
-		ttft := "—"
-		if totals.TTFTSamples > 0 {
-			ttft = fmt.Sprintf("%d", totals.TotalTTFTMs/int64(totals.TTFTSamples))
-		}
-		fmt.Fprintf(b, "| **TOTAL** | %d | %d | %d | %d | %d | %d | %s |\n",
+		fmt.Fprintf(b, "| **TOTAL** | %d | %d | %d | %d | %d | %d | — | — |\n",
 			totals.Calls, totals.InputTokens, totals.OutputTokens,
 			totals.CacheReadTokens, totals.CacheCreationTokens,
-			totals.TotalDurationMs, ttft)
+			totals.TotalDurationMs)
 	}
 	b.WriteString("\n")
 
