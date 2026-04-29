@@ -53,6 +53,10 @@ Reach for these MCP tools first:
 - `signatory_signals target=<X>` — the cached signal records (every collector's output for this target).
 - `signatory_detail target=<X>` — entity metadata when you need short_name, ecosystem, URL.
 
+Specific cached signals worth knowing about:
+
+- **OpenSSF Scorecard** — read `signal_type=scorecard-check` from `signatory_signals` instead of WebFetching `api.securityscorecards.dev`. The cached value carries the aggregate score, per-check breakdown (Code-Review, Branch-Protection, Signed-Releases, etc.), and the commit Scorecard analyzed. An absence with reason `not in scorecards index` means the project hasn't been picked up by Scorecard's crawler — a real piece of information, not a fetch failure.
+
 Reach for direct upstream APIs (`gh api`, `curl`, `WebFetch`) only when:
 
 1. The signal you need isn't in `signatory_signals` — when this happens, note the gap in your `round_notes` field so a future signal collector can close it. The dogfood-metrics report flags every direct upstream call as a cache-miss candidate; closing those gaps is how signatory's economics improve.

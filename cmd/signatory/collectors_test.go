@@ -151,6 +151,8 @@ func TestCollectorsFor_OriginMatches_ReturnsCollectorList(t *testing.T) {
 	}
 	assert.True(t, names["github"], "github collector should be present")
 	assert.True(t, names["git"], "git collector should be present")
+	assert.True(t, names["openssf-scorecard"],
+		"openssf-scorecard collector should be present so dispatched analysts read cached scorecard data via signatory_signals instead of WebFetching the API")
 }
 
 func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
@@ -187,7 +189,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 3, "github + git + repofiles collectors returned")
+	assert.Len(t, collectors, 4, "github + git + repofiles + openssf-scorecard collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)
@@ -310,6 +312,8 @@ func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
 	assert.True(t, names["npm-registry"], "npm collector should be present")
 	assert.True(t, names["github"], "github collector should be present after URL resolution")
 	assert.True(t, names["git"], "git collector should be present after URL resolution")
+	assert.True(t, names["openssf-scorecard"],
+		"openssf-scorecard collector should also dispatch once an npm package has a resolved github URL — it caches scorecard data for the resolved repo")
 }
 
 // TestCollectorsFor_NonNpmPackage_NoCollectors covers a defensive

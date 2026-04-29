@@ -583,6 +583,19 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"absence of a pattern is only as strong as the coverage of the check",
 		},
 	},
+	"scorecard-check": {
+		Type:              "scorecard-check",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "OpenSSF Scorecard aggregate score plus per-check breakdown for a GitHub-hosted project. Sourced from api.securityscorecards.dev — Scorecard runs out-of-band and produces a regularly-refreshed corpus of supply-chain hygiene signals (branch protection, signed releases, code review, dangerous workflows, dependency-update tooling, etc.).",
+		Caveats: []string{
+			"the aggregate score is a weighted average across ~18 individual checks; two projects with the same score can have very different per-check shapes — compare check-by-check when the comparison matters",
+			"a check score of -1 means 'not applicable' or 'could not be determined' (e.g., Signed-Releases is N/A on a project with no releases); these are not failures and shouldn't be summed as zeros",
+			"absence (404 on the Scorecard API) is a real condition — Scorecard's crawler hasn't indexed every public project; an absence is information, not an error",
+			"scores reflect the commit Scorecard last analyzed (recorded in repo.commit); a project that recently fixed a check may still report the prior result until Scorecard re-runs (roughly weekly per indexed project)",
+			"Scorecard's check set evolves across releases — when comparing scores across time, compare the scorecard.version too or the comparison may be apples-to-oranges",
+		},
+	},
 
 	// ================================================================
 	// Criticality — "How critical is this?"

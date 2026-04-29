@@ -14,6 +14,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
+	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
@@ -108,6 +109,13 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			ghcollector.NewCollector(),
 			gitcollector.NewCollector(clonePath),
 			repofilescollector.NewCollector(clonePath),
+			// OpenSSF Scorecard — additional hygiene signal for
+			// github-hosted entities. Caches the API response so
+			// dispatched analysts read scorecard data via
+			// signatory_signals instead of re-fetching from
+			// api.securityscorecards.dev each run (the cache-miss
+			// pattern flagged repeatedly in the dogfood reports).
+			openssfcollector.NewCollector(),
 		)
 	}
 
