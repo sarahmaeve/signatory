@@ -125,6 +125,34 @@ func stringAttr(attrs []otlpKV, key string) string {
 	return ""
 }
 
+// stringAttrFirst returns the first non-empty value for any of the
+// named keys, in argument order. Used at the read boundary for
+// attributes where Claude Code's vendor name (e.g., `input_tokens`)
+// and the OTel GenAI semantic-conventions name (e.g.,
+// `gen_ai.usage.input_tokens`) coexist in the wild.
+//
+// Pass the most-likely-present key first so the common case stays
+// a single attribute scan; the fallback chain only walks further
+// keys when the primary returned empty. Today Claude Code emits
+// the unprefixed vendor names, so the semconv form is reached only
+// when (a) Claude Code migrates, or (b) traces.jsonl is replayed
+// from a different semconv-compliant producer (e.g., the OTel
+// Anthropic SDK instrumentation).
+//
+// Scope is deliberately narrow: only attributes with a STABLE OTel
+// semconv equivalent get the dual-key treatment. Cache tokens,
+// duration_ms, ttft_ms, subagent_type — no semconv form, so they
+// stay single-key reads. Adding speculative aliases for those
+// would just add noise without a producer to read them from.
+func stringAttrFirst(attrs []otlpKV, keys ...string) string {
+	for _, k := range keys {
+		if v := stringAttr(attrs, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // agentEconomics aggregates token + duration totals per "agent" —
 // either the orchestrator (the session's user-facing Claude
 // instance) or a specific subagent type that was dispatched via
@@ -425,17 +453,15 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 
 // aggregateEconomics adds one llm_request span's token + duration
 // totals into the per-model bucket in agg. The model key prefers
-// `gen_ai.request.model` (OTEL semantic-conventions name) and falls
-// back to the simpler `model` attribute when absent.
+// `gen_ai.request.model` (OTel semantic-conventions name) and falls
+// back to the simpler `model` attribute when absent. Token attrs
+// follow the same vendor-then-semconv fallback via stringAttrFirst.
 //
 // All the numeric attributes are stringValue-typed in OTLP-JSON, so
 // we parseInt with errors-as-zero — a missing or malformed value
 // doesn't break aggregation; it just contributes nothing.
 func aggregateEconomics(agg *aggregated, sp otlpSpan) {
-	model := stringAttr(sp.Attributes, "gen_ai.request.model")
-	if model == "" {
-		model = stringAttr(sp.Attributes, "model")
-	}
+	model := stringAttrFirst(sp.Attributes, "gen_ai.request.model", "model")
 	if model == "" {
 		model = "(unknown)"
 	}
@@ -445,8 +471,8 @@ func aggregateEconomics(agg *aggregated, sp otlpSpan) {
 		agg.EconomicsByModel[model] = stats
 	}
 	stats.Calls++
-	stats.InputTokens += parseStringInt(stringAttr(sp.Attributes, "input_tokens"))
-	stats.OutputTokens += parseStringInt(stringAttr(sp.Attributes, "output_tokens"))
+	stats.InputTokens += parseStringInt(stringAttrFirst(sp.Attributes, "input_tokens", "gen_ai.usage.input_tokens"))
+	stats.OutputTokens += parseStringInt(stringAttrFirst(sp.Attributes, "output_tokens", "gen_ai.usage.output_tokens"))
 	stats.CacheReadTokens += parseStringInt(stringAttr(sp.Attributes, "cache_read_tokens"))
 	stats.CacheCreationTokens += parseStringInt(stringAttr(sp.Attributes, "cache_creation_tokens"))
 	stats.TotalDurationMs += parseStringInt(stringAttr(sp.Attributes, "duration_ms"))
@@ -511,8 +537,13 @@ func aggregateAgentEconomics(agg *aggregated) {
 		agentKey := attributeAgent(sp, agg)
 		stats := getOrInitAgent(agg, agentKey)
 		stats.Calls++
-		stats.InputTokens += parseStringInt(stringAttr(sp.Attributes, "input_tokens"))
-		stats.OutputTokens += parseStringInt(stringAttr(sp.Attributes, "output_tokens"))
+		// input_tokens / output_tokens accept the OTel GenAI semconv
+		// names as a fallback so this aggregator stays in lockstep
+		// with aggregateEconomics — the conservation invariant
+		// (orchestrator + per-agent = per-model TOTAL) only holds if
+		// both functions read from the same key set.
+		stats.InputTokens += parseStringInt(stringAttrFirst(sp.Attributes, "input_tokens", "gen_ai.usage.input_tokens"))
+		stats.OutputTokens += parseStringInt(stringAttrFirst(sp.Attributes, "output_tokens", "gen_ai.usage.output_tokens"))
 		stats.CacheReadTokens += parseStringInt(stringAttr(sp.Attributes, "cache_read_tokens"))
 		stats.CacheCreationTokens += parseStringInt(stringAttr(sp.Attributes, "cache_creation_tokens"))
 		stats.TotalDurationMs += parseStringInt(stringAttr(sp.Attributes, "duration_ms"))

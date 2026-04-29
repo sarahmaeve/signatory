@@ -182,6 +182,49 @@ func TestReport_LLMEconomics_AcceptsIntValueAsBareNumber(t *testing.T) {
 		"bare-number intValue must parse and aggregate; the previous string-only decoder silently dropped these")
 }
 
+// TestReport_LLMEconomics_AcceptsSemconvTokenNames pins the
+// "either name works" contract for the two token attributes that
+// have OTel GenAI semantic-conventions equivalents:
+//
+//   - input_tokens  ↔ gen_ai.usage.input_tokens
+//   - output_tokens ↔ gen_ai.usage.output_tokens
+//
+// Today's Claude Code emits the unprefixed vendor names (verified
+// 2026-04-27, Round 6). The fallback exists so that (a) a future
+// Claude Code release migrating to semconv form doesn't silently
+// regress every report to zero tokens, and (b) traces.jsonl
+// captured from a different semconv-compliant producer can be
+// replayed through `dogfood-metrics report` without code changes.
+//
+// Cache tokens (cache_read_tokens / cache_creation_tokens) and
+// ttft_ms have no standardized semconv equivalent at this time, so
+// they're not part of the dual-key contract — only the two
+// covered-by-semconv attributes are tested here.
+func TestReport_LLMEconomics_AcceptsSemconvTokenNames(t *testing.T) {
+	t.Parallel()
+	semconvTraces := `{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[` +
+		`{"name":"claude_code.llm_request","attributes":[` +
+		`{"key":"session.id","value":{"stringValue":"sess-sc"}},` +
+		`{"key":"gen_ai.request.model","value":{"stringValue":"claude-test"}},` +
+		`{"key":"gen_ai.usage.input_tokens","value":{"stringValue":"1234"}},` +
+		`{"key":"gen_ai.usage.output_tokens","value":{"stringValue":"567"}}` +
+		`]}` +
+		`]}]}]}`
+	rawDir := writeRawDir(t, semconvTraces, "")
+	outDir := t.TempDir()
+
+	require.NoError(t, runReport("sess-sc", rawDir, outDir))
+
+	report := readReport(t, outDir, "sess-sc")
+	// Per-model row: 1 call, 1234 input, 567 output, 0 cache. Pre-fix,
+	// the row would show 0/0 for tokens because the reader only
+	// looked at the unprefixed vendor keys.
+	assert.Regexp(t,
+		`\| claude-test \| 1 \| 1234 \| 567 \| 0 \| 0 \|`,
+		report,
+		"semconv-named tokens must aggregate; pre-fix they decoded to zero")
+}
+
 // TestReport_LLMEconomicsTokenAggregation: per-model token totals
 // must accumulate across the session. fixtureTraces has one
 // claude-opus-4-7 call (1000/500 input/output, 8000/200 cache) and
