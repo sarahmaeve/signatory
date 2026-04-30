@@ -113,9 +113,8 @@ func AlternateURIs(canonical string) []string {
 	if version != "" {
 		out = append(out, base)
 	}
-	for _, b := range bases[1:] { // bases[0] is `base`, already covered above
-		out = append(out, b)
-	}
+	// bases[0] is `base`, already covered above.
+	out = append(out, bases[1:]...)
 	if version != "" {
 		for _, b := range bases[1:] {
 			out = append(out, b+"@"+version)
