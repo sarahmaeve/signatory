@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,14 @@ type CollectOpts struct {
 	// Tests pass a recorder closure to assert on subcommand shape
 	// without spawning real git. Threaded from AnalyzeCmd.RunGit.
 	RunGit func(ctx context.Context, workdir string, args ...string) error
+
+	// Stderr captures progress narration from the clone phase
+	// (cloning / refreshing / unshallowing). nil suppresses
+	// narration entirely — programmatic callers and tests that
+	// don't care about the chatter just leave it nil.
+	// AnalyzeCmd.Run threads its own stderr writer here so manual
+	// CLI invocations narrate to the user's terminal.
+	Stderr io.Writer
 }
 
 // Sentinel errors for each failure mode of collectorsFor.
@@ -183,7 +192,7 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 		if err := safeGitCloneURL(entity.URL); err != nil {
 			return "", fmt.Errorf("entity URL unsafe for clone: %w", err)
 		}
-		if err := ensureCloneAtPath(ctx, opts.RunGit, absPath, entity.URL); err != nil {
+		if err := ensureCloneAtPath(ctx, opts.Stderr, opts.RunGit, absPath, entity.URL); err != nil {
 			return "", err
 		}
 		return absPath, nil
@@ -317,6 +326,12 @@ func cloneIsShallow(path string) (bool, error) {
 // filesystem-path cloneURL (test fixtures) is acceptable for fresh
 // clones even though it wouldn't normalize as github.
 //
+// stderr captures one progress line per action (cloning / refreshing /
+// unshallowing) emitted BEFORE the runner is invoked, so the user sees
+// intent first and the failure reason second if the operation fails.
+// nil suppresses narration entirely — programmatic callers and tests
+// that don't care about chatter pass nil rather than a discard writer.
+//
 // runner is the git subprocess injection; nil falls through to
 // defaultRunGit. The runner is responsible for routing through
 // gitenv.NewCloneCmd so env-strip + WaitDelay discipline applies.
@@ -327,6 +342,7 @@ func cloneIsShallow(path string) (bool, error) {
 // added with a flock when the use case appears.
 func ensureCloneAtPath(
 	ctx context.Context,
+	stderr io.Writer,
 	runner func(ctx context.Context, workdir string, args ...string) error,
 	absPath, cloneURL string,
 ) error {
@@ -334,9 +350,21 @@ func ensureCloneAtPath(
 		runner = defaultRunGit
 	}
 
+	// progress emits one stderr line if a writer was provided. Errors
+	// from the write are intentionally swallowed: this is diagnostic
+	// chatter, not contract output, and propagating a broken-pipe
+	// error here would mask the underlying clone/fetch error.
+	progress := func(format string, args ...any) {
+		if stderr == nil {
+			return
+		}
+		_, _ = fmt.Fprintf(stderr, format, args...)
+	}
+
 	// Case 1a: path doesn't exist → fresh clone.
 	info, err := os.Stat(absPath)
 	if errors.Is(err, os.ErrNotExist) {
+		progress("Cloning %s into %s ...\n", cloneURL, absPath)
 		return runner(ctx, "", "clone", cloneURL, absPath)
 	}
 	if err != nil {
@@ -352,6 +380,7 @@ func ensureCloneAtPath(
 		return fmt.Errorf("read --path %q: %w", absPath, err)
 	}
 	if len(entries) == 0 {
+		progress("Cloning %s into %s ...\n", cloneURL, absPath)
 		return runner(ctx, "", "clone", cloneURL, absPath)
 	}
 
@@ -375,9 +404,11 @@ func ensureCloneAtPath(
 		// Case 3: shallow → unshallow + refresh refs. --tags is omitted;
 		// `--unshallow` already implies a refs refresh as part of its
 		// download.
+		progress("Unshallowing clone at %s ...\n", absPath)
 		return runner(ctx, absPath, "fetch", "--unshallow")
 	}
 	// Case 2: full clone → refresh refs.
+	progress("Refreshing clone at %s ...\n", absPath)
 	return runner(ctx, absPath, "fetch")
 }
 

@@ -118,14 +118,114 @@ func TestResolveTarget_NpmjsURLs(t *testing.T) {
 func TestResolveTarget_PkgURI(t *testing.T) {
 	t.Parallel()
 
+	// cargo (and ecosystems other than golang/go where we don't
+	// yet auto-derive a github source) leave CloneURL empty at
+	// parse time. Network-resolved ecosystems (npm, pypi) also
+	// stay empty here — their CloneURL gets stamped later by
+	// resolveNpmRepo / resolvePyPIRepo on --refresh.
 	got, err := ResolveTarget("pkg:cargo/atuin")
 	require.NoError(t, err)
 	assert.Equal(t, "pkg:cargo/atuin", got.CanonicalURI)
 	assert.Equal(t, "atuin", got.ShortName)
 	assert.Equal(t, "pkg", got.Scheme)
 	assert.Empty(t, got.Platform)
-	assert.Empty(t, got.CloneURL, "pkg: URIs have no clone URL")
+	assert.Empty(t, got.CloneURL, "non-Go pkg: URIs have no clone URL at parse time")
 	assert.Empty(t, got.Version, "unversioned pkg URI must have empty Version")
+}
+
+// TestResolveTarget_PkgGolangCloneURL pins the contract that pkg:golang
+// (and pkg:go alias) URIs whose import path has an algorithmic github
+// mapping populate CloneURL at parse time. Closes the v0.1 dispatch-
+// gate gap surfaced by the gopkg.in/yaml.v3 dogfood: github-hosted Go
+// modules and golang.org/x/* paths now flow into AnalyzeCmd's --clone
+// path without requiring an external resolver.
+//
+// Vanity hosts WITHOUT an algorithmic github mapping (gopkg.in,
+// modernc.org, k8s.io) keep CloneURL empty — those need network
+// resolution (proxy.golang.org Origin block) which is a v2 concern.
+func TestResolveTarget_PkgGolangCloneURL(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		in      string
+		wantURI string
+		wantURL string // empty means "must be empty"
+	}{
+		// github-hosted Go modules: derive https://github.com/<owner>/<repo>.
+		{
+			name:    "pkg:golang github-hosted",
+			in:      "pkg:golang/github.com/alecthomas/kong",
+			wantURI: "pkg:golang/github.com/alecthomas/kong",
+			wantURL: "https://github.com/alecthomas/kong",
+		},
+		{
+			name:    "pkg:go alias github-hosted",
+			in:      "pkg:go/github.com/alecthomas/kong",
+			wantURI: "pkg:go/github.com/alecthomas/kong",
+			wantURL: "https://github.com/alecthomas/kong",
+		},
+		// Versioned forms strip @V from the CloneURL but keep the
+		// canonical URI's version intact.
+		{
+			name:    "pkg:golang github-hosted versioned",
+			in:      "pkg:golang/github.com/alecthomas/kong@v1.2.3",
+			wantURI: "pkg:golang/github.com/alecthomas/kong@v1.2.3",
+			wantURL: "https://github.com/alecthomas/kong",
+		},
+		// golang.org/x organizational vanity → github.com/golang/<Y>,
+		// matching alternates.go's encoded equivalence.
+		{
+			name:    "pkg:golang golang.org/x",
+			in:      "pkg:golang/golang.org/x/sys",
+			wantURI: "pkg:golang/golang.org/x/sys",
+			wantURL: "https://github.com/golang/sys",
+		},
+		{
+			name:    "pkg:golang golang.org/x with subpackage",
+			in:      "pkg:golang/golang.org/x/sys/cpu",
+			wantURI: "pkg:golang/golang.org/x/sys/cpu",
+			wantURL: "https://github.com/golang/sys",
+		},
+		{
+			name:    "pkg:go golang.org/x",
+			in:      "pkg:go/golang.org/x/mod",
+			wantURI: "pkg:go/golang.org/x/mod",
+			wantURL: "https://github.com/golang/mod",
+		},
+		// Vanity hosts without algorithmic mapping: CloneURL stays
+		// empty. Re-running with a future proxy-Origin resolver could
+		// populate these; today they're terminal.
+		{
+			name:    "pkg:golang gopkg.in vanity",
+			in:      "pkg:golang/gopkg.in/yaml.v3",
+			wantURI: "pkg:golang/gopkg.in/yaml.v3",
+			wantURL: "", // intentionally empty
+		},
+		{
+			name:    "pkg:golang modernc.org vanity",
+			in:      "pkg:golang/modernc.org/sqlite",
+			wantURI: "pkg:golang/modernc.org/sqlite",
+			wantURL: "", // intentionally empty
+		},
+		{
+			name:    "pkg:golang k8s.io vanity",
+			in:      "pkg:golang/k8s.io/client-go",
+			wantURI: "pkg:golang/k8s.io/client-go",
+			wantURL: "", // intentionally empty
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, tc.wantURL, got.CloneURL,
+				"CloneURL for %q must be %q", tc.in, tc.wantURL)
+		})
+	}
 }
 
 // TestResolveTarget_VersionedPkgURI covers the @version suffix grammar

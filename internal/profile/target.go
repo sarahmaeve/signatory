@@ -612,6 +612,31 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 			}
 		}
 
+		// Go modules: derive a github CloneURL when the import path
+		// has an algorithmic mapping. Pure string transformation
+		// driven by the same equivalences alternates.go encodes; no
+		// network. Vanity hosts without an algorithmic mapping
+		// (gopkg.in, modernc.org, k8s.io, …) keep CloneURL empty —
+		// proxy.golang.org Origin lookups are a v2 concern.
+		//
+		// Closes the v0.1 dispatch-gate gap surfaced when running
+		// `signatory analyze --clone --refresh pkg:golang/...`:
+		// without CloneURL stamped here, isGitHostedEntity returns
+		// false in collectorsFor and the github + git + repofiles
+		// + openssf collectors silently skip.
+		if out.Ecosystem == "golang" || out.Ecosystem == "go" {
+			// Reconstruct the import path from parts after the
+			// ecosystem prefix, replacing the last segment's @V
+			// with the bare name (out.Version is already extracted
+			// by the lastSeg parsing above).
+			importParts := make([]string, len(parts)-1)
+			copy(importParts, parts[1:])
+			if out.Version != "" {
+				importParts[len(importParts)-1] = out.ShortName
+			}
+			out.CloneURL = derivedGoCloneURL(strings.Join(importParts, "/"))
+		}
+
 	case "identity", "org":
 		// identity:<platform>/<user> or org:<platform>/<org>
 		if len(parts) < 2 {
@@ -762,4 +787,41 @@ func canonicalGoModuleURI(importPath string) string {
 		// caller's downstream validation surfaces the real issue.
 	}
 	return "pkg:golang/" + importPath
+}
+
+// derivedGoCloneURL returns the https://github.com/... clone URL for
+// a Go module import path that has an algorithmic mapping to github.
+// Returns "" for vanity hosts (gopkg.in, modernc.org, k8s.io, …) that
+// need external resolution; those are a v2 concern.
+//
+// Mapping rules mirror alternates.go:
+//
+//   - github.com/<owner>/<repo>[/...]  →  https://github.com/<owner>/<repo>
+//   - golang.org/x/<Y>[/...]           →  https://github.com/golang/<Y>
+//
+// Owner/repo are lowercased to match canonicalGoModuleURI's invariant
+// (github is case-insensitive at the host layer; lowercase is the
+// canonical form). Subpackages beyond the module root are stripped.
+//
+// Pure string transformation, no I/O. Empty input → empty output.
+func derivedGoCloneURL(importPath string) string {
+	if importPath == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(importPath, "github.com/"); ok {
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return "https://github.com/" +
+				strings.ToLower(parts[0]) + "/" + strings.ToLower(parts[1])
+		}
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(importPath, "golang.org/x/"); ok {
+		// golang.org/x/Y → github.com/golang/Y. Strip any subpackage.
+		firstSeg, _, _ := strings.Cut(rest, "/")
+		if firstSeg != "" {
+			return "https://github.com/golang/" + strings.ToLower(firstSeg)
+		}
+	}
+	return ""
 }

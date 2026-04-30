@@ -273,6 +273,15 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			// for its own reasons; reconstruct here.
 			entity.ShortName = strings.TrimPrefix(
 				resolved.CanonicalURI, "pkg:"+resolved.Ecosystem+"/")
+			// Stamp URL from the parse-time CloneURL when available.
+			// For pkg:golang/github.com/* and pkg:golang/golang.org/x/*
+			// (and pkg:go aliases), ResolveTarget derives a github URL
+			// algorithmically — no network. Empty for ecosystems that
+			// resolve via network (npm, pypi) or for vanity Go hosts
+			// without algorithmic mapping (gopkg.in, modernc.org, …);
+			// resolveNpmRepo / resolvePyPIRepo still populate URL on
+			// --refresh for those.
+			entity.URL = resolved.CloneURL
 		default:
 			return fmt.Errorf("analyze does not yet support %q-scheme targets (got %q)",
 				resolved.Scheme, resolved.CanonicalURI)
@@ -400,6 +409,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			Path:   cmd.Path,
 			Clone:  cmd.Clone,
 			RunGit: cmd.RunGit,
+			Stderr: stderr,
 		})
 		if err != nil {
 			return err
@@ -419,6 +429,37 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 
 	if err := s.AppendSignals(ctx, allSignals); err != nil {
 		return fmt.Errorf("store signals: %w", err)
+	}
+
+	// Storage breadcrumb: tell the user where their freshly-collected
+	// signals went and how to query them. Names the resolved DB path
+	// so a manual `signatory analyze --refresh` invocation hands the
+	// user the next thread to pull (signatory show-conclusions, or a
+	// direct sqlite3 inspection of the file). When --clone planted a
+	// clone, also surface that path so `cd <path> && git log` is one
+	// hop away. ResolvePath errors are swallowed: the path resolution
+	// can't fail in any way that matters AFTER a successful AppendSignals
+	// against the same DBPath, so a warning would be noise — fall back
+	// to just naming the count.
+	if dbPath, perr := store.ResolvePath(globals.DBPath); perr == nil {
+		_, _ = fmt.Fprintf(stderr, "Stored %d signals in %s\n", len(allSignals), dbPath)
+	} else {
+		_, _ = fmt.Fprintf(stderr, "Stored %d signals\n", len(allSignals))
+	}
+	_, _ = fmt.Fprintf(stderr,
+		"  query: signatory show-conclusions --target %s\n", entity.CanonicalURI)
+	// Only surface the inspect-clone hint if a clone actually exists.
+	// --clone may have been requested but never executed (vanity-host
+	// Go module with no derivable github source: dispatch gate keeps
+	// the git-side collectors out, ensureCloneAtPath never runs). The
+	// .git probe is the honest test — promising a clone path that
+	// isn't there sends the user on a wild goose chase.
+	if cmd.Clone && cmd.Path != "" {
+		if absClone, aerr := filepath.Abs(cmd.Path); aerr == nil {
+			if _, gitErr := os.Stat(filepath.Join(absClone, ".git")); gitErr == nil {
+				_, _ = fmt.Fprintf(stderr, "  inspect clone: %s\n", absClone)
+			}
+		}
 	}
 
 	entity.UpdatedAt = time.Now().UTC()

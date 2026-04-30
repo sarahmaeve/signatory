@@ -36,8 +36,10 @@ package main
 //   - All other tests use t.Parallel().
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -514,4 +516,223 @@ func TestAnalyzeClone_SentinelErrors_Stable(t *testing.T) {
 
 	assert.True(t, errors.Is(ErrShallowClone, ErrShallowClone),
 		"ErrShallowClone must be a stable sentinel comparable via errors.Is")
+}
+
+// ---- Progress narration tests ---------------------------------------------
+//
+// The clone phase narrates its action to a caller-supplied stderr so a
+// human running `signatory analyze --clone --refresh <target>` sees what
+// signatory is doing. Three actions, three messages: cloning, refreshing,
+// unshallowing. Each is a single stderr line emitted BEFORE the git
+// subprocess runs (so the user sees intent first, error second if it
+// fails).
+//
+// nil stderr → silent. Tests inject a *bytes.Buffer to capture and
+// assert.
+
+// TestEnsureCloneAtPath_NarratesFreshClone asserts the "cloning ..."
+// progress line for the missing-path case.
+func TestEnsureCloneAtPath_NarratesFreshClone(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "")
+	dest := filepath.Join(t.TempDir(), "fresh")
+
+	var stderr bytes.Buffer
+	err := ensureCloneAtPath(
+		t.Context(),
+		&stderr,
+		func(ctx context.Context, workdir string, args ...string) error {
+			if len(args) >= 1 && args[0] == "clone" {
+				return gitCloneFull(ctx, src, dest)
+			}
+			return nil
+		},
+		dest, src,
+	)
+	require.NoError(t, err)
+	out := stderr.String()
+	assert.Contains(t, strings.ToLower(out), "cloning",
+		"fresh clone must narrate 'cloning ...' before invoking git; got: %q", out)
+	assert.Contains(t, out, dest,
+		"narration must name the destination path so the user can find it")
+	assert.Contains(t, out, src,
+		"narration must name the source URL so the user knows what's being cloned")
+}
+
+// TestEnsureCloneAtPath_NarratesRefreshExisting asserts the
+// "refreshing ..." progress line for the existing-full-clone case.
+func TestEnsureCloneAtPath_NarratesRefreshExisting(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepoWithCommits(t, 2, "")
+	dest := initFullClone(t, src, "https://github.com/acme/widget")
+
+	var stderr bytes.Buffer
+	recorder := &gitCallRecorder{}
+	err := ensureCloneAtPath(
+		t.Context(),
+		&stderr,
+		recorder.record,
+		dest, "https://github.com/acme/widget",
+	)
+	require.NoError(t, err)
+	out := stderr.String()
+	assert.Contains(t, strings.ToLower(out), "refreshing",
+		"existing-clone refresh must narrate 'refreshing ...'; got: %q", out)
+	assert.Contains(t, out, dest,
+		"narration must name the clone path so the user knows where it lives")
+}
+
+// TestEnsureCloneAtPath_NarratesUnshallow asserts the "unshallowing ..."
+// progress line for the existing-shallow-clone case.
+func TestEnsureCloneAtPath_NarratesUnshallow(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepoWithCommits(t, 3, "")
+	dest := initShallowClone(t, src, "https://github.com/acme/widget")
+
+	var stderr bytes.Buffer
+	err := ensureCloneAtPath(
+		t.Context(),
+		&stderr,
+		// Runner that performs the actual unshallow against the local
+		// fixture (same shape as TestAnalyzeClone_UnshallowsExistingShallowClone).
+		func(ctx context.Context, workdir string, args ...string) error {
+			if len(args) >= 2 && args[0] == "fetch" && slices.Contains(args, "--unshallow") {
+				mustRunGitInTest(t, dest, "remote", "set-url", "origin", "file://"+src)
+				mustRunGitInTest(t, dest, "fetch", "--unshallow")
+				mustRunGitInTest(t, dest, "remote", "set-url", "origin", "https://github.com/acme/widget")
+			}
+			return nil
+		},
+		dest, "https://github.com/acme/widget",
+	)
+	require.NoError(t, err)
+	out := stderr.String()
+	assert.Contains(t, strings.ToLower(out), "unshallow",
+		"shallow upgrade must narrate 'unshallowing ...'; got: %q", out)
+	assert.Contains(t, out, dest,
+		"narration must name the clone path")
+}
+
+// TestEnsureCloneAtPath_NarratesNothing_OnNilStderr verifies the
+// "narration is opt-in" property: passing a nil stderr suppresses
+// progress entirely. Production code paths that don't want narration
+// (CLI subcommands operating in --quiet mode, future programmatic
+// callers) just pass nil instead of a discard writer.
+func TestEnsureCloneAtPath_NarratesNothing_OnNilStderr(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "")
+	dest := filepath.Join(t.TempDir(), "fresh")
+
+	// No buffer; pass nil. ensureCloneAtPath must not panic and must
+	// not require a non-nil writer.
+	err := ensureCloneAtPath(
+		t.Context(),
+		nil, // explicit: no narration
+		func(ctx context.Context, workdir string, args ...string) error {
+			if len(args) >= 1 && args[0] == "clone" {
+				return gitCloneFull(ctx, src, dest)
+			}
+			return nil
+		},
+		dest, src,
+	)
+	require.NoError(t, err)
+}
+
+// TestAnalyzeRun_StorageBreadcrumb verifies that AnalyzeCmd.Run emits a
+// "stored N signals in <db_path>" line after AppendSignals, plus a
+// query hint pointing at signatory show-conclusions, so a manual
+// invocation tells the user where to look next.
+func TestAnalyzeRun_StorageBreadcrumb(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockCollector()
+	globals := testGlobals(t, mock)
+
+	var stderr bytes.Buffer
+	cmd := &AnalyzeCmd{
+		Target:  "https://github.com/acme/widget",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.Contains(t, strings.ToLower(out), "stored",
+		"after AppendSignals, run must narrate 'stored N signals ...'; got: %q", out)
+	// The database path must appear so the user knows where signatory
+	// stored their signals. testGlobals points DBPath at a t.TempDir,
+	// so the resolved path will contain that tempdir.
+	assert.Contains(t, out, globals.DBPath,
+		"breadcrumb must include the resolved DB path; got: %q", out)
+	assert.Contains(t, out, "show-conclusions",
+		"breadcrumb must point users at the canonical query command; got: %q", out)
+}
+
+// TestAnalyzeRun_StorageBreadcrumb_IncludesClonePath_WhenCloned verifies
+// that when --clone planted a clone, the breadcrumb tells the user where
+// to find it so they can `cd` in for manual inspection. Mock collectors
+// bypass collectorsFor (so no real clone runs), and we pre-create a
+// fake .git directory at cmd.Path to simulate a successful clone — the
+// breadcrumb's .git probe must see it and emit the hint.
+func TestAnalyzeRun_StorageBreadcrumb_IncludesClonePath_WhenCloned(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockCollector()
+	globals := testGlobals(t, mock)
+
+	dest := filepath.Join(t.TempDir(), "clone-here")
+	// Stand in for a real clone: AnalyzeCmd.Run probes for .git to
+	// decide whether to surface the inspect-clone hint. mkdir alone is
+	// sufficient — the probe is os.Stat on the path, not a deep
+	// validation.
+	require.NoError(t, os.MkdirAll(filepath.Join(dest, ".git"), 0o755))
+
+	var stderr bytes.Buffer
+	cmd := &AnalyzeCmd{
+		Target:  "https://github.com/acme/widget",
+		Refresh: true,
+		Clone:   true,
+		Path:    dest,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.Contains(t, out, dest,
+		"--clone breadcrumb must include the clone path so the user can inspect it; got: %q", out)
+	assert.Contains(t, out, "inspect clone:",
+		"--clone breadcrumb header must explicitly label the path; got: %q", out)
+}
+
+// TestAnalyzeRun_StorageBreadcrumb_OmitsClonePath_WhenNoCloneExists
+// guards the honest-output property: when --clone was set but no clone
+// actually got planted (the vanity-host Go-module case where the
+// dispatch gate keeps git-side collectors out), the breadcrumb must
+// NOT promise an inspect-clone path that doesn't exist.
+func TestAnalyzeRun_StorageBreadcrumb_OmitsClonePath_WhenNoCloneExists(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockCollector()
+	globals := testGlobals(t, mock)
+
+	dest := filepath.Join(t.TempDir(), "no-clone-here") // never created
+
+	var stderr bytes.Buffer
+	cmd := &AnalyzeCmd{
+		Target:  "https://github.com/acme/widget",
+		Refresh: true,
+		Clone:   true,
+		Path:    dest,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.NotContains(t, out, "inspect clone:",
+		"breadcrumb must NOT advertise an inspect-clone path when no .git exists at cmd.Path; got: %q", out)
 }
