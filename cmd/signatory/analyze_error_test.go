@@ -817,6 +817,134 @@ func TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaMetaTag(t *testing.T) {
 		"meta-tag fallback must resolve gopkg.in/yaml.v3 to its github source")
 }
 
+// TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem pins the
+// stderr hint we emit when --refresh runs against a pkg:<ecosystem>
+// target whose ecosystem doesn't yet have a source resolver. Without
+// the hint, the user sees zero collected signals and no explanation
+// — confusing because they know the target exists but signatory
+// produced nothing.
+//
+// Specifically: entity.Ecosystem is "cargo" (not in the supported
+// set: npm, pypi, golang, go), entity.URL stays empty (we never
+// tried to resolve it), and the user gets a note explaining why the
+// github + git + repofiles + openssf collectors won't fire for
+// this target.
+//
+// This is distinct from the npm/pypi/golang failure case where
+// resolution was ATTEMPTED but yielded empty — those write an
+// absence:repo_declaration signal AND surface in the rendered
+// profile's Absences section. The unsupported-ecosystem path is
+// "we didn't even try"; the hint replaces the absence record.
+func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:cargo/atuin",
+			Type:         profile.EntityPackage,
+			ShortName:    "atuin",
+			Ecosystem:    "cargo",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:cargo/atuin",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals),
+		"unsupported ecosystem must NOT fail --refresh; the hint is informational")
+
+	out := stderr.String()
+	assert.Contains(t, out, "cargo",
+		"note must name the ecosystem so the user knows what's unsupported")
+	assert.Contains(t, out, "resolver",
+		"note must explain that there's no source resolver yet")
+}
+
+// TestFunctional_AnalyzeRefresh_NoUnsupportedNoteForResolvableEcosystem
+// guards the "don't be noisy on supported targets" property: when
+// entity.Ecosystem IS a resolvable one (npm, pypi, golang, go), the
+// unsupported-ecosystem note must NOT fire — even if URL ends up
+// empty (a real "not resolvable" case writes an absence record
+// instead, which has its own surface).
+func TestFunctional_AnalyzeRefresh_NoUnsupportedNoteForResolvableEcosystem(t *testing.T) {
+	t.Parallel()
+
+	// Proxy returns Origin pointing at github so resolveGoRepo
+	// stamps URL successfully.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/example.org/foo/@latest":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)
+		case "/example.org/foo/@v/v1.0.0.info":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+                "Version":"v1.0.0",
+                "Time":"2026-01-01T00:00:00Z",
+                "Origin":{"VCS":"git","URL":"https://github.com/example-org/foo"}
+            }`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxy.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:golang/example.org/foo",
+			Type:         profile.EntityPackage,
+			ShortName:    "example.org/foo",
+			Ecosystem:    "golang",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+		GoProxyURL:    proxy.URL,
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:golang/example.org/foo",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.NotContains(t, out, "no source resolver",
+		"unsupported-ecosystem note must NOT fire when the ecosystem (golang) IS resolvable; got: %q", out)
+}
+
 // TestFunctional_AnalyzeRefresh_GoResolutionUnresolvable verifies the
 // "fully exhausted" path: proxy 404 AND vanity host serves no meta
 // tag. resolveGoRepo returns nil (not an error — empty is the

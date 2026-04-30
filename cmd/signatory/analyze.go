@@ -113,6 +113,29 @@ type AnalyzeCmd struct {
 	Stderr io.Writer `kong:"-"`
 }
 
+// resolvableEcosystems is the set of pkg:<ecosystem>/ values for
+// which signatory has wired a source-URL resolver in this
+// AnalyzeCmd.Run (resolveNpmRepo, resolvePyPIRepo, resolveGoRepo).
+//
+// Used by the unsupported-ecosystem hint just before collector
+// dispatch — entities whose ecosystem ISN'T in this set get a
+// stderr note explaining that github + git + repofiles + openssf
+// collectors won't fire (no URL → isGitHostedEntity false →
+// silent skip otherwise).
+//
+// Keep in sync with the resolver branches in Run(): adding a new
+// resolver means adding its ecosystem here, removing one
+// (unlikely) means removing the entry. A resolver missing from
+// this set produces noisy notes on supported targets; an entry
+// here without a resolver suppresses helpful notes on unsupported
+// targets. Either drift is a UX bug, not a correctness one.
+var resolvableEcosystems = map[string]bool{
+	"npm":    true,
+	"pypi":   true,
+	"golang": true,
+	"go":     true,
+}
+
 // AnalysisDisplay wraps the runtime profile with any ingested
 // analyst outputs (Layer 2 data) so a single render or JSON dump
 // presents the full picture: signals (Layer 1) AND
@@ -458,6 +481,33 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			_, _ = fmt.Fprintf(stderr, "warning: go-module repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, resolveErr)
 		}
+	}
+
+	// Unsupported-ecosystem hint: when the user --refresh's a
+	// pkg:<ecosystem>/<name> target whose ecosystem isn't one
+	// signatory has wired a resolver for, every git-side collector
+	// (github, git, repofiles, openssf) silently sits out because
+	// entity.URL is empty and isGitHostedEntity returns false. The
+	// user sees zero collected signals and has no idea why.
+	//
+	// Surfacing the gap here closes the last user-visible
+	// silent-skip path identified in design/openssf-problem.txt.
+	// Distinct from npm/pypi/golang's failed-resolution case
+	// (which writes absence:repo_declaration); this is the
+	// "we didn't try because no resolver exists" case.
+	//
+	// Gates on Ecosystem rather than Type — same rationale as
+	// resolveGoRepo: pre-fix entities in some users' stores carry
+	// Type=EntityProject from MCP ingest paths that didn't classify
+	// the URI as a package. Ecosystem is the load-bearing field;
+	// when it's set and not in the resolvable set, the URI is a
+	// pkg:<ecosystem>/* and we're missing a resolver.
+	if entity.Ecosystem != "" &&
+		entity.URL == "" &&
+		!resolvableEcosystems[entity.Ecosystem] {
+		_, _ = fmt.Fprintf(stderr,
+			"note: ecosystem %q has no source resolver yet — github + git + repofiles + openssf collectors won't fire for this target.\n",
+			entity.Ecosystem)
 	}
 
 	// Nudge users analyzing a Go module via its github URL form
