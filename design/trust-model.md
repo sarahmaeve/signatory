@@ -10,7 +10,10 @@ decisions explicit and auditable.
 ## Temporal Trust Boundaries
 
 Code provenance is interpreted differently depending on when it was committed.
-Two key dates define three eras:
+Three key dates define four eras. The first three boundaries anchor
+*authorship-capability* claims (could the author have written or reviewed
+this code with AI assistance at this date?). The fourth — at 30 April 2026
+— is a *target-durability* claim; see Era 4 for the framing shift.
 
 ### Era 1: Pre-LLM (before 30 November 2022)
 
@@ -29,13 +32,39 @@ Two key dates define three eras:
 - Code may or may not have AI involvement — the uncertainty zone.
 - Trust signals from this era require more contextual interpretation.
 
-### Era 3: Modern AI (after 24 November 2025)
+### Era 3: Modern AI (24 November 2025 — 30 April 2026)
 
 - **Claude Opus 4.5 release date** marks the threshold of current code generation
   abilities.
 - Assume AI could have authored or reviewed any code from this era.
 - Provenance of the *author* matters more than provenance of the *code* itself.
 - Sophisticated, subtle backdoors become plausible at scale.
+
+### Era 4: Mature Cyber (after 30 April 2026)
+
+- **Anchor: 2026-04-30** — UK AISI's independent evaluation of GPT-5.5
+  cyber capabilities (the first non-vendor measurement of multi-vendor
+  frontier parity). Greg Kroah-Hartman on oss-security the same day
+  reports duplicate independent vulnerability finds within the Linux
+  kernel's fix-merge window. See
+  [threat-landscape/2026-04-30-aisi-gpt55-evaluation.md] and
+  [threat-landscape/2026-04-30-coordinated-disclosure-collapse.md].
+- **The boundary's meaning shifts here.** Earlier era boundaries anchor
+  authorship-capability claims. The mature-cyber boundary is a
+  **target-durability** claim — code unexamined and unrepaired through
+  the maturation phase has surfaces that will not weather current attacks
+  well.
+- A `mature-cyber` stamp on `last_push` or `last_commit` is a positive
+  durability signal — the project has been touched since multi-vendor
+  frontier offensive cyber capability went public. A `modern-ai` (or
+  earlier) stamp on `last_push` for a still-depended-on project is the
+  audit-debt concern.
+- Coordinated-disclosure embargo as a defensive posture is collapsing
+  under LLM-mediated duplicate-find rates. Even the Linux kernel barely
+  outruns the merge window; long-tail projects are past that threshold
+  by construction. The signal model reads CVE history, vitality
+  cadence, and disclosure-practice posture against this operational
+  reality.
 
 **Note:** These dates are defaults. Whether they should be configurable
 per-deployment is an open question.
