@@ -288,6 +288,21 @@ func TestStore_UnicodeAndSpecialCharacters(t *testing.T) {
 	}
 }
 
+// TestStore_DeleteSessionWhileDepositingRace exercises a delete
+// running concurrently with a stream of deposits. We don't care
+// which writes won — we care that neither goroutine panics nor
+// corrupts the database, and that the delete eventually committed.
+//
+// Race-detector reliance: per-call deposit errors are tracked but
+// not asserted against (FK violations are an expected outcome once
+// the delete commits). The validators are (a) no panic, (b) no
+// DATA RACE under `go test -race` (see
+// internal/invariants/TestRaceDetectorWiredIntoCI), and (c) the
+// session is gone post-Wait — asserted below. Earlier versions of
+// this test ended with `_ = err` on the GetSession call, leaving
+// (c) unchecked; a regression where DeleteSession silently no-op'd
+// while the deposit goroutine held the connection would have
+// passed.
 func TestStore_DeleteSessionWhileDepositingRace(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -341,12 +356,12 @@ func TestStore_DeleteSessionWhileDepositingRace(t *testing.T) {
 
 	wg.Wait()
 
-	// After the race, the session should be deleted (delete eventually wins
-	// or deposits that land after delete reference a gone session).
-	// Either outcome is acceptable — no panic, no DB corruption.
+	// End-state: the delete must have committed by now (its
+	// goroutine finished, and with MaxOpenConns=1 the operation
+	// is atomic on the single connection). The session must be
+	// gone — GetSession should return an error.
 	_, err = s.GetSession(ctx, sess.ID)
-	// May or may not error depending on race outcome. Just don't panic.
-	_ = err
+	assert.Error(t, err, "session must be deleted after the delete goroutine returns")
 }
 
 func TestStore_GetMessages_AllFilterCombinations(t *testing.T) {
@@ -445,7 +460,10 @@ func TestStore_GetSession_NotFound(t *testing.T) {
 
 	_, err := s.GetSession(context.Background(), "does-not-exist-uuid")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "scan session")
+	// store.GetSession wraps sql.ErrNoRows with %w; check the
+	// sentinel via errors.Is rather than the wrapper prefix
+	// substring. A reword of the prefix shouldn't fail this test.
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
 
 func TestStore_DeleteSession_Nonexistent(t *testing.T) {
@@ -468,7 +486,10 @@ func TestStore_GetLatestMessage_EmptySession(t *testing.T) {
 
 	_, err = s.GetLatestMessage(ctx, pipeline.MessageFilter{SessionID: sess.ID})
 	require.Error(t, err, "GetLatestMessage on empty session should error")
-	assert.Contains(t, err.Error(), "no rows")
+	// store.GetLatestMessage wraps sql.ErrNoRows with %w; check the
+	// sentinel via errors.Is rather than the wrapper substring. A
+	// reword of the wrapper shouldn't fail this test.
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
 
 func TestStore_CreateSession_EmptyMetadata(t *testing.T) {
@@ -1071,15 +1092,30 @@ func TestHTTP_ConcurrentDepositsViaHTTP(t *testing.T) {
 	assert.Len(t, msgs, goroutines*msgsPerGoroutine)
 }
 
+// TestHTTP_DepositToNonexistentSession asserts the server's
+// response when a deposit references a session that does not exist.
+//
+// Behavior chain: openTestDB → ConfigureDB → `PRAGMA foreign_keys=ON`,
+// so the FK constraint declared in the schema IS enforced at runtime.
+// On a missing parent row, SQLite returns SQLITE_CONSTRAINT_FOREIGNKEY,
+// store.DepositMessage maps that to ErrSessionNotFound via
+// isForeignKeyFailure(), and server.go's deposit handler renders that
+// as 400 BadRequest with a body naming the missing session — the same
+// shape used for other client-input errors on this endpoint (invalid
+// role, missing content, etc.). See internal/pipeline/server.go,
+// deposit handler, ~line 258.
+//
+// Earlier this test was log-only (`t.Logf` with no assertion) and its
+// comment claimed FK enforcement was off. Both were stale — the
+// pragma was added when ConfigureDB landed. A regression that mapped
+// the FK failure to 500 instead of 400 (or 201, masking the missing
+// parent) would have passed under the old shape.
 func TestHTTP_DepositToNonexistentSession(t *testing.T) {
 	t.Parallel()
 	ts := newTestServer(t)
 	defer ts.Close()
 	client := ts.Client()
 
-	// SQLite foreign key enforcement depends on PRAGMA foreign_keys.
-	// The pipeline schema defines REFERENCES but may not enforce it.
-	// This test documents the actual behavior.
 	body, _ := json.Marshal(map[string]string{
 		"role":     "security",
 		"msg_type": "handoff",
@@ -1089,16 +1125,27 @@ func TestHTTP_DepositToNonexistentSession(t *testing.T) {
 		ts.URL+"/api/sessions/nonexistent-session-id/messages",
 		strings.NewReader(string(body)))
 	require.NoError(t, err)
-	// NOTE: Without PRAGMA foreign_keys=ON, SQLite silently accepts
-	// messages referencing nonexistent sessions. This is a real finding:
-	// the FK constraint in the schema is decorative, not enforced.
-	// Documenting actual behavior here rather than asserting what
-	// "should" happen, since either outcome (201 or 500) is valid
-	// depending on whether FK enforcement is desired.
-	t.Logf("deposit to nonexistent session returned status %d", resp.StatusCode)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	assert.Equalf(t, http.StatusBadRequest, resp.StatusCode,
+		"deposit to nonexistent session must return 400 (FK enforcement "+
+			"on + ErrSessionNotFound mapping in server.go); got %d",
+		resp.StatusCode)
 }
 
+// TestHTTP_DeleteSession_WhileGettingMessages exercises a delete
+// running concurrently with a stream of message reads at the HTTP
+// surface. HTTP-layer twin of TestRace_DepositDuringDelete and
+// TestStore_DeleteSessionWhileDepositingRace.
+//
+// Race-detector reliance: per-call errors are tolerated (some
+// reads will land after the delete and return 404 — acceptable).
+// The validators are (a) no panic, (b) no DATA RACE under
+// `go test -race` (see
+// internal/invariants/TestRaceDetectorWiredIntoCI), and (c) the
+// session is gone post-Wait — asserted below by GET-ing the
+// session URL and asserting 404. Without (c), a regression where
+// DELETE silently no-op'd while the read goroutines kept the
+// connection busy would pass.
 func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	t.Parallel()
 	// Use pragma-equipped DB to avoid SQLITE_BUSY during concurrent ops.
@@ -1118,7 +1165,8 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&sess))
 	resp.Body.Close()
 
-	msgURL := ts.URL + "/api/sessions/" + sess.ID + "/messages"
+	sessURL := ts.URL + "/api/sessions/" + sess.ID
+	msgURL := sessURL + "/messages"
 
 	// Deposit a few messages.
 	for i := 0; i < 10; i++ {
@@ -1148,12 +1196,21 @@ func TestHTTP_DeleteSession_WhileGettingMessages(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		resp, err := doRequest(t, client, http.MethodDelete, ts.URL+"/api/sessions/"+sess.ID, nil)
+		resp, err := doRequest(t, client, http.MethodDelete, sessURL, nil)
 		if err == nil {
 			resp.Body.Close()
 		}
 	}()
 	wg.Wait()
+
+	// End-state: the delete goroutine has returned, so the delete
+	// committed. GET on the session URL must now return 404.
+	finalResp, err := doGet(t, client, sessURL)
+	require.NoError(t, err)
+	defer finalResp.Body.Close()
+	assert.Equalf(t, http.StatusNotFound, finalResp.StatusCode,
+		"session must be gone after the delete goroutine finished; "+
+			"got %d (expected 404)", finalResp.StatusCode)
 }
 
 // TestHTTP_GetSessionNotFoundVsDeleteNotFound verifies the difference in
@@ -1305,13 +1362,29 @@ func TestHTTP_ResponseBodiesAreJSONSafe(t *testing.T) {
 		"raw format must return content bytes verbatim without JSON wrapping")
 }
 
-// assertResponseBodyJSONSafe asserts that body is valid JSON with
-// no raw ASCII control characters outside the tolerated whitespace
-// set (\t \n \r) at the top level. Whitespace between tokens is
-// allowed per RFC 8259; only characters INSIDE JSON string fields
-// would be the real violation, and those are checked implicitly by
-// json.Unmarshal's strictness. Raw control chars in a string value
-// would fail the unmarshal.
+// assertResponseBodyJSONSafe asserts that body is valid JSON AND
+// contains no raw ASCII control characters outside the tolerated
+// whitespace set (\t \n \r) anywhere in its bytes — including
+// inside JSON string fields.
+//
+// The byte scan is the load-bearing check, NOT json.Unmarshal.
+// Go's encoding/json is lenient on decode: it accepts raw control
+// characters (U+0000–U+001F) inside JSON string values without
+// error, even though RFC 8259 §7 requires them to be escaped. A
+// server emitting a raw 0x01 byte inside a string field would
+// produce a body that Unmarshal accepts but `jq` rejects.
+//
+// Both checks stay because they cover different failure modes:
+//
+//   - json.Unmarshal catches structural breakage (malformed
+//     envelopes, bad escape sequences, truncated values).
+//   - The byte scan catches RFC 8259 §7 violations the lenient
+//     decoder ignores.
+//
+// Do NOT remove the byte scan as "redundant with Unmarshal". It
+// is not redundant — it's the actual RFC 8259 guard for the
+// downstream `jq` pipeline failure mode this invariant exists to
+// prevent.
 //
 // Helper kept local to this test since it's an assertion idiom
 // specific to the JSON-safety invariant rather than a general-
@@ -1319,16 +1392,18 @@ func TestHTTP_ResponseBodiesAreJSONSafe(t *testing.T) {
 func assertResponseBodyJSONSafe(t *testing.T, label string, body []byte) {
 	t.Helper()
 
-	// Must parse — catches malformed envelopes and raw control
-	// chars embedded in string fields (encoding/json rejects the
-	// latter per RFC 8259 §7).
+	// Structural check: catches malformed envelopes and bad
+	// escape sequences. Does NOT catch raw control bytes in
+	// string fields (Go's decoder is lenient on those, per
+	// encoding/json's documented behavior).
 	var parsed any
 	require.NoError(t, json.Unmarshal(body, &parsed),
 		"%s must be valid JSON", label)
 
-	// Top-level bytes check — only \t \n \r tolerated outside
-	// strings. If anything else < 0x20 appears, the server is
-	// emitting something pre-JSON-encoding.
+	// RFC 8259 §7 guard: only \t \n \r tolerated below 0x20.
+	// This is the check downstream `jq` consumers care about — a
+	// raw 0x01 inside a string field would be silently accepted
+	// by encoding/json but would break the orchestrator pipeline.
 	for i, b := range body {
 		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
 			t.Fatalf("%s: raw control byte 0x%02x at offset %d; server must emit JSON-escaped form",
