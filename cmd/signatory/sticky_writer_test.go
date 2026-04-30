@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -203,6 +204,127 @@ func TestDisplayHuman_Success(t *testing.T) {
 	assert.Contains(t, buf.String(), "kong")
 	assert.Contains(t, buf.String(), "repo:github/alecthomas/kong")
 	assert.Contains(t, buf.String(), "Total signals:")
+}
+
+// TestDisplayHuman_AbsencesSection_SurfacesAtBottom pins the
+// consolidated absence display: every absence appears in a dedicated
+// "=== Absences ===" section between the per-group renders and the
+// "Total signals:" footer, so a user scanning the output finds all
+// the [ABSENT] markers in one place rather than hunting through each
+// signal group. The in-group [ABSENT] rows are preserved (they keep
+// the semantic context — Governance absences alongside Governance
+// signals) — the bottom section is consolidation, not relocation.
+//
+// Retryable absences carry a "(retryable)" suffix matching the
+// in-group rendering so the user knows whether re-running --refresh
+// is worth it.
+//
+// Section ordering: groups → absences → total. A user reading top-
+// to-bottom sees the rich per-group view first, then the consolidated
+// absences as a "you might also want to know about these" capstone,
+// then the count footer.
+func TestDisplayHuman_AbsencesSection_SurfacesAtBottom(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	display := &AnalysisDisplay{
+		Profile: &profile.Profile{
+			Entity: profile.Entity{
+				ShortName:    "repr",
+				CanonicalURI: "repo:github/alecthomas/repr",
+				Type:         profile.EntityProject,
+			},
+			Signals: []profile.Signal{
+				{
+					Type:              "stars",
+					Group:             profile.SignalGroupCriticality,
+					Value:             []byte(`{"count":175}`),
+					ForgeryResistance: profile.ForgeryMediumDeclining,
+				},
+				{
+					Type:  "absence:identity_graph_depth",
+					Group: profile.SignalGroupGovernance,
+					// Non-retryable: a missing .mailmap is structural,
+					// not transient.
+					Value: []byte(`{"absent":true,"reason":"no .mailmap file at repo root","retryable":false}`),
+				},
+				{
+					Type:  "absence:adoption",
+					Group: profile.SignalGroupCriticality,
+					// Retryable: 401 means the token wasn't loaded for
+					// this run; next run with GITHUB_TOKEN set succeeds.
+					Value: []byte(`{"absent":true,"reason":"GitHub API 401","retryable":true}`),
+				},
+			},
+		},
+	}
+
+	err := displayHuman(&buf, display, 0)
+	require.NoError(t, err)
+	out := buf.String()
+
+	// Pin the consolidated section.
+	assert.Contains(t, out, "=== Absences ===",
+		"absences must surface in a dedicated section so the user finds them without scanning every group")
+	assert.Contains(t, out, "identity_graph_depth",
+		"absences section must enumerate each absent signal type")
+	assert.Contains(t, out, "no .mailmap file at repo root",
+		"absences section must include each absence's reason — that's what makes the consolidated view useful")
+	assert.Contains(t, out, "adoption",
+		"absences section must enumerate EVERY absent signal, not stop at the first")
+	assert.Contains(t, out, "GitHub API 401",
+		"absences section must include each absence's reason")
+	assert.Contains(t, out, "(retryable)",
+		"absences section must annotate retryable absences so the user knows whether to re-run")
+
+	// Section ordering: Absences after groups, before Total. We
+	// locate by header substring; index ordering pins the layout.
+	groupIdx := strings.Index(out, "=== Criticality ===")
+	absencesIdx := strings.Index(out, "=== Absences ===")
+	totalIdx := strings.Index(out, "Total signals:")
+	require.NotEqual(t, -1, groupIdx, "Criticality group must render (fixture has a stars signal)")
+	require.NotEqual(t, -1, absencesIdx, "Absences section must render (fixture has 2 absences)")
+	require.NotEqual(t, -1, totalIdx, "Total line must render")
+	assert.Less(t, groupIdx, absencesIdx,
+		"per-group renders must come before the consolidated absences section")
+	assert.Less(t, absencesIdx, totalIdx,
+		"consolidated absences must come before the Total signals footer")
+}
+
+// TestDisplayHuman_AbsencesSection_SkippedWhenZero guards the "no
+// empty header" property: when there are zero absences, the rendered
+// output must NOT include "=== Absences ===" — that would be visual
+// noise on every clean target. Sister test to the surface-when-present
+// one above.
+func TestDisplayHuman_AbsencesSection_SkippedWhenZero(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	display := &AnalysisDisplay{
+		Profile: &profile.Profile{
+			Entity: profile.Entity{
+				ShortName:    "kong",
+				CanonicalURI: "repo:github/alecthomas/kong",
+				Type:         profile.EntityProject,
+			},
+			Signals: []profile.Signal{
+				{
+					Type:              "stars",
+					Group:             profile.SignalGroupCriticality,
+					Value:             []byte(`{"count":3044}`),
+					ForgeryResistance: profile.ForgeryMediumDeclining,
+				},
+			},
+		},
+	}
+
+	err := displayHuman(&buf, display, 0)
+	require.NoError(t, err)
+	assert.NotContains(t, buf.String(), "=== Absences ===",
+		"the absences section must be omitted entirely when no absences exist; an empty header is visual noise")
+	// Total line is still present — the count just reports 0 absent.
+	assert.Contains(t, buf.String(), "Total signals: 1 (0 absent)",
+		"footer count must still report zero absences honestly")
 }
 
 // TestPrintCompactValue_ShortCircuits confirms that printCompactValue

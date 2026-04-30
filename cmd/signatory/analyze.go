@@ -709,6 +709,18 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 		{profile.SignalGroupPosture, "Posture"},
 	}
 
+	// Collected once during the per-group walk so the consolidated
+	// "=== Absences ===" section below can render without a second
+	// pass over p.Signals. Each entry preserves what the in-group
+	// row already shows, plus the structured retryable bit so the
+	// summary section can annotate "(retryable)" without re-parsing
+	// the JSON value.
+	type absenceRow struct {
+		name      string
+		reason    string
+		retryable bool
+	}
+	var absences []absenceRow
 	absenceCount := 0
 	for _, g := range groupOrder {
 		sigs, ok := groups[g.group]
@@ -728,21 +740,49 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 
 			if strings.HasPrefix(s.Type, "absence:") {
 				absenceCount++
-				retryable := ""
-				if r, ok := val["retryable"].(bool); ok && r {
-					retryable = " (retryable)"
+				retryable := false
+				if r, ok := val["retryable"].(bool); ok {
+					retryable = r
 				}
 				reason := ""
 				if r, ok := val["reason"].(string); ok {
 					reason = r
 				}
-				sw.Writef("  %-20s [ABSENT]  %s%s\n",
-					strings.TrimPrefix(s.Type, "absence:"), reason, retryable)
+				name := strings.TrimPrefix(s.Type, "absence:")
+				absences = append(absences, absenceRow{
+					name: name, reason: reason, retryable: retryable,
+				})
+				retryStr := ""
+				if retryable {
+					retryStr = " (retryable)"
+				}
+				sw.Writef("  %-20s [ABSENT]  %s%s\n", name, reason, retryStr)
 			} else {
 				sw.Writef("  %-20s [%s]  ", s.Type, s.ForgeryResistance)
 				printCompactValue(sw, val)
 				sw.Writeln()
 			}
+		}
+		sw.Writeln()
+	}
+
+	// Consolidated absences section: surfaces every [ABSENT] marker
+	// in one place at the bottom of the display, so a user scanning
+	// the output doesn't have to walk every group looking for them.
+	// The in-group rows above still show absences alongside their
+	// peers (preserves Governance vs Criticality vs Vitality semantic
+	// context); this section is the consolidated capstone.
+	//
+	// Skipped when there are zero absences — an empty "=== Absences ==="
+	// header would be visual noise on every clean target.
+	if len(absences) > 0 {
+		sw.Writeln("=== Absences ===")
+		for _, a := range absences {
+			retryStr := ""
+			if a.retryable {
+				retryStr = " (retryable)"
+			}
+			sw.Writef("  %-30s %s%s\n", a.name, a.reason, retryStr)
 		}
 		sw.Writeln()
 	}
