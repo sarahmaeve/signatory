@@ -43,13 +43,22 @@ type TemporalEra string
 const (
 	EraPreLLM   TemporalEra = "pre-llm"   // Before 30 Nov 2022
 	EraEarlyLLM TemporalEra = "early-llm" // 30 Nov 2022 — 24 Nov 2025
-	EraModernAI TemporalEra = "modern-ai" // After 24 Nov 2025
+	EraModernAI TemporalEra = "modern-ai" // 24 Nov 2025 — 30 Apr 2026
+
+	// EraMatureCyber labels code touched after multi-vendor frontier
+	// cyber capability is established. The era is a notation for
+	// analysis: code unexamined and unrepaired from before this phase
+	// is likely to have surfaces that will not weather current attacks
+	// well. The boundary is not a claim about authorship capability —
+	// it is a claim about target durability.
+	EraMatureCyber TemporalEra = "mature-cyber" // After 30 Apr 2026
 )
 
 // Temporal era boundary dates (unexported to prevent runtime manipulation).
 var (
 	preLLMEnd   = time.Date(2022, 11, 30, 0, 0, 0, 0, time.UTC)
 	earlyLLMEnd = time.Date(2025, 11, 24, 0, 0, 0, 0, time.UTC)
+	modernAIEnd = time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)
 )
 
 // PreLLMEnd returns the boundary date before which code is classified as pre-LLM era.
@@ -65,8 +74,10 @@ func ClassifyEra(t time.Time) TemporalEra {
 		return EraPreLLM
 	case t.Before(earlyLLMEnd):
 		return EraEarlyLLM
-	default:
+	case t.Before(modernAIEnd):
 		return EraModernAI
+	default:
+		return EraMatureCyber
 	}
 }
 

@@ -28,7 +28,7 @@ func TestEntityTypeConstants(t *testing.T) {
 func TestTemporalEraConstants(t *testing.T) {
 	t.Parallel()
 
-	eras := []TemporalEra{EraPreLLM, EraEarlyLLM, EraModernAI}
+	eras := []TemporalEra{EraPreLLM, EraEarlyLLM, EraModernAI, EraMatureCyber}
 	for _, e := range eras {
 		assert.NotEmpty(t, string(e), "TemporalEra constant must not be empty")
 	}
@@ -125,7 +125,16 @@ func TestClassifyEra(t *testing.T) {
 		{
 			name:     "FarFuture",
 			input:    time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
-			expected: EraModernAI,
+			expected: EraMatureCyber,
+		},
+		{
+			// Illustrative case in the mature-cyber era. The boundary itself
+			// is interpretive (target durability, not authorship capability),
+			// so we don't carry the nanosecond-precision triple the earlier
+			// boundaries get — one mid-range case suffices.
+			name:     "MidMatureCyber",
+			input:    time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+			expected: EraMatureCyber,
 		},
 		{
 			name:     "NonUTCTimezone_StillClassifiedCorrectly",
