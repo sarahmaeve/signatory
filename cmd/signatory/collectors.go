@@ -27,17 +27,26 @@ import (
 // here as they're needed.
 type CollectOpts struct {
 	// Path is an absolute-or-relative filesystem path. In "read
-	// mode" (Clone == false) it must already contain a valid git
-	// clone of the analyze target. In "create mode"
-	// (Clone == true) it must either not exist or be empty, and
-	// the collector will clone the target into it.
+	// mode" (Clone == false) it must already contain a valid full
+	// (non-shallow) git clone of the analyze target. In "manage
+	// mode" (Clone == true) ensureCloneAtPath drives it to that
+	// state — clone if missing/empty, fetch if present, fetch
+	// --unshallow if shallow.
 	Path string
 
-	// Clone, when true, creates a new clone at Path. Fails loudly
-	// if Path is non-empty. Always a full clone — shallow clones
-	// would silently degrade first_commit_date and historical
-	// authorship signals; shallow-clone support is a v0.2 concern.
+	// Clone, when true, makes ensureCloneAtPath responsible for
+	// driving Path to a current, complete full clone of the
+	// target's git origin. Idempotent against pre-existing clones:
+	// fetches refs (and unshallows shallow clones) rather than
+	// re-cloning. Origin mismatch is loud-fail.
 	Clone bool
+
+	// RunGit injects the git subprocess runner for clone-shaped
+	// operations (clone / fetch / fetch --unshallow). nil → fall
+	// through to defaultRunGit, which builds via gitenv.NewCloneCmd.
+	// Tests pass a recorder closure to assert on subcommand shape
+	// without spawning real git. Threaded from AnalyzeCmd.RunGit.
+	RunGit func(ctx context.Context, workdir string, args ...string) error
 }
 
 // Sentinel errors for each failure mode of collectorsFor.
@@ -50,6 +59,13 @@ var (
 	ErrPathNotEmpty   = errors.New("refusing to clone: --path directory is not empty")
 	ErrPathNotAClone  = errors.New("--path does not point at a git clone (no .git directory)")
 	ErrOriginMismatch = errors.New("clone origin does not match target entity")
+	// ErrShallowClone is returned by validateExistingClone (no --clone,
+	// just --path) when the path holds a shallow clone. Shallow clones
+	// degrade historical signals (first_commit_date, authorship windows,
+	// signing ratios); callers should re-run with --clone to unshallow.
+	// The --clone branch's ensureCloneAtPath does NOT return this — it
+	// remediates the shallow state by issuing `git fetch --unshallow`.
+	ErrShallowClone = errors.New("clone at --path is shallow; re-run with --clone to unshallow")
 )
 
 // collectorsFor returns the collectors appropriate for an entity,
@@ -143,6 +159,13 @@ func isGitHostedEntity(entity *profile.Entity) bool {
 // The happy paths produce a path; every unhappy path returns a
 // sentinel-wrapped error that `signatory analyze` surfaces
 // directly to the operator.
+//
+// Normalization of entity.URL to a github canonical URI is deferred
+// to the call sites that actually need it (validateExistingClone, and
+// ensureCloneAtPath's existing-clone branches). The fresh-clone path
+// only needs entity.URL to be a safe `git clone` argument — which
+// includes filesystem-path URLs that test fixtures use as local
+// "remotes." Lifting the normalization up here would block that.
 func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectOpts) (string, error) {
 	if opts.Clone && opts.Path == "" {
 		return "", ErrPathMissing
@@ -157,25 +180,21 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 	}
 
 	if opts.Clone {
-		if err := ensurePathEmptyOrMissing(absPath); err != nil {
-			return "", err
-		}
 		if err := safeGitCloneURL(entity.URL); err != nil {
 			return "", fmt.Errorf("entity URL unsafe for clone: %w", err)
 		}
-		if err := gitCloneFull(ctx, entity.URL, absPath); err != nil {
+		if err := ensureCloneAtPath(ctx, opts.RunGit, absPath, entity.URL); err != nil {
 			return "", err
 		}
 		return absPath, nil
 	}
 
-	// validateExistingClone compares the clone's origin against a
-	// repo:github/... URI. For repo-scheme entities the entity's
-	// CanonicalURI is already that form. For pkg-scheme entities
-	// (npm packages whose source has been resolved to a github
-	// repo in A.5), CanonicalURI is pkg:npm/<name>, which would
-	// never match the clone's resolved origin URI. Derive the
-	// expected URI from entity.URL instead — that's the declared
+	// --path-only branch: entity.URL must be a github-parseable URI so
+	// validateExistingClone can compare origins. For repo-scheme entities
+	// the entity's CanonicalURI is already that form; for pkg-scheme
+	// entities (npm/pypi packages whose source has been resolved to a
+	// github repo), CanonicalURI is pkg:<eco>/<name> — not what we need.
+	// Derive expectedURI from entity.URL instead, which is the declared
 	// github source regardless of entity type.
 	expectedURI, _, _, err := profile.NormalizeGitHubRepoInput(entity.URL)
 	if err != nil {
@@ -187,37 +206,12 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 	return absPath, nil
 }
 
-// ensurePathEmptyOrMissing returns nil if path is a non-existent
-// directory (we'll create it) or an existing empty directory (we'll
-// clone into it). Returns a wrapped ErrPathNotEmpty otherwise.
-//
-// This is the "never clobber" half of the --clone contract: if the
-// operator points --clone at a directory with existing content —
-// another clone, their personal work, the wrong target's checkout —
-// we refuse rather than overwrite.
-func ensurePathEmptyOrMissing(path string) error {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("stat --path %q: %w", path, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%w: --path %q is not a directory", ErrPathNotEmpty, path)
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return fmt.Errorf("read --path %q: %w", path, err)
-	}
-	if len(entries) > 0 {
-		return fmt.Errorf("%w: %q contains %d entries", ErrPathNotEmpty, path, len(entries))
-	}
-	return nil
-}
-
-// validateExistingClone checks path is a git clone whose origin
-// URL normalizes to expectedURI.
+// validateCloneOrigin checks path is a git clone whose origin
+// URL normalizes to expectedURI. Does NOT check shallow-ness —
+// callers that want to allow shallow (the --clone branch, which
+// will unshallow) call this directly; callers that want to reject
+// shallow (the --path-only branch) call validateExistingClone,
+// which composes this with cloneIsShallow.
 //
 // The normalization cross-check is load-bearing: an operator who
 // cloned the wrong repo into --path would otherwise get a
@@ -231,7 +225,7 @@ func ensurePathEmptyOrMissing(path string) error {
 // reads the repo's config and does not fork network helpers — so
 // WaitDelay is intentionally NOT applied here. See the gitenv
 // package doc "Why clone-only" for the rationale.
-func validateExistingClone(ctx context.Context, path, expectedURI string) error {
+func validateCloneOrigin(ctx context.Context, path, expectedURI string) error {
 	info, err := os.Stat(filepath.Join(path, ".git"))
 	if err != nil || info == nil {
 		return fmt.Errorf("%w: %q", ErrPathNotAClone, path)
@@ -260,16 +254,175 @@ func validateExistingClone(ctx context.Context, path, expectedURI string) error 
 	return nil
 }
 
+// validateExistingClone is the --path-only contract: path must be a
+// git clone of the expected target AND must not be shallow. Shallow
+// clones silently degrade history-dependent signals (first_commit_date,
+// authorship windows, signing ratios), so refusing them here defends
+// the store from poisoned positive signals — the failure mode flagged
+// in design/openssf-problem.txt.
+//
+// Callers that want to ALLOW (and remediate) a shallow clone — the
+// --clone branch's ensureCloneAtPath, which unshallows — call
+// validateCloneOrigin directly and check cloneIsShallow themselves.
+func validateExistingClone(ctx context.Context, path, expectedURI string) error {
+	if err := validateCloneOrigin(ctx, path, expectedURI); err != nil {
+		return err
+	}
+	shallow, err := cloneIsShallow(path)
+	if err != nil {
+		return err
+	}
+	if shallow {
+		return fmt.Errorf("%w: %q (re-run with --clone to unshallow)", ErrShallowClone, path)
+	}
+	return nil
+}
+
+// cloneIsShallow reports whether path holds a shallow git clone.
+// Returns (true, nil) iff path/.git/shallow exists; (false, nil) when
+// it doesn't; (false, err) on unexpected stat errors. Plain Lstat —
+// no subprocess — keeps the cost trivial and removes one possible
+// failure mode from the inspection step.
+func cloneIsShallow(path string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(path, ".git", "shallow"))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat .git/shallow at %q: %w", path, err)
+}
+
+// ensureCloneAtPath drives absPath to a current, complete clone of
+// cloneURL. Four cases:
+//
+//  1. Path missing or empty → fresh full clone (`git clone <url> <path>`).
+//  2. Path holds a valid full clone of the expected target → `git fetch`.
+//  3. Path holds a valid SHALLOW clone of the expected target →
+//     `git fetch --unshallow`.
+//  4. Path holds a clone of a DIFFERENT target → ErrOriginMismatch (no
+//     git operation performed; we must not clobber unrelated work).
+//
+// Any other state (a non-empty non-clone directory, a non-directory
+// file at path, an unreadable directory) is a refusal with the
+// appropriate sentinel — same "never clobber" property the older
+// ensurePathEmptyOrMissing guarded.
+//
+// cloneURL is passed verbatim to `git clone` for the fresh-clone case;
+// callers must have validated it via safeGitCloneURL upstream. For
+// existing-clone cases, cloneURL is also normalized via
+// NormalizeGitHubRepoInput to derive the expectedURI compared against
+// the clone's recorded origin — done lazily inside this function so a
+// filesystem-path cloneURL (test fixtures) is acceptable for fresh
+// clones even though it wouldn't normalize as github.
+//
+// runner is the git subprocess injection; nil falls through to
+// defaultRunGit. The runner is responsible for routing through
+// gitenv.NewCloneCmd so env-strip + WaitDelay discipline applies.
+//
+// The function does NOT acquire any lock — callers running concurrently
+// against the same path will race. v0.1 is single-process; concurrent
+// /analyze runs against the same target are out of scope and can be
+// added with a flock when the use case appears.
+func ensureCloneAtPath(
+	ctx context.Context,
+	runner func(ctx context.Context, workdir string, args ...string) error,
+	absPath, cloneURL string,
+) error {
+	if runner == nil {
+		runner = defaultRunGit
+	}
+
+	// Case 1a: path doesn't exist → fresh clone.
+	info, err := os.Stat(absPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return runner(ctx, "", "clone", cloneURL, absPath)
+	}
+	if err != nil {
+		return fmt.Errorf("stat --path %q: %w", absPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: --path %q is not a directory", ErrPathNotEmpty, absPath)
+	}
+
+	// Case 1b: path exists but is empty → fresh clone.
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return fmt.Errorf("read --path %q: %w", absPath, err)
+	}
+	if len(entries) == 0 {
+		return runner(ctx, "", "clone", cloneURL, absPath)
+	}
+
+	// Path exists with content. We need a github-parseable cloneURL to
+	// compare origins. Filesystem-path cloneURLs (test fixtures) get
+	// rejected here, which is the right outcome — a real existing clone
+	// can only have a real github origin under signatory's threat model.
+	expectedURI, _, _, err := profile.NormalizeGitHubRepoInput(cloneURL)
+	if err != nil {
+		return fmt.Errorf("entity URL %q not parseable as a github target: %w", cloneURL, err)
+	}
+	if err := validateCloneOrigin(ctx, absPath, expectedURI); err != nil {
+		return err
+	}
+
+	shallow, err := cloneIsShallow(absPath)
+	if err != nil {
+		return err
+	}
+	if shallow {
+		// Case 3: shallow → unshallow + refresh refs. --tags is omitted;
+		// `--unshallow` already implies a refs refresh as part of its
+		// download.
+		return runner(ctx, absPath, "fetch", "--unshallow")
+	}
+	// Case 2: full clone → refresh refs.
+	return runner(ctx, absPath, "fetch")
+}
+
+// defaultRunGit is the production runner that ensureCloneAtPath
+// falls back to when the caller passes a nil runner. Routes every
+// invocation through gitenv.NewCloneCmd: clone and fetch operations
+// both talk to a remote (and may fork ssh/askpass/credential-helper
+// grandchildren), so the WaitDelay + env-strip discipline applies
+// to both.
+//
+// workdir, when non-empty, is prepended as `-C workdir` so the
+// subcommand operates against an existing clone without an
+// os.Chdir() race. workdir empty means args already carry the
+// destination (the clone case: `clone <url> <dest>`).
+func defaultRunGit(ctx context.Context, workdir string, args ...string) error {
+	full := args
+	if workdir != "" {
+		full = append([]string{"-C", workdir}, args...)
+	}
+	cmd := gitenv.NewCloneCmd(ctx, full...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %v: %w: %s", args, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // gitCloneFull performs `git clone <url> <dest>` with full history
 // (no --depth). Full-history is non-negotiable for v0.1 because
 // several git-collector signals (first_commit_date, windowed
 // authorship tallies over a 12-month window, commit-signing
 // ratios) silently degrade on shallow clones. The registry caveats
-// document which signals are affected; the --clone contract
-// prevents the operator from hitting those caveats accidentally.
+// document which signals are affected.
 //
-// Caller must have validated url via safeGitCloneURL and dest via
-// ensurePathEmptyOrMissing before invoking this.
+// In production, ensureCloneAtPath dispatches `clone` operations
+// through the runner injection (defaultRunGit fallback); this helper
+// is retained as the package-private full-clone primitive used by
+// tests that need a deterministic local fixture clone (see the
+// RunGit closures in analyze_clone_test.go).
+//
+// Caller must have validated url via safeGitCloneURL before invoking
+// this; ensureCloneAtPath enforces "dest is missing or empty" before
+// the dispatched runner reaches a `clone` op, so this helper does not
+// re-check.
 //
 // Subprocess discipline (env scrubbing + post-kill pipe-drain
 // bound) comes from gitenv.NewCloneCmd — clone-shaped operations

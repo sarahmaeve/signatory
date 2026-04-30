@@ -69,14 +69,38 @@ type AnalyzeCmd struct {
 
 	// --path points at an existing local clone of the target. Required
 	// with --refresh for git-hosted entities unless --clone is also
-	// passed. See design/v0.1-invariants.md §"Invariant 2" for the
-	// "no implicit network" principle this flag serves.
-	Path string `name:"path" help:"Filesystem path to an existing local clone of the target. Required with --refresh for git-hosted entities unless --clone is passed." type:"path"`
+	// passed. Without --clone, the clone must be full (not shallow); a
+	// shallow clone is rejected with ErrShallowClone pointing the user
+	// toward --clone for unshallow. See design/v0.1-invariants.md
+	// §"Invariant 2" for the "no implicit network" principle this flag
+	// serves.
+	Path string `name:"path" help:"Filesystem path to an existing local clone of the target. Required with --refresh for git-hosted entities unless --clone is passed. Must be a full clone — shallow clones are rejected." type:"path"`
 
-	// --clone creates a new clone at --path. Always a full clone;
-	// shallow clones silently degrade historical signals. Refuses to
-	// run if --path is non-empty.
-	Clone bool `name:"clone" help:"Create a new clone at --path by fetching from the target's origin. Fails loudly if --path is non-empty."`
+	// --clone ensures --path holds a current, complete clone of the
+	// target. Idempotent: clones if --path is missing or empty, fetches
+	// if --path holds a valid clone, fetches --unshallow if --path holds
+	// a shallow clone, refuses with ErrOriginMismatch if --path holds a
+	// clone of a different repo. Requires --refresh (--clone is plumbing
+	// for the refresh path's collector dispatch). When --path is unset,
+	// defaults to filestore/clones/<short-name>.
+	Clone bool `name:"clone" help:"Ensure --path holds a current, complete full clone of the target (clone if missing, fetch if present, fetch --unshallow if shallow). Defaults --path to filestore/clones/<short-name> when unset. Requires --refresh."`
+
+	// RunGit overrides the git subprocess invocation for clone-shaped
+	// operations triggered by --clone (fresh clone, fetch on an existing
+	// valid clone, fetch --unshallow on a shallow clone). nil → fall
+	// through to defaultRunGit, which builds via gitenv.NewCloneCmd.
+	//
+	// workdir is the working directory for the git operation:
+	//   - empty string for clone operations (the destination path is
+	//     carried in args, e.g. ["clone", url, dest])
+	//   - the existing clone path for fetch/unshallow operations
+	//     (e.g. workdir=dest, args=["fetch"] or args=["fetch","--unshallow"])
+	//
+	// Mirrors HandoffCmd.RunGitClone: struct-field seam for parallel-safe
+	// test injection, visible dependency. Tests inject a closure that
+	// records calls without spawning real git subprocesses; production
+	// leaves it nil and ensureCloneAtPath falls through to defaultRunGit.
+	RunGit func(ctx context.Context, workdir string, args ...string) error `kong:"-"`
 
 	// Stdout and Stderr let tests inject buffers. Production paths
 	// leave them nil; Run defaults them to os.Stdout / os.Stderr.
@@ -124,6 +148,18 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		ctx = context.Background()
 	}
 
+	// --clone is plumbing for the --refresh path: it tells the collector
+	// dispatch to ensure a current local clone before signal collection.
+	// Without --refresh, --clone has nothing to plumb into — the no-refresh
+	// branch returns before collectors are built. Reject the combination
+	// loudly rather than silently no-op the flag, which surprised users in
+	// dogfood. If you only want a clone with no signal collection, use git
+	// directly.
+	if cmd.Clone && !cmd.Refresh {
+		return NewUsageError(fmt.Errorf(
+			"--clone requires --refresh; pass --refresh, or use 'git clone' directly if you only want the clone"))
+	}
+
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -143,6 +179,19 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	resolved, err := profile.ResolveTarget(cmd.Target)
 	if err != nil {
 		return fmt.Errorf("parse target %q: %w", cmd.Target, err)
+	}
+
+	// Default --path when --clone is set without --path: a stable filestore
+	// location keyed by the resolved short-name. Matches the layout used by
+	// `signatory handoff --clone-dir filestore/clones/` and the /analyze
+	// pipeline's Step 1, so a subsequent `signatory handoff` run reuses
+	// the same directory without ceremony.
+	//
+	// Empty ShortName (some pkg:* canonical URIs) falls through to the
+	// existing ErrPathMissing in resolveClonePath — the default depends on
+	// having a name to key off.
+	if cmd.Clone && cmd.Path == "" && resolved.ShortName != "" {
+		cmd.Path = filepath.Join("filestore", "clones", resolved.ShortName)
 	}
 
 	// Look up an existing entity by canonical URI. A matching entity
@@ -347,7 +396,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// on the entity's shape plus --path / --clone.
 	collectors := globals.Collectors
 	if len(collectors) == 0 {
-		c, err := collectorsFor(ctx, entity, CollectOpts{Path: cmd.Path, Clone: cmd.Clone})
+		c, err := collectorsFor(ctx, entity, CollectOpts{
+			Path:   cmd.Path,
+			Clone:  cmd.Clone,
+			RunGit: cmd.RunGit,
+		})
 		if err != nil {
 			return err
 		}

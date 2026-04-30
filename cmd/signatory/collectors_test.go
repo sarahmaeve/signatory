@@ -81,10 +81,17 @@ func TestCollectorsFor_CloneWithoutPath_ReturnsErrPathMissing(t *testing.T) {
 	assert.ErrorIs(t, err, ErrPathMissing)
 }
 
-func TestCollectorsFor_CloneIntoNonEmpty_ReturnsErrPathNotEmpty(t *testing.T) {
+// TestCollectorsFor_CloneIntoNonEmptyNonClone_ReturnsErrPathNotAClone
+// guards the "never clobber" property of --clone under the idempotent
+// clone-or-refresh contract: pointing --clone at a non-empty directory
+// that is NOT a git clone still refuses, but with ErrPathNotAClone
+// (origin-validation discovers no .git and refuses) rather than the
+// pre-idempotent ErrPathNotEmpty. The protective intent — never
+// overwrite content the user didn't authorize — is preserved.
+func TestCollectorsFor_CloneIntoNonEmptyNonClone_ReturnsErrPathNotAClone(t *testing.T) {
 	t.Parallel()
 
-	// Create a dir and put something in it.
+	// Create a dir and put something in it that is NOT a clone.
 	dst := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "existing.txt"), []byte("hi"), 0o600))
 
@@ -95,7 +102,8 @@ func TestCollectorsFor_CloneIntoNonEmpty_ReturnsErrPathNotEmpty(t *testing.T) {
 	}
 	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrPathNotEmpty)
+	assert.ErrorIs(t, err, ErrPathNotAClone,
+		"under the idempotent --clone contract, a non-empty non-clone dir is rejected by origin validation (no .git → ErrPathNotAClone), not the legacy ErrPathNotEmpty")
 }
 
 func TestCollectorsFor_ExistingPathNoGitDir_ReturnsErrPathNotAClone(t *testing.T) {
@@ -406,12 +414,12 @@ func readEnvDump(t *testing.T, path string) map[string]string {
 	data, err := os.ReadFile(path)
 	require.NoErrorf(t, err, "fake git must have produced env dump at %s", path)
 	out := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		idx := strings.IndexByte(line, '=')
-		if idx < 0 {
+	for line := range strings.SplitSeq(string(data), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
 			continue
 		}
-		out[line[:idx]] = line[idx+1:]
+		out[key] = value
 	}
 	return out
 }
