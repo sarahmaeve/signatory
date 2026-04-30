@@ -115,3 +115,47 @@ func TestCollectionResult_NoFailures(t *testing.T) {
 	assert.Contains(t, result.Summary(), "1 signals")
 	assert.NotContains(t, result.Summary(), "failures")
 }
+
+// TestCollectionResult_Summary_EnumeratesFailures pins the contract
+// that the per-collector summary line surfaces WHICH signals failed
+// and WHY, not just the counts. The collector loop in AnalyzeCmd.Run
+// emits this string verbatim (`[%s] %s`), so dropping the failure
+// detail there is the difference between
+//
+//	[github] Collected 17 signals, 1 failures
+//
+// and
+//
+//	[github] Collected 17 signals, 1 failures: adoption=GitHub API 403
+//
+// for a manual CLI user trying to figure out what to fix.
+func TestCollectionResult_Summary_EnumeratesFailures(t *testing.T) {
+	result := &CollectionResult{
+		Collected: []SignalOrAbsence{
+			MakeSignal(profile.Signal{Type: "stars"}),
+		},
+		Failures: []CollectionError{
+			{SignalType: "adoption", Source: "github", Reason: "GitHub API 403", Retryable: false},
+			{SignalType: "contributors", Source: "github", Reason: "rate limited", Retryable: true},
+		},
+	}
+
+	summary := result.Summary()
+
+	// Existing contract preserved: counts and retryable bulk count.
+	assert.Contains(t, summary, "1 signals")
+	assert.Contains(t, summary, "2 failures")
+	assert.Contains(t, summary, "1 retryable")
+
+	// New contract: per-failure detail. Each failed signal type AND
+	// its reason must appear in the line so the user can see what to
+	// look at without re-running with extra logging.
+	assert.Contains(t, summary, "adoption",
+		"summary must name the failed signal type so the user knows what to investigate")
+	assert.Contains(t, summary, "GitHub API 403",
+		"summary must include the failure reason so the user knows whether to retry, fix auth, etc.")
+	assert.Contains(t, summary, "contributors",
+		"summary must enumerate every failed signal type, not just the first")
+	assert.Contains(t, summary, "rate limited",
+		"summary must include each failure's reason")
+}

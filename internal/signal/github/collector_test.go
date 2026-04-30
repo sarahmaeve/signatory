@@ -584,3 +584,62 @@ require (
 		})
 	}
 }
+
+// TestSanitizeErrorForStorage_SurfacesStatusCode pins the contract that
+// when client.get fails with the sanitized "GitHub API returned status
+// NNN" format (per #93's body-removal), the reason string surfaces the
+// numeric status code rather than collapsing to a blanket "client
+// error" / "server error" label. The original generic labels lost the
+// signal a user needs to act on — 401 (auth), 403 (permissions), 404
+// (gone), 422 (validation), 502/503 (transient) all merit different
+// remediation, and "client error" tells the user nothing about which.
+//
+// The status code is the only attacker-uninfluenced field in the
+// upstream error (#93 dropped the body); surfacing it is safe.
+func TestSanitizeErrorForStorage_SurfacesStatusCode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		errMsg   string
+		wantCode string
+	}{
+		{"4xx - 401 unauthorized", "GitHub API returned status 401", "401"},
+		{"4xx - 403 forbidden", "GitHub API returned status 403", "403"},
+		{"4xx - 422 unprocessable", "GitHub API returned status 422", "422"},
+		{"5xx - 500 internal", "GitHub API returned status 500", "500"},
+		{"5xx - 502 bad gateway", "GitHub API returned status 502", "502"},
+		{"5xx - 503 unavailable", "GitHub API returned status 503", "503"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sanitizeErrorForStorage(testErr(tc.errMsg))
+			assert.Contains(t, got, tc.wantCode,
+				"sanitized reason for %q must include the status code %q so the user can distinguish it from other 4xx/5xx; got %q",
+				tc.errMsg, tc.wantCode, got)
+		})
+	}
+}
+
+// TestSanitizeErrorForStorage_FallbackOnUnknownFormat verifies that
+// errors NOT matching the "GitHub API returned status NNN" prefix still
+// fall through to the existing generic labels — we don't want the
+// status-extraction branch to swallow unrelated errors.
+func TestSanitizeErrorForStorage_FallbackOnUnknownFormat(t *testing.T) {
+	t.Parallel()
+
+	got := sanitizeErrorForStorage(testErr("something else entirely"))
+	assert.Equal(t, "collection failed", got,
+		"errors that don't match any classifier branch must fall through to the generic 'collection failed' label")
+}
+
+// testErr is a tiny helper to construct an error with a known message
+// without dragging in 'errors.New' at every callsite. Local to this
+// file to avoid polluting the package test surface.
+func testErr(msg string) error { return &simpleErr{msg: msg} }
+
+type simpleErr struct{ msg string }
+
+func (e *simpleErr) Error() string { return e.msg }

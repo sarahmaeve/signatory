@@ -387,16 +387,44 @@ func sanitizeErrorForStorage(err error) string {
 	// #93 to drop the attacker-influenceable body; these classifier
 	// branches were not updated at that time and silently became dead
 	// code, with all 4xx/5xx falling through to "collection failed".)
-	if strings.Contains(errMsg, "GitHub API returned status 5") {
-		return "server error"
-	}
-	if strings.Contains(errMsg, "GitHub API returned status 4") {
-		return "client error"
+	//
+	// Surface the numeric status code so a manual operator can
+	// distinguish 401 (auth) from 403 (perms) from 404 (gone) from 422
+	// (validation) from 500/502/503 (transient infrastructure). The
+	// status code is the only attacker-uninfluenced field in the
+	// upstream error after #93's sanitization; the body is already
+	// gone by the time we reach this classifier.
+	if code := extractGitHubAPIStatusCode(errMsg); code != "" {
+		switch code[0] {
+		case '5':
+			return "GitHub API " + code + " (server error)"
+		case '4':
+			return "GitHub API " + code
+		}
 	}
 	if strings.Contains(errMsg, "decode response") {
 		return "invalid response"
 	}
 	return "collection failed"
+}
+
+// extractGitHubAPIStatusCode pulls the 3-digit status code out of an
+// errMsg that follows the "GitHub API returned status NNN" sanitized
+// format. Returns "" when the prefix isn't present or no digits follow.
+//
+// Stops at 3 digits — defensive against a future format change that
+// might append additional content; we only want the numeric status,
+// not whatever came after it.
+func extractGitHubAPIStatusCode(errMsg string) string {
+	_, rest, ok := strings.Cut(errMsg, "GitHub API returned status ")
+	if !ok {
+		return ""
+	}
+	end := 0
+	for end < 3 && end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	return rest[:end]
 }
 
 // isRetryable determines if an error is likely to succeed on retry.

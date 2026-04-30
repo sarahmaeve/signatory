@@ -98,20 +98,48 @@ func (r *CollectionResult) HasFailures() bool {
 }
 
 // Summary returns a human-readable summary of the collection result.
+//
+// The format on success is brief: "Collected N signals". When failures
+// occurred, the summary names each failed signal type and its reason
+// so the per-collector line in `signatory analyze` ([source] <summary>)
+// tells a manual user what to investigate without re-running with extra
+// logging:
+//
+//	Collected 17 signals, 1 failures (1 retryable): adoption=GitHub API 403
+//	Collected 5 signals, 2 failures (1 retryable): stars=rate limited, forks=GitHub API 502
+//
+// The bulk "(N retryable)" parenthetical is preserved alongside the
+// per-failure detail because the count is useful at a glance even when
+// the enumeration is long. Reasons come from each collector's already-
+// sanitized error classifier — the github package strips
+// attacker-influenceable bodies via sanitizeErrorForStorage before any
+// CollectionError is constructed, so the enumeration here is safe to
+// surface verbatim.
 func (r *CollectionResult) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Collected %d signals", len(r.Collected))
-	if len(r.Failures) > 0 {
-		fmt.Fprintf(&b, ", %d failures", len(r.Failures))
-		retryable := 0
-		for _, f := range r.Failures {
-			if f.Retryable {
-				retryable++
-			}
+	if len(r.Failures) == 0 {
+		return b.String()
+	}
+	fmt.Fprintf(&b, ", %d failures", len(r.Failures))
+	retryable := 0
+	for _, f := range r.Failures {
+		if f.Retryable {
+			retryable++
 		}
-		if retryable > 0 {
-			fmt.Fprintf(&b, " (%d retryable)", retryable)
+	}
+	if retryable > 0 {
+		fmt.Fprintf(&b, " (%d retryable)", retryable)
+	}
+	// Per-failure enumeration. Format: "type=reason" per failure,
+	// comma-separated. Order matches r.Failures so determinism comes
+	// from the collector's own ordering rather than a sort here.
+	b.WriteString(": ")
+	for i, f := range r.Failures {
+		if i > 0 {
+			b.WriteString(", ")
 		}
+		fmt.Fprintf(&b, "%s=%s", f.SignalType, f.Reason)
 	}
 	return b.String()
 }
