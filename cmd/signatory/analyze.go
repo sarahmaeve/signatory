@@ -17,6 +17,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	"github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypiregistry "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -408,6 +409,53 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 					entity.CanonicalURI, resolveErr)
 			}
 			_, _ = fmt.Fprintf(stderr, "warning: pypi repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, resolveErr)
+		}
+	}
+
+	// Go-module vanity-host resolution: parallel to npm/pypi above.
+	// Triggers for entities whose Ecosystem is "golang"/"go" and
+	// whose URL stayed empty after parse-time CloneURL stamping —
+	// i.e., vanity hosts (gopkg.in, modernc.org, k8s.io) where the
+	// URI alone doesn't algorithmically yield a github source.
+	// Resolver queries proxy.golang.org for an Origin block and,
+	// if that fails, falls back to the vanity host's go-import
+	// meta tag.
+	//
+	// Gates on Ecosystem rather than Type because pre-fix entities
+	// in some users' stores carry Type=EntityProject (created via
+	// MCP ingest paths that didn't classify the URI as a package);
+	// the Ecosystem field is the load-bearing one, already stamped
+	// by the defensive backfill above. The URI prefix
+	// (pkg:golang/* or pkg:go/*) is implied by Ecosystem.
+	//
+	// Failure semantics match npm/pypi: a transport error during
+	// resolution writes an absence:repo_declaration signal AND
+	// returns a wrapped error on --refresh (loud-fail). A "no source
+	// resolvable" outcome (proxy 404 + no meta tag) is NOT a failure
+	// — empty URL stays empty, github + git + repofiles + openssf
+	// collectors gate themselves out, and the user still gets
+	// gopublish signals.
+	if (entity.Ecosystem == "golang" || entity.Ecosystem == "go") &&
+		entity.URL == "" {
+		if resolveErr := resolveGoRepo(ctx, s, entity, globals); resolveErr != nil {
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"goproxy",
+				resolveErr.Error(),
+				true,
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
+
+			if cmd.Refresh {
+				_, _ = fmt.Fprintf(stderr, "warning: go-module repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh go-module repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: go-module repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, resolveErr)
 		}
 	}
@@ -1008,6 +1056,79 @@ func resolvePyPIRepo(ctx context.Context, s store.Store, entity *profile.Entity,
 		// No github-hosted repository declared in project_urls or
 		// home_page. Stay silent; downstream dispatch will skip the
 		// github + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
+}
+
+// resolveGoRepo asks proxy.golang.org for the module's declared VCS
+// source (Origin block), falling back to the vanity host's
+// go-import meta tag for pre-Go-1.20 publishes that lack the proxy
+// Origin. Stamps the resolved github URL on the entity. Persists.
+//
+// Parallel to resolveNpmRepo / resolvePyPIRepo: the provider answers
+// the "where is this module's source?" question, the orchestrator
+// stamps it, downstream collectors operate against the resolved
+// entity. The resolution chain — proxy first, meta tag as fallback,
+// neither-resolves means empty stays empty — lives in
+// gopublish.Client.ResolveRepoURL; this wrapper handles the
+// CanonicalURI parsing, the test-time URL injection, and the
+// entity-stamp persistence.
+//
+// Module path extraction is identical for pkg:golang/ and pkg:go/
+// (the latter is the gomod parser's preferred prefix; both decode
+// to the same module). The TrimPrefix tries each in turn.
+func resolveGoRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	modulePath := entity.CanonicalURI
+	for _, prefix := range []string{"pkg:golang/", "pkg:go/"} {
+		if rest, ok := strings.CutPrefix(modulePath, prefix); ok {
+			modulePath = rest
+			break
+		}
+	}
+	if modulePath == "" || modulePath == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not a Go module URI", entity.CanonicalURI)
+	}
+	// Strip @version if present — resolveGoRepo always queries the
+	// module root, not a specific version. proxy.golang.org's
+	// @latest gives us the version pointer to read .info from.
+	if idx := strings.LastIndexByte(modulePath, '@'); idx > 0 {
+		modulePath = modulePath[:idx]
+	}
+
+	// Construct client. Production: live proxy + sum, vanity-host
+	// fetch goes to https://<modulePath>?go-get=1. Tests: Globals
+	// fields point at httptest servers for both proxy and vanity.
+	client := gopublish.NewClient()
+	if globals != nil && (globals.GoProxyURL != "" || globals.GoVanityURL != "") {
+		proxy := globals.GoProxyURL
+		if proxy == "" {
+			proxy = "https://proxy.golang.org"
+		}
+		// Tests don't typically inject sumURL for resolveGoRepo (the
+		// resolver doesn't query the transparency log); reuse proxy
+		// as a safe default that works against the same multiplexing
+		// httptest server. Production uses NewClient.
+		sum := proxy
+		client = gopublish.NewClientWithBaseURLs(proxy, sum, globals.GoVanityURL)
+	}
+
+	repoURL, err := client.ResolveRepoURL(ctx, modulePath)
+	if err != nil {
+		return fmt.Errorf("query go proxy: %w", err)
+	}
+	if repoURL == "" {
+		// Module has no resolvable github source (proxy 404 + no
+		// meta tag, or non-github source declared). Stay silent;
+		// downstream dispatch will skip the github + git collectors
+		// via isGitHostedEntity, and the user gets gopublish
+		// (publication-integrity) signals only.
 		return nil
 	}
 

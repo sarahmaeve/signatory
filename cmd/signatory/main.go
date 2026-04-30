@@ -173,6 +173,24 @@ type Globals struct {
 	// means the production registry (https://pypi.org). Tests
 	// point this at an httptest server.
 	PypiRegistryURL string
+
+	// GoProxyURL overrides the base URL for proxy.golang.org calls
+	// made during analyze-orchestration repo resolution for vanity-
+	// host Go modules (gopkg.in, modernc.org, k8s.io). Empty means
+	// the production proxy (https://proxy.golang.org). Tests point
+	// this at an httptest server. Used by resolveGoRepo when the
+	// canonical pkg:golang/<modpath> URI doesn't have an algorithmic
+	// github mapping (vanity hosts) and we need to query the proxy
+	// for an Origin block.
+	GoProxyURL string
+
+	// GoVanityURL overrides the base URL prefix for go-import meta
+	// tag fetches during the resolution fallback. Empty means
+	// resolveGoRepo fetches the live "https://<modulePath>?go-get=1"
+	// URL. Tests point this at an httptest server so the meta-tag
+	// fallback is exercised without contacting real vanity hosts.
+	// Production callers leave it empty.
+	GoVanityURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.

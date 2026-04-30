@@ -662,3 +662,220 @@ func TestFunctional_AnalyzeRefresh_PyPIFailurePropagates_AbsenceSignal(t *testin
 	assert.True(t, ok && retryable,
 		"absence signal must carry retryable=true; got val=%v", val)
 }
+
+// TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaProxyOrigin pins
+// the canonical "post-Go-1.20 vanity host" path: the proxy returns
+// a version-info with an Origin block pointing at github, the
+// orchestrator stamps entity.URL with that URL, and downstream
+// dispatch can fire the github + git + repofiles + openssf
+// collectors. Mirrors the npm/pypi integration tests in shape.
+//
+// Pre-creates a stale entity with empty URL (the
+// pkg:golang/gopkg.in/yaml.v3-style dogfood scenario).
+// resolveGoRepo walks proxy → finds Origin → stamps entity.URL.
+func TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaProxyOrigin(t *testing.T) {
+	t.Parallel()
+
+	// Proxy returns @latest + .info with Origin pointing at github.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/example.org/foo/@latest":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)
+		case "/example.org/foo/@v/v1.0.0.info":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+                "Version":"v1.0.0",
+                "Time":"2026-01-01T00:00:00Z",
+                "Origin":{
+                    "VCS":"git",
+                    "URL":"https://github.com/example-org/foo"
+                }
+            }`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxy.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pre-create the stale entity. Empty URL is the dogfood state:
+	// pkg:golang/<vanity>/<name> entity exists from a prior run that
+	// didn't have resolveGoRepo wired.
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:golang/example.org/foo",
+			Type:         profile.EntityPackage,
+			ShortName:    "example.org/foo",
+			Ecosystem:    "golang",
+			URL:          "", // ← THE BUG STATE: vanity host, no URL
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+		GoProxyURL:    proxy.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:golang/example.org/foo", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"analyze --refresh against a stale Go vanity entity must resolve via proxy and proceed")
+
+	// Re-read and verify URL is now populated with the github source
+	// the proxy declared.
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:golang/example.org/foo")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/example-org/foo", entity.URL,
+		"empty URL on a stale pkg:golang/vanity entity must be backfilled by analyze --refresh via proxy Origin")
+}
+
+// TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaMetaTag pins the
+// pre-Go-1.20 path: proxy has the module but no Origin block (the
+// gopkg.in/yaml.v3 dogfood symptom), the resolver falls back to the
+// vanity host's go-import meta tag, finds the github URL, and
+// stamps entity.URL with it.
+func TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaMetaTag(t *testing.T) {
+	t.Parallel()
+
+	// Proxy: module exists but no Origin block.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gopkg.in/yaml.v3/@latest":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"Version":"v3.0.1","Time":"2022-05-27T08:35:30Z"}`)
+		case "/gopkg.in/yaml.v3/@v/v3.0.1.info":
+			w.Header().Set("Content-Type", "application/json")
+			// Pre-1.20 publish: no Origin block.
+			fmt.Fprint(w, `{"Version":"v3.0.1","Time":"2022-05-27T08:35:30Z"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxy.Close()
+
+	// Vanity host: returns go-import meta tag pointing at github.
+	vanity := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head>
+            <meta name="go-import" content="gopkg.in/yaml.v3 git https://github.com/go-yaml/yaml">
+        </head></html>`)
+	}))
+	defer vanity.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:golang/gopkg.in/yaml.v3",
+			Type:         profile.EntityPackage,
+			ShortName:    "gopkg.in/yaml.v3",
+			Ecosystem:    "golang",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+		GoProxyURL:    proxy.URL,
+		GoVanityURL:   vanity.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:golang/gopkg.in/yaml.v3", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"analyze --refresh against gopkg.in vanity must fall back to meta-tag and resolve")
+
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:golang/gopkg.in/yaml.v3")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/go-yaml/yaml", entity.URL,
+		"meta-tag fallback must resolve gopkg.in/yaml.v3 to its github source")
+}
+
+// TestFunctional_AnalyzeRefresh_GoResolutionUnresolvable verifies the
+// "fully exhausted" path: proxy 404 AND vanity host serves no meta
+// tag. resolveGoRepo returns nil (not an error — empty is the
+// affirmative "no source found"), entity.URL stays empty, dispatch
+// silently skips github + git collectors. The user gets gopublish-
+// only signals + a non-zero exit only if the orchestrator decides
+// the empty result merits one (it does not — same shape as a
+// pkg:cargo/* target with no resolver).
+func TestFunctional_AnalyzeRefresh_GoResolutionUnresolvable(t *testing.T) {
+	t.Parallel()
+
+	// Proxy 404s on everything.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer proxy.Close()
+
+	// Vanity also 404s (no meta tag).
+	vanity := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer vanity.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:golang/example.org/missing",
+			Type:         profile.EntityPackage,
+			ShortName:    "example.org/missing",
+			Ecosystem:    "golang",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+		GoProxyURL:    proxy.URL,
+		GoVanityURL:   vanity.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:golang/example.org/missing", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"unresolvable Go module must NOT fail --refresh — empty resolution is a valid 'no github source' answer")
+
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:golang/example.org/missing")
+	require.NoError(t, err)
+	assert.Equal(t, "", entity.URL,
+		"unresolvable module must leave URL empty — downstream isGitHostedEntity gates github+git collectors out cleanly")
+}

@@ -136,14 +136,24 @@ func encodeModulePath(path string) string {
 }
 
 // Client is a narrow Go-publish data-plane HTTP client. Surface is
-// kept to the four endpoints v0.1's collector reads:
-// @latest, @v/list, @v/<v>.info on the proxy, plus /lookup on the
-// sumdb. Extending the surface should follow the same TDD shape
-// (test the response model, then add the method).
+// kept to the endpoints v0.1's collector and the resolver read:
+// @latest, @v/list, @v/<v>.info on the proxy; /lookup on the sumdb;
+// <module>?go-get=1 on the vanity host (for meta-tag fallback when
+// the proxy lacks an Origin block). Extending the surface should
+// follow the same TDD shape (test the response model, then add the
+// method).
 type Client struct {
 	httpClient *http.Client
 	proxyURL   string
 	sumURL     string
+	// metaTagURLPrefix overrides the vanity-host base URL for the
+	// meta-tag fallback. Empty (production) → ResolveRepoURL fetches
+	// "https://<modulePath>?go-get=1" directly. Non-empty (tests) →
+	// "<metaTagURLPrefix>/<modulePath>?go-get=1" so the fetch hits
+	// the test's httptest server. NEVER set this in production —
+	// it would route legitimate vanity-host fetches through an
+	// arbitrary URL.
+	metaTagURLPrefix string
 }
 
 // NewClient returns a Client bound to the public Go endpoints —
@@ -163,17 +173,36 @@ func NewClient() *Client {
 	}
 }
 
-// NewClientWithBaseURL returns a Client whose endpoints both point
-// at the supplied bases. Tests typically pass the same httptest
-// server URL twice; production wires the two distinct hosts.
+// NewClientWithBaseURL returns a Client whose proxy and sum
+// endpoints point at the supplied bases. Tests typically pass the
+// same httptest server URL twice; production wires the two distinct
+// hosts via NewClient.
+//
+// Meta-tag fetches (the vanity-host fallback inside ResolveRepoURL)
+// route to the live https://<modulePath>?go-get=1 URL; tests that
+// exercise the fallback need to use NewClientWithBaseURLs to
+// override that target.
 func NewClientWithBaseURL(proxy, sum string) *Client {
+	return NewClientWithBaseURLs(proxy, sum, "")
+}
+
+// NewClientWithBaseURLs returns a Client with explicit overrides
+// for all three URL bases: proxy, sum, and the meta-tag vanity-host
+// prefix. Tests use this to wire ResolveRepoURL's meta-tag fallback
+// into an httptest server so no real vanity hosts are contacted.
+//
+// Production callers should use NewClient (live endpoints).
+// metaTagBase empty preserves the production behavior of fetching
+// the live <modulePath>?go-get=1 URL.
+func NewClientWithBaseURLs(proxy, sum, metaTagBase string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout:       60 * time.Second,
 			CheckRedirect: checkRedirect,
 		},
-		proxyURL: proxy,
-		sumURL:   sum,
+		proxyURL:         proxy,
+		sumURL:           sum,
+		metaTagURLPrefix: metaTagBase,
 	}
 }
 
