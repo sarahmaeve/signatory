@@ -10,9 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// raceWiredSurfaces enumerates the project's two enforced test
-// surfaces — `make test` and the GitHub Actions CI workflow — that
-// must invoke `go test` with the `-race` flag.
+// raceWiredSurfaces enumerates the project's local test gauntlet
+// (`make test`) which must invoke `go test` with the `-race` flag.
 //
 // Why this is an invariant. A swath of pipeline tests
 // (internal/pipeline/race_test.go and
@@ -24,51 +23,47 @@ import (
 // of asserting end-state, because the failure mode they exist to
 // surface IS a data race rather than a logical-error outcome.
 //
-// If `-race` is removed from CI to save minutes, those tests
-// silently degrade to smoke checks: they still pass, but no longer
-// catch the bugs they were written to catch. This invariant fails
-// fast in that scenario so the degradation is visible at PR time
+// If `-race` is removed from `make test`, those tests silently
+// degrade to smoke checks: they still pass, but no longer catch
+// the bugs they were written to catch. This invariant fails fast
+// in that scenario so the degradation is visible at commit time
 // rather than after a real race lands.
 //
-// Substring search (not YAML/Makefile parsing) is intentional, but
-// each surface's matcher anchors on the syntactic form of an actual
-// command rather than the bare substring `go test -race`. The bare
-// substring would match prose comments and YAML step `name:`
-// fields — an early version of this test (2026-04-30) would have
-// passed even if the YAML `run:` line was deleted, because three
-// other unrelated `go test -race` substrings (header comment,
-// quoted comment, step name) survived.
+// Historical note. An earlier version of this invariant (added in
+// commit 6631f3a, 2026-04-30) also asserted that
+// .github/workflows/ci.yml ran `-race`. CI no longer does so —
+// see the comment in ci.yml: "we no longer perform test -race on
+// github as its capacity has collapsed" (commit 02d7ed2). The CI
+// surface was dropped from this invariant when that decision was
+// made permanent; the Makefile surface is unchanged because the
+// pipeline-test reliance on `-race` is unchanged and `make test`
+// is the local gauntlet that delivers it. Pipeline-test reliance
+// on `-race` is now honor-system for CI runs and asserted at the
+// local gauntlet level here.
 //
-// Per-surface anchors:
+// Substring search (not Makefile parsing) is intentional, but the
+// matcher anchors on the syntactic form of an actual command
+// rather than the bare substring `go test -race`. The bare
+// substring would match prose comments and `## help`-style
+// annotations.
 //
-//   - ci.yml uses `run: go test -race`. The `run:` prefix means
-//     the substring must be on the actual GitHub Actions shell-
-//     command line, not in a comment or a step name. Multi-line
-//     run blocks (`run: |` followed by indented lines) would NOT
-//     match — accepted as a benign-refactor cost; if the workflow
-//     ever goes multi-line, update the matcher in the same commit.
-//   - Makefile uses a tab-prefixed `\tgo test -race`. The leading
-//     tab means the substring must be on a recipe line (Make
-//     recipes are tab-prefixed by syntax) rather than in a
-//     `## help` comment or a prose docstring.
+// Per-surface anchor: the Makefile uses a tab-prefixed
+// `\tgo test -race`. The leading tab means the substring must be
+// on a recipe line (Make recipes are tab-prefixed by syntax)
+// rather than in a `## help` comment or a prose docstring.
 //
 // Pre-commit hook is deliberately NOT in this list. The Makefile
 // docstring claims the hook runs `test -race` but the actual
 // .githooks/pre-commit only runs `go test ./...`. That drift exists
 // independently of this invariant; surface it if you're touching
 // the hook, but don't load it into this guard or the test would
-// fail today for a reason unrelated to the CI regression it
-// guards against.
+// fail today for a reason unrelated to the regression it guards
+// against.
 var raceWiredSurfaces = []struct {
 	name    string
 	path    string
 	matcher string
 }{
-	{
-		name:    "ci_workflow",
-		path:    filepath.Join(".github", "workflows", "ci.yml"),
-		matcher: "run: go test -race",
-	},
 	{
 		name:    "makefile",
 		path:    "Makefile",
@@ -78,16 +73,20 @@ var raceWiredSurfaces = []struct {
 
 // TestRaceDetectorWiredIntoCI asserts each surface in
 // raceWiredSurfaces contains its per-surface anchor substring (see
-// the var-block doc for why `run:` and `\t` prefixes are
+// the var-block doc for why the `\t` prefix on the matcher is
 // load-bearing).
 //
-// Revert proof: drop `-race` from either the CI workflow's `run:`
-// step or the Makefile's `test:` recipe; the corresponding subtest
-// fails with the surface name, path, and required matcher in the
-// error message. Critically, deleting only the `run:` line in
-// ci.yml while leaving the step `name: go test -race` in place
-// ALSO fails — that scenario was the gap a bare-substring matcher
-// would have missed.
+// Note on the name: the `IntoCI` suffix predates the 2026 removal
+// of `-race` from the GitHub Actions workflow. The test now guards
+// the Makefile (`make test`) only — the historical-note paragraph
+// in the var-block doc explains the change. The function name is
+// preserved because it is referenced by name in pipeline-test
+// docstrings (internal/pipeline/race_test.go,
+// internal/pipeline/adversarial_test.go); rename is a follow-up.
+//
+// Revert proof: drop `-race` from the Makefile's `test:` recipe;
+// the makefile subtest fails with the surface name, path, and
+// required matcher in the error message.
 func TestRaceDetectorWiredIntoCI(t *testing.T) {
 	root := findModuleRoot(t)
 
