@@ -78,7 +78,7 @@ type HandoffCmd struct {
 	ProjectDir   string   `name:"project-dir" help:"Project root used to locate ./templates/, ./filestore/, and signatory.config.toml." default:"." type:"path"`
 
 	NetworkPrecheck bool   `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the GitHub API (requires a github.com target). Offline by default; this is the opt-in that authorizes network calls."`
-	CloneDir        string `name:"clone-dir" help:"Shallow-clone the target URL into CLONE_DIR/<repo-name>/ and use that path for TARGET_PATH. Uses 'git clone --depth=1'. Skipped if the destination already exists. Requires target to be a URL." type:"path"`
+	CloneDir        string `name:"clone-dir" help:"Clone the target URL into CLONE_DIR/<repo-name>/ with full history and use that path for TARGET_PATH. Skipped if the destination already exists. Requires target to be a URL." type:"path"`
 
 	AnalysisSessionID string `name:"analysis-session-id" help:"Link the handoff (and the analyst's resulting ingest) to an analysis_sessions.id. Get the id from 'signatory analysis begin'. Validated before render — unknown or already-terminal ids fail here rather than being discovered by the dispatched subagent."`
 
@@ -228,7 +228,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		precheckReport = report
 	}
 
-	// Clone step: shallow-clone the target URL if --clone-dir was passed.
+	// Clone step: full-clone the target URL if --clone-dir was passed.
 	// Runs AFTER precheck (precheck may confirm the target is a GitHub URL)
 	// but BEFORE template resolution (so TARGET_PATH is available).
 	var cloneReport string
@@ -782,8 +782,12 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 // hardening: when it fires, signatory has decided the operator is
 // better served by a clear "your clone exceeded N minutes" failure
 // than by hanging indefinitely. Picked at 2 minutes because that's
-// generous for a shallow clone of any project signatory typically
-// targets while still well under typical CI step deadlines.
+// generous for a full clone of any project signatory typically
+// targets (focused libraries and tools — kong, idna, yaml.v3,
+// testify) while still well under typical CI step deadlines. If a
+// future target outgrows this budget, raise the constant rather
+// than silently failing — the timeout exists to bound surprises,
+// not to hard-cap legitimate work.
 //
 // On timeout, applyClone wraps the underlying git error via
 // wrapCloneTimeoutError so the operator sees "exceeded signatory's
@@ -827,6 +831,17 @@ func wrapCloneTimeoutError(target string, cloneCtx, parentCtx context.Context, e
 // accidental-mutation surface — tests inject via HandoffCmd.RunGitClone
 // field assignment, not via swap-the-global.
 //
+// Full clone (no --depth=1) is the only supported shape. Handoff is
+// invoked exclusively as Step 1 of the /analyze pipeline (see the
+// SKILL.md), and Step 1b runs validateExistingClone against the
+// planted clone via `signatory analyze --refresh --path …`.
+// validateExistingClone rejects shallow clones with ErrShallowClone
+// (defending the store from poisoned positive signals — total_commits=1,
+// top_author_share=1.0 — that history-dependent collectors emit when
+// reading a depth=1 clone). A shallow plant here would hard-fail the
+// pipeline at Step 1b on every invocation. The previous --depth=1
+// default was vestigial from a pre-pipeline design.
+//
 // Subprocess discipline (env scrubbing + post-kill pipe-drain bound)
 // comes from gitenv.NewCloneCmd — clone-shaped operations may fork
 // ssh/askpass/credential-helper grandchildren that won't inherit
@@ -839,7 +854,7 @@ func wrapCloneTimeoutError(target string, cloneCtx, parentCtx context.Context, e
 // safeCloneRepoName; version by safeGitVersion (rejects leading -,
 // shell metacharacters, path traversal).
 func defaultGitClone(ctx context.Context, url, dest, version string) error {
-	args := []string{"clone", "--depth=1"}
+	args := []string{"clone"}
 	if version != "" {
 		// --branch accepts both tag names and branch names. Git
 		// resolves to the named ref and detaches HEAD on a tag, or
@@ -911,10 +926,16 @@ func safeGitVersion(v string) error {
 	return nil
 }
 
-// applyClone shallow-clones the target URL into CloneDir/<repo-name>/
-// and returns (clonedPath, stderrReport, error). It is analogous to
-// applyNetworkPrecheck: it encapsulates one pre-render side-effect and
-// returns a human-readable report string the caller emits to stderr.
+// applyClone clones the target URL with full history into
+// CloneDir/<repo-name>/ and returns (clonedPath, stderrReport, error).
+// Analogous to applyNetworkPrecheck: encapsulates one pre-render
+// side-effect and returns a human-readable report string the caller
+// emits to stderr.
+//
+// Full clone is the only supported shape — see defaultGitClone's doc
+// for the chain-integrity rationale. The /analyze pipeline's Step 1b
+// runs validateExistingClone against this clone, which would reject
+// any shallow plant.
 //
 // Invariants enforced here:
 //   - Target must classify as TargetURL (ClassifyTarget).

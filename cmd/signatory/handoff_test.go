@@ -2616,7 +2616,17 @@ func TestSafeGitVersion_RejectsUnsafeRefs(t *testing.T) {
 // git pattern as the env-scrub tests (collectors_test.go) to
 // verify the actual argv defaultGitClone constructs. Confirms
 // --branch is present when version is set, absent when empty,
-// and positional args are ordered correctly.
+// positional args are ordered correctly, AND --depth=1 is NOT
+// passed by default.
+//
+// The "no --depth=1" assertion pins the chain-integrity fix:
+// applyClone is the /analyze pipeline's Step 1 cloner, and Step
+// 1b's `analyze --refresh --path` runs validateExistingClone,
+// which now rejects shallow clones (defending the store from
+// poisoned positive signals — total_commits=1, top_author_share=1
+// from --depth=1 truncation). Planting a shallow clone in Step 1
+// would hard-fail Step 1b. Full clones are the only shape the
+// pipeline can use end-to-end.
 //
 // NOTE: t.Setenv and t.Parallel are mutually exclusive — this
 // test is intentionally sequential.
@@ -2630,7 +2640,8 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Versioned clone: --branch <version> must appear before the
-	// URL and dest positional args.
+	// URL and dest positional args. No --depth=1 — handoff plants
+	// full clones for /analyze pipeline compatibility.
 	require.NoError(t, defaultGitClone(t.Context(),
 		"https://example.invalid/repo.git",
 		"/tmp/dest-versioned",
@@ -2639,12 +2650,12 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 	require.NoError(t, err)
 	args := strings.Split(strings.TrimSpace(string(got)), "\n")
 	assert.Equal(t,
-		[]string{"clone", "--depth=1", "--branch", "v1.2.3",
+		[]string{"clone", "--branch", "v1.2.3",
 			"https://example.invalid/repo.git", "/tmp/dest-versioned"},
 		args,
-		"versioned clone must include --branch followed by ref, then URL, then dest")
+		"versioned clone must include --branch followed by ref, then URL, then dest, with no --depth flag")
 
-	// Unversioned clone: no --branch.
+	// Unversioned clone: no --branch, no --depth.
 	require.NoError(t, os.Remove(argDump))
 	require.NoError(t, defaultGitClone(t.Context(),
 		"https://example.invalid/repo.git",
@@ -2654,10 +2665,91 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 	require.NoError(t, err)
 	args = strings.Split(strings.TrimSpace(string(got)), "\n")
 	assert.Equal(t,
-		[]string{"clone", "--depth=1",
+		[]string{"clone",
 			"https://example.invalid/repo.git", "/tmp/dest-unversioned"},
 		args,
-		"unversioned clone must omit --branch entirely")
+		"unversioned clone must omit --branch and --depth entirely (full clone is the default)")
+}
+
+// TestHandoff_ClonePlantsFullClone_ChainIntegrity pins the /analyze
+// pipeline's chain integrity end-to-end:
+//
+//   - Step 1: handoff --clone-dir plants a clone at filestore/clones/<name>.
+//   - Step 1b: analyze --refresh --path runs validateExistingClone against it.
+//
+// The chain breaks when applyClone plants a shallow clone (--depth=1)
+// because validateExistingClone now rejects shallow with ErrShallowClone.
+// This test plants a clone via applyClone (using a RunGitClone closure
+// that performs a real local clone of a fixture, mirroring production's
+// post-fix behavior — full clone, no --depth=1) and then runs
+// validateExistingClone against the dest. No ErrShallowClone, no
+// ErrOriginMismatch, no error of any kind.
+//
+// Even if a future change accidentally re-introduces --depth=1 to
+// defaultGitClone, this test pins the chain expectation: the planted
+// clone must be one validateExistingClone can accept. A reviewer
+// dropping --depth=1 back into the args sees this test fail and
+// investigates the chain implication rather than trusting the diff.
+//
+// NOTE: t.Parallel intentionally not used — the test exercises real
+// git subprocesses and t.Parallel-friendliness comes for free here
+// only because each test gets its own t.TempDir, but we keep it
+// sequential to match TestDefaultGitClone_ArgvShape's discipline and
+// avoid surprising interactions with PATH-shimmed siblings if those
+// land in the same package.
+func TestHandoff_ClonePlantsFullClone_ChainIntegrity(t *testing.T) {
+	// Source fixture with multiple commits — required so a hypothetical
+	// --depth=1 would actually truncate (single-commit repos have a
+	// complete object graph regardless of --depth, making the shallow
+	// vs. full distinction vacuous).
+	src := initSourceRepoWithCommits(t, 3, "")
+
+	parent := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/acme/widget", // synthetic, never fetched
+		CloneDir: parent,
+		Language: "python",
+		Output:   outPath,
+		Quiet:    true,
+		RunGitClone: func(ctx context.Context, _, dest, _ string) error {
+			// Real local clone of the fixture — mirrors the production
+			// behavior we expect after dropping --depth=1: full clone
+			// via gitenv.NewCloneCmd, no shallow truncation.
+			mustRunGitInTest(t, ".", "clone", "file://"+src, dest)
+			return nil
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+
+	// applyClone resolves symlinks in the parent (filepath.EvalSymlinks);
+	// the planted dest lives under that resolved path. On macOS,
+	// t.TempDir() returns /var/folders/… but /var → /private/var, so
+	// the resolved parent is the path the test must look at.
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	require.NoError(t, err)
+	dest := filepath.Join(resolvedParent, "widget")
+
+	// Pin: planted clone must be full (no .git/shallow). A regression
+	// that re-introduces --depth=1 to defaultGitClone is caught here
+	// even though this test injects RunGitClone — because the test's
+	// closure represents the contract the production code must honor.
+	assert.NoFileExists(t, filepath.Join(dest, ".git", "shallow"),
+		"applyClone-planted clone must be full — chain depends on validateExistingClone not rejecting it")
+
+	// Set origin to the synthetic github URL so validateExistingClone
+	// can parse it. The planted clone's origin is the file:// fixture
+	// URL by default; the production /analyze chain stamps a github
+	// origin upstream (resolved.CloneURL writes through entity.URL),
+	// and validateExistingClone compares origin URI against that.
+	mustRunGitInTest(t, dest, "remote", "set-url", "origin", "https://github.com/acme/widget")
+
+	// Pin: the chain works. validateExistingClone accepts the planted
+	// clone — no ErrShallowClone, no ErrOriginMismatch, no error.
+	require.NoError(t, validateExistingClone(t.Context(), dest, "repo:github/acme/widget"),
+		"validateExistingClone must accept handoff's planted clone — pipeline integrity guard")
 }
 
 // --- Synthesist + @version: hot fix for the halted dogfood ---------------

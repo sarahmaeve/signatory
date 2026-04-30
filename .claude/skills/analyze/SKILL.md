@@ -141,8 +141,11 @@ Generate both handoff prompts and deposit them in the pipeline
 session. `signatory handoff` handles target resolution (accepts
 every form `signatory analyze` accepts: owner/repo shorthand,
 github.com URL, https:// URL, `repo:` canonical URI),
-language/ecosystem detection, shallow-cloning — you do NOT need
-to call `gh api` or `git clone` yourself.
+language/ecosystem detection, and full-history cloning — you do
+NOT need to call `gh api` or `git clone` yourself. The clone is
+full (no `--depth=1`) so Step 1b's `analyze --refresh --path` can
+read history-dependent signals (first_commit_date, authorship
+windows, signing ratios) without rejecting it as shallow.
 
 `--analysis-session-id "$ANALYSIS_SID"` tells the handoff renderer
 to embed the session linkage instruction in the rendered prompt.
