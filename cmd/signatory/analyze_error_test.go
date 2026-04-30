@@ -452,6 +452,70 @@ func TestFunctional_AnalyzeRefresh_BackfillsEcosystemOnStaleEntity(t *testing.T)
 		"after Ecosystem backfill, resolvePyPIRepo must fire and stamp the github URL — proves the chain works end-to-end")
 }
 
+// TestFunctional_AnalyzeRefresh_BackfillsURLOnStaleGoEntity is the
+// defensive companion to the pkg-case CloneURL wiring (target.go's
+// derivedGoCloneURL + analyze.go's `entity.URL = resolved.CloneURL`
+// in the create branch). Entities created before that wiring have
+// empty URL even when the canonical URI encodes an algorithmic github
+// source (pkg:golang/github.com/X, golang.org/x/Y). On --refresh,
+// the orchestrator must backfill URL from the resolved CloneURL —
+// without it, isGitHostedEntity stays false on the stale row and the
+// github + git + repofiles + openssf collectors silently skip the
+// next run too. Reproduces the dogfood symptom on
+// `signatory analyze --clone --refresh pkg:golang/github.com/alecthomas/kong`
+// where a stale entity from a 7-day-old security analysis prevented
+// the clone-side dispatch from firing.
+//
+// Mirrors TestFunctional_AnalyzeRefresh_BackfillsEcosystemOnStaleEntity:
+// pre-create a stale row, run --refresh, assert URL is populated.
+// Mock collectors keep the test offline.
+func TestFunctional_AnalyzeRefresh_BackfillsURLOnStaleGoEntity(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pre-create the entity with empty URL to mimic the pre-fix
+	// state: entity exists from an earlier analysis that ran before
+	// CloneURL wiring landed. The Ecosystem is set (this isn't the
+	// Ecosystem-backfill scenario); only URL is missing.
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		stale := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:golang/github.com/alecthomas/kong",
+			Type:         profile.EntityPackage,
+			ShortName:    "github.com/alecthomas/kong",
+			Ecosystem:    "golang",
+			URL:          "", // ← THE BUG STATE
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), stale))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:golang/github.com/alecthomas/kong", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"analyze --refresh against a stale Go entity must backfill URL and proceed")
+
+	// Re-read and verify URL is now populated.
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:golang/github.com/alecthomas/kong")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/alecthomas/kong", entity.URL,
+		"empty URL on a stale pkg:golang/github.com/* entity must be backfilled by analyze --refresh so isGitHostedEntity returns true on the next dispatch")
+}
+
 // ----- Gap 6c: stderr hint for Go modules analyzed via repo: form -----
 //
 // The dogfood audit identified a coverage gap: when a Go module

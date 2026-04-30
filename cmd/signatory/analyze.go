@@ -314,6 +314,28 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		}
 	}
 
+	// Defensive backfill of entity.URL: same shape as the Ecosystem
+	// backfill above. Stale rows created before ResolveTarget wired
+	// CloneURL for pkg:{golang,go}/github.com/* and golang.org/x/Y
+	// have empty URL, which keeps isGitHostedEntity false in
+	// collectorsFor and silently skips the github + git + repofiles
+	// + openssf collectors. Backfill from resolved.CloneURL when
+	// known so the next dispatch fires the full collector set.
+	//
+	// Closes the symptom of the 2026-04-30 dogfood:
+	// `signatory analyze --clone --refresh pkg:golang/github.com/alecthomas/kong`
+	// returned only the 4 gopublish signals because the entity (from
+	// a 7-day-old security analysis) had URL="" and the just-shipped
+	// CloneURL wiring only fires during entity creation.
+	if entity.URL == "" && resolved.CloneURL != "" {
+		entity.URL = resolved.CloneURL
+		entity.UpdatedAt = time.Now().UTC()
+		if err := s.PutEntity(ctx, entity); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: backfill URL on %s failed: %v\n",
+				entity.CanonicalURI, err)
+		}
+	}
+
 	// Resolve the entity's upstream repo URL when it's an npm
 	// package that hasn't been resolved yet (A.5 in design/npm-plan.
 	// txt). The registry tells us where the package's source lives;
