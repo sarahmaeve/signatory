@@ -116,6 +116,38 @@ func TestCollectionResult_NoFailures(t *testing.T) {
 	assert.NotContains(t, result.Summary(), "failures")
 }
 
+// TestCollectionResult_Summary_EnumeratesSignalTypes pins the contract
+// that Summary names each collected type in the per-collector line,
+// not just the count. The collector loop in AnalyzeCmd.Run emits this
+// string verbatim ([%s] %s), so a manual user sees:
+//
+//	[github] Collected 17 signals: stars, forks, contributors, ...
+//
+// rather than the opaque "Collected 17 signals" — same data, but the
+// user can scan WHICH signals fired without scrolling through the
+// rendered profile.
+//
+// Absences are enumerated with their "absence:" prefix so the user
+// can distinguish "we collected stars" from "we recorded an absence
+// for publish_origin" at a glance.
+func TestCollectionResult_Summary_EnumeratesSignalTypes(t *testing.T) {
+	now := time.Now()
+	result := &CollectionResult{
+		Collected: []SignalOrAbsence{
+			MakeSignal(profile.Signal{Type: "stars"}),
+			MakeSignal(profile.Signal{Type: "forks"}),
+			MakeAbsence("e", "publish_origin", "gopublish", "no origin block", false, now),
+		},
+	}
+	summary := result.Summary()
+	assert.Contains(t, summary, "stars",
+		"summary must enumerate each collected signal type so the user can see what fired")
+	assert.Contains(t, summary, "forks",
+		"summary must enumerate each collected signal type")
+	assert.Contains(t, summary, "absence:publish_origin",
+		"summary must enumerate absences with their 'absence:' prefix so the user can distinguish definitive negatives from positive observations")
+}
+
 // TestCollectionResult_Summary_EnumeratesFailures pins the contract
 // that the per-collector summary line surfaces WHICH signals failed
 // and WHY, not just the counts. The collector loop in AnalyzeCmd.Run
@@ -126,7 +158,7 @@ func TestCollectionResult_NoFailures(t *testing.T) {
 //
 // and
 //
-//	[github] Collected 17 signals, 1 failures: adoption=GitHub API 403
+//	[github] Collected 17 signals: stars, ...; 1 failures: adoption=GitHub API 403
 //
 // for a manual CLI user trying to figure out what to fix.
 func TestCollectionResult_Summary_EnumeratesFailures(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 	"github.com/sarahmaeve/signatory/internal/config"
 	"github.com/sarahmaeve/signatory/internal/ecosystem"
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
-	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/pipeline"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
@@ -101,9 +100,13 @@ type HandoffCmd struct {
 	PrecheckSource ecosystem.Source `kong:"-"`
 
 	// RunGitClone overrides the git subprocess invocation for
-	// --clone-dir. nil → fall through to defaultGitClone (which
-	// builds the cmd via gitenv.NewCmd). Same rationale as
-	// PrecheckSource: parallel-safe injection, visible dependency.
+	// --clone-dir. nil → fall through to defaultGitClone, which
+	// composes argv and routes through defaultRunGit (collectors.go)
+	// for the actual gitenv.NewCloneCmd construction — both clone
+	// sites in this binary share that one chokepoint, so env-strip
+	// and WaitDelay discipline can't drift between them. Same
+	// rationale as PrecheckSource: parallel-safe injection, visible
+	// dependency.
 	//
 	// version is the git ref (tag/branch) to check out, or empty
 	// for HEAD-of-default-branch. When non-empty, the production
@@ -842,12 +845,14 @@ func wrapCloneTimeoutError(target string, cloneCtx, parentCtx context.Context, e
 // pipeline at Step 1b on every invocation. The previous --depth=1
 // default was vestigial from a pre-pipeline design.
 //
-// Subprocess discipline (env scrubbing + post-kill pipe-drain bound)
-// comes from gitenv.NewCloneCmd — clone-shaped operations may fork
-// ssh/askpass/credential-helper grandchildren that won't inherit
-// SIGKILL, so WaitDelay caps cmd.Wait's pipe-drain. See the gitenv
-// package doc for the threat shape, the GIT_*-prefix-strip rule,
-// and why WaitDelay is scoped to clone-shaped sites only.
+// Argv composition lives here so this site owns the policy (`--branch
+// <version>` for ref pinning; full history; URL/dest positional ordering).
+// Subprocess construction routes through defaultRunGit (collectors.go),
+// which gives both this site and the analyze-side ensureCloneAtPath
+// identical env-strip + WaitDelay discipline by construction; drift
+// between the two would be a silent inconsistency in subprocess
+// hardening.
+//
 // Argv validation upstream: url by safeGitCloneURL (rejects ?, #,
 // userinfo, NUL); dest by the containment check in applyClone
 // (filepath.Rel against an EvalSymlinks-resolved parent) and
@@ -864,12 +869,10 @@ func defaultGitClone(ctx context.Context, url, dest, version string) error {
 		args = append(args, "--branch", version)
 	}
 	args = append(args, url, dest)
-	cmd := gitenv.NewCloneCmd(ctx, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git clone failed: %w\n%s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	// workdir="" — the dest is in args, not a pre-existing repo to
+	// operate against. defaultRunGit honors that by NOT prepending
+	// "-C <workdir>" when workdir is empty. See its doc.
+	return defaultRunGit(ctx, "", args...)
 }
 
 // safeGitVersion validates a git ref string before it's passed to
@@ -1064,7 +1067,21 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 				destClean)
 		}
 		if fi.IsDir() {
-			return destClean, fmt.Sprintf("# clone: %s already exists, reusing\n", destClean), nil
+			report := fmt.Sprintf("# clone: %s already exists, reusing\n", destClean)
+			// Stale-shallow detection: a leftover --depth=1 clone from
+			// before the chain-integrity fix will now silently survive
+			// skip-if-exists here, then trip ErrShallowClone in Step 1b's
+			// `analyze --refresh --path`. Emit an upstream warning so
+			// the operator knows the remediation BEFORE the loud-fail.
+			// Errors from cloneIsShallow are absorbed: a probe failure
+			// shouldn't block reuse, and the analyze-side validator
+			// will surface any underlying problem on its own.
+			if shallow, _ := cloneIsShallow(destClean); shallow {
+				report += fmt.Sprintf(
+					"# warning: %s is shallow (--depth=1); analyze --refresh --path will reject it. Remove the directory or run `signatory analyze --clone --refresh <target>` to unshallow it in place.\n",
+					destClean)
+			}
+			return destClean, report, nil
 		}
 	}
 

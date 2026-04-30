@@ -99,29 +99,63 @@ func (r *CollectionResult) HasFailures() bool {
 
 // Summary returns a human-readable summary of the collection result.
 //
-// The format on success is brief: "Collected N signals". When failures
-// occurred, the summary names each failed signal type and its reason
-// so the per-collector line in `signatory analyze` ([source] <summary>)
-// tells a manual user what to investigate without re-running with extra
-// logging:
+// Two enumerations live in the line: the collected signal types
+// (after the count) and the failures (after a `;` separator). Both
+// help a manual user reading the per-collector line in `signatory
+// analyze` ([source] <summary>) see WHAT happened without scrolling
+// through the rendered profile or re-running with extra logging:
 //
-//	Collected 17 signals, 1 failures (1 retryable): adoption=GitHub API 403
-//	Collected 5 signals, 2 failures (1 retryable): stars=rate limited, forks=GitHub API 502
+//	Collected 4 signals: last_publish, version_count, absence:publish_origin, transparency_log_present
+//	Collected 17 signals: stars, forks, ...; 1 failures (1 retryable): adoption=GitHub API 401
+//
+// Signal-type enumeration is in emission order, deduped (a collector
+// emitting the same type twice shows it once). Absences carry the
+// "absence:" prefix so a definitive negative (publish_origin not in
+// proxy) reads distinctly from a positive observation (4 signals
+// fired).
+//
+// Failure enumeration uses "type=reason" per entry, comma-separated.
+// Reasons come from each collector's already-sanitized error
+// classifier — the github package strips attacker-influenceable
+// bodies via sanitizeErrorForStorage before any CollectionError is
+// constructed, so the enumeration here is safe to surface verbatim.
 //
 // The bulk "(N retryable)" parenthetical is preserved alongside the
-// per-failure detail because the count is useful at a glance even when
-// the enumeration is long. Reasons come from each collector's already-
-// sanitized error classifier — the github package strips
-// attacker-influenceable bodies via sanitizeErrorForStorage before any
-// CollectionError is constructed, so the enumeration here is safe to
-// surface verbatim.
+// per-failure detail because the count is useful at a glance even
+// when the enumeration is long.
 func (r *CollectionResult) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Collected %d signals", len(r.Collected))
+
+	// Signal-type enumeration: list each unique type in emission
+	// order. ToSignal().Type yields the canonical type name, prefixed
+	// with "absence:" for absence records, so the output naturally
+	// distinguishes the two without us hand-rolling the prefix here.
+	if len(r.Collected) > 0 {
+		seen := make(map[string]bool, len(r.Collected))
+		types := make([]string, 0, len(r.Collected))
+		for i := range r.Collected {
+			t := r.Collected[i].ToSignal().Type
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			types = append(types, t)
+		}
+		if len(types) > 0 {
+			b.WriteString(": ")
+			b.WriteString(strings.Join(types, ", "))
+		}
+	}
+
 	if len(r.Failures) == 0 {
 		return b.String()
 	}
-	fmt.Fprintf(&b, ", %d failures", len(r.Failures))
+
+	// Section separator from signal enumeration to failure enumeration:
+	// `;` rather than `,` so the two ":"-introduced lists don't visually
+	// merge into one ambiguous comma-separated stream.
+	fmt.Fprintf(&b, "; %d failures", len(r.Failures))
 	retryable := 0
 	for _, f := range r.Failures {
 		if f.Retryable {
@@ -131,9 +165,6 @@ func (r *CollectionResult) Summary() string {
 	if retryable > 0 {
 		fmt.Fprintf(&b, " (%d retryable)", retryable)
 	}
-	// Per-failure enumeration. Format: "type=reason" per failure,
-	// comma-separated. Order matches r.Failures so determinism comes
-	// from the collector's own ordering rather than a sort here.
 	b.WriteString(": ")
 	for i, f := range r.Failures {
 		if i > 0 {

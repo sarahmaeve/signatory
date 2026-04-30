@@ -2752,6 +2752,110 @@ func TestHandoff_ClonePlantsFullClone_ChainIntegrity(t *testing.T) {
 		"validateExistingClone must accept handoff's planted clone — pipeline integrity guard")
 }
 
+// TestApplyClone_WarnsOnStaleShallow pins the stale-shallow remediation
+// hint: when applyClone hits its skip-if-exists branch and the existing
+// directory is a shallow clone (a leftover from before the chain-
+// integrity fix), the report includes a warning pointing the user at
+// the remediation flow. Without this hint, a stale shallow clone gets
+// silently reused in Step 1, then Step 1b's `analyze --refresh --path`
+// fails with ErrShallowClone — actionable error, but late.
+//
+// The warning is gated by the same --quiet contract as the rest of the
+// clone report (reuse note, override warning): on for interactive use,
+// suppressed for scripted automation that's opted out of stderr
+// chatter. Quiet callers still get the eventual ErrShallowClone from
+// Step 1b's loud-fail path; this hint is the upstream nicety.
+//
+// Setup pre-creates a shallow-shaped fixture: a directory with .git/
+// and .git/shallow inside. The marker is what cloneIsShallow probes;
+// applyClone's skip-if-exists branch reads it before returning.
+func TestApplyClone_WarnsOnStaleShallow(t *testing.T) {
+	parent := t.TempDir()
+
+	// InferNameFromURL turns "https://github.com/nvbn/thefuck" into
+	// "thefuck". applyClone EvalSymlinks the parent first, so the
+	// fixture directory must live under the resolved-symlink parent
+	// for the skip-if-exists branch to find it.
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	require.NoError(t, err)
+	dest := filepath.Join(resolvedParent, "thefuck")
+	require.NoError(t, os.MkdirAll(filepath.Join(dest, ".git"), 0o755))
+	// .git/shallow marker: cloneIsShallow checks Lstat on this path.
+	// Content doesn't matter; existence does.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dest, ".git", "shallow"),
+		[]byte("dummy-sha\n"),
+		0o644,
+	))
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck",
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		// Quiet false: the warning SHOULD appear on stderr.
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
+			t.Fatal("RunGitClone must not be invoked — skip-if-exists should fire on the existing dir")
+			return nil
+		},
+	}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+
+	// Specific phrasing — bare "shallow" can match a temp-dir path with
+	// the test's name in it (TestApplyClone_WarnsOnStaleShallow → path
+	// contains "Shallow"), giving a false pass. "is shallow" appears
+	// only in the warning text we're adding.
+	assert.Contains(t, stderr, "is shallow",
+		"stale-shallow warning must surface to stderr; got: %q", stderr)
+	assert.Contains(t, stderr, "--clone",
+		"stale-shallow warning must point at the --clone remediation flag; got: %q", stderr)
+}
+
+// TestApplyClone_StaleShallowWarning_QuietSuppresses guards the --quiet
+// contract: scripted automation pointing handoff at a stale shallow
+// clone gets the warning suppressed (matching the existing reuse-note
+// and override-warning gates). The eventual ErrShallowClone from
+// `analyze --refresh --path` is still loud-fail, so the script's
+// failure path still surfaces the issue.
+func TestApplyClone_StaleShallowWarning_QuietSuppresses(t *testing.T) {
+	parent := t.TempDir()
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	require.NoError(t, err)
+	dest := filepath.Join(resolvedParent, "thefuck")
+	require.NoError(t, os.MkdirAll(filepath.Join(dest, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dest, ".git", "shallow"),
+		[]byte("dummy-sha\n"),
+		0o644,
+	))
+
+	cmd := &HandoffCmd{
+		Role:     "security",
+		Target:   "https://github.com/nvbn/thefuck",
+		CloneDir: parent,
+		Language: "python",
+		Output:   filepath.Join(t.TempDir(), "out.md"),
+		Quiet:    true, // explicit opt-out of stderr chatter
+		RunGitClone: func(_ context.Context, _, _, _ string) error {
+			t.Fatal("RunGitClone must not be invoked")
+			return nil
+		},
+	}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, cmd.Run(&Globals{}))
+	})
+
+	// Same specificity as the non-quiet test: "is shallow" is the
+	// warning's distinctive substring; bare "shallow" would match
+	// the test's temp-dir path name. With --quiet the warning must
+	// be absent.
+	assert.NotContains(t, stderr, "is shallow",
+		"--quiet must suppress the stale-shallow warning; got: %q", stderr)
+}
+
 // --- Synthesist + @version: hot fix for the halted dogfood ---------------
 //
 // These tests cover the two bugs surfaced by the user's halted
