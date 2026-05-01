@@ -371,7 +371,7 @@ func TestAssemble_LongPinTable_RespectsBudget_SingleMajor(t *testing.T) {
 	// 40-char hex placeholders so each is unique.
 	pins := make([]VersionPin, 0, 250)
 	filesBySHA := make(map[string][]golang.SourceFile, 250)
-	for i := 0; i < 250; i++ {
+	for i := range 250 {
 		version := fmt.Sprintf("v0.%d.0", i)
 		sha := fmt.Sprintf("%040x", i)
 		pins = append(pins, VersionPin{
@@ -422,8 +422,8 @@ func TestAssemble_LongPinTable_RespectsBudget_MultiMajor(t *testing.T) {
 	// recent; v0.0.0..v0.49.0 are oldest.
 	pins := make([]VersionPin, 0, 250)
 	filesBySHA := make(map[string][]golang.SourceFile, 250)
-	for major := 0; major < 5; major++ {
-		for minor := 0; minor < 50; minor++ {
+	for major := range 5 {
+		for minor := range 50 {
 			version := fmt.Sprintf("v%d.%d.0", major, minor)
 			sha := fmt.Sprintf("%040x", major*1000+minor)
 			pins = append(pins, VersionPin{
@@ -448,7 +448,7 @@ func TestAssemble_LongPinTable_RespectsBudget_MultiMajor(t *testing.T) {
 	assert.Len(t, mv.Rows, 16)
 
 	// Top 12 rows are v4.x (most-recent major), in semver-descending order.
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		assert.Truef(t, strings.HasPrefix(mv.Rows[i].Version, "v4."),
 			"row[%d] (LastN window) should be v4.x, got %q", i, mv.Rows[i].Version)
 	}
@@ -473,8 +473,8 @@ func TestAssemble_LongPinTable_RespectsBudget_HardCapClamps(t *testing.T) {
 
 	pins := make([]VersionPin, 0, 250)
 	filesBySHA := make(map[string][]golang.SourceFile, 250)
-	for major := 0; major < 5; major++ {
-		for minor := 0; minor < 50; minor++ {
+	for major := range 5 {
+		for minor := range 50 {
 			version := fmt.Sprintf("v%d.%d.0", major, minor)
 			sha := fmt.Sprintf("%040x", major*1000+minor)
 			pins = append(pins, VersionPin{Version: version, SHA: sha, Source: "proxy.golang.org"})
