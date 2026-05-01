@@ -481,6 +481,30 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"v0.1 emits source: \"proxy.golang.org\" for every pin; the field is retained for forward compatibility with future registry-side pin sources",
 		},
 	},
+	"source_evolution_matrix": {
+		Type:              "source_evolution_matrix",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Per-tagged-version AST feature matrix for a Go module, anchored to version_pin_table SHAs. Surfaces sleeper-to-weaponized publication patterns through direct cross-version source comparison rather than tag-cadence correlatives.",
+		Caveats: []string{
+			"bounded by the source-evolution collector budget (last-N + leaves-of-each-major); long-history modules may have rows omitted",
+			"Go-specific in v0.1; non-Go entities skip without emitting",
+			"the AST count of init() does not distinguish legitimate package init from payload bootstrap — the analyst's job to interpret a spike row",
+			"documented v0.1 coverage gaps include dot imports, three-level method chains, local-var-bound clients/encodings, and binary ^ inside regular = assignment",
+			"missing-from-clone rows (proxy has a SHA the local --refresh did not fetch) are preserved with tag_sha_local_status and null analysis blocks, not dropped",
+		},
+	},
+	"source_evolution_anomaly": {
+		Type:              "source_evolution_anomaly",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Boolean+pointer summary derived from source_evolution_matrix: an inflection point exists between consecutive tagged versions where two or more feature counts cross from zero baseline. Names the suspect version pair and which features spiked.",
+		Caveats: []string{
+			"refactors and legitimate feature additions can also produce multi-feature spikes — the signal is an anomaly flag, not a verdict; the analyst reads the matrix row at the spike SHA to classify",
+			"threshold is conservative (multi-feature joint, false-negative-heavy by design); false negatives are recoverable because the matrix itself is in the handoff and the analyst can still notice",
+			"absence does not mean clean — a sleeper that has not yet been weaponized produces a flat matrix, no anomaly fires, and the operator's metadata signals (account age, tag signing) carry the load until source diverges",
+		},
+	},
 
 	// ================================================================
 	// Hygiene — "Does it look like they care?"

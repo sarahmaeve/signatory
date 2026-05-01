@@ -168,6 +168,42 @@ func TestRegistry_GoPublishCollectorTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_SourceEvolutionTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types the source-
+// evolution collector (internal/signal/source/) will emit. Same
+// coupling contract as the sibling tests: registry drift and
+// emitter intent stay aligned, caught in a single place.
+//
+// The source-evolution collector is built in stages (see
+// design/coll7.md commit breakdown); the registry entries are
+// landed first so subsequent emission code can reference them
+// without panicking on unregistered types. Until the emission
+// commits land, this test only validates registration shape.
+func TestRegistry_SourceEvolutionTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"source_evolution_matrix", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"source_evolution_anomaly", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — source-evolution collector will emit it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match source-evolution collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match source-evolution collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.
