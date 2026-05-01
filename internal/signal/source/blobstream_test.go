@@ -18,6 +18,12 @@ import (
 // test on any non-zero exit. Same shape as the helper in
 // internal/signal/git/collector_test.go; duplicated here to keep
 // the source package self-contained.
+//
+// Use this for LOCAL porcelain only — init, config, add, commit,
+// rev-parse, etc. For clone-shaped operations (clone, fetch, push,
+// pull), use runGitClone instead — those may fork ssh/credential-
+// helper grandchildren that need NewCloneCmd's WaitDelay
+// discipline. See gitenv package docs for the boundary rationale.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	full := append([]string{"-C", dir}, args...)
@@ -26,6 +32,24 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, stderr.String())
+	}
+}
+
+// runGitClone runs `git clone args...` via gitenv.NewCloneCmd. The
+// distinction from runGit matters: even local file:// clone can
+// spawn credential helpers in some configurations, and clone is
+// the canonical site listed in the gitenv package doc as requiring
+// NewCloneCmd's WaitDelay discipline.
+//
+// Note: no -C dir prefix — clone takes <source> <dest> directly.
+func runGitClone(t *testing.T, args ...string) {
+	t.Helper()
+	full := append([]string{"clone"}, args...)
+	cmd := gitenv.NewCloneCmd(t.Context(), full...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git %v: %v: %s", full, err, stderr.String())
 	}
 }
 
@@ -304,6 +328,161 @@ func TestBlobStreamer_EnumerateGoFiles_StopsOnYieldFalse(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, count, "iteration should stop after first yield-false")
+}
+
+// ============================================================
+// allow-fetch (commit 10)
+// ============================================================
+
+// setupFetchableFixture creates a "missing SHA, recoverable via
+// fetch" scenario by:
+//
+//  1. Initializing a source repo with one commit, cloning it to
+//     local (which gets the full pack of objects to that point).
+//  2. Adding a NEW commit to source AFTER the clone. Local has no
+//     knowledge of this commit or its blob.
+//  3. Returning local's path plus the new commit's blob SHA, which
+//     is genuinely not in local's object DB and is recoverable via
+//     `git fetch origin`.
+//
+// Why not "delete an object from .git/objects": git clone packs
+// every object into a single packfile, so deleting an unpacked
+// loose object file leaves the SHA still readable from the pack.
+// "Source advances after clone" is the simpler design that works
+// without packfile surgery.
+func setupFetchableFixture(t *testing.T) (localPath, missingBlobSHA, expectedContent string) {
+	t.Helper()
+
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "main", "-q")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "commit.gpgsign", "false")
+
+	writeFile(t, source, "before-clone.txt", "captured by clone\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "first")
+
+	// Full clone: local has every object source knows about so far.
+	localPath = t.TempDir()
+	runGitClone(t, "--quiet", source, localPath)
+
+	// Source advances. The new commit's blob is NOT in local's
+	// object DB — local was cloned before this commit existed.
+	expectedContent = "added after clone — recoverable via fetch\n"
+	writeFile(t, source, "after-clone.txt", expectedContent)
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "second")
+	missingBlobSHA = captureGitOutput(t, source, "rev-parse", "HEAD:after-clone.txt")
+
+	return localPath, missingBlobSHA, expectedContent
+}
+
+func TestBlobStreamer_AllowFetch_DefaultIsFalse(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+	bs, err := NewBlobStreamer(clonePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+	assert.False(t, bs.allowFetch)
+}
+
+func TestBlobStreamer_AllowFetch_OptionEnables(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+	bs, err := NewBlobStreamer(clonePath, WithAllowFetch(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+	assert.True(t, bs.allowFetch)
+}
+
+func TestBlobStreamer_ReadBlob_NoFetchByDefault_StillReturnsErrSHAMissingFromClone(t *testing.T) {
+	t.Parallel()
+	localPath, missingSHA, _ := setupFetchableFixture(t)
+	bs, err := NewBlobStreamer(localPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	_, err = bs.ReadBlob(t.Context(), missingSHA)
+	assert.ErrorIs(t, err, ErrSHAMissingFromClone)
+	assert.False(t, bs.fetched, "default no-fetch should not invoke fetch")
+}
+
+func TestBlobStreamer_ReadBlob_AllowFetch_RecoversMissingSHA(t *testing.T) {
+	t.Parallel()
+	localPath, missingSHA, expectedContent := setupFetchableFixture(t)
+	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	content, err := bs.ReadBlob(t.Context(), missingSHA)
+	require.NoError(t, err)
+	assert.Equal(t, expectedContent, string(content))
+	assert.True(t, bs.fetched, "ensureFetched should have run and succeeded")
+}
+
+func TestBlobStreamer_ReadBlob_AllowFetch_FetchRunsAtMostOnce(t *testing.T) {
+	t.Parallel()
+	localPath, missingSHA, _ := setupFetchableFixture(t)
+	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	// First call: missing locally, fetched, recovered.
+	_, err = bs.ReadBlob(t.Context(), missingSHA)
+	require.NoError(t, err)
+	assert.True(t, bs.fetched)
+
+	// Second call to a STILL-missing SHA (fake hash that origin
+	// also doesn't have): should fail with ErrSHAMissingFromClone
+	// without re-fetching. ensureFetched short-circuits because
+	// b.fetched is already true.
+	const fakeSHA = "0000000000000000000000000000000000000000"
+	_, err = bs.ReadBlob(t.Context(), fakeSHA)
+	assert.ErrorIs(t, err, ErrSHAMissingFromClone)
+}
+
+func TestBlobStreamer_ListTreeBlobs_AllowFetch_RecoversMissingSHA(t *testing.T) {
+	t.Parallel()
+
+	// Same fixture pattern as setupFetchableFixture: source
+	// advances after the clone, so local doesn't have the second
+	// commit's tree object. ls-tree on the second commit's SHA
+	// fails initially; allow-fetch recovers.
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "main", "-q")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "commit.gpgsign", "false")
+	writeFile(t, source, "first.txt", "first\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "first")
+
+	localPath := t.TempDir()
+	runGitClone(t, "--quiet", source, localPath)
+
+	// Advance source — local doesn't have this commit yet.
+	writeFile(t, source, "second.txt", "second\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "second")
+	newCommitSHA := captureGitOutput(t, source, "rev-parse", "HEAD")
+
+	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	// Without fetch this would be ErrSHAMissingFromClone; allow-
+	// fetch should run `git fetch origin` and recover.
+	blobs, err := bs.ListTreeBlobs(t.Context(), newCommitSHA)
+	require.NoError(t, err)
+	assert.NotEmpty(t, blobs)
+	// Should include both files now that fetch brought the new commit.
+	paths := make([]string, len(blobs))
+	for i, b := range blobs {
+		paths[i] = b.Path
+	}
+	assert.ElementsMatch(t, []string{"first.txt", "second.txt"}, paths)
+	assert.True(t, bs.fetched)
 }
 
 // ============================================================
