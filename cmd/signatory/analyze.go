@@ -86,6 +86,16 @@ type AnalyzeCmd struct {
 	// defaults to filestore/clones/<short-name>.
 	Clone bool `name:"clone" help:"Ensure --path holds a current, complete full clone of the target (clone if missing, fetch if present, fetch --unshallow if shallow). Defaults --path to filestore/clones/<short-name> when unset. Requires --refresh."`
 
+	// --allow-fetch is the opt-in for the source-evolution
+	// collector's BlobStreamer fetch-on-missing-SHA retry path.
+	// Default false (no fetch): a missing SHA in the local clone
+	// surfaces as tag_sha_local_status="missing_from_clone" in
+	// the matrix row, itself a forgery-resistance HIGH signal —
+	// see design/coll7.md D11. Operators who know their clone
+	// may be stale relative to the proxy can opt in to the
+	// targeted retry.
+	AllowFetch bool `name:"allow-fetch" help:"Allow the source-evolution collector to retry missing-SHA reads via 'git fetch origin' once. Default off — a missing SHA after --refresh is preserved as a signal rather than fetched." default:"false"`
+
 	// RunGit overrides the git subprocess invocation for clone-shaped
 	// operations triggered by --clone (fresh clone, fetch on an existing
 	// valid clone, fetch --unshallow on a shallow clone). nil → fall
@@ -523,13 +533,26 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// globals.Collectors (see functional_test.go); in production that
 	// field is empty and we build the collector list per-target based
 	// on the entity's shape plus --path / --clone.
+	//
+	// inRunResult accumulates signals as collectors complete so that
+	// later collectors can read earlier collectors' emissions in the
+	// same run. Currently only the source-evolution collector consumes
+	// this — it reads gopublish's version_pin_table to anchor matrix
+	// rows to commit SHAs (design/coll7.md D3, Architecture B). The
+	// pointer is captured at construction time so subsequent mutations
+	// inside this loop are visible to source-evolution's Collect.
+	inRunResult := &signal.CollectionResult{}
+
 	collectors := globals.Collectors
 	if len(collectors) == 0 {
 		c, err := collectorsFor(ctx, entity, CollectOpts{
-			Path:   cmd.Path,
-			Clone:  cmd.Clone,
-			RunGit: cmd.RunGit,
-			Stderr: stderr,
+			Path:        cmd.Path,
+			Clone:       cmd.Clone,
+			RunGit:      cmd.RunGit,
+			Stderr:      stderr,
+			AllowFetch:  cmd.AllowFetch,
+			InRunResult: inRunResult,
+			Store:       s,
 		})
 		if err != nil {
 			return err
@@ -543,6 +566,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		if err != nil {
 			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
 		}
+		// Accumulate into inRunResult so subsequent collectors see
+		// this collector's signals. Append to .Collected (not
+		// .Signals()) because Signals() flattens absences for
+		// storage, but the in-run lookup wants the full record set.
+		inRunResult.Collected = append(inRunResult.Collected, result.Collected...)
 		allSignals = append(allSignals, result.Signals()...)
 		_, _ = fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
 	}

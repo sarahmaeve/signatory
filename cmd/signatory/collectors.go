@@ -19,6 +19,7 @@ import (
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
+	sourcecollector "github.com/sarahmaeve/signatory/internal/signal/source"
 )
 
 // CollectOpts carries per-invocation options from AnalyzeCmd's
@@ -56,6 +57,37 @@ type CollectOpts struct {
 	// AnalyzeCmd.Run threads its own stderr writer here so manual
 	// CLI invocations narrate to the user's terminal.
 	Stderr io.Writer
+
+	// AllowFetch enables the source-evolution collector's
+	// BlobStreamer fetch-on-missing-SHA path (--allow-fetch CLI
+	// flag). Default false: missing SHAs surface as
+	// tag_sha_local_status="missing_from_clone" in the matrix
+	// row rather than triggering a remote fetch. See
+	// design/coll7.md D11 for the network-surface rationale.
+	AllowFetch bool
+
+	// InRunResult is a pointer to the orchestrator's accumulated
+	// CollectionResult. The source-evolution collector reads
+	// gopublish's just-emitted version_pin_table from here. The
+	// orchestrator (AnalyzeCmd.Run) updates the pointed-to struct
+	// as each collector returns; source-evolution sees the latest
+	// state when its Collect runs (last in the dispatch order for
+	// Go entities, after gopublish).
+	//
+	// nil disables the in-run lookup; the source collector falls
+	// back to Store-only.
+	InRunResult *signal.CollectionResult
+
+	// Store is the persistent signal store passed through to the
+	// source-evolution collector for fallback pin-table lookup
+	// (when a previous analysis ran gopublish but the current run
+	// hasn't, e.g., querying a re-run without --refresh).
+	//
+	// Defined as the narrow sourcecollector.SignalStore interface
+	// so cmd/signatory doesn't have to import the full store
+	// package's interface; store.Store satisfies it via
+	// structural typing.
+	Store sourcecollector.SignalStore
 }
 
 // Sentinel errors for each failure mode of collectorsFor.
@@ -142,6 +174,21 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// pattern flagged repeatedly in the dogfood reports).
 			openssfcollector.NewCollector(),
 		)
+
+		// Source-evolution: per-version AST feature matrix
+		// (design/coll7.md). Requires clonePath AND a Go ecosystem
+		// classification — depends on gopublish's version_pin_table
+		// emission via opts.InRunResult / opts.Store.
+		//
+		// Appended LAST in the dispatch order so by the time it
+		// runs, the orchestrator's in-run accumulator already
+		// holds gopublish's version_pin_table from the same run.
+		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
+			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
+			collectors = append(collectors,
+				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),
+			)
+		}
 	}
 
 	return collectors, nil
