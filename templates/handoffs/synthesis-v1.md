@@ -110,7 +110,7 @@ Not all conclusions carry equal evidentiary weight:
 
 | Forgery resistance | Example signals | Weight in your assessment |
 |---|---|---|
-| Very high | Cryptographic signatures, institutional attestations, Trusted Publishing | Strong evidence — hard to fake |
+| Very high | Cryptographic signatures, institutional attestations, Trusted Publishing, `source_evolution_anomaly` / `source_evolution_matrix` (cross-version source-tree zero-crossing anchored to proxy.golang.org-pinned SHAs) | Strong evidence — hard to fake |
 | High | Cross-platform identity consistency, long account tenure, signed commits | Good evidence — effort to forge |
 | Medium, declining | CI presence, code hygiene, Renovate/Dependabot config | Suggestive — increasingly easy to fake with AI |
 | Low, declining | Star count, commit message style, README quality | Weak — trivially faked |

@@ -172,6 +172,83 @@ A bus-factor concern is `low` for a single-user adoption,
 `medium` for a CI runner that would re-fetch on every build.
 Use the `severity.by_context` map.
 
+## Reading the source-evolution matrix
+
+For Go-ecosystem targets, the `source_evolution_matrix` signal
+holds a per-tagged-version table of AST feature counts (init,
+network egress, sensitive-path reads, exec, XOR-decode, base64-
+decode) plus structural counts (file count, LOC, new packages).
+The matrix is anchored to proxy.golang.org-pinned commit SHAs
+via `version_pin_table`, so its row identities are forgery-
+resistance VERY HIGH (registry-stamped at publish time, not
+re-resolvable post-hoc).
+
+The matrix exposes the *sleeper → weaponized* publication
+pattern directly. The 2026-04-30 BufferZoneCorp 17-repo campaign
+is the canonical example: a package publishes v0.1.0 with clean
+utility code, then introduces malicious payload at v0.3.0+. The
+matrix's row for the spike version reads as zeros across the
+feature columns at v0.1.0, then non-zeros at v0.3.0 — the diff
+IS the evidence.
+
+How to read a row's feature counts:
+
+- **Zeros at v0.1.0 followed by spikes at v0.3.0** is the
+  BufferZoneCorp signature. The complementary
+  `source_evolution_anomaly` signal flags this automatically;
+  treat its `anomaly_present: true` as a strong prompt to read
+  the actual files at the spike SHA.
+
+- **One feature spiking on its own is rarely conclusive.** A
+  library legitimately adopting a new dependency may add a
+  network call without anything else changing. The joint
+  distribution — init + sensitive-path + network spiking
+  TOGETHER between consecutive versions — is the
+  anomaly-fires shape because no benign refactor produces it.
+
+- **A high baseline that stays flat is "this is just what this
+  code does."** A library that has had network calls since
+  v0.1.0 is not anomalous when the count stays steady; a
+  tag-parsing utility that suddenly gains network calls at
+  v0.3.0 IS anomalous. The matrix's flat rows tell you what to
+  ignore as much as the spike rows tell you what to inspect.
+
+- **The matrix is per-tag; Layer 1 doesn't classify.** Your job
+  when the anomaly fires is to read the actual files at the
+  spike SHA (via the local clone) and decide whether the spike
+  represents legitimate feature work or payload introduction.
+  The matrix's `tag_sha` field gives you the SHA to check out.
+
+- **A row with `tag_sha_local_status: "missing_from_clone"` is
+  itself a signal.** It means proxy.golang.org has a SHA that
+  the analyze pipeline's `--clone --refresh` did not fetch —
+  unusual, possibly evidence of a force-push or a registry-side
+  cache-vs-source divergence. Treat as forgery-resistance HIGH
+  for that version's ID, even though the AST blocks are null.
+
+When you cite the matrix in a Conclusion, use the per-row
+shorthand:
+
+```
+Citation: "source_evolution_matrix at v0.3.0: init=1 (was 0),
+           sensitive_path_reads=8 (was 0), exec_calls=3 (was 0)"
+Signal-type: source_evolution_matrix
+```
+
+Or, when the `source_evolution_anomaly` signal is the load-
+bearing fact for a verdict:
+
+```
+Citation: "source_evolution_anomaly at v0.3.0: 6 features
+           crossed zero (init, network, sensitive_path, exec,
+           xor, base64); previous v0.1.0 had all six at 0"
+Signal-type: source_evolution_anomaly
+```
+
+Both citations are tree-scope at the spike SHA — see the
+existing citation grammar for line-and-quote variants when you
+want to point at the specific call site.
+
 ## Output format — v1-schema JSON via MCP ingest
 
 When your analysis is complete, call the **signatory_ingest_analysis**
@@ -485,6 +562,22 @@ Publication integrity:
   security finding
 - `documented_unbypassable_callbacks` — same
 - `sync_integrity_protection_split` — for sync protocols
+- `version_pin_table` — joint per-version commit-SHA pin table
+  from proxy.golang.org (Go-only). Source for `tag_sha` citations
+  in source_evolution_matrix conclusions; chain-of-custody anchor
+  in its own right because the proxy stamps each version's SHA at
+  publication time, independent of the operator's GitHub account.
+- `source_evolution_matrix` — per-tagged-version AST feature
+  counts (init()s, network calls, sensitive-path reads, exec
+  calls, XOR-decode operators, base64-decode call sites), file
+  diff stats, and new-symbol-export counts. Exposes the
+  sleeper→weaponized progression directly — see "Reading the
+  source-evolution matrix" earlier in this template.
+- `source_evolution_anomaly` — derived boolean: an inflection
+  between consecutive versions where ≥2 feature counts cross
+  from zero. Cite BOTH signals when drawing a conclusion — the
+  anomaly for the verdict, the matrix row at the spike SHA for
+  the citation.
 
 Hygiene:
 - `ci_supply_chain_gate` — pip-audit / cargo-deny / npm audit /
