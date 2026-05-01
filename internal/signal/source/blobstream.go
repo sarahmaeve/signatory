@@ -94,6 +94,23 @@ type TreeBlob struct {
 	Path string
 }
 
+// DiffStat captures the file- and line-count delta between two
+// commit SHAs. Populates the matrix row's `diff_from_previous`
+// block (design/coll7.md D2). Counts are non-negative; "file
+// added" and "file removed" are mutually exclusive per file (a
+// rename counts as one Changed entry, not Added+Removed).
+//
+// Binary files contribute to FilesChanged/Added/Removed but not
+// to LinesAdded/LinesRemoved — git's --numstat marks binaries
+// with "-\t-\t<path>" so the line counts are unknown.
+type DiffStat struct {
+	FilesAdded   int `json:"files_added"`
+	FilesChanged int `json:"files_changed"`
+	FilesRemoved int `json:"files_removed"`
+	LinesAdded   int `json:"lines_added"`
+	LinesRemoved int `json:"lines_removed"`
+}
+
 // NewBlobStreamer starts a `git cat-file --batch` subprocess
 // against clonePath and returns a streamer ready for reads. The
 // subprocess persists for the streamer's lifetime; call Close to
@@ -380,6 +397,109 @@ func (b *BlobStreamer) Close() error {
 		}
 	}
 	return nil
+}
+
+// DiffStat returns the file- and line-count delta between sha1
+// and sha2 (in that order: sha1 is "before", sha2 is "after").
+// Both SHAs must be present in the local clone — there's no
+// fetch-retry path here because diff between two SHAs requires
+// both to be in the object DB simultaneously, and the missing-SHA
+// case for a row is handled at matrix-row assembly time.
+//
+// Implementation runs two git invocations:
+//   - `git diff --numstat sha1 sha2` for line counts per file
+//   - `git diff --name-status sha1 sha2` for per-file add/modify/
+//     delete classification
+//
+// Both are local porcelain (NewCmd, no WaitDelay). One subprocess
+// per invocation; the cost is two forks but keeps parsing simple
+// and avoids parsing unified-diff format. Renames are counted as
+// FilesChanged (a single semantic change), not Added+Removed.
+func (b *BlobStreamer) DiffStat(ctx context.Context, sha1, sha2 string) (DiffStat, error) {
+	var stat DiffStat
+
+	// Pass 1: numstat → line counts.
+	numstatCmd := gitenv.NewCmd(ctx, "-C", b.clonePath, "diff", "--numstat", sha1, sha2)
+	var numstatOut, numstatErr bytes.Buffer
+	numstatCmd.Stdout = &numstatOut
+	numstatCmd.Stderr = &numstatErr
+	if err := numstatCmd.Run(); err != nil {
+		stderrStr := numstatErr.String()
+		if isMissingObjectMessage(stderrStr) {
+			return DiffStat{}, fmt.Errorf("%w: diff %s..%s", ErrSHAMissingFromClone, sha1, sha2)
+		}
+		return DiffStat{}, fmt.Errorf("git diff --numstat %s..%s: %w (stderr: %s)", sha1, sha2, err, stderrStr)
+	}
+
+	numstatScanner := bufio.NewScanner(&numstatOut)
+	numstatScanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for numstatScanner.Scan() {
+		line := numstatScanner.Text()
+		// Format: <added>\t<removed>\t<path>
+		// Binary files: "-\t-\t<path>"
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		if parts[0] == "-" || parts[1] == "-" {
+			// Binary file — counted as a file at the name-status
+			// pass below, but no line count.
+			continue
+		}
+		added, err1 := strconv.Atoi(parts[0])
+		removed, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		stat.LinesAdded += added
+		stat.LinesRemoved += removed
+	}
+	if err := numstatScanner.Err(); err != nil {
+		return DiffStat{}, fmt.Errorf("scan numstat output for %s..%s: %w", sha1, sha2, err)
+	}
+
+	// Pass 2: name-status → file add/modify/delete classification.
+	nsCmd := gitenv.NewCmd(ctx, "-C", b.clonePath, "diff", "--name-status", sha1, sha2)
+	var nsOut, nsErr bytes.Buffer
+	nsCmd.Stdout = &nsOut
+	nsCmd.Stderr = &nsErr
+	if err := nsCmd.Run(); err != nil {
+		stderrStr := nsErr.String()
+		if isMissingObjectMessage(stderrStr) {
+			return DiffStat{}, fmt.Errorf("%w: diff %s..%s", ErrSHAMissingFromClone, sha1, sha2)
+		}
+		return DiffStat{}, fmt.Errorf("git diff --name-status %s..%s: %w (stderr: %s)", sha1, sha2, err, stderrStr)
+	}
+
+	nsScanner := bufio.NewScanner(&nsOut)
+	nsScanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for nsScanner.Scan() {
+		line := nsScanner.Text()
+		if line == "" {
+			continue
+		}
+		// Format: <status>\t<path>[\t<new-path>]
+		// Status codes:
+		//   A = added
+		//   D = deleted
+		//   M = modified (content changed)
+		//   T = typechange (e.g., file → symlink)
+		//   R<num> = renamed (with similarity %)
+		//   C<num> = copied (with similarity %)
+		switch line[0] {
+		case 'A':
+			stat.FilesAdded++
+		case 'D':
+			stat.FilesRemoved++
+		case 'M', 'T', 'R', 'C':
+			stat.FilesChanged++
+		}
+	}
+	if err := nsScanner.Err(); err != nil {
+		return DiffStat{}, fmt.Errorf("scan name-status output for %s..%s: %w", sha1, sha2, err)
+	}
+
+	return stat, nil
 }
 
 // ensureFetched runs `git fetch origin` at most once per
