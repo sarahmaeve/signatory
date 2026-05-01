@@ -324,6 +324,102 @@ func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
 		"openssf-scorecard collector should also dispatch once an npm package has a resolved github URL — it caches scorecard data for the resolved repo")
 }
 
+// TestCollectorsFor_GoModuleEntity_IncludesGoPublish locks in the
+// dispatch contract for Go-ecosystem entities: a pkg:golang/...
+// entity with a resolved github URL gets the gopublish collector
+// (which emits last_publish, version_count, transparency_log_present,
+// publish_origin, and version_pin_table from proxy.golang.org +
+// sum.golang.org) ALONGSIDE github + git + repofiles +
+// openssf-scorecard.
+//
+// This is the test that catches a regression where the dispatch
+// switch in collectorsFor either drops the "golang"/"go" case or
+// fails to actually append the gopublish collector. Without this
+// assertion, the version_pin_table signal — load-bearing for
+// source-evolution per design/coll7.md D3 — would silently stop
+// emitting and the only signal would be `signatory analyze` not
+// printing it on a real Go target.
+func TestCollectorsFor_GoModuleEntity_IncludesGoPublish(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:golang/github.com/alecthomas/kong",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "golang",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, c := range collectors {
+		names[c.Name()] = true
+	}
+	assert.True(t, names["go-publish"],
+		"gopublish collector must dispatch for Ecosystem=\"golang\" — emits version_pin_table consumed by source-evolution per design/coll7.md D3")
+	assert.True(t, names["github"], "github collector should also dispatch for resolved Go entity")
+	assert.True(t, names["git"], "git collector should also dispatch for resolved Go entity")
+	assert.True(t, names["repofiles"], "repofiles collector should also dispatch for resolved Go entity")
+	assert.True(t, names["openssf-scorecard"], "openssf-scorecard collector should also dispatch for resolved Go entity")
+}
+
+// TestCollectorsFor_GoModuleLegacyEcosystem_IncludesGoPublish covers
+// the legacy Ecosystem="go" form (pre-purl-canonicalization). Some
+// in-store entities created before the migration still carry "go"
+// rather than "golang"; the dispatch's `case "golang", "go":` arm
+// must keep matching both. Without this test a regression that
+// drops "go" would silently break older entities.
+func TestCollectorsFor_GoModuleLegacyEcosystem_IncludesGoPublish(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:go/github.com/alecthomas/kong",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "go",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, c := range collectors {
+		names[c.Name()] = true
+	}
+	assert.True(t, names["go-publish"],
+		"gopublish collector must dispatch for legacy Ecosystem=\"go\"")
+}
+
+// TestCollectorsFor_NonGoEcosystem_NoGoPublish is the negative
+// counterpart: an npm entity must NOT receive the gopublish
+// collector. A regression that broadens the dispatch case (e.g.,
+// adding "default:" by accident) would catch on this assertion.
+func TestCollectorsFor_NonGoEcosystem_NoGoPublish(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/expressjs/express")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:npm/express",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "npm",
+		URL:          "https://github.com/expressjs/express",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	require.NoError(t, err)
+
+	for _, c := range collectors {
+		assert.NotEqualf(t, "go-publish", c.Name(),
+			"gopublish collector must NOT dispatch for non-Go ecosystem (got it for Ecosystem=%q)", entity.Ecosystem)
+	}
+}
+
 // TestCollectorsFor_NonNpmPackage_NoCollectors covers a defensive
 // edge case: a package-scheme entity for an ecosystem signatory
 // doesn't yet collect (pypi, cargo, ...) with no URL gets zero
