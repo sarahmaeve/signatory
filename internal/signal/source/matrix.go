@@ -119,13 +119,26 @@ func NewAssembler(provider SourceProvider, analyzer *golang.Analyzer) *Assembler
 // tag_sha_local_status set according to the version's classification
 // in the pin table and whether the local clone has the SHA.
 //
-// Returns a non-nil MatrixValue with empty Rows for an empty input
-// (no versions to process).
+// Two passes:
+//
+//  1. Per-version: build each row's AST + Structural by analyzing
+//     the version's source (pinned + present-in-clone case) or
+//     recording the gap status (missing/fetch-failed cases).
+//
+//  2. Cross-version: for each adjacent pair of rows in the
+//     semver-descending sequence, diff the older against the newer
+//     and populate the newer row's DiffFromPrevious +
+//     Structural.NewTopLevelPackages. Pairs where either side
+//     lacks a present analysis (missing-from-clone, missing-origin,
+//     fetch-failed) skip the diff — those rows have nil
+//     DiffFromPrevious.
+//
+// Returns a non-nil MatrixValue with empty Rows for empty input.
 //
 // Errors only when a structural problem prevents any progress
-// (nil provider/analyzer, ctx cancelled before first iteration).
-// Per-version analysis failures land in the row's
-// tag_sha_local_status field, not in the returned error.
+// (nil provider/analyzer). Per-version analysis failures land in
+// the row's tag_sha_local_status field; per-pair diff failures
+// leave DiffFromPrevious nil but don't abort.
 func (a *Assembler) Build(ctx context.Context, pinTable PinTable, opts BudgetOpts) (MatrixValue, error) {
 	if a.provider == nil {
 		return MatrixValue{}, errors.New("Build: nil SourceProvider")
@@ -152,11 +165,19 @@ func (a *Assembler) Build(ctx context.Context, pinTable PinTable, opts BudgetOpt
 	missingOriginSet := setOf(pinTable.MissingOriginVersions)
 	fetchFailedSet := setOf(pinTable.FetchFailedVersions)
 
+	// Pass 1: per-version row construction. aux carries per-row
+	// state that doesn't ship in the JSON output (the package set
+	// for cross-version diff in pass 2).
 	rows := make([]MatrixRow, 0, len(sel.SelectedVersions))
+	auxByIdx := make([]rowAux, 0, len(sel.SelectedVersions))
 	for _, version := range sel.SelectedVersions {
-		row := a.buildRow(ctx, version, pinByVersion, missingOriginSet, fetchFailedSet)
+		row, aux := a.buildRow(ctx, version, pinByVersion, missingOriginSet, fetchFailedSet)
 		rows = append(rows, row)
+		auxByIdx = append(auxByIdx, aux)
 	}
+
+	// Pass 2: cross-version diff + new-packages population.
+	a.applyCrossVersion(ctx, rows, auxByIdx)
 
 	return MatrixValue{
 		ModulePath: pinTable.ModulePath,
@@ -167,18 +188,81 @@ func (a *Assembler) Build(ctx context.Context, pinTable PinTable, opts BudgetOpt
 	}, nil
 }
 
+// rowAux holds the per-row state needed by the cross-version pass
+// but not surfaced in the JSON output. Currently just SHA (for
+// DiffStat) and the package directory set (for NewTopLevelPackages
+// computation). Stays parallel to the rows slice.
+type rowAux struct {
+	sha      string
+	packages map[string]struct{}
+}
+
+// applyCrossVersion walks the rows in semver-descending order and,
+// for each adjacent pair (newer at i, older at i+1), populates the
+// newer row's DiffFromPrevious and NewTopLevelPackages. The oldest
+// row (last in the slice) has nil DiffFromPrevious by definition.
+//
+// Skip cases (DiffFromPrevious stays nil):
+//   - Either row's TagSHALocalStatus is not "present" — at least
+//     one side of the diff has no SHA we can analyze.
+//   - DiffStat returns an error — record a debug-level mark and
+//     move on; per-pair failures shouldn't abort the matrix.
+//
+// NewTopLevelPackages is the set of package directories present
+// in the newer row but absent in the older. Sorted ascending for
+// deterministic JSON output.
+func (a *Assembler) applyCrossVersion(ctx context.Context, rows []MatrixRow, aux []rowAux) {
+	for i := 0; i < len(rows)-1; i++ {
+		newer := &rows[i]
+		older := &rows[i+1]
+		newerAux := aux[i]
+		olderAux := aux[i+1]
+
+		// Both sides must be analyzable to diff.
+		if newer.TagSHALocalStatus != TagSHALocalPresent ||
+			older.TagSHALocalStatus != TagSHALocalPresent {
+			continue
+		}
+		if newerAux.sha == "" || olderAux.sha == "" {
+			continue
+		}
+
+		// DiffStat: from older SHA to newer SHA.
+		stat, err := a.provider.DiffStat(ctx, olderAux.sha, newerAux.sha)
+		if err == nil {
+			newer.DiffFromPrevious = &stat
+		}
+		// NewTopLevelPackages: present in newer, absent in older.
+		if newer.Structural != nil {
+			var added []string
+			for pkg := range newerAux.packages {
+				if _, existed := olderAux.packages[pkg]; !existed {
+					added = append(added, pkg)
+				}
+			}
+			sort.Strings(added)
+			if added == nil {
+				added = []string{}
+			}
+			newer.Structural.NewTopLevelPackages = added
+		}
+	}
+}
+
 // buildRow dispatches a version to the right row-construction
 // path based on its pin-table classification: pinned (try analysis),
 // missing-origin (record gap, no analysis), or fetch-failed (record
-// gap). A version that's in none of these is an internal logic
-// error — it shouldn't reach buildRow because Selection's input
-// is exactly the union of those sets.
+// gap). Returns the row plus its rowAux for the cross-version pass.
+//
+// A version that's in none of the classifications is an internal
+// logic error — it shouldn't reach buildRow because Selection's
+// input is exactly the union of those sets.
 func (a *Assembler) buildRow(
 	ctx context.Context,
 	version string,
 	pinByVersion map[string]VersionPin,
 	missingOriginSet, fetchFailedSet map[string]struct{},
-) MatrixRow {
+) (MatrixRow, rowAux) {
 	if pin, ok := pinByVersion[version]; ok {
 		return a.buildRowFromPin(ctx, version, pin)
 	}
@@ -186,19 +270,19 @@ func (a *Assembler) buildRow(
 		return MatrixRow{
 			Version:           version,
 			TagSHALocalStatus: TagSHALocalMissingOrigin,
-		}
+		}, rowAux{}
 	}
 	if _, ok := fetchFailedSet[version]; ok {
 		return MatrixRow{
 			Version:           version,
 			TagSHALocalStatus: TagSHALocalFetchFailed,
-		}
+		}, rowAux{}
 	}
 	// Defensive: should not reach here.
 	return MatrixRow{
 		Version:           version,
 		TagSHALocalStatus: "unknown",
-	}
+	}, rowAux{}
 }
 
 // buildRowFromPin runs the AST analyzer + structural counter at
@@ -207,50 +291,50 @@ func (a *Assembler) buildRow(
 // nil analysis blocks. Other analyzer/provider errors land the
 // same way — partial-row preservation is more useful than aborting
 // the whole matrix on one version's failure.
-func (a *Assembler) buildRowFromPin(ctx context.Context, version string, pin VersionPin) MatrixRow {
+//
+// Returns rowAux populated with sha + packages set when analysis
+// succeeded; empty rowAux for partial rows (the cross-version
+// pass skips pairs without aux).
+func (a *Assembler) buildRowFromPin(ctx context.Context, version string, pin VersionPin) (MatrixRow, rowAux) {
 	row := MatrixRow{
 		Version:      version,
 		TagSHA:       pin.SHA,
 		TagSHASource: pin.Source,
 	}
 
-	feats, structural, err := a.analyzeAtSHA(ctx, pin.SHA)
+	feats, structural, packages, err := a.analyzeAtSHA(ctx, pin.SHA)
 	if err != nil {
-		// Distinguish missing-from-clone (the diagnostic case the
-		// design doc names explicitly) from other errors. Both
-		// produce a partial row; only the status string differs.
 		if errors.Is(err, ErrSHAMissingFromClone) {
 			row.TagSHALocalStatus = TagSHALocalMissingFromClone
 		} else {
-			// Unexpected error — record as missing-from-clone
-			// rather than crashing. Log-only would be better but
-			// this layer doesn't have a logger plumbed yet.
 			row.TagSHALocalStatus = TagSHALocalMissingFromClone
 		}
-		return row
+		return row, rowAux{}
 	}
 
 	row.TagSHALocalStatus = TagSHALocalPresent
 	row.AST = &feats
 	row.Structural = &structural
-	return row
+	return row, rowAux{sha: pin.SHA, packages: packages}
 }
 
 // analyzeAtSHA collects all Go source files at sha, computes
 // per-file LOC + package-set + total file count, and runs the AST
-// analyzer to produce Features.
+// analyzer to produce Features. Returns Features, Structural, the
+// per-version package directory set (consumed by the cross-version
+// pass for NewTopLevelPackages), and any error.
 //
 // Files are collected to a slice rather than streamed twice
 // (analyzer + counters): the iter.Seq2 from BlobStreamer is
 // single-pass. Memory cost: typical Go module's .go files total
 // <500KB; not a concern at the budget caps in play.
-func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (golang.Features, Structural, error) {
+func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (golang.Features, Structural, map[string]struct{}, error) {
 	var files []golang.SourceFile
 	packageDirs := make(map[string]struct{})
 
 	for sf, err := range a.provider.EnumerateGoFiles(ctx, sha) {
 		if err != nil {
-			return golang.Features{}, Structural{}, err
+			return golang.Features{}, Structural{}, nil, err
 		}
 		files = append(files, sf)
 		packageDirs[goPackageDir(sf.Path)] = struct{}{}
@@ -258,20 +342,20 @@ func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (golang.Featur
 
 	feats, err := a.analyzer.Analyze(ctx, sliceToErrSeq(files))
 	if err != nil {
-		return golang.Features{}, Structural{}, fmt.Errorf("analyze sha %s: %w", sha, err)
+		return golang.Features{}, Structural{}, nil, fmt.Errorf("analyze sha %s: %w", sha, err)
 	}
 
 	structural := Structural{
 		GoFileCount: len(files),
 		GoLOC:       totalLOC(files),
-		// NewTopLevelPackages and NewSymbolExports stay empty in
-		// commit 12. Commit 13 fills NewTopLevelPackages from
-		// cross-version diffs of packageDirs.
+		// NewTopLevelPackages is filled by applyCrossVersion (pass
+		// 2) when the previous-version's package set is known.
+		// NewSymbolExports remains future work.
 		NewTopLevelPackages: []string{},
 		NewSymbolExports:    []string{},
 	}
 
-	return feats, structural, nil
+	return feats, structural, packageDirs, nil
 }
 
 // goPackageDir returns the directory portion of a Go source file
