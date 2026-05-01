@@ -469,6 +469,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the hash is a commit SHA; when paired with sum.golang.org's transparency log it gives a reproducible proof-of-fetch chain",
 		},
 	},
+	"version_pin_table": {
+		Type:              "version_pin_table",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Per-version (version, sha, published_at) pin table from proxy.golang.org. Trust anchor consumed by source-evolution to attach matrix rows to commit SHAs.",
+		Caveats: []string{
+			"covers up to the 12 most-recent versions; long-history modules may not have full coverage in a single emission",
+			"pre-Go-1.20 versions lacking the proxy Origin block land in missing_origin_versions[], not pins[] — source-evolution falls back to local refs/tags for those when reconstructing matrix rows",
+			"fetch failures (proxy 5xx, network) land in fetch_failed_versions[] separately from missing-origin; the distinction is \"proxy doesn't know\" vs \"we couldn't ask\"",
+			"v0.1 emits source: \"proxy.golang.org\" for every pin; the field is retained for forward compatibility with future registry-side pin sources",
+		},
+	},
 
 	// ================================================================
 	// Hygiene — "Does it look like they care?"

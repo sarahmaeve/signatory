@@ -43,12 +43,23 @@ const defaultTTL = 24 * time.Hour
 // exist," not "which is current."
 type Collector struct {
 	client *Client
+
+	// jitterMin / jitterMax bracket the random pause between
+	// consecutive GetVersionInfo calls in processPinTable. Production
+	// values (200-800ms) are set by NewCollector{,WithClient}; tests
+	// in this package set both to 0 to bypass jitter for fast runs.
+	jitterMin time.Duration
+	jitterMax time.Duration
 }
 
 // NewCollector returns a Collector bound to the public Go
 // data-plane endpoints (proxy.golang.org + sum.golang.org).
 func NewCollector() *Collector {
-	return &Collector{client: NewClient()}
+	return &Collector{
+		client:    NewClient(),
+		jitterMin: pinFetchJitterMin,
+		jitterMax: pinFetchJitterMax,
+	}
 }
 
 // NewCollectorWithClient returns a Collector using the supplied
@@ -56,7 +67,11 @@ func NewCollector() *Collector {
 // server via NewClientWithBaseURL; production code uses
 // NewCollector.
 func NewCollectorWithClient(c *Client) *Collector {
-	return &Collector{client: c}
+	return &Collector{
+		client:    c,
+		jitterMin: pinFetchJitterMin,
+		jitterMax: pinFetchJitterMax,
+	}
 }
 
 // Name identifies the collector — value flows into source-tracking
@@ -192,6 +207,27 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 				"ref":             info.Origin.Ref,
 				"hash":            info.Origin.Hash,
 			})
+	}
+
+	// ----- @v/<v>.info × N → version_pin_table -----
+	//
+	// Iterates up to maxPinFetches most-recent versions, fetching
+	// the Origin hash per version with random jitter between calls.
+	// The compound result is the trust anchor source-evolution uses
+	// to attach matrix rows to commit SHAs. See pintable.go.
+	switch {
+	case listErr != nil && errors.Is(listErr, ErrNotFound):
+		result.RecordAbsence(entity.ID, "version_pin_table", source,
+			"module not found in proxy.golang.org", false, collectedAt)
+	case listErr != nil:
+		result.RecordFailure(entity.ID, "version_pin_table", source,
+			sanitizeFetchReason(listErr), true, collectedAt)
+	case len(versions) == 0:
+		result.RecordAbsence(entity.ID, "version_pin_table", source,
+			"@v/list returned empty version set", false, collectedAt)
+	default:
+		pinTable := c.processPinTable(ctx, modulePath, versions)
+		result.RecordSignal(entity.ID, "version_pin_table", source, collectedAt, defaultTTL, pinTable)
 	}
 
 	return result, nil

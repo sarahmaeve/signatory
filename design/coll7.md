@@ -264,25 +264,43 @@ Compound JSON shape:
 
 `tag_sha_local_status` enum: `"present"` | `"missing_from_clone"` | `"fetched_via_allow_fetch"`. Rows with `missing_from_clone` are preserved (analyst sees the gap explicitly) but have null analysis blocks.
 
-### D3. Tag-SHA pinning: gopublish emits, source-evolution consumes
+### D3. Tag-SHA pinning: gopublish emits proxy data, source-evolution does local fallback
 
-Tag-SHA pinning is gopublish's responsibility. The source-evolution collector does not touch proxy.golang.org directly.
+Architecture B: single-responsibility split.
 
-**gopublish change**: extend `internal/signal/registry/gopublish/collector.go` to emit a new `version_pin_table` signal alongside the existing per-version `publish_origin` signals. The pin table is a single compound record per Go-ecosystem entity:
+- **gopublish** reads proxy.golang.org. It does not touch git. Pins it emits always carry `source: "proxy.golang.org"`.
+- **source-evolution** combines gopublish's pins with local-clone state when building each matrix row. Versions the proxy didn't pin (pre-Go-1.20 publishes; pre-Origin-block era) get a local `git rev-parse refs/tags/<v>` fallback, and the *matrix row* records the result via `tag_sha_source: "local_clone_refs_tags"`. The pin table emitted by gopublish is not mutated.
+
+This keeps gopublish a pure registry collector and concentrates "where did this SHA come from" on the matrix row — one place to read, not two.
+
+**gopublish change**: extend `internal/signal/registry/gopublish/collector.go` to emit a new `version_pin_table` compound signal alongside the existing per-version `publish_origin` signal (the latter remains, scoped to @latest). Cost: one extra `GetVersionInfo` per processed version, capped at 12.
+
+Operation:
+- After fetching `@v/list`, iterate the **12 most recent** versions (sorted by `golang.org/x/mod/semver`). 12 covers the typical source-evolution budget with headroom.
+- For each, call `GetVersionInfo` sequentially with 200-800ms jitter between calls (`math/rand/v2.IntN`). Sequential pacing avoids burst-shape against the proxy; jitter slightly randomizes our request fingerprint.
+- Classify the response: present-with-Origin → pin; missing-Origin (pre-1.20 publish) → `missing_origin_versions[]`; fetch-failed (4xx other than 410, 5xx, network) → `fetch_failed_versions[]`. 410/Gone → `missing_origin_versions[]` (proxy authoritatively says no record).
+
+**version_pin_table value shape**:
 
 ```json
 {
   "module_path": "github.com/foo/bar",
+  "version_count_total": 47,
+  "version_count_processed": 12,
   "pins": [
-    {"version": "v0.1.0", "sha": "abc...", "source": "proxy.golang.org"},
-    {"version": "v0.2.0", "sha": "def...", "source": "proxy.golang.org"},
-    {"version": "v0.3.0", "sha": "ghi...", "source": "local_clone_refs_tags"}
+    {"version": "v0.42.0", "sha": "abc...", "source": "proxy.golang.org",
+     "published_at": "2026-04-29T12:00:00Z"},
+    {"version": "v0.41.0", "sha": "def...", "source": "proxy.golang.org",
+     "published_at": "2026-04-25T08:00:00Z"}
   ],
-  "missing_origin_versions": ["v0.3.0"]
+  "missing_origin_versions": ["v0.3.0"],
+  "fetch_failed_versions": []
 }
 ```
 
-Per-pin `source` enum: `"proxy.golang.org"` (default) | `"local_clone_refs_tags"` (proxy lacked Origin block; pre-Go-1.20 publish; see `gopublish/collector.go:178-186`).
+Per-pin `source` is always `"proxy.golang.org"` in v0.1. The field is retained for forward compatibility; future work may add other registry-side pin sources (e.g., GitHub API tag SHA) without breaking the consumer schema.
+
+`published_at` is captured because it's free (already in `@v/<v>.info`'s `Time` field) and lets downstream signals detect version-padding patterns: 12 versions inside a short window (e.g., 72 hours) is the PROV-009-shaped misdirection signal we already catch correlatively. A future analyzer can compute span/velocity from these times directly.
 
 **source-evolution change**: a `VersionPinSource` interface abstracts pin lookup:
 
@@ -292,20 +310,28 @@ type VersionPinSource interface {
 }
 
 type PinTable struct {
-    ModulePath string
-    Pins       []VersionPin
+    ModulePath              string
+    Pins                    []VersionPin  // proxy-sourced pins only
+    MissingOriginVersions   []string      // versions present in @v/list but lacking proxy Origin
+    FetchFailedVersions     []string      // versions where the proxy fetch errored
 }
 
 type VersionPin struct {
-    Version string
-    SHA     string
-    Source  string  // "proxy.golang.org" | "local_clone_refs_tags"
+    Version     string
+    SHA         string
+    Source      string     // "proxy.golang.org" — always, in v0.1
+    PublishedAt time.Time
 }
 ```
 
 Production impl reads from the in-run `CollectionResult` first (the same analysis just ran gopublish), falling back to `signal.Store.GetLatestSignals` (a previous analysis). If neither has a `version_pin_table` for the entity, source-evolution emits an absence with reason `"version pin table required; gopublish collector did not run or did not emit"` and exits cleanly — no proxy access, no GitHub access.
 
-**Sequencing**: `cmd/signatory/collectors.go` dispatch wires gopublish before source-evolution for Go entities. Test fakes inject hand-built `PinTable` directly.
+When the source-evolution matrix assembler processes a version:
+- Pin in `Pins` → use the proxy SHA, set `tag_sha_source: "proxy.golang.org"`.
+- Version in `MissingOriginVersions` → `git rev-parse refs/tags/<v>` against the local clone. If found, use that SHA, set `tag_sha_source: "local_clone_refs_tags"`. If not found, set `tag_sha_local_status: "missing_from_proxy_and_clone"` and skip the row's analysis blocks.
+- Version in `FetchFailedVersions` → record the row with `tag_sha_local_status: "fetch_failed"`; analyst sees the gap.
+
+**Sequencing**: `cmd/signatory/collectors.go` dispatch wires gopublish before source-evolution for Go entities. Test fakes inject hand-built `PinTable` directly without going through gopublish.
 
 ### D4. Budget: last-N + leaves-of-each-major, with caps
 

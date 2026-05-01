@@ -135,6 +135,39 @@ func TestRegistry_RepofilesCollectorTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_GoPublishCollectorTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types the gopublish
+// collector (internal/signal/registry/gopublish/) emits. Same coupling
+// contract as the sibling git/github/repofiles tests: registry drift
+// and collector intent stay aligned, caught in a single place.
+func TestRegistry_GoPublishCollectorTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"last_publish", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
+		{"version_count", profile.SignalGroupVitality, profile.ForgeryHigh},
+		{"transparency_log_present", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"publish_origin", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"version_pin_table", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — gopublish collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match gopublish collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match gopublish collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.

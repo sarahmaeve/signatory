@@ -65,7 +65,9 @@ func fakeProxyAndSum(t *testing.T, modulePath string, fx fixtures) *httptest.Ser
 			fmt.Fprint(w, fx.lookupBody)
 		}
 	})
-	// Per-version .info handler: matches @v/<version>.info.
+	// Per-version .info handler for the legacy single-version
+	// fixture: matches @v/<lookupVersion>.info as a fixed path so
+	// it takes precedence over the broader prefix handler below.
 	mux.HandleFunc("/"+encoded+"/@v/"+fx.lookupVersion+".info", func(w http.ResponseWriter, r *http.Request) {
 		if fx.infoStatus == 0 {
 			fx.infoStatus = http.StatusOK
@@ -75,43 +77,102 @@ func fakeProxyAndSum(t *testing.T, modulePath string, fx fixtures) *httptest.Ser
 			fmt.Fprint(w, fx.infoBody)
 		}
 	})
+	// Per-version .info handler for multi-version fixtures used by
+	// pin-table tests. The prefix `/<encoded>/@v/` catches any
+	// version-suffixed request that the more-specific list and
+	// lookupVersion-info handlers above don't match. Requests for
+	// versions in fx.versionInfos are answered from that map; any
+	// other request 404s.
+	mux.HandleFunc("/"+encoded+"/@v/", func(w http.ResponseWriter, r *http.Request) {
+		suffix := strings.TrimPrefix(r.URL.Path, "/"+encoded+"/@v/")
+		if !strings.HasSuffix(suffix, ".info") {
+			http.NotFound(w, r)
+			return
+		}
+		version := strings.TrimSuffix(suffix, ".info")
+		body, ok := fx.versionInfos[version]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		status := http.StatusOK
+		if s, override := fx.versionInfoStatuses[version]; override {
+			status = s
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			fmt.Fprint(w, body)
+		}
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// fixtures bundles the four endpoint response fixtures the
-// collector tests vary. Default zeros mean "200 with empty body";
-// each test overrides the fields it cares about.
+// fixtures bundles the endpoint response fixtures the collector
+// tests vary. Default zeros mean "200 with empty body"; each test
+// overrides the fields it cares about.
+//
+// versionInfos / versionInfoStatuses drive the multi-version
+// .info responses used by pin-table tests. Map key is the version
+// string (e.g., "v0.20.0"); value is the JSON body. Statuses
+// default to 200 and only override when explicitly set.
 type fixtures struct {
-	latestBody    string
-	latestStatus  int
-	listBody      string
-	listStatus    int
-	infoBody      string
-	infoStatus    int
-	lookupBody    string
-	lookupStatus  int
-	lookupVersion string // version inserted into the @v/<v>.info and /lookup paths
+	latestBody          string
+	latestStatus        int
+	listBody            string
+	listStatus          int
+	infoBody            string
+	infoStatus          int
+	lookupBody          string
+	lookupStatus        int
+	lookupVersion       string // version inserted into the legacy @v/<v>.info and /lookup paths
+	versionInfos        map[string]string
+	versionInfoStatuses map[string]int
 }
 
 // happyPathFixtures returns a fixtures bundle modelling a
 // well-published, well-attested Go module — proxy answers with a
 // recent latest version, the version list has multiple entries,
-// the .info block carries an Origin section, and sum.golang.org
+// every .info block carries an Origin section, and sum.golang.org
 // has a transparency-log entry.
+//
+// versionInfos is populated for every version in listBody so the
+// version_pin_table emission lands a full pin set on the happy
+// path. Tests that want a specific version to fail / lack Origin
+// override the relevant map entry.
 func happyPathFixtures() fixtures {
-	return fixtures{
-		latestBody: `{"Version":"v0.20.0","Time":"2026-04-15T10:00:00Z"}`,
-		listBody:   "v0.16.0\nv0.17.0\nv0.18.0\nv0.19.0\nv0.20.0\n",
-		infoBody: `{
+	v20Body := `{
 			"Version": "v0.20.0",
 			"Time": "2026-04-15T10:00:00Z",
 			"Origin": {"VCS":"git","URL":"https://go.googlesource.com/sync","Ref":"refs/tags/v0.20.0","Hash":"ec11c4a93de22cde2abe2bf74d70791033c2464c"}
-		}`,
+		}`
+	return fixtures{
+		latestBody:    `{"Version":"v0.20.0","Time":"2026-04-15T10:00:00Z"}`,
+		listBody:      "v0.16.0\nv0.17.0\nv0.18.0\nv0.19.0\nv0.20.0\n",
+		infoBody:      v20Body,
 		lookupBody:    "12345\ngolang.org/x/sync v0.20.0 h1:fakebase64\ngolang.org/x/sync v0.20.0/go.mod h1:fakebase64\n\n— sum.golang.org Az3grx...\n",
 		lookupVersion: "v0.20.0",
+		versionInfos: map[string]string{
+			"v0.16.0": versionInfoBody("v0.16.0", "1616161616161616161616161616161616161616", "2026-03-01T00:00:00Z"),
+			"v0.17.0": versionInfoBody("v0.17.0", "1717171717171717171717171717171717171717", "2026-03-15T00:00:00Z"),
+			"v0.18.0": versionInfoBody("v0.18.0", "1818181818181818181818181818181818181818", "2026-04-01T00:00:00Z"),
+			"v0.19.0": versionInfoBody("v0.19.0", "1919191919191919191919191919191919191919", "2026-04-08T00:00:00Z"),
+			"v0.20.0": v20Body,
+		},
 	}
+}
+
+// noJitterCollector returns a Collector wired to the test server
+// with the pin-fetch jitter disabled, so iterating up to 12 versions
+// adds at most a few milliseconds rather than 800-3200ms × 12 to
+// test runtime. Same-package field access is the established test
+// seam pattern; production code never sets these to zero.
+func noJitterCollector(srvURL string) *Collector {
+	c := NewCollectorWithClient(NewClientWithBaseURL(srvURL, srvURL))
+	c.jitterMin = 0
+	c.jitterMax = 0
+	return c
 }
 
 // hasSignal reports whether the result recorded a non-absence
@@ -154,20 +215,21 @@ type anySignals interface {
 
 // ----- happy path -----
 
-// TestCollector_HappyPath: a Go module with all four data points
+// TestCollector_HappyPath: a Go module with all five data points
 // available emits the full signal set — last_publish, version_count,
-// transparency_log_present, publish_origin — with zero absences.
+// transparency_log_present, publish_origin, version_pin_table —
+// with zero absences.
 func TestCollector_HappyPath(t *testing.T) {
 	t.Parallel()
 	fx := happyPathFixtures()
 	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
 
-	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL, srv.URL))
+	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, 4, result.SignalCount(), "all four signals should land on happy path")
+	assert.Equal(t, 5, result.SignalCount(), "all five signals should land on happy path")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	require.True(t, hasSignal(result, "last_publish"))
@@ -227,10 +289,10 @@ func TestCollector_PkgGoLegacyURI(t *testing.T) {
 		Ecosystem:    "go",
 		ShortName:    "golang.org/x/sync",
 	}
-	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL, srv.URL))
+	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), legacy)
 	require.NoError(t, err)
-	assert.Equal(t, 4, result.SignalCount(), "legacy pkg:go URI should still resolve")
+	assert.Equal(t, 5, result.SignalCount(), "legacy pkg:go URI should still resolve")
 }
 
 // TestCollector_LatestNotFound: @latest 404 turns into a fetch
@@ -243,7 +305,7 @@ func TestCollector_LatestNotFound(t *testing.T) {
 	fx.latestStatus = http.StatusNotFound
 	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
 
-	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL, srv.URL))
+	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -268,7 +330,7 @@ func TestCollector_TransparencyAbsent(t *testing.T) {
 	fx.lookupStatus = http.StatusNotFound
 	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
 
-	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL, srv.URL))
+	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
 	require.NoError(t, err)
 
@@ -289,7 +351,7 @@ func TestCollector_OriginAbsent(t *testing.T) {
 	fx.infoBody = `{"Version":"v0.20.0","Time":"2026-04-15T10:00:00Z"}`
 	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
 
-	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL, srv.URL))
+	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
 	require.NoError(t, err)
 	assert.True(t, hasAbsence(result, "publish_origin"))
