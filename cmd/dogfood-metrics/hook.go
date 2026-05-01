@@ -148,7 +148,7 @@ func writeEvent(path string, ev hookEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: path constructed from receiver-controlled outDir + a sanitized session_id

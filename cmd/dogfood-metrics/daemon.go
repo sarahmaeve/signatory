@@ -97,7 +97,7 @@ var errNotRunning = errors.New("no receiver running")
 // to bind. Pre-flight: refuses to start if a live receiver is
 // already running per the PID file.
 func startDaemon(addr, outDir string) error {
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 

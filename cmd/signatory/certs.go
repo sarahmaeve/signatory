@@ -146,7 +146,7 @@ func (cmd *CertsDoctorCmd) Run(_ *Globals) error {
 	// is reachable.
 	if path, err := exec.LookPath("mkcert"); err == nil {
 		fmt.Printf("mkcert: %s\n", path)
-		if out, err := exec.Command(path, "-CAROOT").Output(); err == nil {
+		if out, err := exec.Command(path, "-CAROOT").Output(); err == nil { //nolint:gosec // G204: path resolved from LookPath, no user input
 			fmt.Printf("mkcert CAROOT: %s\n", strings.TrimSpace(string(out)))
 		} else {
 			fmt.Printf("mkcert -CAROOT failed: %v\n", err)

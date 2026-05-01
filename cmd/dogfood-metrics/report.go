@@ -341,7 +341,7 @@ func runReport(sessionID, inDir, outDir string) error {
 	}
 
 	sessionDir := filepath.Join(outDir, sessionID)
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	if err := os.MkdirAll(sessionDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", sessionDir, err)
 	}
 	reportPath := filepath.Join(sessionDir, "report.md")

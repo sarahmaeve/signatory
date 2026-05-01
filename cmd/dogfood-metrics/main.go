@@ -84,7 +84,7 @@ func runServe(args []string) {
 		log.Fatalf("parse flags: %v", err)
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		log.Fatalf("mkdir %s: %v", *outDir, err)
 	}
 
@@ -122,7 +122,7 @@ func runHookCmd(args []string) {
 		// flag.ExitOnError already exited, but defense in depth.
 		os.Exit(0)
 	}
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		// Log to stderr (Claude Code may surface it to the user)
 		// but still exit 0 — a missing dogfood dir must not block
 		// real work.

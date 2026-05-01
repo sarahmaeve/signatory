@@ -108,7 +108,7 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("read source: %w", err)
 	}
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { //nolint:gosec // G703: dst flows from operator --cert-dir flag (resolved via filepath.Join with const filename), not network/user input
 		return fmt.Errorf("write temp: %w", err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
