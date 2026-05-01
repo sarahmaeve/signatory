@@ -62,13 +62,13 @@ type Features struct {
 	// across all files. Methods and functions whose names happen to
 	// be "init" but have a receiver are NOT counted — only top-level
 	// init declarations run on import.
-	InitCount int
+	InitCount int `json:"init_count"`
 
 	// NetworkCallSites is the number of package-level call sites
 	// that initiate network egress (matched against
 	// NetworkEgressCallSites in patterns.go). Counts call sites, not
 	// distinct call targets — `http.Get(a); http.Get(b)` is two.
-	NetworkCallSites int
+	NetworkCallSites int `json:"network_call_sites"`
 
 	// SensitivePathReads is the number of call sites in the
 	// SensitivePathReadCallSites catalog whose first argument
@@ -78,14 +78,14 @@ type Features struct {
 	// themselves resolvable; fully dynamic paths are not counted
 	// (documented gap; analyst sees the call-site count via
 	// neighboring features).
-	SensitivePathReads int
+	SensitivePathReads int `json:"sensitive_path_reads"`
 
 	// ExecCalls is the number of call sites in the ExecCallSites
 	// catalog (os/exec.{Command,CommandContext}). Argument content
 	// is NOT inspected — a spike in this field, especially within
 	// init() functions, is the signal; the analyst reads the spike
 	// version's source to interpret intent.
-	ExecCalls int
+	ExecCalls int `json:"exec_calls"`
 
 	// XORAssignments is the number of `^=` (token.XOR_ASSIGN)
 	// statements across all files. The BufferZoneCorp F004 finding
@@ -99,14 +99,14 @@ type Features struct {
 	// `=` assignment) is NOT counted. Closing the gap requires
 	// loop-context analysis to avoid false positives on legitimate
 	// bit-twiddling.
-	XORAssignments int
+	XORAssignments int `json:"xor_assignments"`
 
 	// Base64DecodeCalls is the number of call sites in the
 	// Base64DecodeCallSites catalog. Decoding base64 at runtime
 	// within or near init() is a strong obfuscated-payload signal;
 	// analytic / logging code that decodes external base64 is rare
 	// in package-init.
-	Base64DecodeCalls int
+	Base64DecodeCalls int `json:"base64_decode_calls"`
 }
 
 // Analyzer walks Go source AST and accumulates Features.
