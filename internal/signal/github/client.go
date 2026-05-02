@@ -107,6 +107,20 @@ func NewClient(token string) *Client {
 	}
 }
 
+// NewClientWithBaseURL creates an unauthenticated Client pointed at
+// the given base URL. Test injection point: lets cmd/signatory
+// integration tests redirect API calls to an httptest.Server without
+// needing internal field access. Production callers use NewClient.
+func NewClientWithBaseURL(baseURL string) *Client {
+	return &Client{
+		httpClient: &http.Client{
+			Timeout:       60 * time.Second,
+			CheckRedirect: checkRedirect,
+		},
+		baseURL: baseURL,
+	}
+}
+
 // checkRedirect is the http.Client redirect policy used by NewClient
 // and the security tests. It enforces three invariants in order:
 //

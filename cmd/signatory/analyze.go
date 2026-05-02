@@ -600,6 +600,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			AllowFetch:  cmd.AllowFetch,
 			InRunResult: inRunResult,
 			Store:       s,
+			// Same concrete *store.SQLite value as Store, viewed
+			// through the narrow ghcollector.EntityStore interface
+			// so the github collector can mint identity:/org: rows
+			// for repo owners (Path A; entity-burn1.md §3.1).
+			EntityStore: s,
 		})
 		if err != nil {
 			return err

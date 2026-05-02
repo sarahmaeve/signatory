@@ -88,6 +88,24 @@ type CollectOpts struct {
 	// package's interface; store.Store satisfies it via
 	// structural typing.
 	Store sourcecollector.SignalStore
+
+	// EntityStore is the persistent store viewed through the github
+	// collector's narrow EntityStore interface — only the
+	// EnsureEntityByCanonicalURI primitive needed to mint
+	// identity:github/<login> and org:github/<name> rows for repo
+	// owners (Path A; design/entity-burn1.md §3.1).
+	//
+	// Same concrete value as Store in production (analyze.go threads
+	// the orchestrator's *store.SQLite into both fields); separate
+	// field because the two narrow interfaces have different methods
+	// and Go's structural typing applies at the call site, not the
+	// field type.
+	//
+	// Optional. nil disables owner-entity minting in the github
+	// collector — tests that don't care about that side effect leave
+	// it nil and the collector silently skips the mint. The
+	// owner_profile signal still emits regardless.
+	EntityStore ghcollector.EntityStore
 }
 
 // Sentinel errors for each failure mode of collectorsFor.
@@ -163,7 +181,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			return nil, err
 		}
 		collectors = append(collectors,
-			ghcollector.NewCollector(),
+			ghcollector.NewCollector().WithEntityStore(opts.EntityStore),
 			gitcollector.NewCollector(clonePath),
 			repofilescollector.NewCollector(clonePath),
 			// OpenSSF Scorecard — additional hygiene signal for

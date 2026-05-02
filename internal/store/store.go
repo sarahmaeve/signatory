@@ -19,6 +19,13 @@ type Store interface {
 	// versioned-entity rows; see SQLite implementation for ordering rules.
 	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
 	PutEntity(ctx context.Context, entity *profile.Entity) error
+	// EnsureEntityByCanonicalURI returns the existing entity at uri, or
+	// mints a fresh row keyed by the supplied shortName when none exists.
+	// Bool return distinguishes "found existing" (false) from "minted new"
+	// (true). Type derives from the URI scheme via profile.EntityTypeForURI;
+	// callers never pass an EntityType. "Find OR mint" — preserves existing
+	// metadata on rediscovery (callers wanting refresh use PutEntity).
+	EnsureEntityByCanonicalURI(ctx context.Context, uri, shortName string) (*profile.Entity, bool, error)
 
 	// Signal operations (append-only)
 	GetSignals(ctx context.Context, entityID string) ([]profile.Signal, error)

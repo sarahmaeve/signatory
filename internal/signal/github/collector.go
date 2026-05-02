@@ -12,9 +12,29 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
 
+// EntityStore is the narrow interface the github collector uses to
+// mint identity:/org: entity rows for the owners of repos it scans.
+// Defined here (consumer-side) so the collector doesn't depend on
+// the full internal/store package — any type that implements
+// EnsureEntityByCanonicalURI satisfies it via structural typing.
+//
+// Optional: the field on Collector is nil-safe. Tests that don't
+// care about owner-entity emission construct collectors without
+// calling WithEntityStore, and the entity-minting branch in
+// collectOwnerProfile silently skips when c.entityStore is nil.
+//
+// In production, cmd/signatory/collectors.go threads the
+// orchestrator's *store.SQLite through opts and calls
+// WithEntityStore so every analyze run populates owner entities
+// for github-hosted targets (Path A; design/entity-burn1.md).
+type EntityStore interface {
+	EnsureEntityByCanonicalURI(ctx context.Context, uri, shortName string) (*profile.Entity, bool, error)
+}
+
 // Collector gathers trust signals from the GitHub API.
 type Collector struct {
-	client *Client
+	client      *Client
+	entityStore EntityStore // optional — see EntityStore docstring
 }
 
 // NewCollector creates a GitHub signal collector. It reads GITHUB_TOKEN
@@ -27,6 +47,20 @@ func NewCollector() *Collector {
 // NewCollectorWithClient creates a collector with a provided client (for testing).
 func NewCollectorWithClient(client *Client) *Collector {
 	return &Collector{client: client}
+}
+
+// WithEntityStore wires an EntityStore into the collector so
+// owner-entity minting fires during each Collect run. Returns the
+// receiver so the call chains cleanly with the constructors.
+//
+// Setter rather than constructor parameter to keep backwards-compat
+// with the existing constructor surface (NewCollector and
+// NewCollectorWithClient are widely used and stay nullary in their
+// store-related parameter; tests that don't need entity emission
+// continue to compile unchanged).
+func (c *Collector) WithEntityStore(s EntityStore) *Collector {
+	c.entityStore = s
+	return c
 }
 
 // Name returns the collector identifier.
@@ -215,6 +249,44 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 	if err != nil {
 		result.RecordFailure(entityID, "owner_profile", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
 		return
+	}
+
+	// Mint or refresh the owner-entity row alongside the
+	// owner_profile signal. The signal carries the metadata
+	// (account_age_days, followers, ...) that downstream synthesis
+	// reads; the entity row is what `signatory burn add identity:
+	// github/<login>` attaches to and what future cascade resolvers
+	// will walk through. Path A; design/entity-burn1.md §3.
+	//
+	// Only fires when an EntityStore was wired via WithEntityStore.
+	// Tests and callers that pre-date Path A construct collectors
+	// without a store and silently skip this branch.
+	//
+	// Failure is non-fatal: a transient store error is recorded as
+	// a stderr warning (TODO: structured failure surface) but the
+	// owner_profile signal still gets emitted. Worst case the entity
+	// row gets minted on the next run; the signal carries the data
+	// regardless.
+	if c.entityStore != nil {
+		var ownerURI string
+		if ownerUser.Type == "Organization" {
+			ownerURI = profile.CanonicalOrgURI("github", ownerUser.Login)
+		} else {
+			// "User" is the dominant case; any unrecognized Type
+			// (rare — GitHub's API returns one of two values)
+			// defaults to identity:, matching the semantics that
+			// individual humans get identity URIs.
+			ownerURI = profile.CanonicalIdentityURI("github", ownerUser.Login)
+		}
+		if _, _, err := c.entityStore.EnsureEntityByCanonicalURI(ctx, ownerURI, ownerUser.Login); err != nil {
+			// Don't fail the owner_profile signal on a store error —
+			// the signal is independent of the entity row, and a
+			// failure here doesn't change what we observed about
+			// the owner. Re-running analyze re-attempts the mint.
+			// Log to stderr so an operator notices systematic store
+			// failures rather than silently missing entity rows.
+			fmt.Fprintf(os.Stderr, "warning: failed to ensure owner entity %s: %v\n", ownerURI, err)
+		}
 	}
 
 	result.RecordSignal(entityID, "owner_profile", "github", now, ttl,

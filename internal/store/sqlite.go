@@ -291,6 +291,59 @@ func (s *SQLite) PutEntity(ctx context.Context, entity *profile.Entity) error {
 	return err
 }
 
+// EnsureEntityByCanonicalURI returns the entity at uri, creating a
+// fresh row when none exists. The bool return distinguishes "found
+// existing" (false) from "minted new" (true) so audit-loggers can
+// record creation events without re-querying.
+//
+// Type is derived from the URI scheme via profile.EntityTypeForURI
+// — callers don't pass an EntityType. This decouples collector code
+// (the primary consumer added in Path A) from per-scheme type
+// reasoning: the URI alone determines the row's type.
+//
+// "Find OR mint" — never "find AND update". A second call with a
+// different shortName preserves the existing row's metadata; the
+// shortName is a creation-time hint, not an update directive.
+// Callers that want to refresh metadata go through PutEntity
+// directly. This keeps the helper safe to call from collectors
+// running on every analyze cycle without trampling fields a
+// previous run set.
+//
+// Validation deferred to PutEntity for the mint branch — the same
+// canonical-URI guard applies whether a caller goes through this
+// helper or PutEntity directly. An invalid URI never lands in the
+// store regardless of the entry point.
+func (s *SQLite) EnsureEntityByCanonicalURI(ctx context.Context, uri, shortName string) (*profile.Entity, bool, error) {
+	existing, err := s.FindEntityByURI(ctx, uri)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, false, fmt.Errorf("lookup entity %q: %w", uri, err)
+	}
+
+	// Truncate to second precision so the in-memory entity matches
+	// what FindEntityByURI would return after the round-trip through
+	// RFC3339-formatted storage. Without this, the helper's two
+	// branches (mint vs find-existing) would yield CreatedAt /
+	// UpdatedAt values that differ at sub-second precision —
+	// surprising for any caller that compares timestamps across
+	// invocations.
+	now := time.Now().UTC().Truncate(time.Second)
+	entity := &profile.Entity{
+		ID:           profile.NewEntityID(),
+		CanonicalURI: uri,
+		Type:         profile.EntityTypeForURI(uri),
+		ShortName:    shortName,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return nil, false, fmt.Errorf("mint entity %q: %w", uri, err)
+	}
+	return entity, true, nil
+}
+
 // --- Signal operations (append-only) ---
 
 // signalColumns is the canonical signal SELECT list.
