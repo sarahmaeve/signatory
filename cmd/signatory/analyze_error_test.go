@@ -452,6 +452,149 @@ func TestFunctional_AnalyzeRefresh_BackfillsEcosystemOnStaleEntity(t *testing.T)
 		"after Ecosystem backfill, resolvePyPIRepo must fire and stamp the github URL — proves the chain works end-to-end")
 }
 
+// npmSrvSucceeding returns an httptest server that serves a minimal
+// npm package metadata response with a github repository.url. Pinned
+// to the package name "lodash" to match what the regression tests use.
+func npmSrvSucceeding(packageName, repoURL string) *httptest.Server {
+	body := fmt.Sprintf(`{
+		"name": %q,
+		"dist-tags": {"latest": "1.0.0"},
+		"time": {"created": "2020-01-01T00:00:00Z", "1.0.0": "2020-01-01T00:00:00Z"},
+		"maintainers": [{"name": "test", "email": "test@example.com"}],
+		"versions": {"1.0.0": {"scripts": {}, "dist": {"attestations": null}}},
+		"repository": {"type": "git", "url": %q}
+	}`, packageName, repoURL)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+}
+
+// TestFunctional_AnalyzeRefresh_NpmResolverFires_OnMistypedLegacyEntity
+// is the regression for the npm Type-gate fragility surfaced by the
+// PR0 audit: cmd/signatory/analyze.go's npm-resolver gate ANDed
+// `entity.Type == EntityPackage` with `Ecosystem == "npm"` and
+// `URL == ""`. A pre-PR0 row created via signatory_ingest_analysis
+// (which hardcoded Type=EntityProject) had the right ecosystem but
+// the wrong type, and the gate silently skipped resolveNpmRepo —
+// leaving URL empty, isGitHostedEntity false, and the github + git
+// + repofiles + openssf collectors all suppressed.
+//
+// The go-resolver gate at analyze.go:472 already gates on Ecosystem
+// alone (per the comment immediately above it). Mirroring that fix
+// for npm and pypi is the actual change this test pins.
+//
+// Note: PR0 fixed the producer (analyst_output.go's hardcode), so
+// new ingests no longer create mistyped rows. This test pre-creates
+// the mistyped state directly via PutEntity — modelling legacy data
+// already in users' stores that PR0 alone cannot reach.
+func TestFunctional_AnalyzeRefresh_NpmResolverFires_OnMistypedLegacyEntity(t *testing.T) {
+	t.Parallel()
+
+	npmSrv := npmSrvSucceeding("legacy-mistyped", "git+https://github.com/example/legacy-mistyped.git")
+	defer npmSrv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pre-create the entity in the legacy-mistyped state: pkg:npm/X URI,
+	// Ecosystem=npm (correct), but Type=EntityProject (wrong — the
+	// pre-PR0 producer bug). Without the gate fix, resolveNpmRepo will
+	// not fire on this row and URL stays empty.
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		mistyped := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:npm/legacy-mistyped",
+			Type:         profile.EntityProject, // ← THE LEGACY BUG STATE
+			ShortName:    "legacy-mistyped",
+			Ecosystem:    "npm",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), mistyped))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:         dbPath,
+		Collectors:     []signal.Collector{newMockCollector()},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		NpmRegistryURL: npmSrv.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:npm/legacy-mistyped", Refresh: true}
+	err := cmd.Run(globals)
+	require.NoError(t, err, "analyze --refresh against a mistyped legacy entity should still resolve: %v", err)
+
+	// Re-read and verify URL got stamped. If the gate's Type check
+	// kept the resolver from firing, URL would still be empty.
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:npm/legacy-mistyped")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/example/legacy-mistyped", entity.URL,
+		"npm resolver must fire on a mistyped legacy entity (Type=Project + Ecosystem=npm + URL='') — "+
+			"the Type-gate at analyze.go:386 must not block the resolver from running on legacy data")
+}
+
+// TestFunctional_AnalyzeRefresh_PyPIResolverFires_OnMistypedLegacyEntity
+// is the pypi parallel to the npm test above. Same gate fragility,
+// same fix, same assertion shape.
+func TestFunctional_AnalyzeRefresh_PyPIResolverFires_OnMistypedLegacyEntity(t *testing.T) {
+	t.Parallel()
+
+	pypiSrv := pypiSrvSucceeding("https://github.com/example/legacy-py")
+	defer pypiSrv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// pypiSrvSucceeding pins the package name to "idna" (the URL the
+	// client hits is /pypi/<name>/json). Match that target so the
+	// fixture serves the right response. The mistyping shape is what
+	// matters, not the package identity.
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		mistyped := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:pypi/idna",
+			Type:         profile.EntityProject, // ← THE LEGACY BUG STATE
+			ShortName:    "idna",
+			Ecosystem:    "pypi",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), mistyped))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:          dbPath,
+		Collectors:      []signal.Collector{newMockCollector()},
+		AuditFilePath:   filepath.Join(dir, "audit.log"),
+		PypiRegistryURL: pypiSrv.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:pypi/idna", Refresh: true}
+	err := cmd.Run(globals)
+	require.NoError(t, err, "analyze --refresh against a mistyped legacy entity should still resolve: %v", err)
+
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:pypi/idna")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/example/legacy-py", entity.URL,
+		"pypi resolver must fire on a mistyped legacy entity (Type=Project + Ecosystem=pypi + URL='') — "+
+			"the Type-gate at analyze.go:426 must not block the resolver from running on legacy data")
+}
+
 // TestFunctional_AnalyzeRefresh_BackfillsURLOnStaleGoEntity is the
 // defensive companion to the pkg-case CloneURL wiring (target.go's
 // derivedGoCloneURL + analyze.go's `entity.URL = resolved.CloneURL`

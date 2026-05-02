@@ -389,7 +389,17 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// repo" result and from "we never tried." On an explicit --refresh,
 	// the error is also returned to the caller (fail loud) because the
 	// user asked for fresh data and we cannot silently decline.
-	if entity.Type == profile.EntityPackage && entity.Ecosystem == "npm" && entity.URL == "" {
+	//
+	// Gates on Ecosystem rather than Type — same rationale as the
+	// go-module gate below (and the symmetric pypi gate that follows):
+	// pre-PR0 entities in dogfood stores carry Type=EntityProject from
+	// the analyst-output ingest path (analyst_output.go) that hardcoded
+	// the type before profile.EntityTypeForURI was hoisted out. The
+	// Ecosystem field is the load-bearing one; gating on it lets the
+	// resolver fire on legacy mistyped rows without requiring a data
+	// migration. PR0 fixed the producer; this defensive gate covers
+	// the rows that were already in users' stores when PR0 landed.
+	if entity.Ecosystem == "npm" && entity.URL == "" {
 		if resolveErr := resolveNpmRepo(ctx, s, entity, globals); resolveErr != nil {
 			// Always write an absence signal so the profile carries a
 			// stored record of the failure — not just ephemeral stderr
@@ -429,7 +439,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// ms dogfood audit where pkg:pypi/ targets reached the analysts
 	// with no resolved github source, so the github + git collectors
 	// silently skipped and the analysts went to upstream APIs.
-	if entity.Type == profile.EntityPackage && entity.Ecosystem == "pypi" && entity.URL == "" {
+	//
+	// Gates on Ecosystem rather than Type — see the npm gate above
+	// for the rationale (legacy mistyped rows from the pre-PR0
+	// analyst_output.go hardcode).
+	if entity.Ecosystem == "pypi" && entity.URL == "" {
 		if resolveErr := resolvePyPIRepo(ctx, s, entity, globals); resolveErr != nil {
 			absenceSig := signal.MakeAbsence(
 				entity.ID,
