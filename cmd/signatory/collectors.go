@@ -164,7 +164,11 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 	if entity != nil {
 		switch entity.Ecosystem {
 		case "npm":
-			collectors = append(collectors, npmcollector.NewCollector())
+			// WithEntityStore wires the publisher-entity minting
+			// branch in the npm collector (Path C). nil-safe — when
+			// opts.EntityStore is nil (e.g., a test that doesn't
+			// care about the side effect) the branch silently skips.
+			collectors = append(collectors, npmcollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "golang", "go":
 			collectors = append(collectors, gopublishcollector.NewCollector())
 		}

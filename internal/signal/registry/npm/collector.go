@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -35,12 +36,34 @@ const source = "npm-registry"
 // but emitting a sensible value keeps the column populated.
 const defaultTTL = 24 * time.Hour
 
+// EntityStore is the narrow interface the npm collector uses to
+// mint identity:npm/<login> entity rows for the maintainers and
+// publishers it observes. Defined here (consumer-side) so the
+// collector doesn't depend on the full internal/store package —
+// any type that implements EnsureEntityByCanonicalURI satisfies
+// it via structural typing.
+//
+// Optional: nil-safe via the WithEntityStore setter, mirroring the
+// github collector's pattern (Path A; design/entity-burn1.md). Tests
+// that don't care about publisher-entity emission construct
+// collectors without calling WithEntityStore, and the minting
+// branch in Collect silently skips when c.entityStore is nil.
+//
+// In production, cmd/signatory/collectors.go threads the
+// orchestrator's *store.SQLite through opts.EntityStore so every
+// analyze run populates publisher entities for npm-ecosystem
+// targets (Path C).
+type EntityStore interface {
+	EnsureEntityByCanonicalURI(ctx context.Context, uri, shortName string) (*profile.Entity, bool, error)
+}
+
 // Collector fetches registry-side signals for npm-hosted packages.
 // Scheme-filtered: entities whose CanonicalURI does NOT start with
 // pkg:npm/ receive an empty result with no error, so the orchestrator
 // can include the collector unconditionally in its dispatch list.
 type Collector struct {
-	client *Client
+	client      *Client
+	entityStore EntityStore // optional — see EntityStore docstring
 }
 
 // NewCollector returns a Collector bound to the public npm registry.
@@ -60,6 +83,19 @@ func NewCollectorWithClient(c *Client) *Collector {
 // for this package's own tests.
 func newCollectorWithClient(c *Client) *Collector {
 	return NewCollectorWithClient(c)
+}
+
+// WithEntityStore wires an EntityStore into the collector so
+// publisher-entity minting fires during each Collect run. Returns
+// the receiver so the call chains cleanly with the constructors —
+// matches the github collector's setter pattern (Path A).
+//
+// Setter rather than constructor parameter so existing call sites
+// (NewCollector / NewCollectorWithClient) keep their signatures and
+// pre-Path-C tests continue to compile unchanged.
+func (c *Collector) WithEntityStore(s EntityStore) *Collector {
+	c.entityStore = s
+	return c
 }
 
 // Name identifies the collector.
@@ -136,7 +172,67 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// patterns" shape gets caught.
 	recordCrossVersionSignals(result, entity.ID, pkg, collectedAt)
 
+	// ----- publisher entity minting (Path C) -----
+	//
+	// Mint identity:npm/<login> entity rows for every maintainer
+	// (top-level Maintainers list) and every per-version publisher
+	// (_npmUser.name across the recent-versions window). Both come
+	// from the same registry payload we already parsed for the
+	// signal emissions above; this is parsing, not network.
+	//
+	// Idempotent on overlap: a login appearing in both the
+	// Maintainers list and as a version publisher gets minted
+	// once — EnsureEntityByCanonicalURI's "find OR mint" contract
+	// makes the second call a no-op on the persistence layer.
+	//
+	// Skipped silently when no EntityStore was wired (pre-Path-C
+	// tests construct collectors without one and continue to work).
+	c.ensurePublisherEntities(ctx, pkg)
+
 	return result, nil
+}
+
+// ensurePublisherEntities walks pkg.Maintainers and the per-version
+// _npmUser.name set, building the union of distinct npm logins, and
+// calls EnsureEntityByCanonicalURI for each. Tracks a local seen-set
+// to avoid redundant store roundtrips when a login appears in both
+// branches (the lodash shape: jdalton is a current maintainer AND
+// was the publisher of the latest version).
+//
+// Failures are logged-and-continued: a transient store error on one
+// login doesn't abort the whole sweep, because each entity row is
+// independent and the next analyze run re-attempts. The per-error
+// stderr line surfaces systemic issues so an operator notices.
+func (c *Collector) ensurePublisherEntities(ctx context.Context, pkg *RegistryPackage) {
+	if c.entityStore == nil || pkg == nil {
+		return
+	}
+
+	seen := map[string]struct{}{}
+	mint := func(login string) {
+		if login == "" {
+			return
+		}
+		uri := profile.CanonicalIdentityURI("npm", login)
+		if _, already := seen[uri]; already {
+			return
+		}
+		seen[uri] = struct{}{}
+		if _, _, err := c.entityStore.EnsureEntityByCanonicalURI(ctx, uri, login); err != nil {
+			// Don't propagate — the signal emissions are independent
+			// of entity-row minting, and the next analyze run re-
+			// attempts. Surface to stderr so systemic store failures
+			// are visible. Matches the github collector's policy.
+			fmt.Fprintf(os.Stderr, "warning: failed to ensure npm publisher entity %s: %v\n", uri, err)
+		}
+	}
+
+	for _, m := range pkg.Maintainers {
+		mint(m.Name)
+	}
+	for _, ver := range pkg.Versions {
+		mint(ver.NpmUser.Name)
+	}
 }
 
 // extractNpmPackageName pulls the npm package name out of an
