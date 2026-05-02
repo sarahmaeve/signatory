@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
@@ -138,11 +139,145 @@ func (s *SQLite) EffectiveBurn(ctx context.Context, entityID string) (*profile.B
 }
 
 // cascadeCandidate is one (owner-URI, role) pair derived from a
-// single signal value. The resolver iterates these to find the
-// first burned related identity.
+// single signal value or from URI structure. The resolver iterates
+// these to find the first burned related identity.
 type cascadeCandidate struct {
 	URI  string
 	Role string
+}
+
+// EffectiveBurnByURI is the pre-collection-gate companion to
+// EffectiveBurn: given only a canonical URI (the entity row may
+// not exist yet in the store), decide whether a related identity
+// is burned. Used by `signatory analyze --refresh` to refuse
+// running collectors against a target whose owner is already
+// burned, before doing any network or filesystem work.
+//
+// Two layers walked in order:
+//
+//  1. URI-derived candidates — for repo:github/X/Y, derive
+//     identity:github/X AND org:github/X (we don't know User vs
+//     Organization without a collect; check both). For scoped npm
+//     packages (pkg:npm/@scope/name), derive identity:npm/scope
+//     and org:npm/scope. Returns one cascadeCandidate per derived
+//     URI; first burned wins.
+//
+//  2. Signal-derived candidates — when an entity row exists at
+//     the queried URI, delegate to EffectiveBurn(entity.ID),
+//     which walks the owner_profile / maintainer_count /
+//     publish_origin_consistency signals as Path B already does.
+//
+// The two layers complement: layer 1 catches "brand-new repo by
+// burned operator" (no entity, no signals); layer 2 catches the
+// general case where the entity is in the store and we have its
+// full relation graph cached.
+//
+// Returns ErrNotFound when neither layer finds a burned related
+// identity — symmetric with EffectiveBurn / GetBurn so callers
+// handle absence uniformly.
+//
+// Direct burn on the queried entity (when it exists) propagates
+// through the layer-2 EffectiveBurn call with Direct=true.
+func (s *SQLite) EffectiveBurnByURI(ctx context.Context, canonicalURI string) (*profile.Burn, *EffectiveBurnContext, error) {
+	// Layer 2 first: if the entity already exists, EffectiveBurn
+	// has the full relation graph (signals + direct check) and is
+	// strictly more informative than URI-derived candidates alone.
+	entity, err := s.FindEntityByURI(ctx, canonicalURI)
+	if err == nil {
+		burn, ebCtx, err := s.EffectiveBurn(ctx, entity.ID)
+		if err == nil {
+			return burn, ebCtx, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, nil, fmt.Errorf("entity-keyed cascade lookup: %w", err)
+		}
+		// Entity exists but no effective burn — fall through to
+		// URI-derived candidates. (Edge case: a freshly-minted
+		// repo entity might exist without an owner_profile signal
+		// yet; URI-derived candidates would still catch the
+		// operator burn.)
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, nil, fmt.Errorf("lookup entity by URI %q: %w", canonicalURI, err)
+	}
+
+	// Layer 1: URI-derived candidates.
+	for _, c := range candidatesFromURI(canonicalURI) {
+		owner, err := s.FindEntityByURI(ctx, c.URI)
+		if errors.Is(err, ErrNotFound) {
+			continue // candidate URI has no entity row (and thus no burn)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("lookup URI-derived candidate %q: %w", c.URI, err)
+		}
+		burn, err := s.GetBurn(ctx, owner.ID)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("burn lookup for URI-derived candidate %q: %w", c.URI, err)
+		}
+		return burn, &EffectiveBurnContext{
+			Direct:   false,
+			ViaOwner: owner,
+			ViaRole:  c.Role,
+		}, nil
+	}
+
+	return nil, nil, ErrNotFound
+}
+
+// candidatesFromURI derives the related-identity URIs encoded by
+// the structure of the canonical URI itself, with no signals
+// required. This is what makes a pre-collection burn-gate
+// possible: the github part of "repo:github/bufferzonecorp/grpc-
+// client" alone says "owner is bufferzonecorp", and that's enough
+// to refuse collection against a burned operator's brand-new repo.
+//
+// Coverage today:
+//
+//   - repo:github/<owner>/<name> → identity:github/<owner>,
+//     org:github/<owner> (User vs Organization indeterminate from
+//     URI alone; both checked)
+//   - pkg:npm/@<scope>/<name>    → identity:npm/<scope>,
+//     org:npm/<scope> (npm scopes usually map to orgs but the
+//     scheme allows user-owned scopes too)
+//
+// Other URI shapes (unscoped npm, pypi, golang vanity hosts,
+// non-pkg/non-repo schemes) return an empty slice — the cascade
+// resolver falls back to signal-derived candidates only for
+// those. Adding new URI-derived patterns here is mechanical when
+// a new ecosystem's URI structure encodes ownership in the path.
+func candidatesFromURI(uri string) []cascadeCandidate {
+	// repo:github/<owner>/<name>
+	if rest, ok := strings.CutPrefix(uri, "repo:github/"); ok {
+		owner, _, found := strings.Cut(rest, "/")
+		if !found || owner == "" {
+			return nil
+		}
+		return []cascadeCandidate{
+			{URI: profile.CanonicalIdentityURI("github", owner), Role: "publisher"},
+			{URI: profile.CanonicalOrgURI("github", owner), Role: "publisher"},
+		}
+	}
+
+	// pkg:npm/@<scope>/<name> — scoped npm packages only. Unscoped
+	// (pkg:npm/<name>) returns nil; the package name is NOT a
+	// publisher login and must not be speculatively checked, or
+	// we'd produce false-positive cascades on name collisions
+	// (a malicious user `foo` would burn the unrelated package
+	// pkg:npm/foo).
+	if rest, ok := strings.CutPrefix(uri, "pkg:npm/@"); ok {
+		scope, _, found := strings.Cut(rest, "/")
+		if !found || scope == "" {
+			return nil
+		}
+		return []cascadeCandidate{
+			{URI: profile.CanonicalIdentityURI("npm", scope), Role: "maintainer"},
+			{URI: profile.CanonicalOrgURI("npm", scope), Role: "maintainer"},
+		}
+	}
+
+	return nil
 }
 
 // cascadeCandidates extracts the related-identity URIs from an

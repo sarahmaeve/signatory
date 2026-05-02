@@ -65,6 +65,14 @@ type Store interface {
 	// (signatory burn list) keep GetBurn so the ledger surface
 	// stays literal.
 	EffectiveBurn(ctx context.Context, entityID string) (*profile.Burn, *EffectiveBurnContext, error)
+	// EffectiveBurnByURI is the URI-keyed companion to EffectiveBurn,
+	// used as the pre-collection gate in `signatory analyze --refresh`.
+	// Walks BOTH URI-derived candidates (repo:github/X/Y → identity:
+	// github/X, org:github/X) AND signal-derived candidates (when an
+	// entity row exists at the URI) so a brand-new repo by a burned
+	// operator gets caught before any collectors run. Returns
+	// ErrNotFound when no related-identity burn applies.
+	EffectiveBurnByURI(ctx context.Context, canonicalURI string) (*profile.Burn, *EffectiveBurnContext, error)
 
 	// Dependency observations (append-only)
 	AppendDependencyObservations(ctx context.Context, observations []profile.DependencyObservation) error

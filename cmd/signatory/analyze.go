@@ -96,6 +96,18 @@ type AnalyzeCmd struct {
 	// targeted retry.
 	AllowFetch bool `name:"allow-fetch" help:"Allow the source-evolution collector to retry missing-SHA reads via 'git fetch origin' once. Default off — a missing SHA after --refresh is preserved as a signal rather than fetched." default:"false"`
 
+	// --ignore-burn overrides the pre-collection burn gate. By
+	// default, --refresh on a target whose owner is burned (or the
+	// target itself) refuses to run collectors and exits non-zero,
+	// so a burned vendor can't accidentally re-collect "fresh"
+	// signals that would contradict the operator-burn classification.
+	// Pass --ignore-burn for forensic / verification cases where you
+	// explicitly want signals collected on a known-burned target.
+	// Withdrawing the burn (signatory burn remove) is the signal-
+	// agnostic alternative — that's the right path when the burn
+	// turns out to have been premature.
+	IgnoreBurn bool `name:"ignore-burn" help:"Override the pre-collection burn gate. Default refuses to collect signals when the target's owner is burned." default:"false"`
+
 	// RunGit overrides the git subprocess invocation for clone-shaped
 	// operations triggered by --clone (fresh clone, fetch on an existing
 	// valid clone, fetch --unshallow on a shallow clone). nil → fall
@@ -121,6 +133,48 @@ type AnalyzeCmd struct {
 	// This unblocks `signatory analyze --json … | jq` pipelines.
 	Stdout io.Writer `kong:"-"`
 	Stderr io.Writer `kong:"-"`
+}
+
+// formatBurnGateError renders the "analyze refusing to collect"
+// error returned by the pre-collection burn gate. Multi-line so
+// the user sees the cascade trace AND the override flag in one
+// place; no need to re-run with --verbose to figure out which
+// ledger entry caused the refusal.
+//
+// Direct burns and cascaded burns get distinct phrasing — a
+// direct burn on the queried entity reads "<URI> is burned",
+// whereas a cascaded burn reads "<URI> is burned via <role>
+// <owner-URI>" so the user can trace the cascade source.
+func formatBurnGateError(canonicalURI string, burn *profile.Burn, ctx *store.EffectiveBurnContext) error {
+	var subject string
+	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
+		subject = fmt.Sprintf("%s is burned via %s %s",
+			canonicalURI, ctx.ViaRole, ctx.ViaOwner.CanonicalURI)
+	} else {
+		subject = fmt.Sprintf("%s is burned", canonicalURI)
+	}
+	return fmt.Errorf(
+		"analyze refusing to collect — %s\n"+
+			"  Reason: %s\n"+
+			"  Burned by: %s at %s\n"+
+			"  Pass --ignore-burn to collect anyway (forensic / verification cases),\n"+
+			"  or `signatory burn remove %s` if the burn was premature.",
+		subject,
+		burn.Reason,
+		burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339),
+		burnRemoveTargetForGate(canonicalURI, ctx),
+	)
+}
+
+// burnRemoveTargetForGate picks the URI a user would point
+// `signatory burn remove` at to clear the gate. For a cascaded
+// burn that's the owner URI (the actual ledger row); for a direct
+// burn it's the queried URI itself.
+func burnRemoveTargetForGate(canonicalURI string, ctx *store.EffectiveBurnContext) string {
+	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
+		return ctx.ViaOwner.CanonicalURI
+	}
+	return canonicalURI
 }
 
 // resolvableEcosystems is the set of pkg:<ecosystem>/ values for
@@ -319,6 +373,29 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	}
 
 	// --- Refresh path: collect fresh signals. ---
+
+	// Pre-collection burn gate (Path B follow-on). Burned vendor =
+	// not safe; collecting fresh signals on a known-burned target
+	// risks producing signals that contradict the operator-burn
+	// classification (a competent attacker may keep most signal
+	// surface clean). EffectiveBurnByURI walks BOTH URI-derived
+	// candidates (catches brand-new repos by burned operators) AND
+	// signal-derived candidates (catches cached entities), so the
+	// gate fires whether or not we've analyzed this target before.
+	//
+	// --ignore-burn overrides for forensic / verification cases.
+	// Withdrawing the burn (signatory burn remove) is the cleaner
+	// path when the burn turns out to have been premature — that
+	// re-opens analyze for everyone, not just this invocation.
+	if !cmd.IgnoreBurn {
+		gateBurn, gateCtx, gateErr := s.EffectiveBurnByURI(ctx, resolved.CanonicalURI)
+		if gateErr != nil && !errors.Is(gateErr, store.ErrNotFound) {
+			return fmt.Errorf("pre-collection burn gate: %w", gateErr)
+		}
+		if gateErr == nil {
+			return formatBurnGateError(resolved.CanonicalURI, gateBurn, gateCtx)
+		}
+	}
 
 	// Create the entity if it doesn't exist yet. Type, ShortName,
 	// URL, and Ecosystem are derived from the resolved target's

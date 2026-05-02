@@ -149,6 +149,129 @@ func TestPathB_CLI_Summary_Identity_ShowsDirectBurn(t *testing.T) {
 		"direct burn rendering must NOT include the cascade phrase — Direct=true is its own case")
 }
 
+// TestPathB_CLI_AnalyzeRefresh_BurnedOwner_GateAborts pins the
+// pre-collection gate: when the operator is burned, analyze
+// --refresh on a brand-new repo by that operator must refuse to
+// run collectors before any network or filesystem work happens.
+// Exits non-zero with a clear message naming the cascade source.
+//
+// This is the answer to "burned vendor = not safe, period" — the
+// /analyze pipeline's primary use case is "is this safe?" and a
+// burned operator is the strongest possible negative answer.
+//
+// Uses a brand-new repo URI (no entity row, no signals) to
+// exercise the URI-derived branch of EffectiveBurnByURI — proves
+// the gate works on first contact with a burned operator's tree,
+// not just on cached entities.
+func TestPathB_CLI_AnalyzeRefresh_BurnedOwner_GateAborts(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	// Burn the operator. The repo we'll target doesn't exist in
+	// the store yet — only the operator burn + the URI structure
+	// tell the gate this is unsafe.
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/bufferzonecorp",
+		"--reason", "campaign-shaped account, 17 throwaway repos",
+	)
+	require.Equal(t, 0, add.exitCode, "burn add must succeed; stderr=%q", add.stderr)
+
+	// Now refresh a brand-new repo by that operator. The gate must
+	// fire and exit non-zero before any collector runs.
+	r := runCLI(t, dbPath,
+		"analyze", "--refresh", "repo:github/bufferzonecorp/never-seen-repo",
+	)
+
+	assert.NotEqual(t, 0, r.exitCode,
+		"analyze --refresh against a burned-operator's repo must exit non-zero; stdout=%q stderr=%q", r.stdout, r.stderr)
+	assert.Contains(t, r.stderr, "refusing to collect",
+		"the abort message must be unambiguous about the refusal")
+	assert.Contains(t, r.stderr, "identity:github/bufferzonecorp",
+		"the abort message must name the cascade source so the user can trace it")
+	assert.Contains(t, r.stderr, "campaign-shaped",
+		"the burn reason must surface so the user knows WHY it's burned")
+	assert.Contains(t, r.stderr, "--ignore-burn",
+		"the abort message must surface the override flag so the user knows the escape hatch")
+	assert.Contains(t, r.stderr, "burn remove",
+		"the abort message must surface the unburn path for cases where the burn was premature")
+}
+
+// TestPathB_CLI_AnalyzeRefresh_BurnedOwner_IgnoreBurn_Proceeds pins
+// the override contract: --ignore-burn skips the gate. The user
+// has explicitly opted in to running collectors against a known-
+// burned target (forensic / verification case). The collectors
+// may still fail or produce no signals in the test environment
+// (no real github API), but the gate must not block the attempt.
+func TestPathB_CLI_AnalyzeRefresh_BurnedOwner_IgnoreBurn_Proceeds(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/bufferzonecorp",
+		"--reason", "campaign-shaped account",
+	)
+	require.Equal(t, 0, add.exitCode)
+
+	// With --ignore-burn, the gate does NOT abort. The collectors
+	// then try to hit the real github API, which we can't redirect
+	// from runCLI (it parses --db only, not --github-base-url).
+	// Concrete assertion: stderr must NOT contain the gate-refusal
+	// message, even if collection eventually fails for other
+	// reasons (network, rate limit). We're pinning the gate, not
+	// the collection happy-path.
+	r := runCLI(t, dbPath,
+		"analyze", "--refresh", "--ignore-burn",
+		"repo:github/bufferzonecorp/never-seen-repo",
+	)
+	assert.NotContains(t, r.stderr, "refusing to collect",
+		"--ignore-burn must skip the gate; stderr=%q", r.stderr)
+}
+
+// TestPathB_CLI_AnalyzeRefresh_HealthyTarget_NoGate confirms the
+// gate doesn't fire on healthy targets — a normal analyze run
+// against an un-burned operator's repo proceeds as before.
+// Catches a future regression where the gate becomes overly broad.
+func TestPathB_CLI_AnalyzeRefresh_HealthyTarget_NoGate(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	// No burns seeded. analyze --refresh on a healthy target must
+	// reach the collector dispatch (which then fails for network
+	// reasons in the test env, but that's collector-side, not
+	// gate-side). Concrete assertion: stderr must NOT contain the
+	// gate-refusal phrase.
+	r := runCLI(t, dbPath,
+		"analyze", "--refresh", "repo:github/healthy-org/healthy-repo",
+	)
+	assert.NotContains(t, r.stderr, "refusing to collect",
+		"healthy-target analyze must NOT trip the gate; stderr=%q", r.stderr)
+}
+
+// TestPathB_CLI_AnalyzeNoRefresh_BurnedOwner_DisplayOnly: without
+// --refresh, the cached-display path runs and the gate should NOT
+// fire — there's no collection to abort. The display still surfaces
+// the cascade via Path B's renderer (signatory analyze without
+// --refresh on a target that has cached signals shows the cached
+// state with the cascade phrase, not "refusing to collect").
+//
+// For a target with no cached signals at all, the existing "no
+// cached data" path is unchanged; the gate doesn't apply.
+func TestPathB_CLI_AnalyzeNoRefresh_BurnedOwner_DisplayOnly(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/bufferzonecorp",
+		"--reason", "campaign-shaped account",
+	)
+	require.Equal(t, 0, add.exitCode)
+
+	r := runCLI(t, dbPath,
+		"analyze", "repo:github/bufferzonecorp/never-seen-repo",
+	)
+	// No cached data + no refresh = the existing "no cached data"
+	// soft-skip. The gate does NOT fire — that would be a UX
+	// regression (the user typed a read-only verb).
+	assert.NotContains(t, r.stderr, "refusing to collect",
+		"non-refresh analyze must NOT trip the gate — there's no collection to refuse")
+}
+
 // TestPathB_CLI_BurnList_ShowsLiteralRowsNotCascaded pins the
 // audit-surface contract: burn list must keep showing what's
 // LITERALLY in the burns table — one row, on the identity. The
