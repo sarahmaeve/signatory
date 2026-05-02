@@ -42,7 +42,14 @@ type PostureGetCmd struct {
 }
 
 func (cmd *PostureGetCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	// Root context. globals.Context, when set, carries the SIGINT-
+	// cancellation wiring from main(); Ctrl-C at the CLI propagates
+	// through store calls. Tests leave this nil and fall back to
+	// context.Background(). See analyze.go for the originating pattern.
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
 	// the `pkg:npm/X` entity with the posture row's `version` column
@@ -158,7 +165,10 @@ type PostureSetCmd struct {
 }
 
 func (cmd *PostureSetCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
 	// the `pkg:npm/X` entity with the row's version column = "V".
@@ -413,7 +423,10 @@ type PostureUnsetCmd struct {
 }
 
 func (cmd *PostureUnsetCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Plan-A canonicalization: a posture for `pkg:npm/X@V` lives at
 	// the `pkg:npm/X` entity with the row's version column = "V".
@@ -545,7 +558,10 @@ type PostureAcceptCmd struct {
 }
 
 func (cmd *PostureAcceptCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

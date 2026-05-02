@@ -32,7 +32,15 @@ type SummaryCmd struct {
 }
 
 func (cmd *SummaryCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	// Root context. globals.Context, when set, carries the SIGINT-
+	// cancellation wiring from main(); Ctrl-C at the CLI propagates
+	// through store/network calls. Tests leave this nil and fall back
+	// to context.Background(). See analyze.go for the originating
+	// pattern.
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	resolved, err := profile.ResolveTarget(cmd.Target)
 	if err != nil {

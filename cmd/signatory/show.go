@@ -25,7 +25,14 @@ type ShowAnalysesCmd struct {
 }
 
 func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	// Root context. globals.Context, when set, carries the SIGINT-
+	// cancellation wiring from main(); Ctrl-C at the CLI propagates
+	// through store calls. Tests leave this nil and fall back to
+	// context.Background(). See analyze.go for the originating pattern.
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -141,7 +148,10 @@ type ShowConclusionsCmd struct {
 }
 
 func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -206,7 +216,10 @@ type ShowMethodologyCmd struct {
 }
 
 func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

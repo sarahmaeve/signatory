@@ -138,6 +138,17 @@ type HandoffCmd struct {
 // (template source, unfilled placeholders, embedded-fallback notice)
 // is informational and goes out independently of Success/failure.
 func (cmd *HandoffCmd) Run(globals *Globals) error {
+	// Root context. globals.Context, when set, carries the SIGINT-
+	// cancellation wiring from main(); Ctrl-C during a long handoff
+	// (network-precheck, clone, store assembly, pipeline POST)
+	// propagates through every helper that takes ctx. Tests leave
+	// this nil and fall back to context.Background(). See analyze.go
+	// for the originating pattern.
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Single-destination rule: --output (file), stdout (default), and
 	// --deposit-to (pipeline service) are the three mutually exclusive
 	// sinks a rendered handoff can go to. Two of them together is a
@@ -224,7 +235,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// inference, provenance-role validation).
 	var precheckReport string
 	if cmd.NetworkPrecheck {
-		report, err := cmd.applyNetworkPrecheck(context.Background())
+		report, err := cmd.applyNetworkPrecheck(ctx)
 		if err != nil {
 			return fmt.Errorf("network-precheck: %w", err)
 		}
@@ -236,7 +247,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// but BEFORE template resolution (so TARGET_PATH is available).
 	var cloneReport string
 	if cmd.CloneDir != "" {
-		clonedPath, report, err := cmd.applyClone(context.Background())
+		clonedPath, report, err := cmd.applyClone(ctx)
 		if err != nil {
 			return fmt.Errorf("clone-dir: %w", err)
 		}
@@ -286,7 +297,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// placeholder; this block is the place where correctness is
 	// enforced.
 	if cmd.AnalysisSessionID != "" {
-		if err := cmd.validateAnalysisSession(context.Background(), globals); err != nil {
+		if err := cmd.validateAnalysisSession(ctx, globals); err != nil {
 			return err
 		}
 	}
@@ -319,7 +330,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// don't need store access; leaving the map untouched keeps the
 	// security handoff path offline.
 	if cmd.Role == "synthesist" {
-		evidenceJSON, err := cmd.assembleSynthesisEvidence(context.Background(), globals)
+		evidenceJSON, err := cmd.assembleSynthesisEvidence(ctx, globals)
 		if err != nil {
 			return err
 		}
@@ -334,7 +345,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	// error so the agent can fall back to collecting from scratch
 	// against the clone.
 	if cmd.Role == "provenance" {
-		signalsBlock, err := cmd.assembleProvenanceSignals(context.Background(), globals)
+		signalsBlock, err := cmd.assembleProvenanceSignals(ctx, globals)
 		if err != nil {
 			return err
 		}
@@ -351,7 +362,7 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 	//   --output FILE     → write rendered bytes to a file.
 	//   (neither)         → write rendered bytes to stdout.
 	if cmd.DepositTo != "" {
-		if err := cmd.depositRendered(rendered); err != nil {
+		if err := cmd.depositRendered(ctx, rendered); err != nil {
 			return err
 		}
 	} else {
@@ -379,17 +390,19 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 // depositRendered POSTs the rendered handoff to the pipeline service
 // as a 'handoff' message on the named session. Role comes from the
 // already-validated cmd.Role positional (kong's enum tag ensures it's
-// one of security / provenance / synthesist).
+// one of security / provenance / synthesist). ctx is the SIGINT-
+// rooted context from Run; cancelling it (Ctrl-C) aborts the in-flight
+// HTTP POST instead of leaving a half-deposited message.
 //
 // Builds a fresh pipeline client per invocation — handoff commands
 // are short-lived (one per skill step), so client reuse buys nothing
 // and a per-call construction keeps the signature simple.
-func (cmd *HandoffCmd) depositRendered(rendered []byte) error {
+func (cmd *HandoffCmd) depositRendered(ctx context.Context, rendered []byte) error {
 	client, err := pipeline.NewClient(cmd.PipelineURL)
 	if err != nil {
 		return fmt.Errorf("open pipeline client: %w", err)
 	}
-	_, err = client.DepositMessage(context.Background(),
+	_, err = client.DepositMessage(ctx,
 		cmd.DepositTo, cmd.Role, "handoff", string(rendered), "")
 	if err != nil {
 		return fmt.Errorf("handoff deposit: %w", err)
