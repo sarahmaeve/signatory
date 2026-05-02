@@ -3,6 +3,7 @@ package profile
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,63 @@ const (
 	EntityPatch    EntityType = "patch"
 	EntityOrg      EntityType = "org"
 )
+
+// EntityTypeForScheme maps a canonical-URI scheme name (without the
+// trailing colon — "repo", "pkg", "identity", "org", "patch") to the
+// EntityType that should be stored on the entity row.
+//
+// This is the single source of truth for the scheme→type mapping.
+// Callers that mint entity rows (analyze, posture, analyst-output
+// ingest, EnsureEntityByCanonicalURI) MUST route through here so the
+// stored type cannot drift from the canonical URI.
+//
+// Unknown schemes return EntityPackage as the least-surprising
+// fallback — purl-style identifiers are the broadest scheme. Callers
+// upstream of here (ResolveTarget, ValidateCanonicalURI) constrain
+// the recognized set; this helper stays total to keep the persistence
+// boundary defensive against future code paths that forget to validate
+// before passing a scheme through.
+//
+// History: previously lived as cmd/signatory/posture.go's package-
+// private entityTypeForScheme. Hoisted to internal/profile/ so
+// store-layer code (internal/store/analyst_output.go) can call it
+// without an import-cycle violation. Replaces a hardcoded
+// Type=EntityProject in the analyst-output ingest path that produced
+// mistyped pkg: rows for every analyst output ingested.
+func EntityTypeForScheme(scheme string) EntityType {
+	switch scheme {
+	case "repo":
+		return EntityProject
+	case "pkg":
+		return EntityPackage
+	case "identity":
+		return EntityIdentity
+	case "org":
+		return EntityOrg
+	case "patch":
+		return EntityPatch
+	default:
+		return EntityPackage
+	}
+}
+
+// EntityTypeForURI extracts the scheme from a canonical URI and returns
+// the matching EntityType. Convenience wrapper over EntityTypeForScheme
+// for callers that have a full URI in hand and don't want to extract
+// the scheme themselves.
+//
+// Defensive: malformed input (no colon, leading colon, empty string)
+// falls through to EntityTypeForScheme's unknown-scheme branch, which
+// returns EntityPackage. Callers that need strict validation should
+// use ValidateCanonicalURI separately; this helper's contract is
+// "always return a usable EntityType."
+func EntityTypeForURI(uri string) EntityType {
+	idx := strings.Index(uri, ":")
+	if idx <= 0 {
+		return EntityPackage
+	}
+	return EntityTypeForScheme(uri[:idx])
+}
 
 // TemporalEra classifies when code was produced, affecting signal interpretation.
 type TemporalEra string

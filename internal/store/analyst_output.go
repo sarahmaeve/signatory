@@ -359,7 +359,11 @@ func resolveIngestTarget(target string) (*resolvedTarget, error) {
 // version stripping is handled by profile.SplitURIVersion.
 //
 // Default fields for newly-created entities:
-//   - type: EntityProject (most analyst outputs target a project)
+//   - type: derived from the URI scheme via profile.EntityTypeForURI
+//     (pkg: → package, repo: → project, identity: → identity, org: →
+//     org, patch: → patch). Previously hardcoded to EntityProject,
+//     which mistyped every pkg: ingest as a project and broke the
+//     downstream Type-gates in cmd/signatory/analyze.go.
 //   - short_name: derived from the UNVERSIONED canonical URI — so
 //     a versioned ingest produces "testify", not "testify@v1.11.1"
 //   - ecosystem: derived from URI prefix (pkg:cargo → "cargo", etc.)
@@ -389,7 +393,13 @@ func (s *SQLite) ensureEntityForTarget(ctx context.Context, target string) (*ent
 	entity := &profile.Entity{
 		ID:           id,
 		CanonicalURI: resolved.EntityURI,
-		Type:         profile.EntityProject,
+		// Type derives from the URI scheme — pkg: → package, repo: →
+		// project, identity: → identity, org: → org, patch: → patch.
+		// Previously hardcoded to EntityProject, which silently
+		// mistyped every pkg: ingest and tripped the Type-gated
+		// resolver triggers in analyze.go (npm/pypi). See
+		// TestIngest_EntityType_MatchesURIScheme for the regression.
+		Type: profile.EntityTypeForURI(resolved.EntityURI),
 		// Derive the short name from the unversioned base so
 		// "pkg:npm/X@1.2.3" produces "X", not "X@1.2.3". Matters
 		// for CLI rendering — `signatory summary` etc. pull

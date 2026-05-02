@@ -290,16 +290,22 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		entity = &profile.Entity{
 			ID:           profile.NewEntityID(),
 			CanonicalURI: resolved.CanonicalURI,
-			CreatedAt:    time.Now().UTC(),
-			UpdatedAt:    time.Now().UTC(),
+			// Type derives from the URI scheme via the shared helper —
+			// single source of truth across analyze, posture set, and
+			// analyst-output ingest. The per-scheme switch below sets
+			// the OTHER fields (ShortName, URL, Ecosystem) that vary
+			// by scheme; the unsupported-scheme error case stays as
+			// analyze's narrower contract (only repo: and pkg: are
+			// wired into Layer-1 collection today).
+			Type:      profile.EntityTypeForScheme(resolved.Scheme),
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
 		}
 		switch resolved.Scheme {
 		case "repo":
-			entity.Type = profile.EntityProject
 			entity.ShortName = resolved.Owner + "/" + resolved.ShortName
 			entity.URL = resolved.CloneURL
 		case "pkg":
-			entity.Type = profile.EntityPackage
 			entity.Ecosystem = resolved.Ecosystem
 			// ShortName is the full package name (scope-preserving
 			// for npm), not the last path segment — "@types/node",

@@ -25,6 +25,103 @@ func TestEntityTypeConstants(t *testing.T) {
 	}
 }
 
+// TestEntityTypeForScheme covers the scheme→EntityType mapping. Kept as
+// a single source of truth so callers (analyze, posture, analyst-output
+// ingest, future EnsureEntityByCanonicalURI) cannot drift out of sync.
+//
+// The mapping mirrors design/entity-model-v2.md and the URI scheme
+// constants in uri.go. Unknown schemes fall back to EntityPackage —
+// the least-surprising default, matching the contract previously held
+// by cmd/signatory/posture.go's package-private entityTypeForScheme.
+func TestEntityTypeForScheme(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		scheme string
+		want   EntityType
+	}{
+		{"repo", EntityProject},
+		{"pkg", EntityPackage},
+		{"identity", EntityIdentity},
+		{"org", EntityOrg},
+		{"patch", EntityPatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.scheme, func(t *testing.T) {
+			t.Parallel()
+			got := EntityTypeForScheme(tc.scheme)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestEntityTypeForScheme_Unknown documents the defensive fallback for
+// schemes outside the recognized set. ResolveTarget normally constrains
+// the set upstream, but the helper is the persistence-boundary safety
+// net — return EntityPackage rather than panic so the store stays
+// permissive at the boundary.
+func TestEntityTypeForScheme_Unknown(t *testing.T) {
+	t.Parallel()
+
+	got := EntityTypeForScheme("bogus")
+	assert.Equal(t, EntityPackage, got, "unknown scheme must fall back to EntityPackage")
+
+	got = EntityTypeForScheme("")
+	assert.Equal(t, EntityPackage, got, "empty scheme must fall back to EntityPackage")
+}
+
+// TestEntityTypeForURI covers the convenience wrapper that takes a full
+// canonical URI and returns the EntityType for its scheme. This is the
+// form most callers want — analyst-output ingest, in particular, has a
+// URI in hand and shouldn't have to extract the scheme manually.
+func TestEntityTypeForURI(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		uri  string
+		want EntityType
+	}{
+		{"repo:github/alecthomas/kong", EntityProject},
+		{"pkg:npm/lodash", EntityPackage},
+		{"pkg:npm/@stripe/stripe-react-native", EntityPackage},
+		{"pkg:cargo/atuin", EntityPackage},
+		{"pkg:golang/github.com/alecthomas/kong", EntityPackage},
+		{"pkg:pypi/click", EntityPackage},
+		{"identity:github/bufferzonecorp", EntityIdentity},
+		{"org:github/vitest-dev", EntityOrg},
+		{"patch:github/foo/bar/123", EntityPatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.uri, func(t *testing.T) {
+			t.Parallel()
+			got := EntityTypeForURI(tc.uri)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestEntityTypeForURI_Malformed documents the defensive fallback for
+// URIs without a recognizable scheme prefix. ValidateCanonicalURI catches
+// these upstream in production paths, but the helper is total — malformed
+// input returns EntityPackage rather than panic.
+func TestEntityTypeForURI_Malformed(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"",
+		"not-a-uri",
+		":no-scheme",
+		"pkg", // no colon at all
+	}
+	for _, uri := range cases {
+		t.Run(uri, func(t *testing.T) {
+			t.Parallel()
+			got := EntityTypeForURI(uri)
+			assert.Equal(t, EntityPackage, got, "malformed URI must fall back to EntityPackage")
+		})
+	}
+}
+
 func TestTemporalEraConstants(t *testing.T) {
 	t.Parallel()
 

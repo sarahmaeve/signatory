@@ -370,7 +370,7 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 	entity := &profile.Entity{
 		ID:           profile.NewEntityID(),
 		CanonicalURI: resolved.CanonicalURI,
-		Type:         entityTypeForScheme(resolved.Scheme),
+		Type:         profile.EntityTypeForScheme(resolved.Scheme),
 		ShortName:    resolved.ShortName,
 		// Ecosystem MUST be stamped here for pkg: targets — the
 		// downstream `signatory analyze --refresh` resolver guards
@@ -390,33 +390,6 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 		return nil, fmt.Errorf("create entity: %w", err)
 	}
 	return entity, nil
-}
-
-// entityTypeForScheme maps a canonical-URI scheme to the EntityType
-// that should be stored on the entity row. Previously ensureEntity
-// hardcoded EntityProject for GitHub URLs and EntityPackage for
-// everything else — identity: and org: URIs would have landed under
-// EntityPackage, which is wrong but rarely surfaced because those
-// schemes came in through different code paths. Routing through
-// ResolveTarget makes the mapping explicit.
-func entityTypeForScheme(scheme string) profile.EntityType {
-	switch scheme {
-	case "repo":
-		return profile.EntityProject
-	case "pkg":
-		return profile.EntityPackage
-	case "identity":
-		return profile.EntityIdentity
-	case "org":
-		return profile.EntityOrg
-	case "patch":
-		return profile.EntityPatch
-	default:
-		// Unknown schemes shouldn't reach here — ResolveTarget
-		// constrains the set — but EntityPackage is the least-
-		// surprising fallback (purl-style identifier).
-		return profile.EntityPackage
-	}
 }
 
 // PostureUnsetCmd withdraws a previously-set posture for an entity.

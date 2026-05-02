@@ -118,6 +118,84 @@ func TestIngest_RepoVersionedTarget_StripsForEntity(t *testing.T) {
 	assert.Equal(t, "repo:github/owner/example-repo@v2.5.0", loaded.Target)
 }
 
+// TestIngest_EntityType_MatchesURIScheme is the producer-side regression
+// for the long-standing analyst-output ingest bug: ensureEntityForTarget
+// hardcoded Type=EntityProject for every newly-created entity, regardless
+// of URI scheme. Every pkg: URI ingested through MCP signatory_ingest_
+// analysis or manual `signatory ingest` produced a row mistyped as
+// EntityProject, and downstream Type-gates (npm/pypi resolver triggers
+// in cmd/signatory/analyze.go) silently failed to fire on those rows.
+//
+// Fix routes through profile.EntityTypeForURI so the stored type is
+// always derived from the canonical URI scheme. This test pins the
+// invariant for every scheme analyst-output ingest can reach.
+func TestIngest_EntityType_MatchesURIScheme(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		target string
+		uri    string // expected unversioned URI on the entity row
+		want   profile.EntityType
+	}{
+		{
+			name:   "pkg npm",
+			target: "pkg:npm/example-pkg",
+			uri:    "pkg:npm/example-pkg",
+			want:   profile.EntityPackage,
+		},
+		{
+			name:   "pkg npm versioned",
+			target: "pkg:npm/example-pkg@1.2.3",
+			uri:    "pkg:npm/example-pkg",
+			want:   profile.EntityPackage,
+		},
+		{
+			name:   "pkg cargo",
+			target: "pkg:cargo/example-crate",
+			uri:    "pkg:cargo/example-crate",
+			want:   profile.EntityPackage,
+		},
+		{
+			name:   "pkg pypi",
+			target: "pkg:pypi/example-py",
+			uri:    "pkg:pypi/example-py",
+			want:   profile.EntityPackage,
+		},
+		{
+			name:   "pkg golang",
+			target: "pkg:golang/github.com/example/mod",
+			uri:    "pkg:golang/github.com/example/mod",
+			want:   profile.EntityPackage,
+		},
+		{
+			name:   "repo github",
+			target: "repo:github/example-org/example-repo",
+			uri:    "repo:github/example-org/example-repo",
+			want:   profile.EntityProject,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestDB(t)
+			ctx := context.Background()
+
+			out := minimalAnalystOutput(tc.target)
+			_, err := s.IngestAnalystOutput(ctx, out, "type-regression")
+			require.NoError(t, err)
+
+			entity, err := s.FindEntityByURI(ctx, tc.uri)
+			require.NoError(t, err, "entity must exist at expected URI")
+			assert.Equal(t, tc.want, entity.Type,
+				"entity.type must match the URI scheme — pkg: → package, repo: → project; "+
+					"hardcoded EntityProject was the producer bug this test pins")
+		})
+	}
+}
+
 // TestIngest_MultipleVersions_SameEntity is the defragmentation
 // invariant: two analyses of the same package at different versions
 // land on ONE entity row with two output rows. Pre-v10 this produced
