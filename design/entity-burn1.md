@@ -1,11 +1,93 @@
 # Entity-burn v0.1 — `ownership_observations` + cascade-on-owner
 
-Status: **draft 2026-05-01** — implementation sketch derived from the discussion that followed `design/countercampaign.md`. Not yet implemented. PR1+PR2 split below; tomorrow-me wants §8 as the test-driven implementation order.
+Status: **shipped 2026-05-02** — see "Status update" below for what landed and what diverged from the original sketch. The original design is preserved in §1–§12 as history.
 
 Implements: the v0.1 slice of `design/countercampaign.md`.
 Defers: identity-equivalence (multiple identities for one human/org) to v0.2 — see §11.
 
 ---
+
+## Status update (2026-05-02): shipped
+
+The work this doc sketches is implemented end-to-end. The BufferZoneCorp use case the parent `countercampaign.md` raised works through every CLI surface: one `signatory burn add identity:github/bufferzonecorp` propagates to every repo that operator publishes (and any future repos), surfacing as `*** BURNED: ... (via publisher identity:github/bufferzonecorp, ...) ***` in `signatory analyze`, `summary`, `survey`, and `show-analyses`; `signatory analyze --refresh` refuses to collect against a burned operator's targets by default; `burn list` stays literal.
+
+### What landed, commit-by-commit
+
+| Commit | What |
+|---|---|
+| `586524b` | `profile`: shared `EntityTypeFor*` helpers + fix analyst_output type hardcode (PR0 — producer-side prerequisite) |
+| `c6c4849` | `cmd/signatory`: drop Type check from npm/pypi resolver gates (Option A — fixed legacy-data fragility) |
+| `4ff4c81` | `cmd/signatory`: scheme guard in analyze + Path D smoke tests (identity/org URI surface validated) |
+| `264c21c` | **Path A**: github collector mints `identity:github/<login>` / `org:github/<name>` for repo owners |
+| `fad5738` | **Path C**: npm collector mints `identity:npm/<login>` for maintainers + per-version publishers |
+| `c3a7d5a` | **Path B**: cascade resolver `EffectiveBurn` via signal lookup, display callers migrated |
+| `57dcd7f` | `analyze`: pre-collection burn gate + `--ignore-burn` override (default-deny) |
+| `af123ef` | `show-analyses`: surface effective burn banner before the listing |
+| `ff06108` | `cmd/signatory`: extract shared `formatBurnLine` renderer (DRY for the three burn surfaces) |
+
+### Key divergence from the original sketch
+
+**The cascade is signal-derived, not table-backed.** §2's `ownership_observations` table never landed. Instead, Path B's `Store.EffectiveBurn(entityID)` and the sibling `EffectiveBurnByURI(uri)` walk the *existing* signals — `owner_profile` (github), `maintainer_count` and `publish_origin_consistency` (npm) — at read time, deriving owner URIs from the JSON values and probing each for a burn.
+
+Why this changed:
+- **No new schema cost.** No migration to write, review, or roll back. The cascade is a pure-derivation feature that ships behind a Go-level Store method.
+- **Same end behaviour.** "Burn the operator → all their repos cascade-burn at display" works identically. Soft-delete of the owner burn naturally clears the cascade because `EffectiveBurn` composes `GetBurn` calls.
+- **`EffectiveBurnByURI` covers the brand-new-entity case.** For `repo:github/X/Y`, it derives both `identity:github/X` and `org:github/X` candidates from the URI structure alone — no entity row required. That's what makes the pre-collection gate work on a brand-new BufferZoneCorp repo we've never analyzed.
+- **Adding new producer ecosystems is purely additive.** PyPI publisher entities, git committer entities, etc., extend the `cascadeCandidates` switch by one case each. No table to modify.
+- **Shape B intent emission was overkill** for the v0.1 surface. Github + npm collectors only mint *entities*, not edges; threading a narrow `EntityStore` interface via a `WithEntityStore` setter (consumer-side interface in each collector package) was simpler than the orchestrator-level intent flush. The Shape-B alternative remains valid if a future collector needs to emit edge-shaped data alongside signals.
+
+What this means for the §2/§3/§4 design notes below: read them as the option-A path that *would have worked*, not the path we took. §11 (identity equivalence) is unchanged — that's still v0.2 work, with its own table.
+
+### Surface area shipped beyond this doc's scope
+
+These weren't in the original §1 "In" but emerged naturally from the work:
+
+- **Path C (npm publisher entities)** — listed as "Out" in §1 but came at parity cost once Path A's pattern was established. The lodash-shape case (three historical publishers, only one current maintainer) wanted entity rows.
+- **Pre-collection burn gate + `--ignore-burn` override** — display-time cascade in §3.3 was the original scope, but a burned operator collecting fresh signals on first contact was the actual v0.1 shipping bar. Default-deny on `analyze --refresh` with explicit override.
+- **`show-analyses` burn banner** — `/analyze` skill's Step 0 calls this; surfacing the burn there gives humans and LLM consumers the lede before the analysis listing.
+- **Renderer extraction** — three commands (`analyze`, `summary`, `show-analyses`) print the BURNED line; `formatBurnLine` consolidates the format.
+
+---
+
+## Pending work (post v0.1)
+
+Each item is its own focused unit; none blocks the others.
+
+### 1. PyPI publisher entities
+
+Mechanical Path A/C parallel for the pypi collector. Same `EntityStore` setter pattern, same minting branch in the per-version walk. The PyPI registry exposes `info.maintainer` (single string) and a `maintainers`-shape extension on newer responses; minting `identity:pypi/<login>` and adding `pypi` to `EffectiveBurn`'s cascade candidates closes the third major ecosystem.
+
+### 2. Git committer / signer entities
+
+`identity:email/<addr>` and `identity:gpg/<keyid>` via the git collector. The git collector's `collectAuthorshipSignals` already parses `--format=%aN\x1f%aE` (mailmap-canonical) and `collectCommitSigning` reads `%GK` (GPG key ID — currently discarded after ratio computation). Promoting either to entity rows is small.
+
+The catch: the existing privacy stance (`internal/signal/git/identity.go:108-111`) deliberately discards the per-mapping detail because mailmap entries can encode personal email addresses. Minting `identity:email/<addr>` rows reverses that decision; needs a privacy review before landing. GPG fingerprints don't carry the same PII concern.
+
+This work also bumps directly into v0.2's identity-equivalence question — Alec at swapoff.org and Alec at block.xyz become two separate entities under v0.1's model, and burning one doesn't burn the other. Worth doing only after the equivalence model is settled or accepting the limitation explicitly.
+
+### 3. Posture cascade
+
+Same shape as burn cascade for posture rows. `Store.EffectivePosture(entityID)` would return the direct posture if any, or walk to owner candidates and return the most-restrictive cascaded posture. Display callers migrate from `GetPostures` to `EffectivePosture` for the rendered "current" view; `signatory posture get --all` keeps the literal-rows surface.
+
+The interesting wrinkle is policy — direct-beats-cascade is obvious for burns ("the analyst said so"), but for postures the right rule is less clear (most-restrictive? most-recent? direct-with-rationale-overriding-cascade?). Worth one design pass before implementing.
+
+### 4. Identity equivalence (v0.2)
+
+The full work outlined in §11 below. Sibling table `identity_equivalences`, populated from `.mailmap` per-line mappings, GPG-UID multi-email keys, npm-username-equals-github-username co-occurrence, and analyst attestations. `EffectiveBurn` extended to walk equivalence edges with depth-bounded transitive closure and confidence-thresholded edges.
+
+This unblocks the "Alec at swapoff.org and Alec at block.xyz are the same person" case in production data. It also re-enables Pending Work #2 (git committer entities) cleanly.
+
+### 5. Smaller follow-ons
+
+- **Skill-side updates** — `/analyze` could check `show-analyses` output for BURNED at Step 0 and short-circuit before pipeline session creation. Skipped per direction; the binary-side gate at Step 1b is the load-bearing enforcement.
+- **`signatory show-conclusions` / `show-methodology` burn banner** — same surfacing pattern as `show-analyses`. Easy follow-up if any user feedback indicates that's where they look first.
+- **Burn-cascade for transitive deps in `survey`** — survey already marks the directly-burned dep as `TierBurned`; if a dep's *dependency* is burned, that's not currently propagated. May or may not be desirable (creates noise on common-ancestor burns); needs design.
+
+---
+
+# Original design sketch (preserved as history)
+
+Sections §1 through §12 below are the implementation sketch as drafted on 2026-05-01, before the work was carried out. They describe the table-backed cascade option — see "Key divergence from the original sketch" above for what we built instead. Read this section as the design discussion that produced the implementation, not as a description of the current code.
 
 ## 1. Scope
 

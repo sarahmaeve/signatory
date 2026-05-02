@@ -1,6 +1,8 @@
 # Counter-campaign: owner-level burn for multi-repo attack operators
 
-Status: **draft 2026-05-01** — written immediately after the BufferZoneCorp/grpc-client analysis surfaced the gap. Not implemented. Decisions to make are in §7; tomorrow-me wants §8 as the implementation checklist.
+Status: **shipped 2026-05-02** — implementation lives in `design/entity-burn1.md` (commits `586524b` through `ff06108`). The §7 decisions resolved as proposed; the §8 implementation checklist was carried out with one architectural divergence: the cascade is signal-derived rather than backed by a new `ownership_observations` table. See `entity-burn1.md`'s "Status update" block for the divergence rationale and the commit-by-commit ledger.
+
+Original design preserved below as history.
 
 Supersedes: nothing. Extends: `design/entity-model-v2.md`, `design/identity-tracking-plan.md`, `design/posture-relationships.md`.
 
