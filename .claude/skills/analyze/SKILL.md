@@ -47,6 +47,9 @@ echo "exit: $?"
   fresh run (re-collect) or are satisfied. If satisfied, skip to
   Step 4. If re-collecting, proceed to Step 1.
 
+- **Exit 0 + "BURNED"**: entity is burned. Tell the user that the
+ entity is burned, show the reason, and stop.
+
 - **Exit 0 + "No entity matches"**: no data in the store. Tell the
   user "no existing analysis" and proceed to Step 1.
 
