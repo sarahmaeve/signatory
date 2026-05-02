@@ -605,11 +605,24 @@ func isMissingObjectMessage(stderr string) bool {
 // isExpectedShutdownErr reports whether err is one of the
 // "subprocess was killed by us" errors that Close should treat as
 // success. The cat-file subprocess exits cleanly on stdin close
-// most of the time, but parent-context cancellation can race and
-// produce "signal: killed" — both are correct shutdowns from our
-// perspective.
+// most of the time, but parent-context cancellation can race in
+// several ways — `cmd.Wait()` may return "signal: killed",
+// "signal: terminated", a "broken pipe" wrap, or — when the
+// context cancellation propagates faster than the OS-level signal
+// — `context.Canceled` / `context.DeadlineExceeded` directly.
+// All are correct shutdowns from our perspective.
+//
+// The errors.Is check covers the context-sentinel cases robustly
+// (works whether `cmd.Wait` returns the sentinel verbatim or
+// wrapped); the string-match cases handle the os/exec ExitError
+// paths that don't unwrap cleanly. Both shapes appeared under
+// `go test -race` load where parallel execution shifts timing
+// enough to surface every race window.
 func isExpectedShutdownErr(err error) bool {
 	if err == nil {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	msg := err.Error()
@@ -621,6 +634,10 @@ func isExpectedShutdownErr(err error) bool {
 	case strings.Contains(msg, "broken pipe"):
 		return true
 	case strings.Contains(msg, "file already closed"):
+		return true
+	case strings.Contains(msg, "context canceled"):
+		return true
+	case strings.Contains(msg, "context deadline exceeded"):
 		return true
 	}
 	return false
