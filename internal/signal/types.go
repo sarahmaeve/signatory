@@ -517,6 +517,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"absence does not mean clean — a sleeper that has not yet been weaponized produces a flat matrix, no anomaly fires, and the operator's metadata signals (account age, tag signing) carry the load until source diverges",
 		},
 	},
+	"exfil_capture_host": {
+		Type:              "exfil_capture_host",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Literal references in package source to HTTP-capture-as-a-service hosts (webhook.site, requestbin.com, beeceptor.com, oast.*, etc.) — services whose operational properties (no signup, ephemeral, public-URL-keyed capture) make their presence in published library code structurally malware-shaped. The BufferZoneCorp campaign (May 2026) exfiltrated to webhook.site/<UUID> from package init() across all 16 packages.",
+		Caveats: []string{
+			"literal substring match only; obfuscated literals (XOR, base64, runtime concatenation) defeat the scan and produce no hit — separate obfuscation patterns catch those",
+			"a hit in test fixtures, README files, or webhook-debugging-tool source is data, not a verdict — the analyst weights by file role",
+			"empty hits is a positive observation (we checked, found nothing), not silence; the signal is always emitted when a clone is available",
+			"the host list is curated in-binary at compile time; updating membership is a code commit, not a remote pull (per ANTIPATTERNS.md no-subscription-list rule)",
+		},
+	},
 
 	// ================================================================
 	// Hygiene — "Does it look like they care?"

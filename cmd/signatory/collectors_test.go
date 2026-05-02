@@ -161,6 +161,8 @@ func TestCollectorsFor_OriginMatches_ReturnsCollectorList(t *testing.T) {
 	assert.True(t, names["git"], "git collector should be present")
 	assert.True(t, names["openssf-scorecard"],
 		"openssf-scorecard collector should be present so dispatched analysts read cached scorecard data via signatory_signals instead of WebFetching the API")
+	assert.True(t, names["exfilwatch"],
+		"exfilwatch collector should be present for git-hosted entities — runs a literal scan of the clone for HTTP-capture-as-a-service hosts (BufferZoneCorp-shaped exfil signal)")
 }
 
 func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
@@ -197,7 +199,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 4, "github + git + repofiles + openssf-scorecard collectors returned")
+	assert.Len(t, collectors, 5, "github + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)

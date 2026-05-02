@@ -13,6 +13,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
@@ -218,6 +219,12 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// api.securityscorecards.dev each run (the cache-miss
 			// pattern flagged repeatedly in the dogfood reports).
 			openssfcollector.NewCollector(),
+			// exfilwatch — literal scan of the clone tree for
+			// HTTP-capture-as-a-service hostnames. Cheap deterministic
+			// signal motivated by the BufferZoneCorp campaign (May 2026,
+			// design/threat-landscape/2026-05-02-bufferzonecorp-campaign.md).
+			// Ecosystem-agnostic: every git-hosted entity gets the scan.
+			exfilwatchcollector.NewCollector(clonePath),
 		)
 
 		// Source-evolution: per-version AST feature matrix
