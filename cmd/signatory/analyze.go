@@ -966,17 +966,22 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 	}
 
 	if p.Burn != nil {
-		// Path B: surface the cascade source when the burn isn't
-		// direct on this entity. Direct burns (BurnVia nil) render
-		// unchanged.
+		// Shared formatter (cmd/signatory/burn_display.go); see
+		// summary.go and show.go for the parallel uses. Empty
+		// BurnVia falls through to the direct form via the
+		// formatter's internal check.
+		var viaURI, viaRole string
 		if d.BurnVia != nil {
-			sw.Writef("*** BURNED: %s (via %s %s, by %s, %s) ***\n",
-				p.Burn.Reason, d.BurnVia.Role, d.BurnVia.OwnerURI,
-				p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
-		} else {
-			sw.Writef("*** BURNED: %s (by %s, %s) ***\n",
-				p.Burn.Reason, p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
+			viaURI = d.BurnVia.OwnerURI
+			viaRole = d.BurnVia.Role
 		}
+		sw.Writef("%s\n", formatBurnLine(burnDisplayInput{
+			Reason:      p.Burn.Reason,
+			BurnedBy:    p.Burn.BurnedBy,
+			BurnedAt:    p.Burn.BurnedAt,
+			ViaOwnerURI: viaURI,
+			ViaRole:     viaRole,
+		}))
 		sw.Writeln()
 	}
 

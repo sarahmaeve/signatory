@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -105,24 +104,28 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 	return nil
 }
 
-// renderShowAnalysesBurnBanner writes the BURNED block to stdout.
-// Format mirrors the equivalent banner in `signatory summary` and
-// `signatory analyze` so the three commands present cascaded burns
-// identically. Direct burns (ctx.Direct == true) get a shorter
-// form without "via owner" — same split as the other renderers.
+// renderShowAnalysesBurnBanner writes the BURNED block to stdout
+// for show-analyses. Adapts the store-side EffectiveBurnContext
+// to the shared formatBurnLine input shape, then prints with a
+// trailing blank line so the BURNED banner is visually separated
+// from the listing/absence message that follows.
 //
 // Stdout, not stderr: the banner is part of the command's primary
 // output; an LLM consumer reading the captured output linearly
 // must see BURNED before the analyses listing/absence message.
 func renderShowAnalysesBurnBanner(burn *profile.Burn, ctx *store.EffectiveBurnContext) {
+	var viaURI, viaRole string
 	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
-		fmt.Printf("*** BURNED: %s (via %s %s, by %s, %s) ***\n\n",
-			burn.Reason, ctx.ViaRole, ctx.ViaOwner.CanonicalURI,
-			burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339))
-		return
+		viaURI = ctx.ViaOwner.CanonicalURI
+		viaRole = ctx.ViaRole
 	}
-	fmt.Printf("*** BURNED: %s (by %s, %s) ***\n\n",
-		burn.Reason, burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339))
+	fmt.Printf("%s\n\n", formatBurnLine(burnDisplayInput{
+		Reason:      burn.Reason,
+		BurnedBy:    burn.BurnedBy,
+		BurnedAt:    burn.BurnedAt,
+		ViaOwnerURI: viaURI,
+		ViaRole:     viaRole,
+	}))
 }
 
 // ShowConclusionsCmd queries the conclusions table across analyst outputs.

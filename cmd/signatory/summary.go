@@ -104,20 +104,16 @@ func renderSummaryHuman(w io.Writer, s *summary.Summary) {
 	}
 
 	if s.Burn != nil {
-		// Path B: when the burn cascaded from a related identity
-		// (the queried entity itself isn't burned, but its github
-		// owner / npm maintainer / npm publisher is), surface the
-		// cascade source so users can trace which ledger entry
-		// caused the degradation. Direct burns (ViaOwnerURI empty)
-		// render unchanged.
-		if s.Burn.ViaOwnerURI != "" {
-			fmt.Fprintf(w, "\n*** BURNED: %s (via %s %s, by %s, %s) ***\n",
-				s.Burn.Reason, s.Burn.ViaRole, s.Burn.ViaOwnerURI,
-				s.Burn.BurnedBy, s.Burn.BurnedAt.Format(time.RFC3339))
-		} else {
-			fmt.Fprintf(w, "\n*** BURNED: %s (by %s, %s) ***\n",
-				s.Burn.Reason, s.Burn.BurnedBy, s.Burn.BurnedAt.Format(time.RFC3339))
-		}
+		// Shared formatter (cmd/signatory/burn_display.go): direct
+		// vs cascade phrasing is centralised so signatory analyze /
+		// summary / show-analyses present cascaded burns identically.
+		fmt.Fprintf(w, "\n%s\n", formatBurnLine(burnDisplayInput{
+			Reason:      s.Burn.Reason,
+			BurnedBy:    s.Burn.BurnedBy,
+			BurnedAt:    s.Burn.BurnedAt,
+			ViaOwnerURI: s.Burn.ViaOwnerURI,
+			ViaRole:     s.Burn.ViaRole,
+		}))
 	}
 
 	if len(s.Analyses) > 0 {
