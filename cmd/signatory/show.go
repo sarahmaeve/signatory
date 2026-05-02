@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -31,8 +33,43 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
+	canonicalURI := normalizeTargetForQuery(cmd.Target)
+
+	// Surface effective-burn status BEFORE the analyses listing
+	// when querying a specific target. This is the lede-first
+	// contract: a human running `show-analyses repo:github/X/Y`
+	// or an LLM consumer reading the captured output linearly
+	// hits BURNED before it sees the analysis listing.
+	//
+	// EffectiveBurnByURI catches three cases in one call:
+	//   - direct burn on the queried entity,
+	//   - signal-derived cascade (entity has owner_profile /
+	//     maintainer_count / publish_origin_consistency signals
+	//     pointing at a burned identity),
+	//   - URI-derived cascade for brand-new repos by burned
+	//     operators (no entity row yet, but repo:github/X/Y
+	//     names a burned X).
+	//
+	// Banner is additive: the existing absence/listing message
+	// still appears below it. Exit code stays 0 in every absence
+	// case — show-analyses is read-only and surfacing a burn is
+	// not an error. A real store error (other than ErrNotFound)
+	// surfaces to stderr as a warning so the listing still runs;
+	// burn surfacing is enrichment, not load-bearing.
+	//
+	// List-all (canonicalURI == "") skips this — there's no
+	// specific target to attribute a banner to, and per-row
+	// burn-tagging would be N+1 store calls for marginal value.
+	if canonicalURI != "" {
+		if burn, ebCtx, burnErr := s.EffectiveBurnByURI(ctx, canonicalURI); burnErr == nil {
+			renderShowAnalysesBurnBanner(burn, ebCtx)
+		} else if !errors.Is(burnErr, store.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "warning: burn check on %s failed: %v\n", canonicalURI, burnErr)
+		}
+	}
+
 	filter := store.AnalystOutputFilter{
-		EntityURI: normalizeTargetForQuery(cmd.Target),
+		EntityURI: canonicalURI,
 		AnalystID: cmd.Analyst,
 		Limit:     cmd.Limit,
 	}
@@ -66,6 +103,26 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		}
 	}
 	return nil
+}
+
+// renderShowAnalysesBurnBanner writes the BURNED block to stdout.
+// Format mirrors the equivalent banner in `signatory summary` and
+// `signatory analyze` so the three commands present cascaded burns
+// identically. Direct burns (ctx.Direct == true) get a shorter
+// form without "via owner" — same split as the other renderers.
+//
+// Stdout, not stderr: the banner is part of the command's primary
+// output; an LLM consumer reading the captured output linearly
+// must see BURNED before the analyses listing/absence message.
+func renderShowAnalysesBurnBanner(burn *profile.Burn, ctx *store.EffectiveBurnContext) {
+	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
+		fmt.Printf("*** BURNED: %s (via %s %s, by %s, %s) ***\n\n",
+			burn.Reason, ctx.ViaRole, ctx.ViaOwner.CanonicalURI,
+			burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339))
+		return
+	}
+	fmt.Printf("*** BURNED: %s (by %s, %s) ***\n\n",
+		burn.Reason, burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339))
 }
 
 // ShowConclusionsCmd queries the conclusions table across analyst outputs.

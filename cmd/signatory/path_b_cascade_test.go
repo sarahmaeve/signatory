@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -270,6 +271,150 @@ func TestPathB_CLI_AnalyzeNoRefresh_BurnedOwner_DisplayOnly(t *testing.T) {
 	// regression (the user typed a read-only verb).
 	assert.NotContains(t, r.stderr, "refusing to collect",
 		"non-refresh analyze must NOT trip the gate — there's no collection to refuse")
+}
+
+// TestPathB_CLI_ShowAnalyses_BurnedTarget_BannerFirst pins the
+// surfacing contract for `signatory show-analyses` (the verb the
+// /analyze skill calls at its Step 0). A target whose owner is
+// burned must surface the BURNED banner BEFORE the existing
+// listing/absence message — so a human running the command sees
+// it as the lede and an LLM consumer reading the captured output
+// linearly hits BURNED before deciding what to do next.
+//
+// Uses seedCascadeScenario (signal-derived cascade): the repo
+// entity exists with an owner_profile signal pointing at the
+// burned identity. Listing produces "No analyses for X" because
+// no analyst outputs are seeded; the test asserts the banner
+// appears in stdout above the "No analyses" line.
+func TestPathB_CLI_ShowAnalyses_BurnedTarget_BannerFirst(t *testing.T) {
+	dbPath := seedCascadeScenario(t)
+
+	r := runCLI(t, dbPath,
+		"show-analyses", "repo:github/bufferzonecorp/grpc-client",
+	)
+	require.Equal(t, 0, r.exitCode,
+		"show-analyses must stay exit 0 even with a burn — read-only command, surfacing not refusing; stderr=%q", r.stderr)
+
+	assert.Contains(t, r.stdout, "BURNED",
+		"the BURNED banner must appear in stdout when the queried target has a cascade-applicable burn")
+	assert.Contains(t, r.stdout, "via publisher identity:github/bufferzonecorp",
+		"the cascade form must name the role and owner URI so the user can trace the source")
+	assert.Contains(t, r.stdout, "campaign-shaped",
+		"the burn reason must surface in the banner")
+
+	// The banner appears BEFORE the existing absence/listing
+	// message — that's the lede-first contract.
+	burnedIdx := strings.Index(r.stdout, "BURNED")
+	noAnalysesIdx := strings.Index(r.stdout, "No analyses")
+	require.GreaterOrEqual(t, burnedIdx, 0)
+	require.GreaterOrEqual(t, noAnalysesIdx, 0)
+	assert.Less(t, burnedIdx, noAnalysesIdx,
+		"BURNED banner must precede the analyses listing/absence message in stdout — output ordering is the contract")
+}
+
+// TestPathB_CLI_ShowAnalyses_DirectBurn_BannerNoViaOwner pins the
+// direct-burn render branch: when the queried target itself has
+// the burn (not a cascade), the banner uses the direct phrasing
+// — no "via owner ..." clause. Mirrors the equivalent split in
+// summary's renderer.
+func TestPathB_CLI_ShowAnalyses_DirectBurn_BannerNoViaOwner(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	// Direct burn on the identity itself; show-analyses on that
+	// identity should render direct-form banner.
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/operator-x",
+		"--reason", "test: direct burn render check",
+	)
+	require.Equal(t, 0, add.exitCode)
+
+	r := runCLI(t, dbPath, "show-analyses", "identity:github/operator-x")
+	require.Equal(t, 0, r.exitCode)
+	assert.Contains(t, r.stdout, "BURNED",
+		"direct burn must produce a banner")
+	assert.NotContains(t, r.stdout, "via owner",
+		"direct burn render must NOT include the cascade phrase — that branch is reserved for cascaded burns")
+	assert.NotContains(t, r.stdout, "via publisher",
+		"same — direct burns don't carry a cascade role")
+	assert.Contains(t, r.stdout, "direct burn render check",
+		"the direct burn reason must surface")
+}
+
+// TestPathB_CLI_ShowAnalyses_BrandNewURIByBurnedOperator_Banner
+// is the URI-derived cascade case: a target whose canonical URI
+// names a burned operator but whose entity row doesn't exist in
+// the store yet. The banner must still fire — it's the load-
+// bearing path for /analyze Step 0 against a brand-new repo by
+// a known-burned operator.
+func TestPathB_CLI_ShowAnalyses_BrandNewURIByBurnedOperator_Banner(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/bufferzonecorp",
+		"--reason", "campaign-shaped account",
+	)
+	require.Equal(t, 0, add.exitCode)
+
+	// Note: this repo URI has NO entity row — only the URI structure
+	// + the operator burn tell show-analyses it's unsafe.
+	r := runCLI(t, dbPath,
+		"show-analyses", "repo:github/bufferzonecorp/never-seen-repo",
+	)
+	require.Equal(t, 0, r.exitCode,
+		"show-analyses on a never-ingested target must stay exit 0 — soft absence is the contract")
+
+	assert.Contains(t, r.stdout, "BURNED",
+		"URI-derived cascade must fire the banner even when no entity row exists for the queried target")
+	assert.Contains(t, r.stdout, "identity:github/bufferzonecorp",
+		"the cascade source must be named")
+	assert.Contains(t, r.stdout, "No entity matches",
+		"the existing absence message must still appear — the banner is additive, not replacing")
+
+	// Banner before the absence message, same lede-first contract.
+	burnedIdx := strings.Index(r.stdout, "BURNED")
+	noEntityIdx := strings.Index(r.stdout, "No entity matches")
+	assert.Less(t, burnedIdx, noEntityIdx,
+		"BURNED banner must precede the absence message")
+}
+
+// TestPathB_CLI_ShowAnalyses_HealthyTarget_NoBanner is the
+// regression guard: a healthy target with no burn anywhere must
+// produce no banner. Catches a future change that overzealously
+// adds a banner unconditionally.
+func TestPathB_CLI_ShowAnalyses_HealthyTarget_NoBanner(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	r := runCLI(t, dbPath, "show-analyses", "repo:github/healthy-org/healthy-repo")
+	require.Equal(t, 0, r.exitCode)
+	assert.NotContains(t, r.stdout, "BURNED",
+		"healthy target must NOT produce a BURNED banner")
+	assert.Contains(t, r.stdout, "No entity matches",
+		"the existing absence message stays intact")
+}
+
+// TestPathB_CLI_ShowAnalyses_NoTarget_NoBanner pins the
+// list-all behaviour: without a target, show-analyses can't
+// burn-check a specific entity and must NOT print a banner.
+// Per-row burn tagging on the list-all path is deferred (would
+// be N+1 store calls for marginal value).
+func TestPathB_CLI_ShowAnalyses_NoTarget_NoBanner(t *testing.T) {
+	dbPath := newCLITestDB(t)
+
+	// Seed a burn so the store DOES contain a burned entity.
+	// The list-all command must still not surface it as a banner —
+	// the contract is "banner only when querying a specific target."
+	add := runCLI(t, dbPath,
+		"burn", "add", "identity:github/some-burned-op",
+		"--reason", "test",
+	)
+	require.Equal(t, 0, add.exitCode)
+
+	r := runCLI(t, dbPath, "show-analyses")
+	require.Equal(t, 0, r.exitCode)
+	assert.NotContains(t, r.stdout, "BURNED",
+		"list-all show-analyses must NOT print a banner — there's no specific target to attribute it to")
+	assert.Contains(t, r.stdout, "No analyses in store",
+		"list-all behaviour stays unchanged")
 }
 
 // TestPathB_CLI_BurnList_ShowsLiteralRowsNotCascaded pins the
