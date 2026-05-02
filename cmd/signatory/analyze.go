@@ -158,6 +158,20 @@ var resolvableEcosystems = map[string]bool{
 type AnalysisDisplay struct {
 	*profile.Profile
 	AnalystOutputs []store.AnalystOutputSummary `json:"analyst_outputs,omitempty"`
+	// BurnVia carries Path B's cascade context: when the displayed
+	// entity isn't directly burned but a related identity is, this
+	// is non-nil and the renderer surfaces "burned via owner ..."
+	// instead of just "burned." Empty when the burn is direct or
+	// when there's no burn at all (Profile.Burn is nil).
+	BurnVia *BurnViaContext `json:"burn_via,omitempty"`
+}
+
+// BurnViaContext is the analyze-display-layer mirror of
+// store.EffectiveBurnContext, kept narrow to what the renderer
+// needs (Profile.Burn already carries Reason / BurnedBy / BurnedAt).
+type BurnViaContext struct {
+	OwnerURI string `json:"owner_uri,omitempty"`
+	Role     string `json:"role,omitempty"`
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
@@ -745,7 +759,10 @@ func (cmd *AnalyzeCmd) displayProfile(
 		return fmt.Errorf("read postures: %w", err)
 	}
 
-	burn, err := s.GetBurn(ctx, entity.ID)
+	// EffectiveBurn surfaces direct OR cascaded burns (Path B).
+	// When the cascade fires, the rendering shows "via owner ..."
+	// so users know which ledger entry caused the degradation.
+	burn, ebCtx, err := s.EffectiveBurn(ctx, entity.ID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("get burn: %w", err)
 	}
@@ -755,6 +772,13 @@ func (cmd *AnalyzeCmd) displayProfile(
 		Signals:  signals,
 		Postures: postures,
 		Burn:     burn,
+	}
+	var burnVia *BurnViaContext
+	if ebCtx != nil && !ebCtx.Direct && ebCtx.ViaOwner != nil {
+		burnVia = &BurnViaContext{
+			OwnerURI: ebCtx.ViaOwner.CanonicalURI,
+			Role:     ebCtx.ViaRole,
+		}
 	}
 	if len(postures) > 0 {
 		// Postures are returned newest-first; highlight the latest as
@@ -766,6 +790,7 @@ func (cmd *AnalyzeCmd) displayProfile(
 	display := &AnalysisDisplay{
 		Profile:        p,
 		AnalystOutputs: analystOutputs,
+		BurnVia:        burnVia,
 	}
 
 	if cmd.JSON {
@@ -864,8 +889,17 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 	}
 
 	if p.Burn != nil {
-		sw.Writef("*** BURNED: %s (by %s, %s) ***\n",
-			p.Burn.Reason, p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
+		// Path B: surface the cascade source when the burn isn't
+		// direct on this entity. Direct burns (BurnVia nil) render
+		// unchanged.
+		if d.BurnVia != nil {
+			sw.Writef("*** BURNED: %s (via %s %s, by %s, %s) ***\n",
+				p.Burn.Reason, d.BurnVia.Role, d.BurnVia.OwnerURI,
+				p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
+		} else {
+			sw.Writef("*** BURNED: %s (by %s, %s) ***\n",
+				p.Burn.Reason, p.Burn.BurnedBy, p.Burn.BurnedAt.Format(time.RFC3339))
+		}
 		sw.Writeln()
 	}
 

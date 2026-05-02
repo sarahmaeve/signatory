@@ -58,6 +58,19 @@ type DepResult struct {
 	// otherwise.
 	BurnReason string
 
+	// BurnViaOwnerURI is populated when Tier == TierBurned AND the
+	// burn cascaded from a related identity (Path B; entity-burn1.md
+	// §3). Empty when the burn is direct on this dep's entity, or
+	// when no burn applies. Renderers surface "burned via owner X"
+	// when this is non-empty so users can trace which ledger entry
+	// caused the degradation.
+	BurnViaOwnerURI string
+
+	// BurnViaRole names the relation kind that produced the
+	// cascade ("publisher", "maintainer"). Set alongside
+	// BurnViaOwnerURI; empty when the burn is direct.
+	BurnViaRole string
+
 	// OtherVersions summarizes what the store knows about this
 	// entity at versions OTHER than the queried one. Populated
 	// only when no exact-version posture matched — the residual

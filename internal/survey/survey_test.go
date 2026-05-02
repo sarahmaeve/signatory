@@ -987,10 +987,15 @@ func lastSegment(uri string) string {
 
 // ---- mock store for error-injection tests ----
 
-// burnErrStore wraps a real SQLite store but overrides GetBurn to
-// return an injected non-ErrNotFound error for a specific entityID.
-// All other methods delegate to the real store so entity and posture
-// setup still works.
+// burnErrStore wraps a real SQLite store but overrides GetBurn AND
+// EffectiveBurn to return an injected non-ErrNotFound error for a
+// specific entityID. All other methods delegate to the real store so
+// entity and posture setup still works.
+//
+// Survey moved to EffectiveBurn at Path B; the GetBurn override is
+// kept for symmetry (any caller still on GetBurn would be exercising
+// the same fault contract). EffectiveBurn is the production path
+// survey actually uses, and this is what the propagation test pins.
 type burnErrStore struct {
 	store.Store
 	burnEntityID string
@@ -1002,6 +1007,13 @@ func (b *burnErrStore) GetBurn(ctx context.Context, entityID string) (*profile.B
 		return nil, b.burnErr
 	}
 	return b.Store.GetBurn(ctx, entityID)
+}
+
+func (b *burnErrStore) EffectiveBurn(ctx context.Context, entityID string) (*profile.Burn, *store.EffectiveBurnContext, error) {
+	if entityID == b.burnEntityID {
+		return nil, nil, b.burnErr
+	}
+	return b.Store.EffectiveBurn(ctx, entityID)
 }
 
 // findErrStore wraps a real SQLite store and overrides

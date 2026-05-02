@@ -232,14 +232,23 @@ func resolveDep(ctx context.Context, s store.Store, d manifest.Dep) (DepResult, 
 		return DepResult{}, err
 	}
 
-	// Layer 0: burns win absolutely.
-	burn, burnErr := s.GetBurn(ctx, entity.ID)
+	// Layer 0: burns win absolutely. EffectiveBurn surfaces direct
+	// OR cascaded burns (Path B) — a dep whose github owner / npm
+	// publisher / maintainer is burned shows as TierBurned, with
+	// BurnViaOwnerURI populated so the renderer can show "burned
+	// via owner X" rather than confusing the user with a "burned"
+	// state they can't trace to a row in burn list.
+	burn, ebCtx, burnErr := s.EffectiveBurn(ctx, entity.ID)
 	if burnErr != nil && !errors.Is(burnErr, store.ErrNotFound) {
 		return DepResult{}, burnErr
 	}
 	if burnErr == nil && burn != nil {
 		r.Tier = TierBurned
 		r.BurnReason = burn.Reason
+		if ebCtx != nil && !ebCtx.Direct && ebCtx.ViaOwner != nil {
+			r.BurnViaOwnerURI = ebCtx.ViaOwner.CanonicalURI
+			r.BurnViaRole = ebCtx.ViaRole
+		}
 		return r, nil
 	}
 

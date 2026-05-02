@@ -98,10 +98,25 @@ type PostureSnapshot struct {
 // BurnSnapshot is the "active burn" view. When nil on the parent
 // Summary, the entity has no active burn. The burned_at / burned_by
 // fields come through verbatim from the burns row.
+//
+// Path B's cascade fields:
+//
+//   - ViaOwnerURI is empty when the burn is direct (on the queried
+//     entity itself), and populated when the burn cascaded from a
+//     related identity (e.g., the repo's github owner is burned, so
+//     the repo summary surfaces "burned via owner identity:github/X").
+//   - ViaRole names the relation kind ("publisher", "maintainer")
+//     so renderers can phrase the cascade reason precisely.
+//
+// Both fields are JSON-omitempty so direct-burn payloads stay
+// compact and clients written before Path B continue to parse the
+// shape they expected.
 type BurnSnapshot struct {
-	Reason   string    `json:"reason"`
-	BurnedBy string    `json:"burned_by"`
-	BurnedAt time.Time `json:"burned_at"`
+	Reason      string    `json:"reason"`
+	BurnedBy    string    `json:"burned_by"`
+	BurnedAt    time.Time `json:"burned_at"`
+	ViaOwnerURI string    `json:"via_owner_uri,omitempty"`
+	ViaRole     string    `json:"via_role,omitempty"`
 }
 
 // AnalysisRollup is the per-analyst-output summary line.

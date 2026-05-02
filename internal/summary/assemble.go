@@ -33,7 +33,13 @@ type AssemblerStore interface {
 	// alternates in cross-row fragmentation cases.
 	HasPostures(ctx context.Context, entityID string) (bool, error)
 	GetPostures(ctx context.Context, entityID string) ([]profile.Posture, error)
-	GetBurn(ctx context.Context, entityID string) (*profile.Burn, error)
+	// EffectiveBurn returns the burn that should display for this
+	// entity, walking related-identity relations (Path B). Direct
+	// burn beats cascade. Used in place of GetBurn so summary
+	// surfaces "burned via owner identity:github/X" when the repo's
+	// owner is burned even though the repo itself isn't directly
+	// burned. Returns ErrNotFound when no effective burn exists.
+	EffectiveBurn(ctx context.Context, entityID string) (*profile.Burn, *store.EffectiveBurnContext, error)
 	ListAnalystOutputs(ctx context.Context, filter store.AnalystOutputFilter) ([]store.AnalystOutputSummary, error)
 	SeverityCounts(ctx context.Context, outputID string) (SeverityCounts, error)
 	ListRelatedURIs(ctx context.Context, entityID string) ([]string, error)
@@ -142,19 +148,30 @@ func (a *Assembler) Assemble(ctx context.Context, targetURI string) (*Summary, e
 		}
 	}
 
-	// Burn: GetBurn already filters withdrawn rows by default, so
-	// ErrNotFound here means "no active burn." Any other error
-	// propagates.
-	burn, err := a.Store.GetBurn(ctx, entity.ID)
+	// Burn: EffectiveBurn handles direct-or-cascade resolution
+	// (Path B). The store filters withdrawn rows in its underlying
+	// GetBurn calls, so ErrNotFound here means "no effective burn"
+	// (neither direct nor cascaded). Any other error propagates.
+	//
+	// When the cascade fires, ViaOwnerURI and ViaRole flow into the
+	// snapshot so renderers can show "burned via owner identity:
+	// github/X" and users can trace which ledger entry caused the
+	// effective state. Direct burns leave those fields empty.
+	burn, ebCtx, err := a.Store.EffectiveBurn(ctx, entity.ID)
 	switch {
 	case err == nil:
-		out.Burn = &BurnSnapshot{
+		snap := &BurnSnapshot{
 			Reason:   burn.Reason,
 			BurnedBy: burn.BurnedBy,
 			BurnedAt: burn.BurnedAt,
 		}
+		if ebCtx != nil && !ebCtx.Direct && ebCtx.ViaOwner != nil {
+			snap.ViaOwnerURI = ebCtx.ViaOwner.CanonicalURI
+			snap.ViaRole = ebCtx.ViaRole
+		}
+		out.Burn = snap
 	case errors.Is(err, store.ErrNotFound):
-		// No active burn — leave Burn nil.
+		// No effective burn — leave Burn nil.
 	default:
 		return nil, fmt.Errorf("lookup burn: %w", err)
 	}

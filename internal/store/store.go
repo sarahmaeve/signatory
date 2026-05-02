@@ -52,6 +52,19 @@ type Store interface {
 	SetBurn(ctx context.Context, burn *profile.Burn) error
 	WithdrawBurn(ctx context.Context, entityID, withdrawnBy, reason string, at time.Time) error
 	ListBurns(ctx context.Context) ([]profile.Burn, error)
+	// EffectiveBurn returns the burn that should apply to entityID,
+	// walking related-identity relations encoded in the entity's
+	// signals (owner_profile, maintainer_count,
+	// publish_origin_consistency). Direct burn beats cascade.
+	// Returns ErrNotFound when neither the entity nor any related
+	// identity has an active burn — symmetric with GetBurn so
+	// callers handle absence uniformly.
+	//
+	// Display callers (signatory analyze rendering, summary,
+	// survey, MCP responses) should use this; audit callers
+	// (signatory burn list) keep GetBurn so the ledger surface
+	// stays literal.
+	EffectiveBurn(ctx context.Context, entityID string) (*profile.Burn, *EffectiveBurnContext, error)
 
 	// Dependency observations (append-only)
 	AppendDependencyObservations(ctx context.Context, observations []profile.DependencyObservation) error

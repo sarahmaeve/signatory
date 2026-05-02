@@ -78,6 +78,25 @@ func (f *fakeStore) GetBurn(_ context.Context, _ string) (*profile.Burn, error) 
 	}
 	return f.burn, nil
 }
+
+// EffectiveBurn delegates to the same f.burn / f.burnErr fields as
+// GetBurn — Path B's resolver is composed of GetBurn calls, so the
+// fake's same-shape behavior here keeps every existing test
+// scenario valid. Tests that want to exercise the cascade-fired
+// path can override this method directly via a wrapper, or extend
+// the fake with an effectiveBurnViaOwner field as that need
+// arises. Path B's load-bearing assertion happens at the
+// SQLite-store layer (effective_burn_test.go) and end-to-end
+// (path_b_cascade_test.go); the summary layer trusts the resolver.
+func (f *fakeStore) EffectiveBurn(_ context.Context, _ string) (*profile.Burn, *store.EffectiveBurnContext, error) {
+	if f.burnErr != nil {
+		return nil, nil, f.burnErr
+	}
+	if f.burn == nil {
+		return nil, nil, store.ErrNotFound
+	}
+	return f.burn, &store.EffectiveBurnContext{Direct: true}, nil
+}
 func (f *fakeStore) ListAnalystOutputs(_ context.Context, _ store.AnalystOutputFilter) ([]store.AnalystOutputSummary, error) {
 	return f.outputs, f.outputsErr
 }
