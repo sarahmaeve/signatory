@@ -215,6 +215,33 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("parse target %q: %w", cmd.Target, err)
 	}
 
+	// Scheme guard: analyze is for repo: and pkg: targets — those
+	// are the schemes whose collectors know how to fetch Layer-1
+	// signals (github API, git log, npm/pypi/golang registries).
+	// identity:, org:, and patch: URIs identify entities the system
+	// stores and burns against, but no Layer-1 collection path
+	// exists for them today: every collector in collectorsFor gates
+	// itself out (no Ecosystem match, isGitHostedEntity false), so
+	// the analyze flow either errored on the create-path or
+	// silently exited 0 with zero signals on the load-path.
+	//
+	// Lifting the guard to the top of Run unifies both shapes: a
+	// fresh-DB ingest and an already-minted entity both fail loudly
+	// with the same message. The error names `signatory summary`
+	// as the right verb for viewing cached state on these entities
+	// (postures, burns, ingested analyst outputs all surface there)
+	// so users don't have to guess the next step.
+	//
+	// The per-scheme switch in the create-block below keeps its
+	// `default:` branch as defense-in-depth — if a future change
+	// removes or weakens this guard, the create-path still rejects
+	// unsupported schemes rather than minting a malformed entity.
+	if resolved.Scheme != "repo" && resolved.Scheme != "pkg" {
+		return fmt.Errorf("analyze does not yet support %q-scheme targets (got %q); "+
+			"use `signatory summary %s` to view cached state",
+			resolved.Scheme, resolved.CanonicalURI, resolved.CanonicalURI)
+	}
+
 	// Default --path when --clone is set without --path: a stable filestore
 	// location keyed by the resolved short-name. Matches the layout used by
 	// `signatory handoff --clone-dir filestore/clones/` and the /analyze
