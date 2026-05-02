@@ -16,8 +16,7 @@ type Project struct {
 	Info Info `json:"info"`
 }
 
-// Info is the project-level metadata block. Only the fields that
-// inform source resolution are modelled today:
+// Info is the project-level metadata block. Modelled today:
 //
 //   - ProjectURLs: free-form publisher-supplied map. Keys vary
 //     wildly (Repository, Source, Source Code, Homepage, Code,
@@ -26,11 +25,40 @@ type Project struct {
 //   - HomePage: the deprecated PEP 621 predecessor of project_urls.
 //     Still populated on older releases and used as the final
 //     fallback when no project_urls key resolves.
+//   - Author / AuthorEmail / Maintainer / MaintainerEmail: legacy
+//     PEP 621 single-string fields. Publisher-supplied free text:
+//     historically a comma-separated list of human-readable names
+//     ("Saurabh Kumar" or "Some Person, Other Person") with optional
+//     <email@addr> wrappers. The collector parses these
+//     conservatively for publisher-entity minting (collector.go,
+//     extractPyPILogins) — login-shaped values only, free-text
+//     display names are rejected.
+//   - Maintainers: PEP 639 / Trove-style multi-maintainer list. Each
+//     entry is a {name, email} object. Newer registry responses
+//     populate this; legacy responses leave it nil and use the
+//     single-string Maintainer field above.
 //
-// Other fields the collector will eventually need (author,
-// requires_python, license, version) land here additively when
-// Layer 5 wires them up.
+// Other fields the full Layer 5 collector will eventually want
+// (requires_python, license, version, downloads, …) land here
+// additively when those signals come online.
 type Info struct {
-	ProjectURLs map[string]string `json:"project_urls"`
-	HomePage    string            `json:"home_page"`
+	ProjectURLs     map[string]string `json:"project_urls"`
+	HomePage        string            `json:"home_page"`
+	Author          string            `json:"author"`
+	AuthorEmail     string            `json:"author_email"`
+	Maintainer      string            `json:"maintainer"`
+	MaintainerEmail string            `json:"maintainer_email"`
+	Maintainers     []Person          `json:"maintainers"`
+}
+
+// Person models one entry in PyPI's PEP 639-style maintainers /
+// authors list (the multi-entry parallel to the legacy single-string
+// Author / Maintainer fields). Both fields are publisher-supplied;
+// Name is the conventional carrier of the registry login when the
+// publisher chose to use one rather than a display name. The
+// collector applies the same login-shape filter as for the legacy
+// fields (extractPyPILogins).
+type Person struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }

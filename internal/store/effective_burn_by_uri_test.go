@@ -105,7 +105,7 @@ func TestEffectiveBurnByURI_SignalDerivedCascade(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/x/y", "x/y")
 	ownerID := seedOwnerEntity(t, s, "identity:github/x", "x")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "x", "type": "User",
 	})
 	seedBurn(t, s, ownerID, "test: cascade via signal")

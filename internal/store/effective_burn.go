@@ -280,22 +280,55 @@ func candidatesFromURI(uri string) []cascadeCandidate {
 	return nil
 }
 
+// platformForRegistrySource maps a registry-collector signal source
+// (the value collectors set in profile.Signal.Source for shared
+// signal types like maintainer_count and publish_origin_consistency)
+// to the platform string used in CanonicalIdentityURI. Returns an
+// empty string for unrecognized sources — the cascade resolver
+// treats that as "no candidate", keeping the dispatch fail-shut.
+//
+// Adding a new ecosystem collector to the cascade requires extending
+// this switch by one case and registering the same source string in
+// the collector. The compile-time pairing (collector source ↔
+// resolver dispatch) is intentional: silent default-to-npm would
+// produce phantom-cascade candidates for any future collector that
+// emitted maintainer_count from a non-npm source without thinking
+// through the cascade implications.
+func platformForRegistrySource(source string) string {
+	switch source {
+	case "npm-registry":
+		return "npm"
+	case "pypi-registry":
+		return "pypi"
+	default:
+		return ""
+	}
+}
+
 // cascadeCandidates extracts the related-identity URIs from an
 // entity's latest signals. Each signal type the resolver knows
 // about contributes zero or more candidates: github's
-// owner_profile produces one (the repo owner); npm's
-// maintainer_count and publish_origin_consistency each produce
-// many (one per login).
+// owner_profile produces one (the repo owner); maintainer_count
+// and publish_origin_consistency each produce many (one per login).
+//
+// The latter two are SHARED signal types — npm and pypi collectors
+// both emit them with the same {count, logins} / {publishers, ...}
+// schema — so the resolver dispatches on sig.Source via
+// platformForRegistrySource to construct the right identity URI
+// (identity:npm/<login> vs identity:pypi/<login>). Signals from
+// unknown sources contribute no candidates (fail-shut).
 //
 // Signal types not in the switch contribute nothing — silent skip.
 // New producer collectors extend the cascade by adding their type
-// to the switch; tests in effective_burn_test.go cover each branch.
+// to the switch (or, for shared types, registering their source in
+// platformForRegistrySource); tests in effective_burn_test.go cover
+// each branch.
 //
 // Order matters for the "first burned wins" rule. Currently:
 // owner_profile entries appear first (github repos have exactly
-// one owner; the unambiguous case); then npm maintainers; then npm
+// one owner; the unambiguous case); then maintainers; then
 // publishers. The latter two iterate the array in stored order,
-// which is the order the npm collector emitted them.
+// which is the order the source collector emitted them.
 func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]cascadeCandidate, error) {
 	signals, err := s.GetLatestSignals(ctx, entityID)
 	if err != nil {
@@ -328,7 +361,18 @@ func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]casc
 
 		case "maintainer_count":
 			// {"count":N, "logins":["a","b",...]} → one
-			// identity:npm/<login> per login. Role: maintainer.
+			// identity:<platform>/<login> per login. Role: maintainer.
+			//
+			// Platform comes from sig.Source: maintainer_count is
+			// emitted by both npm-registry and pypi-registry collectors
+			// with identical schema, so the resolver dispatches on
+			// source to pick the right identity URI. Unknown sources
+			// produce no candidates — fail-shut keeps new ecosystem
+			// collectors honest about declaring their dispatch here.
+			platform := platformForRegistrySource(sig.Source)
+			if platform == "" {
+				continue
+			}
 			var v struct {
 				Logins []string `json:"logins"`
 			}
@@ -340,18 +384,25 @@ func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]casc
 					continue
 				}
 				out = append(out, cascadeCandidate{
-					URI:  profile.CanonicalIdentityURI("npm", login),
+					URI:  profile.CanonicalIdentityURI(platform, login),
 					Role: "maintainer",
 				})
 			}
 
 		case "publish_origin_consistency":
 			// {"publishers":["a","b",...], ...} → one
-			// identity:npm/<login> per publisher. Role: publisher.
+			// identity:<platform>/<login> per publisher. Role: publisher.
 			// Publishers and maintainers can overlap; that's fine —
 			// EffectiveBurn returns the first burned candidate and
 			// dedupes implicitly (duplicate FindEntityByURI calls
 			// for the same URI are idempotent and cheap).
+			//
+			// Same source-dispatch rationale as maintainer_count:
+			// platform is read from sig.Source.
+			platform := platformForRegistrySource(sig.Source)
+			if platform == "" {
+				continue
+			}
 			var v struct {
 				Publishers []string `json:"publishers"`
 			}
@@ -363,7 +414,7 @@ func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]casc
 					continue
 				}
 				out = append(out, cascadeCandidate{
-					URI:  profile.CanonicalIdentityURI("npm", login),
+					URI:  profile.CanonicalIdentityURI(platform, login),
 					Role: "publisher",
 				})
 			}

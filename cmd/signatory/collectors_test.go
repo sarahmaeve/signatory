@@ -470,13 +470,14 @@ func TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution(t *testing.T)
 	}
 }
 
-// TestCollectorsFor_NonNpmPackage_NoCollectors covers a defensive
-// edge case: a package-scheme entity for an ecosystem signatory
-// doesn't yet collect (pypi, cargo, ...) with no URL gets zero
-// collectors. Not a hard error — the surface for other ecosystems
-// lands when each ecosystem's collector ships — but the function
-// must not panic or return a surprise sentinel error.
-func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
+// TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector pins the
+// post-Phase-E wiring: a pkg:pypi/ entity with no resolved github
+// URL still gets the pypi-registry collector (so publisher entities
+// land + maintainer_count emits + cascade resolver picks them up).
+// This used to assert "pypi gets zero collectors" before the pypi
+// collector landed; flipping the assertion is the wiring-shipped
+// signal.
+func TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector(t *testing.T) {
 	t.Parallel()
 
 	entity := &profile.Entity{
@@ -488,8 +489,35 @@ func TestCollectorsFor_NonNpmPackage_NoCollectors(t *testing.T) {
 	}
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
 	require.NoError(t, err)
+
+	var names []string
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "pypi-registry",
+		"pypi entity must dispatch the pypi-registry collector even without a resolved github URL — the maintainer_count signal feeds the cascade resolver and publisher entities mint regardless of repo presence")
+}
+
+// TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors guards the
+// safe-skip behaviour for ecosystems signatory doesn't yet collect
+// against. v0.1 wires npm + pypi + golang; cargo/rust, ruby, php,
+// nuget, ... lack collectors and must produce an empty slice — not
+// a hard error. Mirrors the historical defensive test that pypi
+// used to anchor before pypi wiring landed.
+func TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:cargo/serde",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+		URL:          "",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.NoError(t, err)
 	assert.Empty(t, collectors,
-		"pypi entity without URL gets zero collectors — pypi isn't wired yet, and there's no github URL to clone")
+		"cargo isn't wired in v0.1 — entities for unwired ecosystems must produce zero collectors without erroring")
 }
 
 // --- gitCloneFull / validateExistingClone env-sanitization tests ------------

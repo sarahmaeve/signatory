@@ -57,10 +57,14 @@ func seedRepoEntity(t *testing.T, s *SQLite, uri, shortName string) string {
 	return e.ID
 }
 
-// seedSignal appends one latest-state signal of the given type/value
-// to entityID. The cascade resolver reads these to find related
-// owner/publisher URIs.
-func seedSignal(t *testing.T, s *SQLite, entityID, signalType string, value any) {
+// seedSignal appends one latest-state signal of the given type, with
+// the given source, to entityID. The cascade resolver reads these to
+// find related owner/publisher URIs; source is load-bearing for the
+// shared-signal types (maintainer_count, publish_origin_consistency)
+// where the resolver dispatches on Source to pick the right
+// platform — pass the production-shape source ("github",
+// "npm-registry", "pypi-registry") to exercise the real branch.
+func seedSignal(t *testing.T, s *SQLite, entityID, signalType, source string, value any) {
 	t.Helper()
 	raw, err := json.Marshal(value)
 	require.NoError(t, err)
@@ -70,7 +74,7 @@ func seedSignal(t *testing.T, s *SQLite, entityID, signalType string, value any)
 		EntityID:          entityID,
 		Type:              signalType,
 		Group:             profile.SignalGroupGovernance,
-		Source:            "test",
+		Source:            source,
 		ForgeryResistance: profile.ForgeryHigh,
 		Value:             raw,
 		CollectedAt:       now,
@@ -122,7 +126,7 @@ func TestEffectiveBurn_NoBurn(t *testing.T) {
 	repoID := seedRepoEntity(t, s, "repo:github/x/y", "x/y")
 	// Owner entity exists but isn't burned.
 	seedOwnerEntity(t, s, "identity:github/x", "x")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "x", "type": "User",
 	})
 
@@ -140,7 +144,7 @@ func TestEffectiveBurn_CascadeViaGithubOwner_User(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/bufferzonecorp/grpc-client", "bufferzonecorp/grpc-client")
 	ownerID := seedOwnerEntity(t, s, "identity:github/bufferzonecorp", "bufferzonecorp")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "bufferzonecorp",
 		"type":  "User",
 	})
@@ -166,7 +170,7 @@ func TestEffectiveBurn_CascadeViaGithubOwner_Organization(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/some-org/some-repo", "some-org/some-repo")
 	orgID := seedOwnerEntity(t, s, "org:github/some-org", "some-org")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "some-org",
 		"type":  "Organization",
 	})
@@ -189,7 +193,7 @@ func TestEffectiveBurn_CascadeViaNpmMaintainer(t *testing.T) {
 
 	pkgID := seedRepoEntity(t, s, "pkg:npm/lodash", "lodash")
 	maintID := seedOwnerEntity(t, s, "identity:npm/jdalton", "jdalton")
-	seedSignal(t, s, pkgID, "maintainer_count", map[string]any{
+	seedSignal(t, s, pkgID, "maintainer_count", "npm-registry", map[string]any{
 		"count":  1,
 		"logins": []string{"jdalton"},
 	})
@@ -215,7 +219,7 @@ func TestEffectiveBurn_CascadeViaNpmPublisher(t *testing.T) {
 
 	pkgID := seedRepoEntity(t, s, "pkg:npm/lodash", "lodash")
 	bnjID := seedOwnerEntity(t, s, "identity:npm/bnjmnt4n", "bnjmnt4n")
-	seedSignal(t, s, pkgID, "publish_origin_consistency", map[string]any{
+	seedSignal(t, s, pkgID, "publish_origin_consistency", "npm-registry", map[string]any{
 		"publishers":        []string{"bnjmnt4n", "jdalton", "mathias"},
 		"unique_publishers": 3,
 		"latest_publisher":  "jdalton",
@@ -230,6 +234,101 @@ func TestEffectiveBurn_CascadeViaNpmPublisher(t *testing.T) {
 	assert.Contains(t, burn.Reason, "historical publisher")
 }
 
+// TestEffectiveBurn_CascadeViaPyPIMaintainer pins the pypi case:
+// a package whose maintainer_count signal was emitted by the pypi
+// collector (Source="pypi-registry") cascades through identity:pypi/
+// <login>, NOT identity:npm/<login>. The cascade resolver dispatches
+// on signal Source for shared signal types (maintainer_count is
+// emitted by both npm and pypi collectors with identical schema —
+// {count, logins} — so the resolver reads Source to know which
+// platform's identity URI to construct).
+//
+// Until this test passes, the resolver hardcodes "npm" in the
+// maintainer_count branch and a pypi maintainer's burn never
+// cascades to their packages — the design's "third major ecosystem"
+// goal in entity-burn1.md "Pending work #1" is unmet.
+func TestEffectiveBurn_CascadeViaPyPIMaintainer(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	pkgID := seedRepoEntity(t, s, "pkg:pypi/some-pkg", "some-pkg")
+	maintID := seedOwnerEntity(t, s, "identity:pypi/ofek", "ofek")
+	// Inline signal seed with Source="pypi-registry" — the seedSignal
+	// helper currently uses Source="test" which is too lenient to test
+	// source-dispatch behaviour. After Phase D's refactor, seedSignal
+	// will accept a source argument and this can collapse.
+	now := time.Now().UTC()
+	require.NoError(t, s.AppendSignals(t.Context(), []profile.Signal{{
+		ID:                profile.NewEntityID(),
+		EntityID:          pkgID,
+		Type:              "maintainer_count",
+		Group:             profile.SignalGroupGovernance,
+		Source:            "pypi-registry",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value: mustJSON(t, map[string]any{
+			"count":  1,
+			"logins": []string{"ofek"},
+		}),
+		CollectedAt: now,
+		ExpiresAt:   now.Add(time.Hour),
+	}}))
+	seedBurn(t, s, maintID, "test: pypi maintainer compromised")
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), pkgID)
+	require.NoError(t, err)
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "identity:pypi/ofek", ctx.ViaOwner.CanonicalURI,
+		"a maintainer_count signal sourced from pypi-registry must cascade through identity:pypi/<login>, not identity:npm/<login>")
+	assert.Equal(t, "maintainer", ctx.ViaRole)
+	assert.Contains(t, burn.Reason, "compromised")
+}
+
+// TestEffectiveBurn_CascadeUnknownSource_NoCascade pins the
+// dispatch contract's fail-shut posture: a maintainer_count signal
+// with an unrecognized Source produces NO cascade candidates, rather
+// than silently defaulting to npm. Forces every new ecosystem
+// collector to declare its source in the resolver's switch — keeps
+// the platform→URI mapping explicit at the read layer.
+func TestEffectiveBurn_CascadeUnknownSource_NoCascade(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	pkgID := seedRepoEntity(t, s, "pkg:npm/whatever", "whatever")
+	// Mint an identity row that WOULD cascade if the dispatch
+	// silently picked a default; the burn on it is the trap.
+	maintID := seedOwnerEntity(t, s, "identity:npm/someone", "someone")
+	seedBurn(t, s, maintID, "test: should not cascade — unknown source")
+
+	now := time.Now().UTC()
+	require.NoError(t, s.AppendSignals(t.Context(), []profile.Signal{{
+		ID:                profile.NewEntityID(),
+		EntityID:          pkgID,
+		Type:              "maintainer_count",
+		Group:             profile.SignalGroupGovernance,
+		Source:            "made-up-registry",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value: mustJSON(t, map[string]any{
+			"count":  1,
+			"logins": []string{"someone"},
+		}),
+		CollectedAt: now,
+		ExpiresAt:   now.Add(time.Hour),
+	}}))
+
+	_, _, err := s.EffectiveBurn(t.Context(), pkgID)
+	require.ErrorIs(t, err, ErrNotFound,
+		"unknown signal source must NOT speculate a platform — adding a new ecosystem requires extending the resolver's source→platform switch explicitly")
+}
+
+// mustJSON marshals v to JSON or fails the test. Tiny helper so the
+// inline signal seeds in pypi/dispatch tests stay readable.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
+}
+
 // TestEffectiveBurn_DirectBeatsCascade verifies the precedence rule:
 // when both a direct burn AND a cascade-applicable owner-burn exist,
 // the direct burn is returned as primary. ViaOwner stays nil so the
@@ -240,7 +339,7 @@ func TestEffectiveBurn_DirectBeatsCascade(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/x/y", "x/y")
 	ownerID := seedOwnerEntity(t, s, "identity:github/x", "x")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "x", "type": "User",
 	})
 	seedBurn(t, s, ownerID, "owner-level burn")
@@ -268,7 +367,7 @@ func TestEffectiveBurn_OwnerEntityNotMinted_NoCascade(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/x/y", "x/y")
 	// Note: NO seedOwnerEntity — the identity row doesn't exist.
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "x", "type": "User",
 	})
 
@@ -291,7 +390,7 @@ func TestEffectiveBurn_MultiplePublishers_BurnedOneCascades(t *testing.T) {
 	seedOwnerEntity(t, s, "identity:npm/jdalton", "jdalton")
 	mathiasID := seedOwnerEntity(t, s, "identity:npm/mathias", "mathias")
 	seedOwnerEntity(t, s, "identity:npm/bnjmnt4n", "bnjmnt4n")
-	seedSignal(t, s, pkgID, "publish_origin_consistency", map[string]any{
+	seedSignal(t, s, pkgID, "publish_origin_consistency", "npm-registry", map[string]any{
 		"publishers": []string{"jdalton", "mathias", "bnjmnt4n"},
 	})
 	seedBurn(t, s, mathiasID, "test: only mathias is burned")
@@ -316,7 +415,7 @@ func TestEffectiveBurn_WithdrawnOwnerBurn_NoCascade(t *testing.T) {
 
 	repoID := seedRepoEntity(t, s, "repo:github/x/y", "x/y")
 	ownerID := seedOwnerEntity(t, s, "identity:github/x", "x")
-	seedSignal(t, s, repoID, "owner_profile", map[string]any{
+	seedSignal(t, s, repoID, "owner_profile", "github", map[string]any{
 		"login": "x", "type": "User",
 	})
 	seedBurn(t, s, ownerID, "test: premature burn")

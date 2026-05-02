@@ -18,6 +18,7 @@ import (
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
+	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
 	sourcecollector "github.com/sarahmaeve/signatory/internal/signal/source"
 )
@@ -140,10 +141,10 @@ var (
 //   - Registry-package entities with no resolved repo URL
 //     (EntityPackage + empty URL): neither github nor git-local-clone
 //     apply — the entity has no git origin to examine. The ecosystem
-//     collector (npm, pypi, ...) is added separately by Phase A.4
-//     wiring; this function returns an empty slice for them today.
-//     --path/--clone are NOT required in this case; the sentinel
-//     ErrCloneRequired only fires for git-hosted entities.
+//     collector (npm, pypi, golang, ...) is added by the per-ecosystem
+//     switch below; ecosystems without a wired collector return an
+//     empty slice. --path/--clone are NOT required in this case; the
+//     sentinel ErrCloneRequired only fires for git-hosted entities.
 //
 // The contract's generalization from "always [github, git]" to
 // "dispatch by entity shape" is the Phase A.2 refactor. Prior to it,
@@ -169,6 +170,14 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// opts.EntityStore is nil (e.g., a test that doesn't
 			// care about the side effect) the branch silently skips.
 			collectors = append(collectors, npmcollector.NewCollector().WithEntityStore(opts.EntityStore))
+		case "pypi":
+			// PyPI parallel to the npm branch — mints
+			// identity:pypi/<login> rows for the publisher logins
+			// extractable from info.maintainer / info.author / the
+			// PEP 639 maintainers list, and emits a maintainer_count
+			// signal feeding the cascade resolver's pypi-registry
+			// dispatch (entity-burn1.md "Pending work #1").
+			collectors = append(collectors, pypicollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "golang", "go":
 			collectors = append(collectors, gopublishcollector.NewCollector())
 		}
