@@ -18,14 +18,26 @@ import (
 // tests. Maps SHA → file list (or error) for EnumerateGoFiles, and
 // SHA-pair → DiffStat for DiffStat. Missing entries return
 // ErrSHAMissingFromClone via the iterator.
+//
+// errBySHA is the test seam for non-ErrSHAMissingFromClone errors —
+// context cancellation, blob-cap rejections, generic IO failures —
+// the cases that exercise the analyze-failed branch of
+// buildRowFromPin. Checked before missingSHAs so a SHA listed in
+// both yields the explicit error rather than the canonical
+// missing-from-clone sentinel.
 type fakeSourceProvider struct {
 	filesBySHA  map[string][]golang.SourceFile
 	missingSHAs map[string]bool
+	errBySHA    map[string]error
 	diffsByPair map[[2]string]DiffStat
 }
 
 func (f *fakeSourceProvider) EnumerateGoFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
 	return func(yield func(golang.SourceFile, error) bool) {
+		if err, ok := f.errBySHA[sha]; ok {
+			yield(golang.SourceFile{}, err)
+			return
+		}
 		if f.missingSHAs[sha] {
 			yield(golang.SourceFile{}, ErrSHAMissingFromClone)
 			return
@@ -236,6 +248,52 @@ func TestAssemble_FetchFailedVersion_RowHasStatusOnly(t *testing.T) {
 	assert.Equal(t, TagSHALocalFetchFailed, row.TagSHALocalStatus)
 	assert.Nil(t, row.AST)
 	assert.Nil(t, row.Structural)
+}
+
+// TestAssemble_AnalyzerError_RowHasStatusAnalyzeFailed pins the
+// contract that errors flowing out of analyzeAtSHA which are NOT
+// ErrSHAMissingFromClone — context cancellation during analysis
+// (the SIGINT path), ErrBlobSizeExceedsCap (a tampered blob header),
+// ErrBlobStreamerClosed (mid-iteration shutdown), generic git pipe
+// IO errors — record TagSHALocalAnalyzeFailed rather than
+// TagSHALocalMissingFromClone. The two conditions are different
+// diagnostically: "missing_from_clone" tells the analyst the SHA
+// wasn't fetched; "analyze_failed" tells the analyst the SHA WAS
+// present but analysis tripped over something. Conflating them
+// blinds the analyst to the actual failure mode.
+//
+// This branch is reachable in production after the 2026-05-02
+// SIGINT plumbing fix (Ctrl-C now cancels mid-analysis) and the
+// 2026-05-02 blob-size cap (tampered headers now produce
+// ErrBlobSizeExceedsCap), both of which previously fell through to
+// the missing-from-clone label.
+func TestAssemble_AnalyzerError_RowHasStatusAnalyzeFailed(t *testing.T) {
+	t.Parallel()
+
+	const sha = "abc1234567890123456789012345678901234567"
+	provider := &fakeSourceProvider{
+		errBySHA: map[string]error{
+			sha: errors.New("simulated analyzer failure (e.g. tampered blob, ctx cancel, IO error)"),
+		},
+	}
+	a := NewAssembler(provider, golang.NewAnalyzer())
+
+	mv, err := a.Build(context.Background(), PinTable{
+		ModulePath: "example.com/analyzer-failure",
+		Pins: []VersionPin{
+			{Version: "v0.1.0", SHA: sha, Source: "proxy.golang.org"},
+		},
+	}, BudgetOpts{})
+	require.NoError(t, err)
+	require.Len(t, mv.Rows, 1)
+
+	row := mv.Rows[0]
+	assert.Equal(t, "v0.1.0", row.Version)
+	assert.Equal(t, sha, row.TagSHA, "TagSHA must still be recorded — we know the SHA, the analyzer failed on it")
+	assert.Equal(t, TagSHALocalAnalyzeFailed, row.TagSHALocalStatus,
+		"non-ErrSHAMissingFromClone errors must be classified as analyze_failed, not missing_from_clone")
+	assert.Nil(t, row.AST, "AST must be nil for analyze-failed rows (no analyzed features)")
+	assert.Nil(t, row.Structural, "Structural must be nil for analyze-failed rows")
 }
 
 func TestAssemble_MixedClassifications_AllRowsRepresented(t *testing.T) {
@@ -743,50 +801,12 @@ func TestAssemble_DiffSkippedWhenAdjacentRowIsMissingOrigin(t *testing.T) {
 	assert.Nil(t, newer.DiffFromPrevious)
 }
 
-// ============================================================
-// Existing passes-through-cross-version edge cases
-// ============================================================
-
-// Sanity: the upstream-error path is exercised via the analyzer's
-// own tests (TestAnalyze_UpstreamIteratorError_PropagatesToCaller).
-// Here we just confirm the assembler surfaces the error.
-func TestAssemble_ProviderYieldsNonMissingError_PartialRow(t *testing.T) {
-	t.Parallel()
-
-	const sha = "deadbeef00000000000000000000000000000000"
-	wantErr := errors.New("some other provider error")
-	provider := &errorYieldingProvider{sha: sha, err: wantErr}
-
-	a := NewAssembler(provider, golang.NewAnalyzer())
-	mv, err := a.Build(context.Background(), PinTable{
-		ModulePath: "example.com/x",
-		Pins: []VersionPin{
-			{Version: "v0.1.0", SHA: sha, Source: "proxy.golang.org"},
-		},
-	}, BudgetOpts{})
-	require.NoError(t, err)
-	require.Len(t, mv.Rows, 1)
-
-	// Non-missing-from-clone errors also produce a partial row;
-	// commit 12 conservatively maps them to missing_from_clone
-	// rather than crashing. (A future commit could distinguish.)
-	assert.Equal(t, TagSHALocalMissingFromClone, mv.Rows[0].TagSHALocalStatus)
-	assert.Nil(t, mv.Rows[0].AST)
-}
-
-type errorYieldingProvider struct {
-	sha string
-	err error
-}
-
-func (p *errorYieldingProvider) EnumerateGoFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
-	return func(yield func(golang.SourceFile, error) bool) {
-		if sha == p.sha {
-			yield(golang.SourceFile{}, p.err)
-		}
-	}
-}
-
-func (p *errorYieldingProvider) DiffStat(_ context.Context, _, _ string) (DiffStat, error) {
-	return DiffStat{}, nil
-}
+// (TestAssemble_ProviderYieldsNonMissingError_PartialRow and its
+// errorYieldingProvider fake were superseded by
+// TestAssemble_AnalyzerError_RowHasStatusAnalyzeFailed, which uses
+// the fakeSourceProvider.errBySHA seam and pins the stronger
+// post-2026-05-02 contract: non-ErrSHAMissingFromClone errors map
+// to TagSHALocalAnalyzeFailed, not TagSHALocalMissingFromClone.
+// The earlier test deliberately recorded the lossy behaviour with
+// a "(A future commit could distinguish.)" comment — this is that
+// commit.)

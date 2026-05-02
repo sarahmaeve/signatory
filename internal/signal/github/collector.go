@@ -425,11 +425,22 @@ func (c *Collector) collectCIPresence(ctx context.Context, owner, repoName strin
 // sensitive data from HTTP responses. This function classifies the error
 // and returns only the category, never the raw content.
 //
-// For signatory-owned sentinels (ErrNotFound, RateLimitError) we use
-// errors.Is / errors.As so wrapping doesn't break the classification.
-// For stdlib transport errors (context deadline, "no such host") we
-// still string-match — those errors have no exported sentinel and
-// their text is stable across Go versions by policy.
+// For signatory-owned sentinels (ErrNotFound, RateLimitError) and the
+// stdlib context sentinels (context.DeadlineExceeded, context.Canceled)
+// we use errors.Is / errors.As so any wrapping layer — fmt.Errorf %w,
+// custom error types with their own Error() messages, *url.Error from
+// net/http — still unwraps cleanly to the underlying classification.
+// String matching on err.Error() (the previous approach for the
+// context sentinels) silently dropped any wrapper whose surface
+// message didn't include the sentinel's standard text.
+//
+// For stdlib net errors with no exported sentinel ("connection
+// refused", "no such host") we still string-match — those messages
+// are stable across Go versions by policy. Client.Timeout is also
+// kept as a string-match fallback: modern net/http unwraps to
+// context.DeadlineExceeded, but the literal "Client.Timeout" surface
+// is preserved as belt-and-suspenders for any *url.Error path that
+// surfaces the timeout without a sentinel chain.
 func sanitizeErrorForStorage(err error) string {
 	if err == nil {
 		return ""
@@ -441,13 +452,15 @@ func sanitizeErrorForStorage(err error) string {
 	if errors.Is(err, ErrNotFound) {
 		return "not found"
 	}
-	errMsg := err.Error()
-	if strings.Contains(errMsg, "context deadline exceeded") ||
-		strings.Contains(errMsg, "Client.Timeout") {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return "request timeout"
 	}
-	if strings.Contains(errMsg, "context canceled") {
+	if errors.Is(err, context.Canceled) {
 		return "request cancelled"
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "Client.Timeout") {
+		return "request timeout"
 	}
 	if strings.Contains(errMsg, "connection refused") ||
 		strings.Contains(errMsg, "no such host") {
@@ -501,7 +514,17 @@ func extractGitHubAPIStatusCode(errMsg string) string {
 
 // isRetryable determines if an error is likely to succeed on retry.
 // Rate limits, timeouts, and transient server errors are retryable.
-// 404s and parse errors are not.
+// 404s, parse errors, and deliberately-cancelled requests are not.
+//
+// context.DeadlineExceeded routes through errors.Is so wrapping
+// layers (fmt.Errorf %w, *url.Error, custom error types) don't
+// silently break the classification. context.Canceled is explicitly
+// NOT retryable: a cancelled request was cancelled by the caller,
+// and retrying would fight the cancellation intent. Stdlib net
+// errors with no exported sentinel ("connection refused", "no such
+// host") and net/http's "Client.Timeout" surface keep their string
+// matching — those are stable across Go versions by policy and have
+// no errors.Is hook.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -511,10 +534,12 @@ func isRetryable(err error) bool {
 	if errors.As(err, &rateLimitErr) {
 		return true
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	errMsg := err.Error()
-	// Timeouts and connection errors.
-	if strings.Contains(errMsg, "context deadline exceeded") ||
-		strings.Contains(errMsg, "Client.Timeout") ||
+	// Connection errors and Client.Timeout (no stdlib sentinel).
+	if strings.Contains(errMsg, "Client.Timeout") ||
 		strings.Contains(errMsg, "connection refused") ||
 		strings.Contains(errMsg, "no such host") {
 		return true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -635,6 +636,134 @@ func TestSanitizeErrorForStorage_FallbackOnUnknownFormat(t *testing.T) {
 		"errors that don't match any classifier branch must fall through to the generic 'collection failed' label")
 }
 
+// TestSanitizeErrorForStorage_ContextSentinels pins the contract that
+// context.DeadlineExceeded and context.Canceled are detected via
+// errors.Is — not via strings.Contains on the surface message. The
+// previous implementation pattern-matched err.Error() for "context
+// deadline exceeded" and "context canceled" literals, which is brittle
+// against any error chain that wraps a sentinel under a Error() string
+// that doesn't include the sentinel's standard text. errors.Is unwraps
+// through fmt.Errorf %w chains AND through custom Unwrap() methods,
+// catching both the naked-sentinel case and the hidden-message case.
+//
+// Project rule (CLAUDE.md): "use errors.Is / errors.As for all sentinel
+// comparisons — never ==." String matching on err.Error() is the same
+// anti-pattern by another name; it breaks the moment a wrapping layer
+// changes its surface message.
+func TestSanitizeErrorForStorage_ContextSentinels(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "naked DeadlineExceeded",
+			err:  context.DeadlineExceeded,
+			want: "request timeout",
+		},
+		{
+			name: "naked Canceled",
+			err:  context.Canceled,
+			want: "request cancelled",
+		},
+		{
+			name: "fmt.Errorf %w wrapping DeadlineExceeded",
+			// fmt.Errorf with %w produces an error whose Unwrap()
+			// returns the inner sentinel; errors.Is unwraps the
+			// chain regardless of the surface message. This is the
+			// canonical wrap pattern used by the github client
+			// (see fmt.Errorf("execute request: %w", err) in
+			// client.go).
+			err:  fmt.Errorf("execute request: %w", context.DeadlineExceeded),
+			want: "request timeout",
+		},
+		{
+			name: "hidden-message wrapper of DeadlineExceeded",
+			// hiddenCtxErr.Error() returns a message that does NOT
+			// include "context deadline exceeded" — the only path
+			// to classification is errors.Is unwrap. This case
+			// fails under string matching; it is the load-bearing
+			// regression test for the errors.Is fix.
+			err:  &hiddenCtxErr{inner: context.DeadlineExceeded},
+			want: "request timeout",
+		},
+		{
+			name: "hidden-message wrapper of Canceled",
+			err:  &hiddenCtxErr{inner: context.Canceled},
+			want: "request cancelled",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sanitizeErrorForStorage(tc.err)
+			assert.Equalf(t, tc.want, got,
+				"sanitized reason for %T (msg=%q) must classify as %q via errors.Is, got %q",
+				tc.err, tc.err.Error(), tc.want, got)
+		})
+	}
+}
+
+// TestIsRetryable_ContextSentinels pins the contract that
+// context.DeadlineExceeded — wrapped or naked — is detected via
+// errors.Is and treated as retryable. context.Canceled is NOT
+// retryable: a cancelled request was cancelled deliberately by the
+// caller, not by transient network failure, and retrying it would
+// fight the cancellation intent. Same anti-pattern as
+// sanitizeErrorForStorage's previous implementation; same fix.
+func TestIsRetryable_ContextSentinels(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "naked DeadlineExceeded is retryable",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "fmt.Errorf %w wrapping DeadlineExceeded is retryable",
+			err:  fmt.Errorf("execute request: %w", context.DeadlineExceeded),
+			want: true,
+		},
+		{
+			name: "hidden-message wrapper of DeadlineExceeded is retryable",
+			// The load-bearing case for the errors.Is fix: a
+			// wrapper whose Error() does NOT contain "context
+			// deadline exceeded" still classifies as retryable
+			// because errors.Is unwraps to the sentinel.
+			err:  &hiddenCtxErr{inner: context.DeadlineExceeded},
+			want: true,
+		},
+		{
+			name: "naked Canceled is NOT retryable",
+			err:  context.Canceled,
+			want: false,
+		},
+		{
+			name: "hidden-message wrapper of Canceled is NOT retryable",
+			err:  &hiddenCtxErr{inner: context.Canceled},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRetryable(tc.err)
+			assert.Equalf(t, tc.want, got,
+				"isRetryable(%T msg=%q) = %v, want %v",
+				tc.err, tc.err.Error(), got, tc.want)
+		})
+	}
+}
+
 // testErr is a tiny helper to construct an error with a known message
 // without dragging in 'errors.New' at every callsite. Local to this
 // file to avoid polluting the package test surface.
@@ -643,3 +772,13 @@ func testErr(msg string) error { return &simpleErr{msg: msg} }
 type simpleErr struct{ msg string }
 
 func (e *simpleErr) Error() string { return e.msg }
+
+// hiddenCtxErr wraps a context sentinel with an Error() message that
+// deliberately does NOT include the sentinel's standard text. Used by
+// TestSanitizeErrorForStorage_ContextSentinels to demonstrate that
+// strings.Contains on err.Error() is insufficient — only errors.Is
+// unwraps the underlying sentinel through the custom Unwrap method.
+type hiddenCtxErr struct{ inner error }
+
+func (e *hiddenCtxErr) Error() string { return "request failed for unrelated reasons" }
+func (e *hiddenCtxErr) Unwrap() error { return e.inner }

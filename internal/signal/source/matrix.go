@@ -80,6 +80,22 @@ const (
 	// (proxy 5xx, network). The version exists in @v/list but
 	// couldn't be resolved to a SHA.
 	TagSHALocalFetchFailed = "fetch_failed"
+
+	// TagSHALocalAnalyzeFailed: SHA was present (or expected to be —
+	// the failure prevents us from being certain) but the analyzer
+	// or BlobStreamer returned an error other than
+	// ErrSHAMissingFromClone. Causes include context cancellation
+	// (SIGINT mid-analysis), ErrBlobSizeExceedsCap (a cat-file
+	// header reporting a size over the per-blob cap — itself a
+	// supply-chain-relevant signal), ErrBlobStreamerClosed
+	// (subprocess shutdown mid-iteration), and generic git-pipe
+	// IO errors. Distinct from TagSHALocalMissingFromClone so an
+	// analyst reading the matrix can tell "we never had the SHA"
+	// from "we had it, the analyzer tripped on it" — those have
+	// different remediation paths and different forgery-resistance
+	// implications. See design/coll7.md and the 2026-05-02
+	// adversarial-review punch list (Tier 1 #1.4).
+	TagSHALocalAnalyzeFailed = "analyze_failed"
 )
 
 // SourceProvider is the narrow interface the Assembler uses to
@@ -286,11 +302,24 @@ func (a *Assembler) buildRow(
 }
 
 // buildRowFromPin runs the AST analyzer + structural counter at
-// the pin's SHA. On ErrSHAMissingFromClone (proxy SHA not in local
-// object DB), returns a row with status missing_from_clone and
-// nil analysis blocks. Other analyzer/provider errors land the
-// same way — partial-row preservation is more useful than aborting
-// the whole matrix on one version's failure.
+// the pin's SHA. Two distinct error classes produce partial rows:
+//
+//   - ErrSHAMissingFromClone (proxy SHA not in local object DB) →
+//     TagSHALocalMissingFromClone. The expected case when --refresh
+//     didn't fetch a proxy-pinned SHA; itself diagnostic.
+//   - Any other analyzer/provider error (context cancellation
+//     during analysis, ErrBlobSizeExceedsCap on a tampered blob
+//     header, ErrBlobStreamerClosed mid-iteration, generic git
+//     pipe IO errors) → TagSHALocalAnalyzeFailed. The SHA was
+//     reachable but analysis tripped on it; conflating this with
+//     missing-from-clone would blind the analyst to the real
+//     event class.
+//
+// Both cases preserve the row with nil AST/Structural so the
+// matrix doesn't abort on one version's failure. The 2026-05-02
+// adversarial review (Tier 1 #1.4) split the bucket into two
+// distinct statuses; the doc comment for TagSHALocalAnalyzeFailed
+// in the const block above lists the concrete error classes.
 //
 // Returns rowAux populated with sha + packages set when analysis
 // succeeded; empty rowAux for partial rows (the cross-version
@@ -307,7 +336,7 @@ func (a *Assembler) buildRowFromPin(ctx context.Context, version string, pin Ver
 		if errors.Is(err, ErrSHAMissingFromClone) {
 			row.TagSHALocalStatus = TagSHALocalMissingFromClone
 		} else {
-			row.TagSHALocalStatus = TagSHALocalMissingFromClone
+			row.TagSHALocalStatus = TagSHALocalAnalyzeFailed
 		}
 		return row, rowAux{}
 	}

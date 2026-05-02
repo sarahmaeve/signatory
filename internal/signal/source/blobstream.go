@@ -61,7 +61,27 @@ type BlobStreamer struct {
 	// concurrent missing-SHA reads must not multiply the fetch.
 	fetchMu sync.Mutex
 	fetched bool
+
+	// maxBlobSize bounds the per-blob byte allocation in
+	// readBlobOnce. The cat-file --batch protocol reports each
+	// blob's size in its header line; that size is then used as
+	// the make([]byte, size) capacity. Without a cap, a tampered
+	// loose object header claiming a multi-GiB size would drive
+	// signatory's allocator into territory that has nothing to do
+	// with the actual file content. Default defaultMaxBlobSize;
+	// override via WithMaxBlobSize for tests or for callers that
+	// know their content fits a smaller envelope.
+	maxBlobSize int
 }
+
+// defaultMaxBlobSize is the per-blob allocation cap applied to
+// readBlobOnce when WithMaxBlobSize is not supplied. 10 MiB matches
+// the maxResponseSize used by the github, gopublish, npm, and pypi
+// HTTP clients — generous for any realistic Go source file (typical
+// .go files are <100 KiB; the largest go.mod files are ~1 MiB) while
+// still bounding allocation by two orders of magnitude below where
+// a forged size header would do damage.
+const defaultMaxBlobSize = 10 * 1024 * 1024
 
 // BlobStreamerOption configures a BlobStreamer at construction.
 // Functional-options pattern so future options (timeout, fetch
@@ -82,6 +102,25 @@ type BlobStreamerOption func(*BlobStreamer)
 func WithAllowFetch(allow bool) BlobStreamerOption {
 	return func(b *BlobStreamer) {
 		b.allowFetch = allow
+	}
+}
+
+// WithMaxBlobSize overrides the per-blob allocation cap applied by
+// readBlobOnce. The cap rejects any cat-file response whose declared
+// size exceeds this value before the make([]byte, size) allocation,
+// returning ErrBlobSizeExceedsCap. Useful for tests (where small
+// fixture blobs let the cap fire on values much smaller than the
+// production default) and for callers with stricter memory budgets.
+//
+// A value <= 0 is treated as "use default" rather than "no limit" —
+// disabling the cap is a footgun for a defensive bound, and the
+// signature stays simple by collapsing both invalid inputs to the
+// safe default.
+func WithMaxBlobSize(n int) BlobStreamerOption {
+	return func(b *BlobStreamer) {
+		if n > 0 {
+			b.maxBlobSize = n
+		}
 	}
 }
 
@@ -153,7 +192,11 @@ func NewBlobStreamer(clonePath string, opts ...BlobStreamerOption) (*BlobStreame
 		stderr:       &stderr,
 		parentCtx:    parentCtx,
 		parentCancel: parentCancel,
+		maxBlobSize:  defaultMaxBlobSize,
 	}
+	// Options apply after the defaults so a caller's WithMaxBlobSize
+	// (or future tunables) overrides the const baked into the struct
+	// initializer.
 	for _, opt := range opts {
 		opt(bs)
 	}
@@ -228,6 +271,21 @@ func (b *BlobStreamer) readBlobOnce(ctx context.Context, sha string) ([]byte, er
 	}
 	if size < 0 {
 		return nil, fmt.Errorf("negative cat-file size %d", size)
+	}
+	// Cap before allocation: a tampered loose object could claim
+	// any size in its header. Without this check, make([]byte, size)
+	// is the only thing standing between signatory and a multi-GiB
+	// allocation driven by attacker-controlled bytes. The cat-file
+	// pipe is now in an indeterminate framing state — the reported
+	// size bytes are still queued upstream — so we close the stream
+	// rather than risk reading them on a subsequent ReadBlob (the
+	// trailing-newline parser at the bottom of this function would
+	// hit one of the queued bytes instead). Close is idempotent and
+	// callers already handle ReadBlob errors as terminal for their
+	// loop; the assembler treats this as a partial-row case.
+	if size > b.maxBlobSize {
+		_ = b.closeLocked()
+		return nil, fmt.Errorf("%w: %d > %d", ErrBlobSizeExceedsCap, size, b.maxBlobSize)
 	}
 
 	content := make([]byte, size)
@@ -381,6 +439,16 @@ func (b *BlobStreamer) EnumerateGoFiles(ctx context.Context, sha string) iter.Se
 func (b *BlobStreamer) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.closeLocked()
+}
+
+// closeLocked is the no-mutex-acquire path used both by Close (which
+// takes b.mu before delegating) and by callers that already hold
+// b.mu and need to abort the subprocess mid-operation — readBlobOnce
+// uses this when the cat-file header reports a size over the cap and
+// the pipe framing is no longer trustworthy. Pre-condition: b.mu is
+// held. Idempotent under repeat calls.
+func (b *BlobStreamer) closeLocked() error {
 	if b.closed {
 		return nil
 	}

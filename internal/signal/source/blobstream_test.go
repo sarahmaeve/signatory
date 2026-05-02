@@ -486,6 +486,84 @@ func TestBlobStreamer_ListTreeBlobs_AllowFetch_RecoversMissingSHA(t *testing.T) 
 }
 
 // ============================================================
+// WithMaxBlobSize / blob size cap
+// ============================================================
+
+// TestBlobStreamer_ReadBlob_RejectsBlobOverCap pins the contract that
+// readBlobOnce refuses to allocate when the cat-file header reports a
+// size exceeding the configured maxBlobSize. The cap defends against
+// a tampered or corrupt loose object whose size header would
+// otherwise drive an unbounded make([]byte, size) — git's own
+// integrity normally bounds this, but signatory should not depend on
+// git's integrity for its own memory safety. The other HTTP clients
+// in the codebase enforce the same defensive bound at their fetch
+// boundary; this test pins the cat-file-pipe equivalent.
+//
+// Test seam: WithMaxBlobSize(small) lets the assertion fire on a
+// fixture blob a few hundred bytes long instead of needing a real
+// 10+ MiB blob. The check itself is size-comparison logic, not
+// dependent on the cap value.
+func TestBlobStreamer_ReadBlob_RejectsBlobOverCap(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+
+	// main.go is one of the fixture files (tiny — ~30 bytes).
+	// Cap below the file size guarantees the check fires before
+	// any allocation. The size value (10) is well under the
+	// fixture; the production default (defaultMaxBlobSize) is
+	// 10 MiB and is exercised implicitly by every other test.
+	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(10))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	mainSHA := blobSHAFor(t, clonePath, "main.go")
+
+	_, err = bs.ReadBlob(t.Context(), mainSHA)
+	require.Error(t, err, "ReadBlob must refuse a blob whose size exceeds the cap")
+	assert.ErrorIs(t, err, ErrBlobSizeExceedsCap,
+		"the error must wrap ErrBlobSizeExceedsCap so callers can errors.Is against it; got: %v", err)
+}
+
+// TestBlobStreamer_ReadBlob_AllowsBlobUnderCap is the positive sibling:
+// if the configured cap is generous enough for the fixture blob,
+// ReadBlob must succeed. Pins that the cap check is a strict
+// inequality, not a regression that rejects every blob.
+func TestBlobStreamer_ReadBlob_AllowsBlobUnderCap(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+
+	// 1 KiB cap is well above the fixture blob's ~30 bytes.
+	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(1024))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	mainSHA := blobSHAFor(t, clonePath, "main.go")
+
+	content, err := bs.ReadBlob(t.Context(), mainSHA)
+	require.NoError(t, err, "blob under cap must read successfully")
+	assert.NotEmpty(t, content, "blob content should be the file bytes, not empty")
+}
+
+// TestBlobStreamer_WithMaxBlobSize_NonPositiveKeepsDefault pins the
+// documented "<=0 falls back to default" behaviour of WithMaxBlobSize.
+// This is a footgun guard: a caller passing 0 or a negative value
+// shouldn't accidentally disable the cap — they should get the safe
+// 10 MiB default. We assert that a fixture blob (tiny) reads cleanly
+// after WithMaxBlobSize(0), proving the default is in effect.
+func TestBlobStreamer_WithMaxBlobSize_NonPositiveKeepsDefault(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+
+	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(0))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	mainSHA := blobSHAFor(t, clonePath, "main.go")
+	_, err = bs.ReadBlob(t.Context(), mainSHA)
+	require.NoError(t, err, "WithMaxBlobSize(0) must keep the default cap, not disable it")
+}
+
+// ============================================================
 // Close
 // ============================================================
 

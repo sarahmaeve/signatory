@@ -29,3 +29,15 @@ var ErrSHAMissingFromClone = errors.New("sha missing from local clone")
 // the sentinel makes the failure mode explicit rather than yielding
 // a generic "broken pipe" from the closed stdin.
 var ErrBlobStreamerClosed = errors.New("blob streamer closed")
+
+// ErrBlobSizeExceedsCap is returned by BlobStreamer.ReadBlob when
+// the size field in cat-file's response header exceeds the configured
+// per-blob cap (default 10 MiB; override via WithMaxBlobSize). The
+// cap is a defensive bound on allocation: signatory does not own
+// git's object DB, and a tampered or corrupt loose object claiming
+// e.g. size = MaxInt32 in its header would otherwise drive an
+// unbounded make([]byte, size) before any content was read. Other
+// HTTP clients in this codebase (github, gopublish, npm, pypi) all
+// apply a 10 MiB io.LimitReader at their fetch boundary; this
+// sentinel is the cat-file-pipe equivalent.
+var ErrBlobSizeExceedsCap = errors.New("blob size exceeds configured cap")
