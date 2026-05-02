@@ -29,6 +29,29 @@ const (
 	defaultTTL       = 24 * time.Hour
 )
 
+// EntityStore is the narrow interface the git collector uses to
+// mint identity:gpg/<keyid> entity rows for the per-developer
+// signing keys it observes. Defined here (consumer-side) so the
+// collector doesn't depend on the full internal/store package —
+// any type that implements EnsureEntityByCanonicalURI satisfies
+// it via structural typing.
+//
+// Optional: nil-safe via the WithEntityStore setter, mirroring the
+// github (Path A), npm (Path C), and pypi (Path E) collectors.
+// Tests that don't care about signer-entity emission construct
+// collectors without calling WithEntityStore, and the minting
+// branch in collectCommitSigning silently skips when c.entityStore
+// is nil.
+//
+// In production, cmd/signatory/collectors.go threads the
+// orchestrator's *store.SQLite through opts.EntityStore so every
+// analyze run populates GPG signer entities for any git-hosted
+// target with cryptographically-signed commits in its observation
+// window — Path F (entity-burn1.md "Pending work #2").
+type EntityStore interface {
+	EnsureEntityByCanonicalURI(ctx context.Context, uri, shortName string) (*profile.Entity, bool, error)
+}
+
 // Collector reads signals from a local git clone. Construct one per
 // target using NewCollector; the path is baked into the instance
 // because each invocation operates on a specific on-disk clone.
@@ -55,6 +78,11 @@ type Collector struct {
 	// memory stays bounded by `-n`, and the parser's bounded by
 	// this cap too.
 	commitCap int
+
+	// entityStore, when non-nil, is the EntityStore the signing
+	// pass mints identity:gpg/<keyid> rows against. Optional —
+	// see EntityStore docstring.
+	entityStore EntityStore
 }
 
 // NewCollector constructs a git collector rooted at path. The path
@@ -87,6 +115,18 @@ func (c *Collector) WithWindow(d time.Duration) *Collector {
 // should rarely need to.
 func (c *Collector) WithCommitCap(n int) *Collector {
 	c.commitCap = n
+	return c
+}
+
+// WithEntityStore wires an EntityStore into the collector so
+// signer-entity minting fires during each Collect run. Returns
+// the receiver so the call chains cleanly with the constructors.
+//
+// Setter rather than constructor parameter so existing call sites
+// (NewCollector / WithWindow / WithCommitCap) keep their
+// signatures and pre-Path-F tests continue to compile unchanged.
+func (c *Collector) WithEntityStore(s EntityStore) *Collector {
+	c.entityStore = s
 	return c
 }
 

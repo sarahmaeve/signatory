@@ -39,13 +39,15 @@ type EffectiveBurnContext struct {
 	// ViaRole names the relation kind that produced the cascade.
 	// Values today:
 	//   - "publisher"  — github repo owner (owner_profile signal),
-	//                    or npm per-version publisher
+	//                    or npm/pypi per-version publisher
 	//                    (publish_origin_consistency)
-	//   - "maintainer" — npm Maintainers list (maintainer_count)
+	//   - "maintainer" — npm/pypi Maintainers list (maintainer_count)
+	//   - "signer"     — git per-developer GPG key
+	//                    (commit_signing_keys)
 	//
-	// Future producer collectors extend this set: "committer" /
-	// "signer" for the git collector, etc. The string is stable;
-	// downstream code may switch on it for role-specific rendering.
+	// Future producer collectors extend this set ("committer" for
+	// git author entities, etc.). The string is stable; downstream
+	// code may switch on it for role-specific rendering.
 	ViaRole string
 }
 
@@ -416,6 +418,43 @@ func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]casc
 				out = append(out, cascadeCandidate{
 					URI:  profile.CanonicalIdentityURI(platform, login),
 					Role: "publisher",
+				})
+			}
+
+		case "commit_signing_keys":
+			// {"count":N, "key_ids":["abc","def",...]} → one
+			// identity:gpg/<keyid> per distinct per-developer key.
+			// Role: signer.
+			//
+			// No source dispatch — commit_signing_keys is git-only
+			// (the signal's only emitter is the git collector) and
+			// the platform is always "gpg". If a future collector
+			// emits SSH-signed-commit keys or sigstore identities,
+			// this case grows a sub-switch (or splits into separate
+			// signal types — same call as for maintainer_count vs
+			// publish_origin_consistency).
+			//
+			// Web-flow keys (GitHub's managed signing key) are
+			// excluded at the producer side (signing.go), not here —
+			// this case sees only per-developer keys by contract.
+			// Limitation: same person rotating GPG keys produces
+			// distinct entity rows; burning one doesn't catch the
+			// other. Identity-equivalence work (entity-burn1.md §11
+			// / "Pending work #4") closes that gap; for v0.1, the
+			// limitation is accepted explicitly.
+			var v struct {
+				KeyIDs []string `json:"key_ids"`
+			}
+			if err := json.Unmarshal(sig.Value, &v); err != nil {
+				continue
+			}
+			for _, keyID := range v.KeyIDs {
+				if keyID == "" {
+					continue
+				}
+				out = append(out, cascadeCandidate{
+					URI:  profile.CanonicalIdentityURI("gpg", keyID),
+					Role: "signer",
 				})
 			}
 		}

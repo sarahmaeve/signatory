@@ -300,6 +300,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"a high ratio with low per-developer signing means trust is delegated to GitHub's platform, not to contributor identity",
 		},
 	},
+	"commit_signing_keys": {
+		Type:              "commit_signing_keys",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Distinct per-developer GPG key IDs that signed commits within the observation window. Web-flow keys (GitHub's managed signing key) are excluded.",
+		Caveats: []string{
+			"key IDs are taken from git's %GK placeholder — long key IDs (16 hex chars), not full fingerprints; collision-resistant in practice but cryptographically weaker than %GF would be",
+			"signature validity is filtered upstream (only G/U/X/Y status — see signing.go classifySigning); revoked keys (R) and unsigned commits do not contribute key IDs",
+			"a person rotating GPG keys produces distinct key IDs across rotations; burning one key does not catch the same human's earlier or later keys until identity-equivalence work lands (entity-burn1.md §11)",
+			"web-flow keys are intentionally excluded — they are platform-managed credentials, not per-developer identities, and minting an entity for them would conflate platform trust with individual signer trust",
+		},
+	},
 	"identity_graph_depth": {
 		Type:              "identity_graph_depth",
 		Group:             profile.SignalGroupGovernance,

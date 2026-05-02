@@ -283,6 +283,73 @@ func TestEffectiveBurn_CascadeViaPyPIMaintainer(t *testing.T) {
 	assert.Contains(t, burn.Reason, "compromised")
 }
 
+// TestEffectiveBurn_CascadeViaGPGSigner pins the GPG signer case:
+// a repo whose commit_signing_keys signal lists a burned
+// identity:gpg/<keyid> reports the cascade with role="signer".
+// Mirrors the github owner_profile and npm/pypi maintainer cases
+// at the resolver layer — different signal type, same dispatch
+// shape. Path F (entity-burn1.md "Pending work #2", GPG-only
+// slice).
+//
+// Source dispatch is NOT used for this signal — unlike
+// maintainer_count (shared between npm and pypi collectors), the
+// commit_signing_keys signal is git-only and the platform is
+// always "gpg". Adding more git-flavoured key types later (SSH-
+// signed commits, sigstore) would extend this case rather than
+// adding source dispatch.
+func TestEffectiveBurn_CascadeViaGPGSigner(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	repoID := seedRepoEntity(t, s, "repo:github/some-org/some-repo", "some-org/some-repo")
+	keyID := seedOwnerEntity(t, s, "identity:gpg/abcdef0123456789", "abcdef0123456789")
+	seedSignal(t, s, repoID, "commit_signing_keys", "git", map[string]any{
+		"count":   1,
+		"key_ids": []string{"abcdef0123456789"},
+	})
+	seedBurn(t, s, keyID, "test: gpg key compromised")
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), repoID)
+	require.NoError(t, err)
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "identity:gpg/abcdef0123456789", ctx.ViaOwner.CanonicalURI,
+		"a commit_signing_keys signal must cascade through identity:gpg/<keyid>")
+	assert.Equal(t, "signer", ctx.ViaRole,
+		"GPG keys signing commits cascade with role=signer (per EffectiveBurnContext.ViaRole docstring)")
+	assert.Contains(t, burn.Reason, "compromised")
+}
+
+// TestEffectiveBurn_CascadeViaGPGSigner_MultipleBurnedFinds pins
+// the multi-key case: a repo with several distinct signing keys
+// where exactly one is burned. The cascade must walk the full
+// list (mirrors the npm-publishers test) — not just check the
+// first entry — and surface the burned one as ViaOwner.
+func TestEffectiveBurn_CascadeViaGPGSigner_MultipleBurnedFinds(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	repoID := seedRepoEntity(t, s, "repo:github/multi-signer/repo", "multi-signer/repo")
+	// Mint all three keys; only burn one. The burned key sits in
+	// the middle of the list to verify the cascade walks past
+	// healthy entries.
+	seedOwnerEntity(t, s, "identity:gpg/aaaa111122223333", "aaaa111122223333")
+	burnedID := seedOwnerEntity(t, s, "identity:gpg/bbbb444455556666", "bbbb444455556666")
+	seedOwnerEntity(t, s, "identity:gpg/cccc777788889999", "cccc777788889999")
+	seedSignal(t, s, repoID, "commit_signing_keys", "git", map[string]any{
+		"count":   3,
+		"key_ids": []string{"aaaa111122223333", "bbbb444455556666", "cccc777788889999"},
+	})
+	seedBurn(t, s, burnedID, "test: middle key compromised")
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), repoID)
+	require.NoError(t, err)
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "identity:gpg/bbbb444455556666", ctx.ViaOwner.CanonicalURI,
+		"the cascade must find the burned key even when listed mid-array")
+	assert.Equal(t, "signer", ctx.ViaRole)
+	assert.Contains(t, burn.Reason, "middle key compromised")
+}
+
 // TestEffectiveBurn_CascadeUnknownSource_NoCascade pins the
 // dispatch contract's fail-shut posture: a maintainer_count signal
 // with an unrecognized Source produces NO cascade candidates, rather

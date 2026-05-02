@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
 
@@ -221,4 +224,95 @@ func (c *Collector) collectCommitSigning(
 			"ratio":                float64(webFlow) / float64(total),
 			"window":               c.window.String(),
 		})
+
+	// ----- commit_signing_keys + signer-entity minting (Path F) -----
+	//
+	// Walk the same already-parsed rows to extract the distinct
+	// per-developer GPG key IDs (lowercased, web-flow excluded,
+	// deduped, lexicographically sorted for deterministic output).
+	// Mint identity:gpg/<keyid> for each, then emit
+	// commit_signing_keys carrying the list so the cascade resolver
+	// (internal/store/effective_burn.go's "commit_signing_keys"
+	// case) can walk them at read time.
+	//
+	// When zero per-developer keys are present (all-unsigned or
+	// all-web-flow window), record absence rather than emitting an
+	// empty signal — keeps consumers from confusing "no
+	// cryptographic signers" with "we haven't checked yet."
+	keyIDs := extractPerDeveloperKeyIDs(rows)
+	if len(keyIDs) == 0 {
+		reason := "no per-developer GPG-signed commits in window (web-flow excluded)"
+		result.RecordAbsence(entityID, "commit_signing_keys", sourceName,
+			reason, false, now)
+		return
+	}
+	c.ensureSignerEntities(ctx, keyIDs)
+	result.RecordSignal(entityID, "commit_signing_keys", sourceName, now, ttl,
+		map[string]any{
+			"count":   len(keyIDs),
+			"key_ids": keyIDs,
+			"window":  c.window.String(),
+		})
+}
+
+// extractPerDeveloperKeyIDs walks classified signing rows and
+// returns the lowercased, lexicographically-sorted, deduplicated
+// set of GPG key IDs that signed commits in the per-developer
+// classification (G/U/X/Y status, key not in webFlowKeyIDs).
+// Empty input returns nil so callers can branch on len().
+//
+// Lexicographic sort is the deterministic-output choice: the
+// commit_signing_keys signal's key_ids field is consumed by the
+// cascade resolver (which iterates in slice order, "first burned
+// wins") and by tests (which assert on exact slice contents). The
+// alternative — sort-by-frequency-desc — would surface the
+// dominant signer first, but adds a counting pass for marginal
+// value over alphabetical determinism.
+//
+// Web-flow keys are dropped at the classifySigning gate (see
+// classifySigning); this helper trusts that filter rather than
+// re-checking, keeping the responsibility split clean.
+func extractPerDeveloperKeyIDs(rows []commitSigningRow) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, r := range rows {
+		if classifySigning(r) != classPerDeveloper {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(r.KeyID))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ensureSignerEntities mints identity:gpg/<keyid> rows for each
+// extracted key. Failures are logged-and-continued: a transient
+// store error on one key doesn't abort the whole sweep, because
+// each entity row is independent and the next analyze run re-
+// attempts. Skipped silently when no EntityStore was wired
+// (pre-Path-F tests construct collectors without one and continue
+// to work). Mirrors the github / npm / pypi mint-helper policy.
+func (c *Collector) ensureSignerEntities(ctx context.Context, keyIDs []string) {
+	if c.entityStore == nil {
+		return
+	}
+	for _, keyID := range keyIDs {
+		uri := profile.CanonicalIdentityURI("gpg", keyID)
+		if _, _, err := c.entityStore.EnsureEntityByCanonicalURI(ctx, uri, keyID); err != nil {
+			// Don't propagate — the signal emission is independent
+			// of entity-row minting, and the next analyze run re-
+			// attempts. Surface to stderr so systemic store
+			// failures are visible. Matches the policy of the
+			// other ecosystem collectors.
+			fmt.Fprintf(os.Stderr, "warning: failed to ensure gpg signer entity %s: %v\n", uri, err)
+		}
+	}
 }

@@ -90,22 +90,32 @@ type CollectOpts struct {
 	// structural typing.
 	Store sourcecollector.SignalStore
 
-	// EntityStore is the persistent store viewed through the github
-	// collector's narrow EntityStore interface — only the
-	// EnsureEntityByCanonicalURI primitive needed to mint
-	// identity:github/<login> and org:github/<name> rows for repo
-	// owners (Path A; design/entity-burn1.md §3.1).
+	// EntityStore is the persistent store viewed through the
+	// EntityStore narrow interface that EVERY ecosystem collector
+	// supporting publisher / signer entity minting uses — only the
+	// EnsureEntityByCanonicalURI primitive needed to mint:
+	//
+	//   - identity:github/<login> + org:github/<name> for repo
+	//     owners (Path A; entity-burn1.md §3.1)
+	//   - identity:npm/<login> for npm maintainers + per-version
+	//     publishers (Path C)
+	//   - identity:pypi/<login> for pypi maintainers / authors
+	//     (Path E)
+	//   - identity:gpg/<keyid> for git per-developer signing keys
+	//     (Path F)
 	//
 	// Same concrete value as Store in production (analyze.go threads
-	// the orchestrator's *store.SQLite into both fields); separate
-	// field because the two narrow interfaces have different methods
-	// and Go's structural typing applies at the call site, not the
-	// field type.
+	// the orchestrator's *store.SQLite into both fields); typed as
+	// the github collector's interface here for historical reasons
+	// — every collector's narrow EntityStore has the same method set
+	// and the same *store.SQLite satisfies all of them via
+	// structural typing at the call sites.
 	//
-	// Optional. nil disables owner-entity minting in the github
-	// collector — tests that don't care about that side effect leave
-	// it nil and the collector silently skips the mint. The
-	// owner_profile signal still emits regardless.
+	// Optional. nil disables entity minting in every collector —
+	// tests that don't care about that side effect leave it nil and
+	// each collector silently skips its mint branch. The base
+	// signals (owner_profile, maintainer_count, etc.) still emit
+	// regardless.
 	EntityStore ghcollector.EntityStore
 }
 
@@ -195,7 +205,11 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		}
 		collectors = append(collectors,
 			ghcollector.NewCollector().WithEntityStore(opts.EntityStore),
-			gitcollector.NewCollector(clonePath),
+			// WithEntityStore wires the GPG signer-entity minting
+			// branch in the git collector (Path F). nil-safe — when
+			// opts.EntityStore is nil the branch silently skips.
+			// Mirrors the github / npm / pypi wiring pattern.
+			gitcollector.NewCollector(clonePath).WithEntityStore(opts.EntityStore),
 			repofilescollector.NewCollector(clonePath),
 			// OpenSSF Scorecard — additional hygiene signal for
 			// github-hosted entities. Caches the API response so
