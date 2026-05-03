@@ -100,11 +100,9 @@ func TestResolveTarget_NpmjsURLs(t *testing.T) {
 		// /package/ with no name.
 		{"package no name", "https://www.npmjs.com/package/"},
 		{"package empty scope", "https://www.npmjs.com/package/@/name"},
-		// Other hosts entirely. pypi.org moved to its own accept/
-		// reject coverage in TestResolveTarget_PyPIURLs once the
-		// parsePyPIURL branch landed; crates.io stays rejected
-		// until a crates provider ships.
-		{"crates url", "https://crates.io/crates/atuin"},
+		// Other hosts entirely. pypi.org and crates.io moved to their
+		// own accept/reject coverage once their respective parsers
+		// (parsePyPIURL, parseCratesIOURL) shipped.
 	}
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
@@ -444,6 +442,104 @@ func TestResolveTarget_PyPICanonicalURIs(t *testing.T) {
 			assert.Equal(t, tc.wantName, got.ShortName, "ShortName must be normalized")
 			assert.Equal(t, tc.wantVersion, got.Version, "Version must be preserved verbatim")
 			assert.Equal(t, "pypi", got.Ecosystem)
+		})
+	}
+}
+
+// TestResolveTarget_CratesIOURLs covers the crates.io/crates/<name>
+// copy-paste-from-browser convenience path. Accepted inputs produce
+// pkg:cargo/<name> canonical URIs; rejected inputs fall through to
+// the error path.
+func TestResolveTarget_CratesIOURLs(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in      string
+		wantURI string
+	}{
+		// Basic shape — with/without trailing slash.
+		{"https://crates.io/crates/serde", "pkg:cargo/serde"},
+		{"https://crates.io/crates/serde/", "pkg:cargo/serde"},
+		// http:// rather than https://.
+		{"http://crates.io/crates/serde", "pkg:cargo/serde"},
+		// Versioned page.
+		{"https://crates.io/crates/serde/1.0.219", "pkg:cargo/serde@1.0.219"},
+		{"https://crates.io/crates/serde/1.0.219/", "pkg:cargo/serde@1.0.219"},
+		// Query strings + fragments are UI state; strip.
+		{"https://crates.io/crates/serde?foo=bar", "pkg:cargo/serde"},
+		{"https://crates.io/crates/serde#readme", "pkg:cargo/serde"},
+		// Hyphenated names.
+		{"https://crates.io/crates/serde-json", "pkg:cargo/serde-json"},
+		// Underscored names — normalized to hyphens (crates.io equivalence).
+		{"https://crates.io/crates/serde_json", "pkg:cargo/serde-json"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, "pkg", got.Scheme)
+			assert.Equal(t, "cargo", got.Ecosystem)
+		})
+	}
+
+	rejected := []struct {
+		name string
+		in   string
+	}{
+		// Lookalike host — must not be accepted.
+		{"lookalike host", "https://crates.io.attacker.com/crates/serde"},
+		// Wrong path prefix (not /crates/).
+		{"categories path", "https://crates.io/categories/foo"},
+		{"root", "https://crates.io/"},
+		// /crates/ with no name.
+		{"crates no name", "https://crates.io/crates/"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+		})
+	}
+}
+
+// TestResolveTarget_CargoNameNormalization verifies that crate names
+// with underscores are normalized to hyphens in the canonical URI,
+// preventing storage fragmentation. crates.io treats hyphens and
+// underscores as equivalent for lookups.
+func TestResolveTarget_CargoNameNormalization(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in          string
+		wantURI     string
+		wantName    string
+		wantVersion string
+	}{
+		// Already normalized (hyphens): pass through.
+		{"pkg:cargo/serde-json", "pkg:cargo/serde-json", "serde-json", ""},
+		{"pkg:cargo/tokio-macros", "pkg:cargo/tokio-macros", "tokio-macros", ""},
+		// Underscore → hyphen normalization.
+		{"pkg:cargo/serde_json", "pkg:cargo/serde-json", "serde-json", ""},
+		{"pkg:cargo/tokio_macros", "pkg:cargo/tokio-macros", "tokio-macros", ""},
+		// No separators: pass through.
+		{"pkg:cargo/serde", "pkg:cargo/serde", "serde", ""},
+		// With version.
+		{"pkg:cargo/serde_json@1.0.219", "pkg:cargo/serde-json@1.0.219", "serde-json", "1.0.219"},
+		// Multiple underscores.
+		{"pkg:cargo/my_cool_crate", "pkg:cargo/my-cool-crate", "my-cool-crate", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, tc.wantName, got.ShortName)
+			assert.Equal(t, tc.wantVersion, got.Version)
+			assert.Equal(t, "cargo", got.Ecosystem)
 		})
 	}
 }

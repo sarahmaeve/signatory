@@ -160,8 +160,11 @@ func ValidateCanonicalURI(uri string) error {
 // function would otherwise emit a non-canonical URI.
 func CanonicalPackageURI(ecosystem, name string) string {
 	eco := strings.ToLower(ecosystem)
-	if eco == "pypi" {
+	switch eco {
+	case "pypi":
 		name = NormalizePyPIName(name)
+	case "cargo":
+		name = NormalizeCrateName(name)
 	}
 	return URISchemePackage + eco + "/" + name
 }

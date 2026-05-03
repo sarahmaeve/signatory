@@ -61,9 +61,9 @@ func TestParse_Simple_WithLockfile(t *testing.T) {
 	byName := indexByName(deps)
 
 	// Transitive: serde_derive is pulled in by serde but not
-	// declared in the manifest.
+	// declared in the manifest. Name normalizes _ → - in canonical URI.
 	sd := byName["serde_derive"]
-	assert.Equal(t, "pkg:cargo/serde_derive", sd.CanonicalURI)
+	assert.Equal(t, "pkg:cargo/serde-derive", sd.CanonicalURI)
 	assert.False(t, sd.Direct, "serde_derive is transitive")
 	assert.Equal(t, "1.0.219", sd.Version)
 
@@ -216,15 +216,15 @@ func TestParseGraph_Simple(t *testing.T) {
 	}
 	assert.True(t, found, "expected edge simple-crate → serde")
 
-	// serde → serde_derive should be an edge.
+	// serde → serde_derive should be an edge (underscore normalized to hyphen).
 	found = false
 	for _, e := range g.Edges {
-		if e.Parent == "pkg:cargo/serde" && e.Child == "pkg:cargo/serde_derive" {
+		if e.Parent == "pkg:cargo/serde" && e.Child == "pkg:cargo/serde-derive" {
 			found = true
 			break
 		}
 	}
-	assert.True(t, found, "expected edge serde → serde_derive")
+	assert.True(t, found, "expected edge serde → serde-derive")
 }
 
 // TestParseGraph_NonexistentFile returns ErrGraphUnavailable.

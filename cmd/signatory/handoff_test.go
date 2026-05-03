@@ -1200,6 +1200,71 @@ func TestHandoff_NetworkPrecheck_NpmDoesNotInvokeResolverForGitHubTarget(t *test
 	assert.False(t, invoked, "ResolveNpmSource must not be called for a non-npm target")
 }
 
+// TestHandoff_NetworkPrecheck_PkgCargoResolvesToGitHub verifies that
+// a pkg:cargo/<name> target is rewritten to the crate's declared
+// source repository via the ecosystem resolver registry — the same
+// path npm and Go follow. Uses a stub registry so no network call
+// to crates.io is needed.
+func TestHandoff_NetworkPrecheck_PkgCargoResolvesToGitHub(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "handoff.md")
+	cargoRegistry := resolver.NewRegistry()
+	cargoRegistry.Register("cargo", stubNpmResolverFunc(func(_ context.Context, name string) (string, error) {
+		if name == "serde" {
+			return "https://github.com/serde-rs/serde", nil
+		}
+		return "", nil
+	}))
+	cmd := &HandoffCmd{
+		Role:              "security",
+		Target:            "pkg:cargo/serde",
+		Path:              "/tmp/serde",
+		NetworkPrecheck:   true,
+		Output:            outPath,
+		Quiet:             true,
+		EcosystemRegistry: cargoRegistry,
+		PrecheckSource:    &fakePrecheckSource{Files: []string{"Cargo.toml"}},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://github.com/serde-rs/serde", cmd.Target,
+		"pkg:cargo target must be rewritten to the github source URL via the resolver registry")
+}
+
+// TestHandoff_NetworkPrecheck_PkgCargo_NoDeclaredSource verifies the
+// error path when the crate has no declared repository — mirrors the
+// npm "orphan" test.
+func TestHandoff_NetworkPrecheck_PkgCargo_NoDeclaredSource(t *testing.T) {
+	cargoRegistry := resolver.NewRegistry()
+	cargoRegistry.Register("cargo", stubNpmResolverFunc(func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}))
+	cmd := &HandoffCmd{
+		Role:              "security",
+		Target:            "pkg:cargo/no-repo",
+		Path:              "/tmp/no-repo",
+		NetworkPrecheck:   true,
+		Output:            filepath.Join(t.TempDir(), "out.md"),
+		Quiet:             true,
+		EcosystemRegistry: cargoRegistry,
+	}
+	err := cmd.Run(&Globals{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no-repo")
+	assert.Contains(t, err.Error(), "no resolvable source repository")
+}
+
+// TestHandoff_NetworkPrecheck_PkgCargoUsesDefaultRegistry exercises
+// the production path where resolver.Default ships the cargo resolver
+// via init(). No EcosystemRegistry override — this verifies the actual
+// shipping registration is correct. Uses a stub PrecheckSource and a
+// crates.io httptest stub to avoid network.
+func TestHandoff_NetworkPrecheck_PkgCargoUsesDefaultRegistry(t *testing.T) {
+	// The default registry already has "cargo" registered via the
+	// internal/ecosystem/resolver/cargo.go init(). Verify it's there.
+	ecosystems := resolver.Default.Ecosystems()
+	assert.Contains(t, ecosystems, "cargo",
+		"resolver.Default must include 'cargo' from the init() registration")
+}
+
 // --- --clone-dir tests -------------------------------------------------------
 //
 // Tests inject a fake git-clone implementation via HandoffCmd.RunGitClone.

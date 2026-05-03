@@ -143,6 +143,17 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return resolveCanonicalURI(uri)
 	}
 
+	// crates.io crate URLs: copy-paste-from-browser for Rust crates.
+	// https://crates.io/crates/serde → pkg:cargo/serde
+	// https://crates.io/crates/serde/1.0.219 → pkg:cargo/serde@1.0.219
+	if crateName, crateVersion, ok := parseCratesIOURL(s); ok {
+		uri := "pkg:cargo/" + crateName
+		if crateVersion != "" {
+			uri += "@" + crateVersion
+		}
+		return resolveCanonicalURI(uri)
+	}
+
 	// pkg.go.dev module/package URLs: copy-paste-from-browser
 	// convenience for Go modules. Output is the pkg:golang/<import-path>
 	// canonical form per the purl spec — the same form an analyst
@@ -172,7 +183,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// wrong canonical form.
 	if strings.Contains(s, "://") && !isGitHubURL(s) {
 		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com, npmjs.com, or pypi.org URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com, npmjs.com, pypi.org, or crates.io URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
@@ -466,6 +477,70 @@ func parsePyPIURL(input string) (name, version string, ok bool) {
 	return NormalizePyPIName(rawName), rawVersion, true
 }
 
+// parseCratesIOURL recognizes crates.io crate URLs and extracts the
+// crate name plus an optional version. Returns (name, version, true)
+// on a match; version is "" when the URL has no version segment.
+// Returns ("", "", false) on anything that isn't a well-formed
+// crates.io/crates/<name> URL.
+//
+// Accepted shapes:
+//
+//	https://crates.io/crates/serde                → ("serde", "", true)
+//	https://crates.io/crates/serde/              → ("serde", "", true)
+//	https://crates.io/crates/serde/1.0.219        → ("serde", "1.0.219", true)
+//	http://crates.io/crates/serde                 → ("serde", "", true)
+//	https://crates.io/crates/serde?foo=bar        → ("serde", "", true)
+//	https://crates.io/crates/serde#readme         → ("serde", "", true)
+//
+// Host-anchoring: rejects lookalike hosts like `crates.io.evil.com`
+// by requiring an exact match on "crates.io/" after scheme strip.
+//
+// Unlike npm/pypi, crate names don't need normalization — crates.io
+// already canonicalizes (hyphen and underscore are treated as the same
+// name, and the registry stores the original). The extracted name is
+// returned verbatim.
+func parseCratesIOURL(input string) (name, version string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+
+	// Host anchoring: must be EXACTLY "crates.io/" at this point.
+	rest, hostOK := strings.CutPrefix(s, "crates.io/")
+	if !hostOK {
+		return "", "", false
+	}
+
+	// Path must start with "crates/".
+	rest, pathOK := strings.CutPrefix(rest, "crates/")
+	if !pathOK || rest == "" {
+		return "", "", false
+	}
+
+	// Drop fragment and query.
+	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
+		rest = before
+	}
+	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
+		rest = before
+	}
+
+	// crates.io URL shape: crates/<name>[/<version>][/].
+	segs := strings.Split(rest, "/")
+	for len(segs) > 0 && segs[len(segs)-1] == "" {
+		segs = segs[:len(segs)-1]
+	}
+	if len(segs) == 0 || segs[0] == "" {
+		return "", "", false
+	}
+
+	rawName := segs[0]
+	rawVersion := ""
+	if len(segs) >= 2 && segs[1] != "" {
+		rawVersion = segs[1]
+	}
+
+	return rawName, rawVersion, true
+}
+
 // isGitHubURL returns true when input is an http(s) URL whose host
 // (after scheme strip) starts with "github.com". Accepts forms like
 // `https://github.com/owner/repo`, `http://github.com/...`, and the
@@ -606,6 +681,30 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 			if normalized != out.ShortName {
 				out.ShortName = normalized
 				out.CanonicalURI = "pkg:pypi/" + normalized
+				if out.Version != "" {
+					out.CanonicalURI += "@" + out.Version
+				}
+			}
+		}
+
+		// Cargo name normalization: crates.io treats hyphens and
+		// underscores as equivalent for lookups — both `serde_json`
+		// and `serde-json` resolve to the same crate. We normalize
+		// to the hyphen form to prevent storage fragmentation, since
+		// Cargo.toml dep keys conventionally use hyphens and
+		// `cargo add` prefers them.
+		//
+		// Unlike PyPI (where the registry enforces a single canonical
+		// form), crates.io stores the owner-published spelling. We
+		// pick hyphen-canonical because: (1) Cargo.toml dep keys
+		// use it by convention, (2) purl spec examples use it, (3)
+		// the API accepts both for lookups, so fragmentation is the
+		// only real risk.
+		if out.Ecosystem == "cargo" {
+			normalized := NormalizeCrateName(out.ShortName)
+			if normalized != out.ShortName {
+				out.ShortName = normalized
+				out.CanonicalURI = "pkg:cargo/" + normalized
 				if out.Version != "" {
 					out.CanonicalURI += "@" + out.Version
 				}
