@@ -191,6 +191,12 @@ type Globals struct {
 	// fallback is exercised without contacting real vanity hosts.
 	// Production callers leave it empty.
 	GoVanityURL string
+
+	// CargoRegistryURL overrides the base URL for crates.io API calls
+	// made during analyze-orchestration source resolution for
+	// pkg:cargo/<name> targets. Empty means the production registry
+	// (https://crates.io). Tests point this at an httptest server.
+	CargoRegistryURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.

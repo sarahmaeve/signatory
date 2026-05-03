@@ -17,6 +17,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	cargoregistry "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	"github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypiregistry "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
@@ -198,6 +199,8 @@ var resolvableEcosystems = map[string]bool{
 	"pypi":   true,
 	"golang": true,
 	"go":     true,
+	"cargo":  true,
+	"crates": true,
 }
 
 // AnalysisDisplay wraps the runtime profile with any ingested
@@ -584,7 +587,42 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		}
 	}
 
-	// Go-module vanity-host resolution: parallel to npm/pypi above.
+	// Cargo source resolution: parallel to npm/pypi above. Queries
+	// crates.io for the crate's declared repository URL and stamps it
+	// on the entity when present. Unlocks github + git + repofiles +
+	// openssf collectors for Rust packages.
+	//
+	// Gates on Ecosystem rather than Type — same rationale as above.
+	// Failure semantics match npm/pypi: transport errors write
+	// absence:repo_declaration and fail-loud on --refresh. A crate
+	// that exists but declares no repository leaves URL empty — the
+	// git-side collectors gate themselves out, user still gets the
+	// 10 cargo-registry signals.
+	if (entity.Ecosystem == "cargo" || entity.Ecosystem == "crates") &&
+		entity.URL == "" {
+		if resolveErr := resolveCargoRepo(ctx, s, entity, globals); resolveErr != nil {
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"cargo-registry",
+				resolveErr.Error(),
+				true,
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
+
+			if cmd.Refresh {
+				_, _ = fmt.Fprintf(stderr, "warning: cargo repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh cargo repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: cargo repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, resolveErr)
+		}
+	}
+
+	// Go-module vanity-host resolution: parallel to npm/pypi/cargo above.
 	// Triggers for entities whose Ecosystem is "golang"/"go" and
 	// whose URL stayed empty after parse-time CloneURL stamping —
 	// i.e., vanity hosts (gopkg.in, modernc.org, k8s.io) where the
@@ -600,7 +638,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// by the defensive backfill above. The URI prefix
 	// (pkg:golang/* or pkg:go/*) is implied by Ecosystem.
 	//
-	// Failure semantics match npm/pypi: a transport error during
+	// Failure semantics match npm/pypi/cargo: a transport error during
 	// resolution writes an absence:repo_declaration signal AND
 	// returns a wrapped error on --refresh (loud-fail). A "no source
 	// resolvable" outcome (proxy 404 + no meta tag) is NOT a failure
@@ -1313,16 +1351,65 @@ func resolvePyPIRepo(ctx context.Context, s store.Store, entity *profile.Entity,
 	return nil
 }
 
+// resolveCargoRepo asks crates.io for the crate's declared repository
+// URL, normalizes it to a github clone URL (empty if not declared or
+// non-github), and stamps the result on the entity. Persists the
+// entity update so subsequent reads see the resolved URL.
+//
+// Parallel to resolveNpmRepo / resolvePyPIRepo: the provider answers
+// the "where is this crate's source?" question, the orchestrator
+// records it, and downstream collectors work against the resolved
+// entity. The crate's Repository field in the crates.io API response
+// is publisher-declared (self-reported, not cryptographically bound).
+//
+// Package name extraction handles both pkg:cargo/ and pkg:crates/
+// prefixes (the latter is the ecosystem alias from detect.go).
+func resolveCargoRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	packageName := entity.CanonicalURI
+	for _, prefix := range []string{"pkg:cargo/", "pkg:crates/"} {
+		if rest, ok := strings.CutPrefix(packageName, prefix); ok {
+			packageName = rest
+			break
+		}
+	}
+	if packageName == "" || packageName == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not a cargo package URI", entity.CanonicalURI)
+	}
+
+	client := cargoregistry.NewClient()
+	if globals != nil && globals.CargoRegistryURL != "" {
+		client = cargoregistry.NewClientWithBaseURL(globals.CargoRegistryURL)
+	}
+
+	repoURL, err := client.ResolveRepoURL(ctx, packageName)
+	if err != nil {
+		return fmt.Errorf("query crates.io registry: %w", err)
+	}
+	if repoURL == "" {
+		// Crate doesn't declare a github-hosted repository. Nothing
+		// to stamp; stay silent. Downstream dispatch will skip the
+		// github + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
+}
+
 // resolveGoRepo asks proxy.golang.org for the module's declared VCS
 // source (Origin block), falling back to the vanity host's
 // go-import meta tag for pre-Go-1.20 publishes that lack the proxy
 // Origin. Stamps the resolved github URL on the entity. Persists.
 //
-// Parallel to resolveNpmRepo / resolvePyPIRepo: the provider answers
-// the "where is this module's source?" question, the orchestrator
-// stamps it, downstream collectors operate against the resolved
-// entity. The resolution chain — proxy first, meta tag as fallback,
-// neither-resolves means empty stays empty — lives in
+// Parallel to resolveNpmRepo / resolvePyPIRepo / resolveCargoRepo:
+// the provider answers the "where is this module's source?" question,
+// the orchestrator stamps it, downstream collectors operate against
+// the resolved entity. The resolution chain — proxy first, meta tag
+// as fallback, neither-resolves means empty stays empty — lives in
 // gopublish.Client.ResolveRepoURL; this wrapper handles the
 // CanonicalURI parsing, the test-time URL injection, and the
 // entity-stamp persistence.

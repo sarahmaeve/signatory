@@ -17,6 +17,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	cargoregistry "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -973,7 +974,7 @@ func TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaMetaTag(t *testing.T) {
 // github + git + repofiles + openssf collectors won't fire for
 // this target.
 //
-// This is distinct from the npm/pypi/golang failure case where
+// This is distinct from the npm/pypi/golang/cargo failure case where
 // resolution was ATTEMPTED but yielded empty — those write an
 // absence:repo_declaration signal AND surface in the rendered
 // profile's Absences section. The unsupported-ecosystem path is
@@ -988,10 +989,10 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		require.NoError(t, err)
 		stale := &profile.Entity{
 			ID:           profile.NewEntityID(),
-			CanonicalURI: "pkg:cargo/atuin",
+			CanonicalURI: "pkg:gem/rails",
 			Type:         profile.EntityPackage,
-			ShortName:    "atuin",
-			Ecosystem:    "cargo",
+			ShortName:    "rails",
+			Ecosystem:    "gem",
 			URL:          "",
 			CreatedAt:    time.Now().UTC(),
 			UpdatedAt:    time.Now().UTC(),
@@ -1007,7 +1008,7 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		AuditFilePath: filepath.Join(dir, "audit.log"),
 	}
 	cmd := &AnalyzeCmd{
-		Target:  "pkg:cargo/atuin",
+		Target:  "pkg:gem/rails",
 		Refresh: true,
 		Stderr:  &stderr,
 	}
@@ -1015,7 +1016,7 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		"unsupported ecosystem must NOT fail --refresh; the hint is informational")
 
 	out := stderr.String()
-	assert.Contains(t, out, "cargo",
+	assert.Contains(t, out, "gem",
 		"note must name the ecosystem so the user knows what's unsupported")
 	assert.Contains(t, out, "resolver",
 		"note must explain that there's no source resolver yet")
@@ -1086,6 +1087,151 @@ func TestFunctional_AnalyzeRefresh_NoUnsupportedNoteForResolvableEcosystem(t *te
 	out := stderr.String()
 	assert.NotContains(t, out, "no source resolver",
 		"unsupported-ecosystem note must NOT fire when the ecosystem (golang) IS resolvable; got: %q", out)
+}
+
+// TestFunctional_AnalyzeRefresh_CargoResolvesSource verifies that
+// pkg:cargo/<name> entities trigger source resolution via the
+// crates.io registry. When the registry declares a github repository,
+// entity.URL is stamped and the unsupported-ecosystem note does NOT
+// fire. Symmetric with npm/pypi/golang resolution.
+func TestFunctional_AnalyzeRefresh_CargoResolvesSource(t *testing.T) {
+	t.Parallel()
+
+	// Stub crates.io returning a repository URL for ripgrep.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/ripgrep":
+			resp := cargoregistry.CrateResponse{
+				Crate: cargoregistry.Crate{
+					Name:       "ripgrep",
+					Repository: "https://github.com/BurntSushi/ripgrep",
+				},
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		e := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:cargo/ripgrep",
+			Type:         profile.EntityPackage,
+			ShortName:    "ripgrep",
+			Ecosystem:    "cargo",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), e))
+		require.NoError(t, s.Close())
+	}
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:           dbPath,
+		Collectors:       []signal.Collector{newMockCollector()},
+		AuditFilePath:    filepath.Join(dir, "audit.log"),
+		CargoRegistryURL: srv.URL,
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:cargo/ripgrep",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.NotContains(t, out, "no source resolver",
+		"cargo is now resolvable; unsupported-ecosystem note must NOT fire; got: %q", out)
+
+	// Verify entity.URL was stamped via the resolver.
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:cargo/ripgrep")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/BurntSushi/ripgrep", entity.URL,
+		"resolveCargoRepo must stamp the entity's URL from the registry-declared repository")
+}
+
+// TestFunctional_AnalyzeRefresh_CargoResolution_NoRepository verifies
+// the "crate exists but declares no source" path: resolveCargoRepo
+// returns nil (not an error), entity.URL stays empty, and downstream
+// git-side collectors gate themselves out gracefully.
+func TestFunctional_AnalyzeRefresh_CargoResolution_NoRepository(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/no-source":
+			resp := cargoregistry.CrateResponse{
+				Crate: cargoregistry.Crate{
+					Name:       "no-source",
+					Repository: "",
+				},
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		e := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:cargo/no-source",
+			Type:         profile.EntityPackage,
+			ShortName:    "no-source",
+			Ecosystem:    "cargo",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), e))
+		require.NoError(t, s.Close())
+	}
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:           dbPath,
+		Collectors:       []signal.Collector{newMockCollector()},
+		AuditFilePath:    filepath.Join(dir, "audit.log"),
+		CargoRegistryURL: srv.URL,
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:cargo/no-source",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	// No unsupported-ecosystem note — cargo IS supported now.
+	assert.NotContains(t, out, "no source resolver",
+		"cargo resolver IS wired; note must not fire even when repo is empty")
+
+	// entity.URL must remain empty — legitimate "no declared source."
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:cargo/no-source")
+	require.NoError(t, err)
+	assert.Empty(t, entity.URL,
+		"entity.URL must stay empty when crate declares no repository")
 }
 
 // TestFunctional_AnalyzeRefresh_GoResolutionUnresolvable verifies the
