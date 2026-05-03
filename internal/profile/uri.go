@@ -165,6 +165,8 @@ func CanonicalPackageURI(ecosystem, name string) string {
 		name = NormalizePyPIName(name)
 	case "cargo":
 		name = NormalizeCrateName(name)
+	case "gem":
+		name = NormalizeGemName(name)
 	}
 	return URISchemePackage + eco + "/" + name
 }

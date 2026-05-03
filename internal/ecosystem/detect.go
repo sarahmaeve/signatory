@@ -27,6 +27,9 @@ const (
 	// EcosystemNPM is npmjs.com (Node.js). Signal: `package.json`.
 	EcosystemNPM Ecosystem = "npm"
 
+	// EcosystemGem is rubygems.org (Ruby). Signal: `Gemfile`.
+	EcosystemGem Ecosystem = "gem"
+
 	// EcosystemUnknown is the null ecosystem — returned when no
 	// recognized manifest is present. The caller should treat this
 	// as "unable to determine" rather than "no package here."
@@ -160,6 +163,9 @@ var manifestSignals = map[Ecosystem][]string{
 		// pnpm-lock.yaml) strengthen but aren't required — bare
 		// package.json is already npm-conformant.
 	},
+	EcosystemGem: {
+		"Gemfile", // Gemfile.lock strengthens but isn't required.
+	},
 }
 
 // priorityOrder defines which ecosystem wins when a repo has
@@ -181,6 +187,7 @@ var manifestSignals = map[Ecosystem][]string{
 var priorityOrder = []Ecosystem{
 	EcosystemGo,
 	EcosystemCrates,
+	EcosystemGem,
 	EcosystemPyPI,
 	EcosystemNPM,
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
 	cargomanifest "github.com/sarahmaeve/signatory/internal/manifest/cargo"
+	gemmanifest "github.com/sarahmaeve/signatory/internal/manifest/gem"
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	npmmanifest "github.com/sarahmaeve/signatory/internal/manifest/npm"
 	pypimanifest "github.com/sarahmaeve/signatory/internal/manifest/pypi"
@@ -106,6 +107,11 @@ func parseGraph(ctx context.Context, path string) (manifest.Graph, error) {
 		// manifest's directory.
 		lockPath := filepath.Join(filepath.Dir(path), "Cargo.lock")
 		return cargomanifest.ParseGraph(lockPath)
+	case "Gemfile":
+		// Gemfile.lock contains the full resolved dependency graph in
+		// its nested specs structure — no external toolchain needed.
+		lockPath := filepath.Join(filepath.Dir(path), "Gemfile.lock")
+		return gemmanifest.ParseGraph(lockPath)
 	case "package.json":
 		// npm graph extraction is a follow-up commit.
 		return manifest.Graph{}, fmt.Errorf("%w: npm graph extraction is a v0.1 follow-up",
@@ -181,6 +187,8 @@ func parseManifest(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 		return gomod.Parse(path)
 	case "Cargo.toml":
 		return cargomanifest.Parse(path)
+	case "Gemfile":
+		return gemmanifest.Parse(path)
 	case "package.json":
 		return npmmanifest.Parse(path)
 	case "requirements.txt", "pyproject.toml", "setup.py":
@@ -188,8 +196,8 @@ func parseManifest(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	default:
 		return manifest.ProjectInfo{}, nil, fmt.Errorf(
 			"unrecognized manifest filename %q "+
-				"(supported in v0.1: go.mod, Cargo.toml, package.json, requirements.txt; "+
-				"recognized but not yet parsed: pyproject.toml, setup.py)",
+				"(supported: go.mod, Cargo.toml, Gemfile, package.json, requirements.txt, "+
+				"pyproject.toml, setup.py)",
 			base)
 	}
 }

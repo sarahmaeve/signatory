@@ -603,18 +603,17 @@ replace github.com/upstream/lib => ../local/fork
 
 // TestRun_UnrecognizedManifest errors out when path has a name
 // survey doesn't know how to parse. Protects against silent
-// nothing-happens on typos like `survey --manifest Gemfile`.
+// nothing-happens on typos like `survey --manifest build.gradle`.
 func TestRun_UnrecognizedManifest(t *testing.T) {
 	t.Parallel()
 
-	// Write a fake Gemfile content to a path — doesn't matter if
-	// the content is valid, parseManifest rejects at the filename.
+	// Write a fake content to a path with an unrecognized filename.
 	dir := t.TempDir()
-	gemfile := filepath.Join(dir, "Gemfile")
-	require.NoError(t, os.WriteFile(gemfile, []byte("source 'https://rubygems.org'\n"), 0o600))
+	gradle := filepath.Join(dir, "build.gradle")
+	require.NoError(t, os.WriteFile(gradle, []byte("apply plugin: 'java'\n"), 0o600))
 
 	s := openTestStore(t)
-	_, err := Run(context.Background(), s, gemfile)
+	_, err := Run(context.Background(), s, gradle)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unrecognized manifest")
 	assert.Contains(t, err.Error(), "go.mod")

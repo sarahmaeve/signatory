@@ -1,0 +1,12 @@
+source "https://rubygems.org"
+
+gemspec
+
+gem "puma", "~> 6.0"
+gem "sidekiq", "~> 7.0"
+gem "my_engine", git: "https://github.com/org/my_engine.git", branch: "main"
+gem "local_lib", path: "../local_lib"
+
+group :test do
+  gem "rspec", "~> 3.13"
+end
