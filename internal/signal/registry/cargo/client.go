@@ -156,6 +156,57 @@ func (c *Client) GetCrate(ctx context.Context, name string) (*CrateResponse, err
 	return &cr, nil
 }
 
+// GetOwners fetches the crate's owner list from crates.io. Returns
+// ErrNotFound (wrapped) on 404. A non-nil error on this endpoint does
+// NOT block signal collection — callers degrade gracefully and record
+// the absence for owner-derived signals only.
+func (c *Client) GetOwners(ctx context.Context, name string) (*OwnersResponse, error) {
+	if err := ValidateCrateName(name); err != nil {
+		return nil, fmt.Errorf("get owners: %w", err)
+	}
+
+	escapedName := url.PathEscape(name)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.registryURL+"/api/v1/crates/"+escapedName+"/owners", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build owners request for %q: %w", name, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("crates.io owners request for %q failed: %w", name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: owners for %s", ErrNotFound, name)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
+		return nil, fmt.Errorf("crates.io returned status %d for owners of %q",
+			resp.StatusCode, name)
+	}
+
+	limited := io.LimitReader(resp.Body, maxResponseSize+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read crates.io owners response for %q: %w", name, err)
+	}
+	if int64(len(body)) > maxResponseSize {
+		return nil, fmt.Errorf("crates.io owners response for %q exceeds %d-byte cap",
+			name, maxResponseSize)
+	}
+
+	var or OwnersResponse
+	if err := json.Unmarshal(body, &or); err != nil {
+		return nil, fmt.Errorf("decode crates.io owners response for %q: %w", name, err)
+	}
+	return &or, nil
+}
+
 // ResolveRepoURL is the convenience method Layer 6's resolver wraps.
 // Fetches crate metadata and returns the repository URL (normalized)
 // or empty string if no repository is declared.

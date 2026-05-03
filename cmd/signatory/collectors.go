@@ -17,6 +17,7 @@ import (
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
+	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
@@ -189,6 +190,8 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// signal feeding the cascade resolver's pypi-registry
 			// dispatch (entity-burn1.md "Pending work #1").
 			collectors = append(collectors, pypicollector.NewCollector().WithEntityStore(opts.EntityStore))
+		case "cargo", "crates":
+			collectors = append(collectors, cargocollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "golang", "go":
 			collectors = append(collectors, gopublishcollector.NewCollector())
 		}

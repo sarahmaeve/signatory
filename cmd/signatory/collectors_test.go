@@ -502,7 +502,7 @@ func TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector(t *testing.T) {
 
 // TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors guards the
 // safe-skip behaviour for ecosystems signatory doesn't yet collect
-// against. v0.1 wires npm + pypi + golang; cargo/rust, ruby, php,
+// against. v0.1 wires npm + pypi + golang + cargo; ruby, php,
 // nuget, ... lack collectors and must produce an empty slice — not
 // a hard error. Mirrors the historical defensive test that pypi
 // used to anchor before pypi wiring landed.
@@ -511,15 +511,15 @@ func TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors(t *testing.T) {
 
 	entity := &profile.Entity{
 		ID:           "e1",
-		CanonicalURI: "pkg:cargo/serde",
+		CanonicalURI: "pkg:gem/rails",
 		Type:         profile.EntityPackage,
-		Ecosystem:    "cargo",
+		Ecosystem:    "gem",
 		URL:          "",
 	}
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
 	require.NoError(t, err)
 	assert.Empty(t, collectors,
-		"cargo isn't wired in v0.1 — entities for unwired ecosystems must produce zero collectors without erroring")
+		"gem isn't wired — entities for unwired ecosystems must produce zero collectors without erroring")
 }
 
 // --- gitCloneFull / validateExistingClone env-sanitization tests ------------

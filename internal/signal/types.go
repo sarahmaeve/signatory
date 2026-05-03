@@ -703,4 +703,73 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"use as one input to a criticality picture, never as a sole basis for a trust decision",
 		},
 	},
+	"recent_downloads": {
+		Type:              "recent_downloads",
+		Group:             profile.SignalGroupCriticality,
+		ForgeryResistance: profile.ForgeryLowDeclining,
+		Description:       "Recent download count for a crate from crates.io's first-party stats (last 90 days).",
+		Caveats: []string{
+			"counts are trivially gameable by botting downloads; treat as a floor, never a ceiling",
+			"crates.io's recent_downloads window is ~90 days; not directly comparable to npm's 7-day window",
+			"first-party stat — no third-party endpoint needed, unlike npm",
+		},
+	},
+
+	// ================================================================
+	// Publication — Cargo-specific signals
+	// ================================================================
+
+	"build_script_present": {
+		Type:              "build_script_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published crate version declares a build.rs script — Rust's equivalent of a postinstall hook, executing arbitrary code at compile time.",
+		Caveats: []string{
+			"build.rs is extremely common in legitimate crates (native bindings, code generation, feature detection) — presence alone is not negative",
+			"the signal is analogous to npm's postinstall_present: it raises the attack surface area, not the probability of attack",
+			"has_build_script is per-version metadata set by cargo at publish time — cannot be added post-publish",
+		},
+	},
+	"build_script_introduced": {
+		Type:              "build_script_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether a build.rs script appeared in the latest crate version where prior versions lacked one. Longitudinal complement to build_script_present — the cargo analog of postinstall_introduced.",
+		Caveats: []string{
+			"transitions have legitimate causes — native binding adoption, code-gen migration — so a true positive is an anomaly flag, not a verdict",
+			"window is bounded (last N versions by publish time); a build script introduced farther back looks indistinguishable from one that was always there",
+		},
+	},
+	"yanked_release_count": {
+		Type:              "yanked_release_count",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Count of yanked versions in the crate's version history. Yanking is an irreversible registry-side operation requiring owner credentials.",
+		Caveats: []string{
+			"yanking is normal maintenance (buggy releases, security patches) — a nonzero count is expected for active crates",
+			"abnormally high counts relative to total versions may indicate cleanup of a compromised publishing spree",
+			"yanked versions remain in the index but cannot be freshly resolved — the signal captures historical shape, not current availability",
+		},
+	},
+	"owner_count": {
+		Type:              "owner_count",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Count of crate owners (users + teams) from crates.io's /owners endpoint. Bus-factor signal.",
+		Caveats: []string{
+			"crates.io owner lists are authoritative and append-only within a session — higher forgery resistance than npm's self-declared maintainers list",
+			"low count (1 user, no team) is a governance concern independent of the owner's trustworthiness",
+			"team membership is opaque — a team of 1 looks like group ownership but isn't",
+		},
+	},
+	"owner_team_present": {
+		Type:              "owner_team_present",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether at least one crates.io team (not just individual users) owns the crate. Team ownership is a governance positive.",
+		Caveats: []string{
+			"team presence is a structural governance signal — it doesn't certify that the team has active members or review processes",
+			"a team of 1 is indistinguishable from no team at the API level; the signal can't penetrate team membership",
+		},
+	},
 }
