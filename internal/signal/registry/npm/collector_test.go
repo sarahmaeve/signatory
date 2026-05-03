@@ -124,8 +124,8 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	// Phase B.6. The sample response has only a single version
 	// entry, so the cross-version signals land with stable-state
 	// payloads rather than transition flags.)
-	assert.Equal(t, 7, result.SignalCount(),
-		"all seven signals should land on happy path (5 snapshot + 2 cross-version)")
+	assert.Equal(t, 8, result.SignalCount(),
+		"all eight signals should land on happy path (5 snapshot + 3 cross-version)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// last_publish
@@ -247,11 +247,11 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Six real signals (everything except weekly_downloads), one
+	// Seven real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
-	// failure must not poison the other signals. The two cross-
+	// failure must not poison the other signals. The three cross-
 	// version signals land from the same-wire versions map.
-	assert.Equal(t, 6, result.SignalCount())
+	assert.Equal(t, 7, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -512,7 +512,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 7, result.SignalCount())
+	assert.Equal(t, 8, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -864,6 +864,76 @@ func TestCollector_Collect_CrossVersion_TiebreakDeterministic(t *testing.T) {
 	}
 }
 
+// TestCollector_Collect_VersionPublishBurst_DetectsBurst models a
+// rapid-fire publish campaign: 4 versions within 48 hours. The signal
+// should flag burst_detected=true.
+func TestCollector_Collect_VersionPublishBurst_DetectsBurst(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "spam-pkg",
+	  "dist-tags": {"latest": "1.3.0"},
+	  "time": {
+	    "1.0.0": "2026-04-10T06:00:00Z",
+	    "1.1.0": "2026-04-10T18:00:00Z",
+	    "1.2.0": "2026-04-11T06:00:00Z",
+	    "1.3.0": "2026-04-11T18:00:00Z"
+	  },
+	  "maintainers": [{"name": "newacct"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "newacct"}},
+	    "1.1.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "newacct"}},
+	    "1.2.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "newacct"}},
+	    "1.3.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "newacct"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":5,"start":"a","end":"b","package":"spam-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("spam-pkg"))
+	require.NoError(t, err)
+
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, true, vpb["burst_detected"])
+	assert.EqualValues(t, 4, vpb["versions_in_window"])
+	assert.EqualValues(t, 36, vpb["window_hours"]) // 36h span across 4 versions
+	assert.EqualValues(t, 4, vpb["versions_checked"])
+}
+
+// TestCollector_Collect_VersionPublishBurst_NoBurst — versions spread
+// over months. No burst detected.
+func TestCollector_Collect_VersionPublishBurst_NoBurst(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "stable-pkg",
+	  "dist-tags": {"latest": "3.0.0"},
+	  "time": {
+	    "1.0.0": "2024-01-15T00:00:00Z",
+	    "2.0.0": "2025-03-20T00:00:00Z",
+	    "3.0.0": "2026-02-10T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "solid-dev"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solid-dev"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solid-dev"}},
+	    "3.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solid-dev"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":50000,"start":"a","end":"b","package":"stable-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("stable-pkg"))
+	require.NoError(t, err)
+
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, false, vpb["burst_detected"])
+	assert.EqualValues(t, 3, vpb["versions_in_window"])
+	assert.EqualValues(t, 3, vpb["versions_checked"])
+}
+
 // TestCollector_Collect_CrossVersion_NoOrderableVersions — versions
 // map has entries but no corresponding time entries, so we can't
 // order them. Both cross-version signals emit absence.
@@ -888,6 +958,7 @@ func TestCollector_Collect_CrossVersion_NoOrderableVersions(t *testing.T) {
 
 	assert.True(t, hasAbsence(result, "postinstall_introduced"))
 	assert.True(t, hasAbsence(result, "publish_origin_consistency"))
+	assert.True(t, hasAbsence(result, "version_publish_burst"))
 }
 
 // ----- extractNpmPackageName unit test stays the same -----

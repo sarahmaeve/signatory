@@ -441,11 +441,18 @@ func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
 	return records
 }
 
-// recordCrossVersionSignals emits the two longitudinal signals
-// (postinstall_introduced, publish_origin_consistency) from a
-// shared window of recent versions. Returning an empty window is
-// recorded as absence for both — a package with no orderable
-// versions produces no cross-version evidence either way.
+// burstThreshold is the maximum duration between oldest and newest
+// version in the window that triggers a burst detection. 72 hours
+// matches the BufferZoneCorp campaign cadence (4 versions in 3 days)
+// and the gem collector's threshold.
+const burstThreshold = 72 * time.Hour
+
+// recordCrossVersionSignals emits the longitudinal signals
+// (postinstall_introduced, publish_origin_consistency,
+// version_publish_burst) from a shared window of recent versions.
+// Returning an empty window is recorded as absence for all — a
+// package with no orderable versions produces no cross-version
+// evidence either way.
 func recordCrossVersionSignals(result *signal.CollectionResult, entityID string,
 	pkg *RegistryPackage, collectedAt time.Time) {
 
@@ -456,11 +463,14 @@ func recordCrossVersionSignals(result *signal.CollectionResult, entityID string,
 			reason, false, collectedAt)
 		result.RecordAbsence(entityID, "publish_origin_consistency", source,
 			reason, false, collectedAt)
+		result.RecordAbsence(entityID, "version_publish_burst", source,
+			reason, false, collectedAt)
 		return
 	}
 
 	recordPostinstallIntroduced(result, entityID, recent, collectedAt)
 	recordPublishOriginConsistency(result, entityID, recent, collectedAt)
+	recordVersionPublishBurst(result, entityID, recent, collectedAt)
 }
 
 // recordPostinstallIntroduced detects the axios-2026 shape: a
@@ -554,6 +564,42 @@ func recordPublishOriginConsistency(result *signal.CollectionResult, entityID st
 			"unique_publishers":       len(publishers),
 			"publishers":              publisherList,
 			"latest_publisher":        recent[0].publisher,
+		})
+}
+
+// recordVersionPublishBurst detects whether multiple versions were
+// published within a short time window (burstThreshold). A rapid-fire
+// publish cadence is characteristic of version-pumping campaigns:
+// ship benign versions quickly to build download/version history,
+// then weaponize the latest.
+func recordVersionPublishBurst(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	if len(recent) < 2 {
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(recent),
+				"window_hours":       0,
+				"versions_checked":   len(recent),
+			})
+		return
+	}
+
+	// recent is sorted newest-first: recent[0] is newest,
+	// recent[len-1] is oldest.
+	newest := recent[0].publishedAt
+	oldest := recent[len(recent)-1].publishedAt
+	span := newest.Sub(oldest)
+
+	burst := len(recent) >= 3 && span <= burstThreshold
+
+	result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+		map[string]any{
+			"burst_detected":     burst,
+			"versions_in_window": len(recent),
+			"window_hours":       int(span.Hours()),
+			"versions_checked":   len(recent),
 		})
 }
 

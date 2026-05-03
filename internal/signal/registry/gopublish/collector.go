@@ -209,28 +209,100 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 			})
 	}
 
-	// ----- @v/<v>.info × N → version_pin_table -----
+	// ----- @v/<v>.info × N → version_pin_table + version_publish_burst -----
 	//
 	// Iterates up to maxPinFetches most-recent versions, fetching
 	// the Origin hash per version with random jitter between calls.
 	// The compound result is the trust anchor source-evolution uses
 	// to attach matrix rows to commit SHAs. See pintable.go.
+	//
+	// version_publish_burst is computed from the same pin timestamps
+	// — no additional network calls.
 	switch {
 	case listErr != nil && errors.Is(listErr, ErrNotFound):
 		result.RecordAbsence(entity.ID, "version_pin_table", source,
 			"module not found in proxy.golang.org", false, collectedAt)
+		result.RecordAbsence(entity.ID, "version_publish_burst", source,
+			"module not found in proxy.golang.org", false, collectedAt)
 	case listErr != nil:
 		result.RecordFailure(entity.ID, "version_pin_table", source,
+			sanitizeFetchReason(listErr), true, collectedAt)
+		result.RecordFailure(entity.ID, "version_publish_burst", source,
 			sanitizeFetchReason(listErr), true, collectedAt)
 	case len(versions) == 0:
 		result.RecordAbsence(entity.ID, "version_pin_table", source,
 			"@v/list returned empty version set", false, collectedAt)
+		result.RecordAbsence(entity.ID, "version_publish_burst", source,
+			"@v/list returned empty version set", false, collectedAt)
 	default:
 		pinTable := c.processPinTable(ctx, modulePath, versions)
 		result.RecordSignal(entity.ID, "version_pin_table", source, collectedAt, defaultTTL, pinTable)
+		recordVersionPublishBurst(result, entity.ID, pinTable, collectedAt)
 	}
 
 	return result, nil
+}
+
+// burstThreshold is the maximum time span across the version window
+// that triggers burst detection. 72 hours matches the BufferZoneCorp
+// campaign cadence and the gem/npm collectors' threshold.
+const burstThreshold = 72 * time.Hour
+
+// recordVersionPublishBurst detects whether multiple versions were
+// published within a short time window (burstThreshold). Computed from
+// the pin table's PublishedAt timestamps — no additional HTTP calls
+// beyond what the pin table already fetched.
+func recordVersionPublishBurst(result *signal.CollectionResult, entityID string,
+	pinTable VersionPinTableValue, collectedAt time.Time) {
+
+	// Only pins with successful fetches have timestamps.
+	if len(pinTable.Pins) < 2 {
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(pinTable.Pins),
+				"window_hours":       0,
+				"versions_checked":   pinTable.VersionCountProcessed,
+			})
+		return
+	}
+
+	// Parse timestamps and find oldest/newest.
+	var newest, oldest time.Time
+	for _, pin := range pinTable.Pins {
+		t, err := time.Parse(time.RFC3339, pin.PublishedAt)
+		if err != nil {
+			continue
+		}
+		if newest.IsZero() || t.After(newest) {
+			newest = t
+		}
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest = t
+		}
+	}
+
+	if newest.IsZero() || oldest.IsZero() {
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(pinTable.Pins),
+				"window_hours":       0,
+				"versions_checked":   pinTable.VersionCountProcessed,
+			})
+		return
+	}
+
+	span := newest.Sub(oldest)
+	burst := len(pinTable.Pins) >= 3 && span <= burstThreshold
+
+	result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+		map[string]any{
+			"burst_detected":     burst,
+			"versions_in_window": len(pinTable.Pins),
+			"window_hours":       int(span.Hours()),
+			"versions_checked":   pinTable.VersionCountProcessed,
+		})
 }
 
 // extractGoModulePath pulls the module path out of a Go-ecosystem

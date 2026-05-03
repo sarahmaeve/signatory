@@ -229,7 +229,7 @@ func TestCollector_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, 5, result.SignalCount(), "all five signals should land on happy path")
+	assert.Equal(t, 6, result.SignalCount(), "all six signals should land on happy path")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	require.True(t, hasSignal(result, "last_publish"))
@@ -292,7 +292,7 @@ func TestCollector_PkgGoLegacyURI(t *testing.T) {
 	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), legacy)
 	require.NoError(t, err)
-	assert.Equal(t, 5, result.SignalCount(), "legacy pkg:go URI should still resolve")
+	assert.Equal(t, 6, result.SignalCount(), "legacy pkg:go URI should still resolve")
 }
 
 // TestCollector_LatestNotFound: @latest 404 turns into a fetch
@@ -355,4 +355,72 @@ func TestCollector_OriginAbsent(t *testing.T) {
 	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
 	require.NoError(t, err)
 	assert.True(t, hasAbsence(result, "publish_origin"))
+}
+
+// ----- version_publish_burst -----
+
+// TestCollector_VersionPublishBurst_NoBurst: the happy-path fixture
+// spreads 5 versions across ~6 weeks — well beyond 72 hours. No
+// burst should be detected.
+func TestCollector_VersionPublishBurst_NoBurst(t *testing.T) {
+	t.Parallel()
+	fx := happyPathFixtures()
+	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
+
+	c := noJitterCollector(srv.URL)
+	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_publish_burst"))
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, false, vpb["burst_detected"])
+	assert.EqualValues(t, 5, vpb["versions_in_window"])
+	assert.EqualValues(t, 5, vpb["versions_checked"])
+}
+
+// TestCollector_VersionPublishBurst_DetectsBurst: 4 versions published
+// within 48 hours triggers burst detection.
+func TestCollector_VersionPublishBurst_DetectsBurst(t *testing.T) {
+	t.Parallel()
+	fx := fixtures{
+		latestBody:    `{"Version":"v1.3.0","Time":"2026-04-12T18:00:00Z"}`,
+		listBody:      "v1.0.0\nv1.1.0\nv1.2.0\nv1.3.0\n",
+		infoBody:      versionInfoBody("v1.3.0", "aaaa333333333333333333333333333333333333", "2026-04-12T18:00:00Z"),
+		lookupBody:    "99\nfake.example/spam v1.3.0 h1:abc\nfake.example/spam v1.3.0/go.mod h1:def\n\n— sum.golang.org Az...\n",
+		lookupVersion: "v1.3.0",
+		versionInfos: map[string]string{
+			"v1.0.0": versionInfoBody("v1.0.0", "aaaa000000000000000000000000000000000000", "2026-04-11T06:00:00Z"),
+			"v1.1.0": versionInfoBody("v1.1.0", "aaaa111111111111111111111111111111111111", "2026-04-11T18:00:00Z"),
+			"v1.2.0": versionInfoBody("v1.2.0", "aaaa222222222222222222222222222222222222", "2026-04-12T06:00:00Z"),
+			"v1.3.0": versionInfoBody("v1.3.0", "aaaa333333333333333333333333333333333333", "2026-04-12T18:00:00Z"),
+		},
+	}
+	srv := fakeProxyAndSum(t, "fake.example/spam", fx)
+
+	c := noJitterCollector(srv.URL)
+	result, err := c.Collect(context.Background(), goEntity("fake.example/spam"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_publish_burst"))
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, true, vpb["burst_detected"])
+	assert.EqualValues(t, 4, vpb["versions_in_window"])
+	assert.EqualValues(t, 36, vpb["window_hours"]) // 36h span
+	assert.EqualValues(t, 4, vpb["versions_checked"])
+}
+
+// TestCollector_VersionPublishBurst_ListFails: when @v/list fails,
+// version_publish_burst is recorded as absence (no version list to
+// compute burst from).
+func TestCollector_VersionPublishBurst_ListFails(t *testing.T) {
+	t.Parallel()
+	fx := happyPathFixtures()
+	fx.listStatus = http.StatusInternalServerError
+	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
+
+	c := noJitterCollector(srv.URL)
+	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
+	require.NoError(t, err)
+
+	assert.True(t, hasAbsence(result, "version_publish_burst"))
 }
