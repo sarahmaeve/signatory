@@ -1,0 +1,11 @@
+[workspace]
+members = ["serde", "serde_derive"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.61"
+
+[workspace.dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = "2.0"

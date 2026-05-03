@@ -40,6 +40,7 @@ func Detect(dir string) (path, ecosystem string, err error) {
 		ecosystem string
 	}{
 		{"go.mod", "go"},
+		{"Cargo.toml", "cargo"},
 		{"pyproject.toml", "pypi"},
 		{"setup.py", "pypi"},
 		{"requirements.txt", "pypi"},

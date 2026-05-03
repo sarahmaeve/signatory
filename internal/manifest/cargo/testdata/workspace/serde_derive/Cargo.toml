@@ -1,0 +1,13 @@
+[package]
+name = "serde_derive"
+version = "1.0.219"
+edition = "2021"
+rust-version.workspace = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["derive"] }
+
+[lib]
+proc-macro = true
