@@ -783,4 +783,14 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"detection is from source (Cargo.toml [lib] proc-macro = true); not available without a clone",
 		},
 	},
+	"mfa_required": {
+		Type:              "mfa_required",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the gem's publisher has enabled mandatory multi-factor authentication for pushes. MFA-required gems cannot be published with a compromised API key alone.",
+		Caveats: []string{
+			"MFA-required reflects the gem owner's current policy — it does not retroactively certify older versions",
+			"rubygems.org enforces MFA at the account level for high-download gems since 2022; this signal captures the per-gem explicit opt-in",
+		},
+	},
 }

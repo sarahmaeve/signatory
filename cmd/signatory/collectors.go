@@ -18,6 +18,7 @@ import (
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
+	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
@@ -192,6 +193,8 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			collectors = append(collectors, pypicollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "cargo", "crates":
 			collectors = append(collectors, cargocollector.NewCollector().WithEntityStore(opts.EntityStore))
+		case "gem":
+			collectors = append(collectors, gemcollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "golang", "go":
 			collectors = append(collectors, gopublishcollector.NewCollector())
 		}
