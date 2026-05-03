@@ -793,4 +793,48 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"rubygems.org enforces MFA at the account level for high-download gems since 2022; this signal captures the per-gem explicit opt-in",
 		},
 	},
+	"native_extension_present": {
+		Type:              "native_extension_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published gem version includes native extensions (platform != 'ruby'). Native extensions execute arbitrary code at install time via extconf.rb — the gem equivalent of cargo's build.rs or npm's postinstall.",
+		Caveats: []string{
+			"native extensions are common in legitimate gems (nokogiri, ffi, pg, mysql2) — presence alone is not negative",
+			"the signal flags a distinct attack surface: extconf.rb runs with full system access during gem install",
+			"platform is per-version metadata set by rubygems at publish time — cannot be changed post-publish",
+		},
+	},
+	"native_extension_introduced": {
+		Type:              "native_extension_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether a native extension appeared in a recent version where prior versions were pure Ruby. Longitudinal complement to native_extension_present — the gem analog of build_script_introduced.",
+		Caveats: []string{
+			"transitions have legitimate causes — adopting a C extension for performance, wrapping a new system library — so a true positive is an anomaly flag, not a verdict",
+			"window is bounded (last N versions by publish time); an extension introduced farther back is indistinguishable from one always present",
+			"the BufferZoneCorp campaign weaponized extconf.rb in v0.4.0 after pure-Ruby v0.1.0–v0.3.0 — this signal catches that exact shape",
+		},
+	},
+	"version_publish_burst": {
+		Type:              "version_publish_burst",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether multiple versions were published within a short time window (72 hours). Version-pumping is a common supply-chain attack tactic: ship benign versions quickly to build history, then weaponize the latest.",
+		Caveats: []string{
+			"initial releases of a new gem legitimately publish several versions in rapid succession (0.1.0, 0.1.1, 0.2.0 in a week as the API stabilizes)",
+			"the signal is strongest when combined with young account age and low download counts",
+			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
+		},
+	},
+	"author_drift": {
+		Type:              "author_drift",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Count of distinct author strings across recent versions. A change in the authors field between versions may indicate account takeover or maintainer handoff.",
+		Caveats: []string{
+			"the authors field is self-declared in the gemspec — it can be set to anything by whoever publishes",
+			"legitimate author drift occurs on maintainer succession, corporate sponsorship changes, and name updates",
+			"forgery resistance is medium-declining because the field is publisher-controlled, but a change IS visible in the immutable version history",
+		},
+	},
 }

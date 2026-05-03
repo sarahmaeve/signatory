@@ -109,10 +109,12 @@ func TestCollector_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should emit: last_publish, version_count, recent_downloads,
-	// maintainer_count, owner_count, yanked_release_count, mfa_required.
-	// Total: 7 signals minimum.
-	assert.GreaterOrEqual(t, result.SignalCount(), 7,
-		"expected at least 7 signals, got %d", result.SignalCount())
+	// maintainer_count, owner_count, yanked_release_count, mfa_required,
+	// native_extension_present, native_extension_introduced,
+	// version_publish_burst, author_drift.
+	// Total: 11 signals minimum.
+	assert.GreaterOrEqual(t, result.SignalCount(), 11,
+		"expected at least 11 signals, got %d", result.SignalCount())
 
 	signals := result.Signals()
 	signalMap := map[string]json.RawMessage{}
@@ -258,6 +260,237 @@ func TestCollector_EntityStore_MintsOwnerEntities(t *testing.T) {
 	assert.Contains(t, store.minted, "identity:rubygems/dhh")
 	assert.Contains(t, store.minted, "identity:rubygems/rafaelfranca")
 	assert.Contains(t, store.minted, "identity:rubygems/tenderlove")
+}
+
+// --- Longitudinal signal tests ---
+
+// attackVersions returns a version sequence mimicking the BufferZoneCorp
+// campaign: 4 versions in 72 hours, native extension introduced in the
+// latest, author drift on the final version.
+func attackVersions() []VersionEntry {
+	return []VersionEntry{
+		{Number: "0.4.0", CreatedAt: "2026-04-14T18:00:00Z", Platform: "x86_64-linux", Authors: "attacker@evil.com", Yanked: false},
+		{Number: "0.3.0", CreatedAt: "2026-04-13T12:00:00Z", Platform: "ruby", Authors: "legitimate@example.com", Yanked: false},
+		{Number: "0.2.0", CreatedAt: "2026-04-12T18:00:00Z", Platform: "ruby", Authors: "legitimate@example.com", Yanked: false},
+		{Number: "0.1.0", CreatedAt: "2026-04-12T06:00:00Z", Platform: "ruby", Authors: "legitimate@example.com", Yanked: false},
+	}
+}
+
+func TestCollector_NativeExtensionPresent(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/knot-rack.json":
+			json.NewEncoder(w).Encode(GemResponse{Name: "knot-rack", VersionDownloads: 100, Version: "0.4.0"}) //nolint:errcheck
+		case "/api/v1/versions/knot-rack.json":
+			json.NewEncoder(w).Encode(attackVersions()) //nolint:errcheck
+		case "/api/v1/gems/knot-rack/owners.json":
+			json.NewEncoder(w).Encode([]OwnerEntry{{Handle: "attacker"}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{ID: "test-knot", CanonicalURI: "pkg:gem/knot-rack", Ecosystem: "gem"}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// native_extension_present: latest version has platform != "ruby"
+	require.Contains(t, signalMap, "native_extension_present")
+	var nep map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["native_extension_present"], &nep))
+	assert.Equal(t, true, nep["present"])
+	assert.Equal(t, "x86_64-linux", nep["latest_platform"])
+}
+
+func TestCollector_NativeExtensionIntroduced(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/knot-rack.json":
+			json.NewEncoder(w).Encode(GemResponse{Name: "knot-rack", VersionDownloads: 100, Version: "0.4.0"}) //nolint:errcheck
+		case "/api/v1/versions/knot-rack.json":
+			json.NewEncoder(w).Encode(attackVersions()) //nolint:errcheck
+		case "/api/v1/gems/knot-rack/owners.json":
+			json.NewEncoder(w).Encode([]OwnerEntry{{Handle: "attacker"}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{ID: "test-knot", CanonicalURI: "pkg:gem/knot-rack", Ecosystem: "gem"}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// native_extension_introduced: latest has extension, priors don't
+	require.Contains(t, signalMap, "native_extension_introduced")
+	var nei map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["native_extension_introduced"], &nei))
+	assert.Equal(t, true, nei["introduced_recently"])
+	assert.Equal(t, "0.4.0", nei["introduced_at_version"])
+	assert.Equal(t, float64(3), nei["prior_versions_without"])
+	assert.Equal(t, float64(4), nei["versions_checked"])
+}
+
+func TestCollector_VersionPublishBurst(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/knot-rack.json":
+			json.NewEncoder(w).Encode(GemResponse{Name: "knot-rack", VersionDownloads: 100, Version: "0.4.0"}) //nolint:errcheck
+		case "/api/v1/versions/knot-rack.json":
+			json.NewEncoder(w).Encode(attackVersions()) //nolint:errcheck
+		case "/api/v1/gems/knot-rack/owners.json":
+			json.NewEncoder(w).Encode([]OwnerEntry{{Handle: "attacker"}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{ID: "test-knot", CanonicalURI: "pkg:gem/knot-rack", Ecosystem: "gem"}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// version_publish_burst: 4 versions in ~60h (well under 72h threshold)
+	require.Contains(t, signalMap, "version_publish_burst")
+	var vpb map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_publish_burst"], &vpb))
+	assert.Equal(t, true, vpb["burst_detected"])
+	assert.Equal(t, float64(4), vpb["versions_in_window"])
+}
+
+func TestCollector_AuthorDrift(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/knot-rack.json":
+			json.NewEncoder(w).Encode(GemResponse{Name: "knot-rack", VersionDownloads: 100, Version: "0.4.0"}) //nolint:errcheck
+		case "/api/v1/versions/knot-rack.json":
+			json.NewEncoder(w).Encode(attackVersions()) //nolint:errcheck
+		case "/api/v1/gems/knot-rack/owners.json":
+			json.NewEncoder(w).Encode([]OwnerEntry{{Handle: "attacker"}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{ID: "test-knot", CanonicalURI: "pkg:gem/knot-rack", Ecosystem: "gem"}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// author_drift: latest version has a different author than priors
+	require.Contains(t, signalMap, "author_drift")
+	var ad map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["author_drift"], &ad))
+	assert.Equal(t, float64(2), ad["distinct_authors"])
+	assert.Equal(t, float64(4), ad["versions_checked"])
+}
+
+// TestCollector_Longitudinal_HealthyGem verifies that the rails fixture
+// (stable, single author, pure Ruby, spread-out publishing) produces
+// clean/benign values for all longitudinal signals.
+func TestCollector_Longitudinal_HealthyGem(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/rails.json":
+			json.NewEncoder(w).Encode(railsFixture()) //nolint:errcheck
+		case "/api/v1/versions/rails.json":
+			json.NewEncoder(w).Encode(railsVersions()) //nolint:errcheck
+		case "/api/v1/gems/rails/owners.json":
+			json.NewEncoder(w).Encode(railsOwners()) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{ID: "test-rails", CanonicalURI: "pkg:gem/rails", Ecosystem: "gem"}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// native_extension_present: all ruby platform → not present
+	require.Contains(t, signalMap, "native_extension_present")
+	var nep map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["native_extension_present"], &nep))
+	assert.Equal(t, false, nep["present"])
+
+	// native_extension_introduced: never had one → not introduced
+	require.Contains(t, signalMap, "native_extension_introduced")
+	var nei map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["native_extension_introduced"], &nei))
+	assert.Equal(t, false, nei["introduced_recently"])
+
+	// version_publish_burst: versions spread over months → no burst
+	require.Contains(t, signalMap, "version_publish_burst")
+	var vpb map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_publish_burst"], &vpb))
+	assert.Equal(t, false, vpb["burst_detected"])
+
+	// author_drift: single author throughout → 1 distinct author
+	require.Contains(t, signalMap, "author_drift")
+	var ad map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["author_drift"], &ad))
+	assert.Equal(t, float64(1), ad["distinct_authors"])
 }
 
 // mockEntityStore tracks which entity URIs were minted.
