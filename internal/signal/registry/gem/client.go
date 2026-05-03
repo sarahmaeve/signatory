@@ -190,7 +190,10 @@ func isGitHostURL(u string) bool {
 }
 
 // normalizeRepoURL cleans up a repository URL: strips .git suffix,
-// trailing slashes, and query/fragment.
+// trailing slashes, query/fragment, and GitHub path suffixes like
+// /tree/<ref> or /blob/<ref>/... that rubygems.org commonly sets as
+// source_code_uri (pointing at the version's tree view rather than
+// the bare repository).
 func normalizeRepoURL(u string) string {
 	// Strip query string and fragment.
 	if idx := strings.IndexByte(u, '?'); idx >= 0 {
@@ -202,5 +205,28 @@ func normalizeRepoURL(u string) string {
 	// Strip trailing slashes and .git suffix.
 	u = strings.TrimRight(u, "/")
 	u = strings.TrimSuffix(u, ".git")
+
+	// Strip GitHub /tree/<ref>, /blob/<ref>, /commit/<sha> path
+	// suffixes. These appear in rubygems source_code_uri when gem
+	// authors point at a specific tag's tree view rather than the
+	// repo root. The pattern is: host/owner/repo/{tree,blob,commit}/...
+	// We need at least owner/repo before the keyword to avoid
+	// false-positive stripping on repos literally named "tree".
+	for _, keyword := range []string{"/tree/", "/blob/", "/commit/"} {
+		if idx := strings.Index(u, keyword); idx > 0 {
+			// Verify there are at least two path segments (owner/repo)
+			// before the keyword by checking for github.com/X/Y shape.
+			prefix := u[:idx]
+			afterHost := strings.TrimPrefix(prefix, "https://")
+			afterHost = strings.TrimPrefix(afterHost, "http://")
+			// Count slashes after the host — need at least 2
+			// (host/owner/repo → 2 slashes after stripping scheme).
+			if strings.Count(afterHost, "/") >= 2 {
+				u = prefix
+				break
+			}
+		}
+	}
+
 	return u
 }

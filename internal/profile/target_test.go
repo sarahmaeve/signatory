@@ -544,6 +544,69 @@ func TestResolveTarget_CargoNameNormalization(t *testing.T) {
 	}
 }
 
+// TestResolveTarget_RubyGemsURLs covers the rubygems.org URL
+// copy-paste-from-browser convenience path. Accepted inputs produce
+// pkg:gem/<name> canonical URIs; rejected inputs fall through to
+// the error path.
+func TestResolveTarget_RubyGemsURLs(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in      string
+		wantURI string
+	}{
+		// Basic shape — with/without trailing slash.
+		{"https://rubygems.org/gems/rails", "pkg:gem/rails"},
+		{"https://rubygems.org/gems/rails/", "pkg:gem/rails"},
+		// http:// rather than https://.
+		{"http://rubygems.org/gems/rails", "pkg:gem/rails"},
+		// www. prefix.
+		{"https://www.rubygems.org/gems/rails", "pkg:gem/rails"},
+		// Versioned page.
+		{"https://rubygems.org/gems/rails/versions/7.1.3", "pkg:gem/rails@7.1.3"},
+		{"https://rubygems.org/gems/rails/versions/7.1.3/", "pkg:gem/rails@7.1.3"},
+		// Query strings + fragments are UI state; strip.
+		{"https://rubygems.org/gems/rails?locale=en", "pkg:gem/rails"},
+		{"https://rubygems.org/gems/rails#readme", "pkg:gem/rails"},
+		// Hyphenated names.
+		{"https://rubygems.org/gems/ruby-lsp", "pkg:gem/ruby-lsp"},
+		// Names with underscores — preserved (unlike cargo, gem hyphens != underscores).
+		{"https://rubygems.org/gems/ruby_parser", "pkg:gem/ruby_parser"},
+		// Names with dots.
+		{"https://rubygems.org/gems/google-protobuf", "pkg:gem/google-protobuf"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, "pkg", got.Scheme)
+			assert.Equal(t, "gem", got.Ecosystem)
+		})
+	}
+
+	rejected := []struct {
+		name string
+		in   string
+	}{
+		// Lookalike host — must not be accepted.
+		{"lookalike host", "https://rubygems.org.attacker.com/gems/rails"},
+		// Wrong path prefix (not /gems/).
+		{"profiles path", "https://rubygems.org/profiles/rails"},
+		{"root", "https://rubygems.org/"},
+		// /gems/ with no name.
+		{"gems no name", "https://rubygems.org/gems/"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+		})
+	}
+}
+
 // TestResolveTarget_NpmCasePreserved is the regression guard for
 // the asymmetric normalization policy: npm is case-sensitive at
 // the registry level, so `pkg:npm/Express` and `pkg:npm/express`

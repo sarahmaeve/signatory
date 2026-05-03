@@ -18,6 +18,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	cargoregistry "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
+	gemregistry "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	"github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypiregistry "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
@@ -201,6 +202,7 @@ var resolvableEcosystems = map[string]bool{
 	"go":     true,
 	"cargo":  true,
 	"crates": true,
+	"gem":    true,
 }
 
 // AnalysisDisplay wraps the runtime profile with any ingested
@@ -520,7 +522,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// resolver fire on legacy mistyped rows without requiring a data
 	// migration. PR0 fixed the producer; this defensive gate covers
 	// the rows that were already in users' stores when PR0 landed.
-	if entity.Ecosystem == "npm" && entity.URL == "" {
+	if entity.Ecosystem == "npm" {
 		if resolveErr := resolveNpmRepo(ctx, s, entity, globals); resolveErr != nil {
 			// Always write an absence signal so the profile carries a
 			// stored record of the failure — not just ephemeral stderr
@@ -564,7 +566,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// Gates on Ecosystem rather than Type — see the npm gate above
 	// for the rationale (legacy mistyped rows from the pre-PR0
 	// analyst_output.go hardcode).
-	if entity.Ecosystem == "pypi" && entity.URL == "" {
+	if entity.Ecosystem == "pypi" {
 		if resolveErr := resolvePyPIRepo(ctx, s, entity, globals); resolveErr != nil {
 			absenceSig := signal.MakeAbsence(
 				entity.ID,
@@ -598,8 +600,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// that exists but declares no repository leaves URL empty — the
 	// git-side collectors gate themselves out, user still gets the
 	// 10 cargo-registry signals.
-	if (entity.Ecosystem == "cargo" || entity.Ecosystem == "crates") &&
-		entity.URL == "" {
+	if entity.Ecosystem == "cargo" || entity.Ecosystem == "crates" {
 		if resolveErr := resolveCargoRepo(ctx, s, entity, globals); resolveErr != nil {
 			absenceSig := signal.MakeAbsence(
 				entity.ID,
@@ -618,6 +619,41 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 					entity.CanonicalURI, resolveErr)
 			}
 			_, _ = fmt.Fprintf(stderr, "warning: cargo repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, resolveErr)
+		}
+	}
+
+	// RubyGems source resolution: parallel to npm/pypi/cargo above.
+	// Queries rubygems.org for the gem's declared source_code_uri (or
+	// homepage_uri fallback) and stamps it on the entity when present.
+	// Unlocks github + git + repofiles + openssf collectors for Ruby
+	// packages.
+	//
+	// Gates on Ecosystem rather than Type — same rationale as above.
+	// Failure semantics match npm/pypi/cargo: transport errors write
+	// absence:repo_declaration and fail-loud on --refresh. A gem that
+	// exists but declares no github source leaves URL empty — the
+	// git-side collectors gate themselves out, user still gets the
+	// 7 gem-registry signals.
+	if entity.Ecosystem == "gem" {
+		if resolveErr := resolveGemRepo(ctx, s, entity, globals); resolveErr != nil {
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"gem-registry",
+				resolveErr.Error(),
+				true,
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
+
+			if cmd.Refresh {
+				_, _ = fmt.Fprintf(stderr, "warning: gem repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh gem repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: gem repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, resolveErr)
 		}
 	}
@@ -645,8 +681,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// — empty URL stays empty, github + git + repofiles + openssf
 	// collectors gate themselves out, and the user still gets
 	// gopublish signals.
-	if (entity.Ecosystem == "golang" || entity.Ecosystem == "go") &&
-		entity.URL == "" {
+	if entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
 		if resolveErr := resolveGoRepo(ctx, s, entity, globals); resolveErr != nil {
 			absenceSig := signal.MakeAbsence(
 				entity.ID,
@@ -1389,6 +1424,48 @@ func resolveCargoRepo(ctx context.Context, s store.Store, entity *profile.Entity
 		// Crate doesn't declare a github-hosted repository. Nothing
 		// to stamp; stay silent. Downstream dispatch will skip the
 		// github + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
+}
+
+// resolveGemRepo asks rubygems.org for the gem's declared source
+// repository URL (source_code_uri, falling back to homepage_uri),
+// normalizes it to a github clone URL (empty if not declared or
+// non-github), and stamps the result on the entity. Persists the
+// entity update so subsequent reads see the resolved URL.
+//
+// Parallel to resolveNpmRepo / resolvePyPIRepo / resolveCargoRepo:
+// the provider answers the "where is this gem's source?" question, the
+// orchestrator records it, and downstream collectors work against the
+// resolved entity. The gem's source_code_uri field in the rubygems.org
+// API response is publisher-declared (self-reported, not
+// cryptographically bound).
+func resolveGemRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	packageName := strings.TrimPrefix(entity.CanonicalURI, "pkg:gem/")
+	if packageName == "" || packageName == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not a gem package URI", entity.CanonicalURI)
+	}
+
+	client := gemregistry.NewClient()
+	if globals != nil && globals.GemRegistryURL != "" {
+		client = gemregistry.NewClientWithBaseURL(globals.GemRegistryURL)
+	}
+
+	repoURL, err := client.ResolveRepoURL(ctx, packageName)
+	if err != nil {
+		return fmt.Errorf("query rubygems.org registry: %w", err)
+	}
+	if repoURL == "" {
+		// Gem doesn't declare a github-hosted repository. Nothing to
+		// stamp; stay silent. Downstream dispatch will skip the github
+		// + git collectors via isGitHostedEntity.
 		return nil
 	}
 

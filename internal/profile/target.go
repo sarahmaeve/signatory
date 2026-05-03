@@ -154,6 +154,17 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return resolveCanonicalURI(uri)
 	}
 
+	// rubygems.org gem URLs: copy-paste-from-browser for Ruby gems.
+	// https://rubygems.org/gems/rails → pkg:gem/rails
+	// https://rubygems.org/gems/rails/versions/7.1.3 → pkg:gem/rails@7.1.3
+	if gemName, gemVersion, ok := parseRubyGemsURL(s); ok {
+		uri := "pkg:gem/" + gemName
+		if gemVersion != "" {
+			uri += "@" + gemVersion
+		}
+		return resolveCanonicalURI(uri)
+	}
+
 	// pkg.go.dev module/package URLs: copy-paste-from-browser
 	// convenience for Go modules. Output is the pkg:golang/<import-path>
 	// canonical form per the purl spec — the same form an analyst
@@ -183,7 +194,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// wrong canonical form.
 	if strings.Contains(s, "://") && !isGitHubURL(s) {
 		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com, npmjs.com, pypi.org, or crates.io URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, or rubygems.org URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
@@ -536,6 +547,72 @@ func parseCratesIOURL(input string) (name, version string, ok bool) {
 	rawVersion := ""
 	if len(segs) >= 2 && segs[1] != "" {
 		rawVersion = segs[1]
+	}
+
+	return rawName, rawVersion, true
+}
+
+// parseRubyGemsURL recognizes rubygems.org gem URLs and extracts the
+// gem name plus an optional version from `/versions/<version>` paths.
+// Returns (name, version, true) on a match; version is "" when the
+// URL has no version segment. Returns ("", "", false) on anything that
+// isn't a well-formed rubygems.org/gems/<name> URL.
+//
+// Accepted shapes:
+//
+//	https://rubygems.org/gems/rails                    → ("rails", "", true)
+//	https://rubygems.org/gems/rails/                   → ("rails", "", true)
+//	https://www.rubygems.org/gems/rails                → ("rails", "", true)
+//	http://rubygems.org/gems/rails                     → ("rails", "", true)
+//	https://rubygems.org/gems/rails/versions/7.1.3     → ("rails", "7.1.3", true)
+//	https://rubygems.org/gems/rails/versions/7.1.3/    → ("rails", "7.1.3", true)
+//	https://rubygems.org/gems/rails?locale=en          → ("rails", "", true)
+//	https://rubygems.org/gems/rails#readme             → ("rails", "", true)
+//
+// Host-anchoring: rejects lookalike hosts like `rubygems.org.evil.com`
+// by requiring an exact match on "rubygems.org/" after scheme strip.
+//
+// Gem names are returned verbatim (lowercase-only normalization is
+// applied downstream in resolveCanonicalURI's NormalizeGemName call).
+func parseRubyGemsURL(input string) (name, version string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+
+	// Host anchoring: must be EXACTLY "rubygems.org/" at this point.
+	rest, hostOK := strings.CutPrefix(s, "rubygems.org/")
+	if !hostOK {
+		return "", "", false
+	}
+
+	// Path must start with "gems/".
+	rest, pathOK := strings.CutPrefix(rest, "gems/")
+	if !pathOK || rest == "" {
+		return "", "", false
+	}
+
+	// Drop fragment and query.
+	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
+		rest = before
+	}
+	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
+		rest = before
+	}
+
+	// rubygems.org URL shape: gems/<name>[/versions/<version>][/].
+	segs := strings.Split(rest, "/")
+	for len(segs) > 0 && segs[len(segs)-1] == "" {
+		segs = segs[:len(segs)-1]
+	}
+	if len(segs) == 0 || segs[0] == "" {
+		return "", "", false
+	}
+
+	rawName := segs[0]
+	rawVersion := ""
+	// Version segment follows /versions/ prefix on rubygems.org.
+	if len(segs) >= 3 && segs[1] == "versions" && segs[2] != "" {
+		rawVersion = segs[2]
 	}
 
 	return rawName, rawVersion, true

@@ -126,6 +126,45 @@ func TestClient_ResolveRepoURL(t *testing.T) {
 	assert.Equal(t, "https://github.com/heartcombo/devise", url)
 }
 
+func TestClient_ResolveRepoURL_StripsTreePath(t *testing.T) {
+	t.Parallel()
+
+	// Real-world: rubygems.org sets source_code_uri to the version's
+	// tree view, e.g. https://github.com/rails/rails/tree/v8.1.3.
+	// normalizeRepoURL must strip /tree/<ref> to produce a cloneable URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GemResponse{
+			Name:          "rails",
+			SourceCodeURI: "https://github.com/rails/rails/tree/v8.1.3",
+		}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(), "rails")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/rails/rails", url)
+}
+
+func TestClient_ResolveRepoURL_StripsBlobPath(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GemResponse{
+			Name:          "somegem",
+			SourceCodeURI: "https://github.com/org/somegem/blob/main/README.md",
+		}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(), "somegem")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/org/somegem", url)
+}
+
 func TestClient_ResolveRepoURL_FallsBackToHomepage(t *testing.T) {
 	t.Parallel()
 

@@ -18,6 +18,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	cargoregistry "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
+	gemregistry "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -968,14 +969,14 @@ func TestFunctional_AnalyzeRefresh_ResolvesGoModuleViaMetaTag(t *testing.T) {
 // — confusing because they know the target exists but signatory
 // produced nothing.
 //
-// Specifically: entity.Ecosystem is "cargo" (not in the supported
-// set: npm, pypi, golang, go), entity.URL stays empty (we never
-// tried to resolve it), and the user gets a note explaining why the
-// github + git + repofiles + openssf collectors won't fire for
-// this target.
+// Specifically: entity.Ecosystem is "nuget" (not in the supported
+// set: npm, pypi, golang, go, cargo, gem), entity.URL stays empty
+// (we never tried to resolve it), and the user gets a note explaining
+// why the github + git + repofiles + openssf collectors won't fire
+// for this target.
 //
-// This is distinct from the npm/pypi/golang/cargo failure case where
-// resolution was ATTEMPTED but yielded empty — those write an
+// This is distinct from the npm/pypi/golang/cargo/gem failure case
+// where resolution was ATTEMPTED but yielded empty — those write an
 // absence:repo_declaration signal AND surface in the rendered
 // profile's Absences section. The unsupported-ecosystem path is
 // "we didn't even try"; the hint replaces the absence record.
@@ -989,10 +990,10 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		require.NoError(t, err)
 		stale := &profile.Entity{
 			ID:           profile.NewEntityID(),
-			CanonicalURI: "pkg:gem/rails",
+			CanonicalURI: "pkg:nuget/Newtonsoft.Json",
 			Type:         profile.EntityPackage,
-			ShortName:    "rails",
-			Ecosystem:    "gem",
+			ShortName:    "Newtonsoft.Json",
+			Ecosystem:    "nuget",
 			URL:          "",
 			CreatedAt:    time.Now().UTC(),
 			UpdatedAt:    time.Now().UTC(),
@@ -1008,7 +1009,7 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		AuditFilePath: filepath.Join(dir, "audit.log"),
 	}
 	cmd := &AnalyzeCmd{
-		Target:  "pkg:gem/rails",
+		Target:  "pkg:nuget/Newtonsoft.Json",
 		Refresh: true,
 		Stderr:  &stderr,
 	}
@@ -1016,7 +1017,7 @@ func TestFunctional_AnalyzeRefresh_NotesUnsupportedEcosystem(t *testing.T) {
 		"unsupported ecosystem must NOT fail --refresh; the hint is informational")
 
 	out := stderr.String()
-	assert.Contains(t, out, "gem",
+	assert.Contains(t, out, "nuget",
 		"note must name the ecosystem so the user knows what's unsupported")
 	assert.Contains(t, out, "resolver",
 		"note must explain that there's no source resolver yet")
@@ -1295,4 +1296,142 @@ func TestFunctional_AnalyzeRefresh_GoResolutionUnresolvable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", entity.URL,
 		"unresolvable module must leave URL empty — downstream isGitHostedEntity gates github+git collectors out cleanly")
+}
+
+// TestFunctional_AnalyzeRefresh_GemResolvesSource verifies that
+// pkg:gem/<name> entities trigger source resolution via the
+// rubygems.org registry. Uses the REAL response shape from
+// rubygems.org — source_code_uri includes /tree/<version> path that
+// must be stripped to produce a cloneable URL.
+func TestFunctional_AnalyzeRefresh_GemResolvesSource(t *testing.T) {
+	t.Parallel()
+
+	// Stub rubygems.org with a REALISTIC response: source_code_uri
+	// points at the version's tree view, not the bare repo.
+	// This is what rubygems.org actually returns for rails, nokogiri,
+	// devise, etc. — the exact shape that broke `--clone`.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/rails.json":
+			resp := gemregistry.GemResponse{
+				Name:          "rails",
+				SourceCodeURI: "https://github.com/rails/rails/tree/v8.1.3",
+				HomepageURI:   "https://rubyonrails.org",
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		e := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:gem/rails",
+			Type:         profile.EntityPackage,
+			ShortName:    "rails",
+			Ecosystem:    "gem",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), e))
+		require.NoError(t, s.Close())
+	}
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:         dbPath,
+		Collectors:     []signal.Collector{newMockCollector()},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		GemRegistryURL: srv.URL,
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:gem/rails",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.NotContains(t, out, "no source resolver",
+		"gem is now resolvable; unsupported-ecosystem note must NOT fire; got: %q", out)
+
+	// Verify entity.URL was stamped as a CLONEABLE URL (no /tree/ path).
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:gem/rails")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/rails/rails", entity.URL,
+		"resolveGemRepo must strip /tree/<ref> from source_code_uri to produce a cloneable URL")
+}
+
+// TestFunctional_AnalyzeRefresh_GemResolution_NoRepository verifies
+// the "gem exists but declares no source" path: resolveGemRepo returns
+// nil (not an error), entity.URL stays empty, and downstream git-side
+// collectors gate themselves out gracefully.
+func TestFunctional_AnalyzeRefresh_GemResolution_NoRepository(t *testing.T) {
+	t.Parallel()
+
+	// Stub rubygems.org returning a gem with no source_code_uri and
+	// no homepage_uri pointing at github.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/no-repo.json":
+			resp := gemregistry.GemResponse{
+				Name:        "no-repo",
+				HomepageURI: "https://example.com/no-repo",
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		e := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:gem/no-repo",
+			Type:         profile.EntityPackage,
+			ShortName:    "no-repo",
+			Ecosystem:    "gem",
+			URL:          "",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), e))
+		require.NoError(t, s.Close())
+	}
+
+	globals := &Globals{
+		DBPath:         dbPath,
+		Collectors:     []signal.Collector{newMockCollector()},
+		AuditFilePath:  filepath.Join(dir, "audit.log"),
+		GemRegistryURL: srv.URL,
+	}
+	cmd := &AnalyzeCmd{Target: "pkg:gem/no-repo", Refresh: true}
+	require.NoError(t, cmd.Run(globals),
+		"gem with no declared source must NOT fail --refresh — empty is legitimate")
+
+	s, err := store.OpenSQLite(t.Context(), dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+
+	entity, err := s.FindEntityByURI(t.Context(), "pkg:gem/no-repo")
+	require.NoError(t, err)
+	assert.Equal(t, "", entity.URL,
+		"gem with no github source must leave URL empty — downstream isGitHostedEntity gates collectors out cleanly")
 }

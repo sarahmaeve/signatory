@@ -197,6 +197,12 @@ type Globals struct {
 	// pkg:cargo/<name> targets. Empty means the production registry
 	// (https://crates.io). Tests point this at an httptest server.
 	CargoRegistryURL string
+
+	// GemRegistryURL overrides the base URL for rubygems.org API calls
+	// made during analyze-orchestration source resolution for
+	// pkg:gem/<name> targets. Empty means the production registry
+	// (https://rubygems.org). Tests point this at an httptest server.
+	GemRegistryURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.
