@@ -88,6 +88,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- recent_downloads (criticality) -----
 	recordRecentDownloads(result, entity.ID, cr, collectedAt)
 
+	// ----- version_count (vitality) -----
+	recordVersionCount(result, entity.ID, cr, collectedAt)
+
 	// ----- build_script_present + yanked_release_count (publication) -----
 	recordBuildScriptPresent(result, entity.ID, cr, collectedAt)
 	recordYankedReleaseCount(result, entity.ID, cr, collectedAt)
@@ -165,6 +168,16 @@ func recordLastPublish(result *signal.CollectionResult, entityID string,
 			"latest_version": latest.version,
 			"published_at":   t.UTC().Format(time.RFC3339),
 			"days_ago":       int(collectedAt.Sub(t).Hours() / 24),
+		})
+}
+
+// recordVersionCount emits the total number of published versions.
+func recordVersionCount(result *signal.CollectionResult, entityID string,
+	cr *CrateResponse, collectedAt time.Time) {
+
+	result.RecordSignal(entityID, "version_count", collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"count": len(cr.Versions),
 		})
 }
 

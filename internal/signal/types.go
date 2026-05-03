@@ -772,4 +772,15 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"a team of 1 is indistinguishable from no team at the API level; the signal can't penetrate team membership",
 		},
 	},
+	"proc_macro_crate": {
+		Type:              "proc_macro_crate",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the crate is a procedural macro — code that executes inside rustc at compile time. Proc macros run with full system access during compilation of any downstream crate that uses them.",
+		Caveats: []string{
+			"proc macros are extremely common in legitimate Rust code (derive macros, attribute macros) — presence alone is not negative",
+			"the signal flags a distinct attack surface: a compromised proc-macro crate achieves code execution on every developer's machine that compiles code depending on it, without any runtime execution of the crate itself",
+			"detection is from source (Cargo.toml [lib] proc-macro = true); not available without a clone",
+		},
+	},
 }

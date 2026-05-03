@@ -2,6 +2,9 @@ package repofiles
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -73,5 +76,74 @@ func (c *Collector) Collect(_ context.Context, entity *profile.Entity) (*signal.
 	now := time.Now().UTC()
 	var result signal.CollectionResult
 	result.RecordSignal(entity.ID, "repo_files", sourceName, now, c.ttl, value)
+
+	// Rust-specific: detect proc-macro crates from Cargo.toml.
+	// Only emits when Cargo.toml exists — non-Rust repos produce no
+	// proc_macro_crate signal (absent-because-not-applicable, not
+	// absent-because-we-failed).
+	c.detectProcMacro(&result, entity.ID, now)
+
 	return &result, nil
+}
+
+// detectProcMacro reads the root Cargo.toml (if present) and emits a
+// proc_macro_crate signal when [lib] proc-macro = true. Proc macros
+// execute inside rustc at compile time — a distinct and elevated
+// attack surface compared to regular library/binary crates.
+//
+// Does not emit anything if Cargo.toml is absent (non-Rust repo).
+// Emits present=false when Cargo.toml exists but is not a proc macro.
+func (c *Collector) detectProcMacro(result *signal.CollectionResult, entityID string, collectedAt time.Time) {
+	cargoPath := filepath.Join(c.path, "Cargo.toml")
+	data, err := os.ReadFile(cargoPath)
+	if err != nil {
+		// File doesn't exist or unreadable — not applicable. Don't
+		// emit anything; this is "signal not applicable" not "signal
+		// absent due to failure."
+		return
+	}
+
+	// Quick scan for proc-macro = true in the [lib] section. A full
+	// TOML parse is overkill — the pattern `proc-macro = true` under
+	// a [lib] header is unambiguous and the file is already capped by
+	// filesystem reads (64 KiB typical Cargo.toml).
+	isProcMacro := detectProcMacroInToml(string(data))
+
+	result.RecordSignal(entityID, "proc_macro_crate", sourceName, collectedAt, c.ttl,
+		map[string]any{
+			"present": isProcMacro,
+		})
+}
+
+// detectProcMacroInToml scans TOML content for `proc-macro = true`
+// under a [lib] section. Uses line-by-line scanning rather than a full
+// TOML parse — the pattern is unambiguous and avoids importing a TOML
+// library into the repofiles package (which operates on raw file
+// content for all its other detections).
+func detectProcMacroInToml(content string) bool {
+	inLib := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Section headers.
+		if strings.HasPrefix(trimmed, "[") {
+			inLib = trimmed == "[lib]"
+			continue
+		}
+		if !inLib {
+			continue
+		}
+		// Strip comments.
+		if idx := strings.IndexByte(trimmed, '#'); idx >= 0 {
+			trimmed = strings.TrimSpace(trimmed[:idx])
+		}
+		// Match proc-macro = true (with flexible whitespace).
+		key, val, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(key) == "proc-macro" && strings.TrimSpace(val) == "true" {
+			return true
+		}
+	}
+	return false
 }

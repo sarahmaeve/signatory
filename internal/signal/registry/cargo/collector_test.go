@@ -119,10 +119,10 @@ func TestCollector_Success(t *testing.T) {
 	// Should emit: last_publish, maintainer_count, recent_downloads,
 	// build_script_present, yanked_release_count, owner_count,
 	// owner_team_present, publish_origin_consistency,
-	// build_script_introduced.
-	// Total: 9 signals.
-	assert.GreaterOrEqual(t, result.SignalCount(), 9,
-		"expected at least 9 signals, got %d: %s", result.SignalCount(), result.Summary())
+	// build_script_introduced, version_count.
+	// Total: 10 signals.
+	assert.GreaterOrEqual(t, result.SignalCount(), 10,
+		"expected at least 10 signals, got %d: %s", result.SignalCount(), result.Summary())
 
 	// Verify specific signals by type.
 	signals := result.Signals()
@@ -182,6 +182,12 @@ func TestCollector_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(signalMap["build_script_introduced"], &bsi))
 	assert.Equal(t, false, bsi["introduced_recently"],
 		"serde always had build.rs — no recent introduction")
+
+	// version_count
+	assert.Contains(t, signalMap, "version_count")
+	var vc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_count"], &vc))
+	assert.Equal(t, float64(4), vc["count"], "fixture has 4 versions")
 }
 
 func TestCollector_NotFound(t *testing.T) {

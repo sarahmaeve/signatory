@@ -216,3 +216,108 @@ func TestCollector_ImplementsCollectorInterface(t *testing.T) {
 	t.Parallel()
 	var _ signal.Collector = (*Collector)(nil)
 }
+
+// TestCollector_ProcMacroCrate_Present verifies that a Cargo.toml with
+// [lib] proc-macro = true triggers a proc_macro_crate signal emission.
+func TestCollector_ProcMacroCrate_Present(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte(`
+[package]
+name = "serde_derive"
+version = "1.0.219"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2"
+`), 0o644))
+
+	c := NewCollector(root)
+	entity := &profile.Entity{
+		ID:           "test-proc-macro",
+		CanonicalURI: "pkg:cargo/serde-derive",
+		Ecosystem:    "cargo",
+	}
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Should emit repo_files + proc_macro_crate.
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	assert.Contains(t, signalMap, "proc_macro_crate")
+	var val map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["proc_macro_crate"], &val))
+	assert.Equal(t, true, val["present"])
+}
+
+// TestCollector_ProcMacroCrate_Absent verifies that a Cargo.toml
+// without proc-macro = true does not emit proc_macro_crate as present.
+func TestCollector_ProcMacroCrate_Absent(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte(`
+[package]
+name = "serde"
+version = "1.0.219"
+
+[dependencies]
+serde_derive = "1.0"
+`), 0o644))
+
+	c := NewCollector(root)
+	entity := &profile.Entity{
+		ID:           "test-non-proc-macro",
+		CanonicalURI: "pkg:cargo/serde",
+		Ecosystem:    "cargo",
+	}
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	assert.Contains(t, signalMap, "proc_macro_crate")
+	var val map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["proc_macro_crate"], &val))
+	assert.Equal(t, false, val["present"],
+		"non-proc-macro crate should emit present=false")
+}
+
+// TestCollector_ProcMacroCrate_NoCargo verifies that repos without
+// Cargo.toml don't emit proc_macro_crate at all (signal not applicable).
+func TestCollector_ProcMacroCrate_NoCargo(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"),
+		[]byte("non-rust project"), 0o644))
+
+	c := NewCollector(root)
+	entity := &profile.Entity{
+		ID:           "test-go-project",
+		CanonicalURI: "repo:github/test/goproject",
+		Ecosystem:    "go",
+	}
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	for _, s := range signals {
+		assert.NotEqual(t, "proc_macro_crate", s.Type,
+			"non-Rust repos must not emit proc_macro_crate")
+	}
+}
