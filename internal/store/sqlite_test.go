@@ -435,6 +435,120 @@ func TestGetLatestSignals_ExcludesSuperseded(t *testing.T) {
 	assert.Equal(t, "keeper", latest[0].ID, "superseded signal must be filtered out")
 }
 
+// TestAppendSignals_SupersedesAbsenceOnSuccess verifies that when a
+// successful signal is appended and a prior absence:X from the same
+// source exists, the absence is automatically superseded via a
+// signal_resolution row. GetLatestSignals should only return the
+// successful signal.
+func TestAppendSignals_SupersedesAbsenceOnSuccess(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	entity := testEntity("ent-1", "pkg:npm/express", "express", now)
+	require.NoError(t, s.PutEntity(ctx, entity))
+
+	// Run 1: collector fails, records an absence.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "absence-1", EntityID: "ent-1", Type: "absence:adoption",
+		Group: profile.SignalGroupCriticality, Source: "github",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"reason":"GitHub API 401"}`),
+		CollectedAt:       now, ExpiresAt: now.Add(24 * time.Hour),
+	}}))
+
+	// Run 2: collector succeeds, records the real signal.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "success-1", EntityID: "ent-1", Type: "adoption",
+		Group: profile.SignalGroupCriticality, Source: "github",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"go_mod_refs":42}`),
+		CollectedAt:       now.Add(time.Hour), ExpiresAt: now.Add(25 * time.Hour),
+	}}))
+
+	// GetLatestSignals should only return the success — the absence
+	// should be auto-superseded.
+	latest, err := s.GetLatestSignals(ctx, "ent-1")
+	require.NoError(t, err)
+	require.Len(t, latest, 1, "absence should be superseded; only the success should remain")
+	assert.Equal(t, "success-1", latest[0].ID)
+	assert.Equal(t, "adoption", latest[0].Type)
+}
+
+// TestAppendSignals_SupersedesSuccessOnAbsence verifies the reverse:
+// when a new absence is appended and a prior successful signal from the
+// same source exists with an older collected_at, the old success is
+// superseded. "Latest state wins" in both directions.
+func TestAppendSignals_SupersedesSuccessOnAbsence(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	entity := testEntity("ent-1", "pkg:npm/express", "express", now)
+	require.NoError(t, s.PutEntity(ctx, entity))
+
+	// Run 1: collector succeeds.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "success-1", EntityID: "ent-1", Type: "adoption",
+		Group: profile.SignalGroupCriticality, Source: "github",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"go_mod_refs":42}`),
+		CollectedAt:       now, ExpiresAt: now.Add(24 * time.Hour),
+	}}))
+
+	// Run 2: token revoked, collector fails.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "absence-1", EntityID: "ent-1", Type: "absence:adoption",
+		Group: profile.SignalGroupCriticality, Source: "github",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"reason":"GitHub API 401"}`),
+		CollectedAt:       now.Add(time.Hour), ExpiresAt: now.Add(25 * time.Hour),
+	}}))
+
+	// GetLatestSignals should only return the absence — the old success
+	// is superseded because the later run's state is authoritative.
+	latest, err := s.GetLatestSignals(ctx, "ent-1")
+	require.NoError(t, err)
+	require.Len(t, latest, 1, "old success should be superseded; only the absence should remain")
+	assert.Equal(t, "absence-1", latest[0].ID)
+}
+
+// TestAppendSignals_NoSupersessionForDifferentSources verifies that
+// auto-supersession only fires when both signals share the same source.
+// An absence from source A must NOT be superseded by a success from
+// source B.
+func TestAppendSignals_NoSupersessionForDifferentSources(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	entity := testEntity("ent-1", "pkg:npm/express", "express", now)
+	require.NoError(t, s.PutEntity(ctx, entity))
+
+	// Source "github" records absence.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "absence-gh", EntityID: "ent-1", Type: "absence:adoption",
+		Group: profile.SignalGroupCriticality, Source: "github",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"reason":"401"}`),
+		CollectedAt:       now, ExpiresAt: now.Add(24 * time.Hour),
+	}}))
+
+	// Source "other" records success for same base type.
+	require.NoError(t, s.AppendSignals(ctx, []profile.Signal{{
+		ID: "success-other", EntityID: "ent-1", Type: "adoption",
+		Group: profile.SignalGroupCriticality, Source: "other",
+		ForgeryResistance: profile.ForgeryHigh,
+		Value:             json.RawMessage(`{"go_mod_refs":10}`),
+		CollectedAt:       now.Add(time.Hour), ExpiresAt: now.Add(25 * time.Hour),
+	}}))
+
+	// Both should survive — different sources, no supersession.
+	latest, err := s.GetLatestSignals(ctx, "ent-1")
+	require.NoError(t, err)
+	assert.Len(t, latest, 2, "signals from different sources must not auto-supersede each other")
+}
+
 func TestGetSignalsByGroup(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()

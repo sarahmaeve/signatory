@@ -460,7 +460,85 @@ func (s *SQLite) AppendSignals(ctx context.Context, signals []profile.Signal) er
 			return fmt.Errorf("append signal %s: %w", sig.ID, err)
 		}
 	}
+
+	// Auto-supersede contradictory absence/success pairs from the same
+	// source. When a successful signal X is appended and a prior
+	// absence:X exists (or vice versa), file a signal_resolution so
+	// GetLatestSignals excludes the stale row. See design/stalesignals.md.
+	if err := autoSupersedeConflicts(ctx, tx, signals); err != nil {
+		return fmt.Errorf("auto-supersede conflicts: %w", err)
+	}
+
 	return tx.Commit()
+}
+
+// autoSupersedeConflicts checks each newly-inserted signal for a prior
+// contradictory row (absence:X vs X) from the same source and entity.
+// When found, it inserts a signal_resolution marking the older row as
+// superseded. Both directions are handled: success supersedes absence,
+// and absence supersedes success.
+func autoSupersedeConflicts(ctx context.Context, tx *sql.Tx, signals []profile.Signal) error {
+	findPrior, err := tx.PrepareContext(ctx, `
+		SELECT id FROM signals
+		WHERE entity_id = ? AND type = ? AND source = ?
+		  AND id NOT IN (
+		    SELECT superseded_signal_id FROM signal_resolutions
+		    WHERE entity_id = ?
+		  )
+		ORDER BY collected_at DESC
+		LIMIT 1`)
+	if err != nil {
+		return err
+	}
+	defer findPrior.Close() //nolint:errcheck
+
+	resolveStmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO signal_resolutions
+		 (id, entity_id, signal_type, kept_signal_id, superseded_signal_id, action, resolved_by, resolved_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer resolveStmt.Close() //nolint:errcheck
+
+	now := time.Now().UTC()
+	for _, sig := range signals {
+		oppositeType := signalOppositeType(sig.Type)
+		if oppositeType == "" {
+			continue
+		}
+
+		var priorID string
+		err := findPrior.QueryRowContext(ctx,
+			sig.EntityID, oppositeType, sig.Source, sig.EntityID).Scan(&priorID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("find prior %q for %s: %w", oppositeType, sig.ID, err)
+		}
+
+		// File a resolution: the new signal supersedes the prior.
+		resID := profile.NewEntityID()
+		if _, err := resolveStmt.ExecContext(ctx,
+			resID, sig.EntityID, oppositeType, sig.ID, priorID,
+			"auto:refresh-supersede", "signatory-collector",
+			now.Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("resolve %s superseding %s: %w", sig.ID, priorID, err)
+		}
+	}
+	return nil
+}
+
+// signalOppositeType returns the contradictory signal type for
+// auto-supersession. "absence:X" → "X", "X" → "absence:X".
+// Returns "" for types that don't participate in supersession
+// (currently all types participate).
+func signalOppositeType(sigType string) string {
+	if base, ok := strings.CutPrefix(sigType, "absence:"); ok {
+		return base
+	}
+	return "absence:" + sigType
 }
 
 // --- Posture operations (versioned) ---
