@@ -326,6 +326,112 @@ func TestExtractMavenCoordinate(t *testing.T) {
 	}
 }
 
+// TestResolveRepoURL_ParentPOM verifies that when an artifact POM has
+// no <scm> section but declares a <parent>, ResolveRepoURL follows the
+// parent chain to find the SCM URL. This is the guava pattern: guava's
+// POM inherits from guava-parent, which declares the GitHub SCM URL.
+func TestResolveRepoURL_ParentPOM(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		// Artifact POM — no <scm>, but has a <parent>.
+		case "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.pom":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.google.guava</groupId>
+    <artifactId>guava-parent</artifactId>
+    <version>33.2.1-jre</version>
+  </parent>
+  <artifactId>guava</artifactId>
+  <dependencies>
+    <dependency><groupId>com.google.guava</groupId><artifactId>failureaccess</artifactId></dependency>
+  </dependencies>
+</project>`)) //nolint:errcheck
+
+		// Parent POM — has the <scm> section.
+		case "/maven2/com/google/guava/guava-parent/33.2.1-jre/guava-parent-33.2.1-jre.pom":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.google.guava</groupId>
+  <artifactId>guava-parent</artifactId>
+  <version>33.2.1-jre</version>
+  <scm>
+    <url>https://github.com/google/guava</url>
+    <connection>scm:git:https://github.com/google/guava.git</connection>
+  </scm>
+</project>`)) //nolint:errcheck
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(),
+		"com.google.guava", "guava", "33.2.1-jre")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/google/guava", url,
+		"should resolve SCM URL from parent POM")
+}
+
+// TestResolveRepoURL_ParentPOM_MaxDepth verifies that parent chain
+// resolution stops at the depth limit to prevent infinite loops from
+// circular parent references.
+func TestResolveRepoURL_ParentPOM_MaxDepth(t *testing.T) {
+	t.Parallel()
+
+	// Every POM points to a parent but never declares <scm>.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>infinite-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>child</artifactId>
+</project>`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(),
+		"com.example", "child", "1.0.0")
+	require.NoError(t, err)
+	assert.Empty(t, url, "should return empty after hitting parent depth limit")
+}
+
+// TestResolveRepoURL_DirectSCM verifies the existing behavior: when
+// the artifact POM has its own <scm> section, no parent chasing needed.
+func TestResolveRepoURL_DirectSCM(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <scm>
+    <url>https://github.com/FasterXML/jackson-databind</url>
+  </scm>
+</project>`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(),
+		"com.fasterxml.jackson.core", "jackson-databind", "2.18.0")
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/FasterXML/jackson-databind", url)
+}
+
 // mockEntityStore tracks which entity URIs were minted.
 type mockEntityStore struct {
 	minted []string

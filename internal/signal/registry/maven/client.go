@@ -229,9 +229,17 @@ func (c *Client) CheckSignature(ctx context.Context, groupID, artifactID, versio
 	}
 }
 
+// maxParentDepth limits parent POM chasing to prevent infinite loops
+// from circular parent references. 5 levels is generous — real-world
+// Maven parent chains rarely exceed 3 (artifact → parent → grandparent).
+const maxParentDepth = 5
+
 // ResolveRepoURL fetches the POM for the given artifact version and
 // parses the <scm><url> or <scm><connection> element to find the source
-// repository URL. Returns empty string if no SCM URL is declared.
+// repository URL. If the artifact's own POM has no <scm> section but
+// declares a <parent>, the parent POM is fetched and scanned — up to
+// maxParentDepth levels. Returns empty string if no SCM URL is found
+// in the chain.
 func (c *Client) ResolveRepoURL(ctx context.Context, groupID, artifactID, version string) (string, error) {
 	if err := ValidateCoordinate(groupID); err != nil {
 		return "", fmt.Errorf("resolve repo URL: groupID: %w", err)
@@ -240,44 +248,89 @@ func (c *Client) ResolveRepoURL(ctx context.Context, groupID, artifactID, versio
 		return "", fmt.Errorf("resolve repo URL: artifactID: %w", err)
 	}
 
+	g, a, v := groupID, artifactID, version
+	for range maxParentDepth {
+		body, err := c.fetchPOM(ctx, g, a, v)
+		if err != nil {
+			return "", err
+		}
+
+		if scm := parseSCMURL(body); scm != "" {
+			return scm, nil
+		}
+
+		// No SCM — check for a <parent> to chase.
+		pg, pa, pv := parseParent(body)
+		if pg == "" || pa == "" || pv == "" {
+			return "", nil // no parent, no SCM anywhere in the chain
+		}
+		g, a, v = pg, pa, pv
+	}
+
+	return "", nil // hit depth limit
+}
+
+// fetchPOM retrieves a single POM file from repo1 and returns the raw body.
+func (c *Client) fetchPOM(ctx context.Context, groupID, artifactID, version string) ([]byte, error) {
 	pomURL := fmt.Sprintf("%s/maven2/%s/%s/%s/%s-%s.pom",
 		c.repoURL, groupPath(groupID), artifactID, version, artifactID, version)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pomURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("build POM request for %s:%s:%s: %w",
+		return nil, fmt.Errorf("build POM request for %s:%s:%s: %w",
 			groupID, artifactID, version, err)
 	}
 	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("maven POM request for %s:%s:%s failed: %w",
+		return nil, fmt.Errorf("maven POM request for %s:%s:%s failed: %w",
 			groupID, artifactID, version, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // response body close
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("%w: POM for %s:%s:%s", ErrNotFound, groupID, artifactID, version)
+		return nil, fmt.Errorf("%w: POM for %s:%s:%s", ErrNotFound, groupID, artifactID, version)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return "", fmt.Errorf("maven repo returned status %d for POM of %s:%s:%s",
+		return nil, fmt.Errorf("maven repo returned status %d for POM of %s:%s:%s",
 			resp.StatusCode, groupID, artifactID, version)
 	}
 
 	limited := io.LimitReader(resp.Body, maxResponseSize+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return "", fmt.Errorf("read POM response for %s:%s:%s: %w",
+		return nil, fmt.Errorf("read POM response for %s:%s:%s: %w",
 			groupID, artifactID, version, err)
 	}
 	if int64(len(body)) > maxResponseSize {
-		return "", fmt.Errorf("POM response for %s:%s:%s exceeds %d-byte cap",
+		return nil, fmt.Errorf("POM response for %s:%s:%s exceeds %d-byte cap",
 			groupID, artifactID, version, maxResponseSize)
 	}
 
-	return parseSCMURL(body), nil
+	return body, nil
+}
+
+// parseParent extracts the <parent> groupId, artifactId, and version
+// from a POM. Returns ("", "", "") if no parent is declared.
+func parseParent(pomBytes []byte) (groupID, artifactID, version string) {
+	pom := string(pomBytes)
+
+	start := strings.Index(pom, "<parent>")
+	if start < 0 {
+		return "", "", ""
+	}
+	end := strings.Index(pom[start:], "</parent>")
+	if end < 0 {
+		return "", "", ""
+	}
+	parent := pom[start : start+end]
+
+	g := extractXMLElement(parent, "groupId")
+	a := extractXMLElement(parent, "artifactId")
+	v := extractXMLElement(parent, "version")
+	return g, a, v
 }
 
 // parseSCMURL does a simple scan of POM XML for <scm><url> or

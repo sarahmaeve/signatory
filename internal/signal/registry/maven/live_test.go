@@ -104,6 +104,25 @@ func TestLive_ResolveRepoURL_JacksonDatabind(t *testing.T) {
 	t.Logf("jackson-databind %s: SCM URL = %s", version, repoURL)
 }
 
+func TestLive_ResolveRepoURL_Guava_ParentChain(t *testing.T) {
+	client := NewClient()
+
+	meta, err := client.FetchMetadata(context.Background(), "com.google.guava", "guava")
+	require.NoError(t, err)
+	version := meta.Versioning.Release
+	require.NotEmpty(t, version)
+
+	repoURL, err := client.ResolveRepoURL(context.Background(),
+		"com.google.guava", "guava", version)
+	require.NoError(t, err, "ResolveRepoURL must not error")
+	assert.NotEmpty(t, repoURL,
+		"guava inherits SCM from parent POM — parent chain must resolve")
+	assert.Contains(t, repoURL, "github.com/google/guava",
+		"guava SCM should point to github.com/google/guava")
+
+	t.Logf("guava %s: SCM URL = %s (resolved via parent POM chain)", version, repoURL)
+}
+
 // --- Collector-level tests: verify end-to-end signal emission ---
 
 func TestLive_Collector_Dropwizard(t *testing.T) {
