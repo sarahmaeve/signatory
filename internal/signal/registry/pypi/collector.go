@@ -168,12 +168,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	versions := buildVersionFiles(proj)
 
 	// ----- trusted_publishing: Phase A (snapshot) -----
-	latestAttest := c.recordTrustedPublishing(ctx, result, entity.ID, packageName, versions, collectedAt)
+	latestAttest, latestKnown := c.recordTrustedPublishing(ctx, result, entity.ID, packageName, versions, collectedAt)
 
 	// ----- attestation_consistency: Phase B (longitudinal) -----
-	// Fires regardless of Phase A outcome (attested or unattested latest).
-	// Progressive probe handles the never-adopted early-exit internally.
-	c.recordAttestationConsistency(ctx, result, entity.ID, packageName, versions, latestAttest, collectedAt)
+	// Only fires when Phase A produced a definitive answer (attested or
+	// 404). When Phase A errored we have no reliable latest state — Phase B
+	// would misinterpret nil as "unattested" and could false-alarm.
+	if latestKnown {
+		c.recordAttestationConsistency(ctx, result, entity.ID, packageName, versions, latestAttest, collectedAt)
+	}
 
 	return result, nil
 }
@@ -481,15 +484,18 @@ func buildVersionFiles(proj *Project) []versionFile {
 //
 // Returns the *AttestationResponse for the latest version so Phase B
 // (attestation_consistency) can reuse it without re-fetching.
-// Returns nil when the latest has no attestation (404) or on error.
+// The bool indicates whether the attestation state is known: true means
+// we got a definitive answer (attested or 404), false means we errored
+// and the latest version's state is unknown. Phase B must not run when
+// the state is unknown — nil+false is "don't know", nil+true is "absent".
 func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.CollectionResult,
-	entityID, packageName string, versions []versionFile, collectedAt time.Time) *AttestationResponse {
+	entityID, packageName string, versions []versionFile, collectedAt time.Time) (*AttestationResponse, bool) {
 
 	if len(versions) == 0 {
 		// No releases with valid timestamps and filenames — skip.
 		// The absence for related signals is already recorded by
 		// recordReleaseSignals.
-		return nil
+		return nil, false
 	}
 
 	latest := versions[0]
@@ -500,7 +506,7 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 		// next analyze run re-attempts without failing the whole collection.
 		result.RecordAbsence(entityID, "trusted_publishing", source,
 			sanitizeFetchReason(err), true, collectedAt)
-		return nil
+		return nil, false
 	}
 
 	if attest == nil {
@@ -510,7 +516,7 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 				"present":         false,
 				"version_checked": latest.version,
 			})
-		return nil
+		return nil, true // state is known: definitively absent
 	}
 
 	// Attestation exists — extract publisher identity from the first bundle.
@@ -529,7 +535,7 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	}
 
 	result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL, value)
-	return attest
+	return attest, true
 }
 
 // attestationWindow bounds the number of prior versions checked for
@@ -613,10 +619,12 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 	remaining := versions[2:]
 	remaining = remaining[:min(len(remaining), attestationWindow-2)]
 
+	versionsSkipped := 0
 	for _, vf := range remaining {
 		attest, err := c.client.GetAttestation(ctx, packageName, vf.version, vf.filename)
 		if err != nil {
 			// Degrade gracefully: skip this version rather than aborting.
+			versionsSkipped++
 			continue
 		}
 		checked = append(checked, versionAttest{
@@ -691,6 +699,7 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 		"versions_checked":      len(checked),
 		"versions_attested":     versionsAttested,
 		"versions_unattested":   versionsUnattested,
+		"versions_skipped":      versionsSkipped,
 		"transition_detected":   transitionDetected,
 		"transition_direction":  transitionDirection,
 		"transition_at_version": transitionAtVersion,

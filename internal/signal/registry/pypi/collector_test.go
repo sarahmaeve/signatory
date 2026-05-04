@@ -1166,3 +1166,158 @@ func TestCollector_AttestationConsistency_PublisherKey_ColonInFieldsNoCollision(
 	assert.Equal(t, "ci.yml", pp["workflow"],
 		"workflow field must survive round-trip without colon-separator corruption")
 }
+
+func TestCollector_AttestationConsistency_AdoptionTransition(t *testing.T) {
+	t.Parallel()
+	// Adoption: latest version IS attested but prior versions were NOT.
+	// This is the positive transition (maintainer adopts trusted publishing).
+	ghAttest := makeAttestation("GitHub", "owner/pkg", "release.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+				"3.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-3.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			// Only the latest version is attested — prior versions were not.
+			"3.0.0": ghAttest,
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"),
+		"adoption transition must emit attestation_consistency")
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, false, val["consistent"])
+	assert.Equal(t, true, val["transition_detected"])
+	assert.Equal(t, "unattested_to_attested", val["transition_direction"])
+	assert.Equal(t, "3.0.0", val["transition_at_version"])
+	assert.Equal(t, float64(3), val["versions_checked"])
+	assert.Equal(t, float64(1), val["versions_attested"])
+	assert.Equal(t, float64(2), val["versions_unattested"])
+}
+
+func TestCollector_AttestationConsistency_DegradeGracefully_SkipsCounted(t *testing.T) {
+	t.Parallel()
+	// 5 versions: latest + first prior attested (probe passes), but
+	// remaining 3 versions all return 500. The signal should still emit
+	// with reduced versions_checked and report versions_skipped > 0.
+	ghAttest := makeAttestation("GitHub", "owner/pkg", "release.yml")
+
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+			"2.0.0": {{UploadTimeISO: "2024-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"}},
+			"3.0.0": {{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-3.0.0-py3-none-any.whl"}},
+			"4.0.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-4.0.0-py3-none-any.whl"}},
+			"5.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-5.0.0-py3-none-any.whl"}},
+		},
+	})
+	require.NoError(t, err)
+
+	attestBody, err := json.Marshal(ghAttest)
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/integrity/"); ok {
+			parts := strings.Split(after, "/")
+			if len(parts) >= 2 {
+				// Only latest (5.0.0) and first prior (4.0.0) succeed.
+				if parts[1] == "5.0.0" || parts[1] == "4.0.0" {
+					_, _ = w.Write(attestBody)
+					return
+				}
+			}
+			// All other versions: 500 error.
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"),
+		"signal should emit despite partial failures during full sweep")
+	val := getSignalValue(t, result, "attestation_consistency")
+
+	// Only 2 versions were successfully checked (5.0.0 + 4.0.0).
+	assert.Equal(t, float64(2), val["versions_checked"])
+	// 3 versions were attempted but failed — this should be visible.
+	assert.Equal(t, float64(3), val["versions_skipped"],
+		"versions_skipped must report how many versions were lost to errors")
+	assert.Equal(t, true, val["consistent"],
+		"the 2 successfully checked versions are both attested")
+}
+
+func TestCollector_AttestationConsistency_PhaseAError_SkipsPhaseB(t *testing.T) {
+	t.Parallel()
+	// When Phase A errors (Integrity API 500 for the latest version),
+	// recordTrustedPublishing returns nil. Phase B must not misinterpret
+	// this as "latest is unattested" — it has no basis for comparison.
+	//
+	// If Phase B ran anyway and the probe found a prior version attested,
+	// it would falsely report attested_to_unattested (a false alarm).
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+			"2.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"}},
+		},
+	})
+	require.NoError(t, err)
+
+	attestBody, err := json.Marshal(makeAttestation("GitHub", "owner/pkg", "ci.yml"))
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/integrity/"); ok {
+			parts := strings.Split(after, "/")
+			if len(parts) >= 2 {
+				if parts[1] == "2.0.0" {
+					// Latest: 500 error (Phase A fails).
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				// Prior versions: attested (would trigger false alarm if probed).
+				_, _ = w.Write(attestBody)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	// Phase A should have recorded an absence for trusted_publishing.
+	assert.True(t, hasAbsence(result, "trusted_publishing"),
+		"Phase A error must record trusted_publishing absence")
+
+	// Phase B must NOT emit a signal — it has no reliable latest state.
+	assert.False(t, hasSignal(result, "attestation_consistency"),
+		"Phase B must not emit when Phase A errored (nil means unknown, not absent)")
+}
