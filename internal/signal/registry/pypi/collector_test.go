@@ -1,7 +1,6 @@
 package pypi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -109,7 +108,7 @@ func TestCollector_Collect_HappyPath_EmitsMaintainerCount(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
 	require.NoError(t, err)
 	require.NotNil(t, raw)
 	result := wrap(t, raw)
@@ -136,7 +135,7 @@ func TestCollector_Collect_NoLoginsExtractable_RecordsAbsence(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("python-dotenv"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("python-dotenv"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -163,7 +162,7 @@ func TestCollector_Collect_NonPypiEntity_ReturnsEmpty(t *testing.T) {
 		{CanonicalURI: ""},
 		nil,
 	} {
-		raw, err := newTestCollector(srv).Collect(context.Background(), e)
+		raw, err := newTestCollector(srv).Collect(t.Context(), e)
 		require.NoError(t, err)
 		require.NotNil(t, raw)
 		result := wrap(t, raw)
@@ -182,7 +181,7 @@ func TestCollector_Collect_RegistryNotFound_RecordsDefinitiveAbsence(t *testing.
 	}))
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("nonexistent"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("nonexistent"))
 	require.NoError(t, err,
 		"a 404 from the registry must NOT bubble out as a Collect error — it's a per-signal absence")
 	result := wrap(t, raw)
@@ -203,7 +202,7 @@ func TestCollector_Collect_RegistryServerError_RecordsRetryableAbsence(t *testin
 	}))
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 	assert.True(t, hasAbsence(result, "maintainer_count"))
@@ -219,7 +218,7 @@ func TestCollector_Collect_SignalSourceIsPypiRegistry(t *testing.T) {
 	srv := projectInfoServer(t, Info{Maintainer: "ofek"})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
 	require.NoError(t, err)
 
 	for _, sig := range raw.Signals() {
@@ -259,7 +258,7 @@ func TestCollector_Collect_VersionCount(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -282,7 +281,7 @@ func TestCollector_Collect_LastPublish(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -311,7 +310,7 @@ func TestCollector_Collect_VersionPublishBurst_Burst(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("spam-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("spam-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -337,7 +336,7 @@ func TestCollector_Collect_VersionPublishBurst_NoBurst(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("stable-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("stable-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -357,7 +356,7 @@ func TestCollector_Collect_NoReleases_VersionSignalsAbsent(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("empty-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("empty-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -393,7 +392,7 @@ func TestCollector_Collect_YankedReleaseCount(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("some-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("some-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -414,7 +413,7 @@ func TestCollector_Collect_YankedReleaseCount_NoneYanked(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("clean-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("clean-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -443,7 +442,7 @@ func TestCollector_Collect_SdistOnlyPresent_True(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("native-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("native-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -471,7 +470,7 @@ func TestCollector_Collect_SdistOnlyPresent_False(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("wheeled-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("wheeled-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -505,7 +504,7 @@ func TestCollector_Collect_SdistOnlyIntroduced_DetectsTransition(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("compromised"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("compromised"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -541,7 +540,7 @@ func TestCollector_Collect_SdistOnlyIntroduced_ConsistentWheel(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("safe-pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("safe-pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -570,7 +569,7 @@ func TestCollector_Collect_SdistOnlyIntroduced_AlwaysSdist(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("always-sdist"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("always-sdist"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -600,7 +599,7 @@ func TestCollector_Collect_GPGSignaturePresent_True(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("old-signed"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("old-signed"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -626,7 +625,7 @@ func TestCollector_Collect_GPGSignaturePresent_False(t *testing.T) {
 	})
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("no-sig"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("no-sig"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -700,7 +699,7 @@ func TestCollector_Collect_TrustedPublishing_Present(t *testing.T) {
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -733,7 +732,7 @@ func TestCollector_Collect_TrustedPublishing_Absent(t *testing.T) {
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("old"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("old"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -768,7 +767,7 @@ func TestCollector_Collect_TrustedPublishing_IntegrityError_RecordsAbsence(t *te
 	}))
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("broken"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("broken"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -797,7 +796,7 @@ func TestCollector_Collect_TrustedPublishing_NoReleases_SkipsAttestation(t *test
 	}))
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("empty"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("empty"))
 	require.NoError(t, err)
 	_ = wrap(t, raw)
 
@@ -887,7 +886,7 @@ func TestCollector_AttestationConsistency_OnlyOneVersion_NoSignal(t *testing.T) 
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -920,7 +919,7 @@ func TestCollector_AttestationConsistency_NeverAdopted_NoSignal(t *testing.T) {
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -964,7 +963,7 @@ func TestCollector_AttestationConsistency_AxiosPattern_DetectsTransition(t *test
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("requests"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("requests"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -1006,7 +1005,7 @@ func TestCollector_AttestationConsistency_AllAttested_Consistent(t *testing.T) {
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("flask"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("flask"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -1055,7 +1054,7 @@ func TestCollector_AttestationConsistency_ProbeError_RecordsAbsence(t *testing.T
 	}))
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("broken"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("broken"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -1098,7 +1097,7 @@ func TestCollector_AttestationConsistency_PublisherChanged_DetectedCorrectly(t *
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 
@@ -1149,7 +1148,7 @@ func TestCollector_AttestationConsistency_PublisherKey_ColonInFieldsNoCollision(
 	)
 	defer srv.Close()
 
-	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
 	require.NoError(t, err)
 	result := wrap(t, raw)
 

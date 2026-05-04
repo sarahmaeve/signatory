@@ -349,10 +349,7 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 		})
 
 	// ----- version_publish_burst + sdist_only_introduced -----
-	window := records
-	if len(window) > crossVersionWindow {
-		window = window[:crossVersionWindow]
-	}
+	window := records[:min(len(records), crossVersionWindow)]
 
 	recordSdistOnlyIntroduced(result, entityID, window, collectedAt)
 
@@ -614,10 +611,7 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 
 	// Check remaining prior versions (bounded to attestationWindow total).
 	remaining := versions[2:]
-	maxRemaining := attestationWindow - 2 // already checked 2
-	if len(remaining) > maxRemaining {
-		remaining = remaining[:maxRemaining]
-	}
+	remaining = remaining[:min(len(remaining), attestationWindow-2)]
 
 	for _, vf := range remaining {
 		attest, err := c.client.GetAttestation(ctx, packageName, vf.version, vf.filename)
@@ -748,12 +742,8 @@ func extractPyPIPackageName(entity *profile.Entity) (string, bool) {
 	if entity == nil {
 		return "", false
 	}
-	const prefix = "pkg:pypi/"
-	if !strings.HasPrefix(entity.CanonicalURI, prefix) {
-		return "", false
-	}
-	name := strings.TrimPrefix(entity.CanonicalURI, prefix)
-	if name == "" {
+	name, ok := strings.CutPrefix(entity.CanonicalURI, "pkg:pypi/")
+	if !ok || name == "" {
 		return "", false
 	}
 	return name, true
