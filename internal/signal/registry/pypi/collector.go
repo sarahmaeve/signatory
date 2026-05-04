@@ -158,16 +158,23 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- version_count (vitality) -----
 	recordVersionCount(result, entity.ID, proj, collectedAt)
 
-	// ----- last_publish + version_publish_burst (vitality / publication) -----
+	// ----- yanked_release_count (publication) -----
+	recordYankedReleaseCount(result, entity.ID, proj, collectedAt)
+
+	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
 	return result, nil
 }
 
-// versionTimestamp pairs a version string with its parsed upload time.
-type versionTimestamp struct {
+// versionRecord is the per-version fact-set the longitudinal signals
+// operate over. Built once from proj.Releases and iterated by multiple
+// signal emitters.
+type versionRecord struct {
 	version     string
 	publishedAt time.Time
+	sdistOnly   bool // true when ALL dists for this version are sdist (no wheels)
+	yanked      bool // true when ANY dist for this version is yanked
 }
 
 // recordVersionCount emits the total number of published versions.
@@ -180,15 +187,62 @@ func recordVersionCount(result *signal.CollectionResult, entityID string,
 		})
 }
 
-// recordReleaseSignals derives last_publish and version_publish_burst
-// from the releases map. Both share the sorted timestamps, so they're
-// computed together.
+// recordYankedReleaseCount counts versions where any distribution is
+// marked yanked. Zero additional HTTP calls — derived from the
+// existing releases map.
+func recordYankedReleaseCount(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	yanked := 0
+	for _, dists := range proj.Releases {
+		for _, d := range dists {
+			if d.Yanked {
+				yanked++
+				break // one yanked dist means the whole version is yanked
+			}
+		}
+	}
+
+	result.RecordSignal(entityID, "yanked_release_count", source, collectedAt, defaultTTL,
+		map[string]any{
+			"count":          yanked,
+			"total_versions": len(proj.Releases),
+		})
+}
+
+// isSdistOnly returns true when every distribution in dists is an
+// sdist (no wheels, eggs, or other pre-built formats). An empty
+// dist list returns false (no distributions means no install path).
+func isSdistOnly(dists []Distribution) bool {
+	if len(dists) == 0 {
+		return false
+	}
+	for _, d := range dists {
+		if d.PackageType != "sdist" {
+			return false
+		}
+	}
+	return true
+}
+
+// isYanked returns true when any distribution in the version is
+// marked yanked.
+func isYanked(dists []Distribution) bool {
+	for _, d := range dists {
+		if d.Yanked {
+			return true
+		}
+	}
+	return false
+}
+
+// recordReleaseSignals derives last_publish, version_publish_burst,
+// sdist_only_present, and sdist_only_introduced from the releases map.
+// All share the sorted version records, so they're computed together.
 func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 	proj *Project, collectedAt time.Time) {
 
-	if len(proj.Releases) == 0 {
-		result.RecordAbsence(entityID, "last_publish", source,
-			"no releases in PyPI response", false, collectedAt)
+	emptyBurst := func() {
 		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
 			map[string]any{
 				"burst_detected":     false,
@@ -196,12 +250,21 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 				"window_hours":       0,
 				"versions_checked":   0,
 			})
+	}
+
+	if len(proj.Releases) == 0 {
+		result.RecordAbsence(entityID, "last_publish", source,
+			"no releases in PyPI response", false, collectedAt)
+		emptyBurst()
+		result.RecordAbsence(entityID, "sdist_only_present", source,
+			"no releases in PyPI response", false, collectedAt)
+		result.RecordAbsence(entityID, "sdist_only_introduced", source,
+			"no releases in PyPI response", false, collectedAt)
 		return
 	}
 
-	// Build timestamped records from the first distribution in each
-	// release (all dists within a version share the same upload time).
-	var stamps []versionTimestamp
+	// Build version records from the releases map.
+	var records []versionRecord
 	for ver, dists := range proj.Releases {
 		if len(dists) == 0 {
 			continue
@@ -210,27 +273,27 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 		if err != nil {
 			continue
 		}
-		stamps = append(stamps, versionTimestamp{
+		records = append(records, versionRecord{
 			version:     ver,
 			publishedAt: t,
+			sdistOnly:   isSdistOnly(dists),
+			yanked:      isYanked(dists),
 		})
 	}
 
-	if len(stamps) == 0 {
+	if len(records) == 0 {
 		result.RecordAbsence(entityID, "last_publish", source,
 			"no parseable timestamps in releases", false, collectedAt)
-		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
-			map[string]any{
-				"burst_detected":     false,
-				"versions_in_window": 0,
-				"window_hours":       0,
-				"versions_checked":   0,
-			})
+		emptyBurst()
+		result.RecordAbsence(entityID, "sdist_only_present", source,
+			"no parseable releases", false, collectedAt)
+		result.RecordAbsence(entityID, "sdist_only_introduced", source,
+			"no parseable releases", false, collectedAt)
 		return
 	}
 
 	// Sort newest-first.
-	slices.SortFunc(stamps, func(a, b versionTimestamp) int {
+	slices.SortFunc(records, func(a, b versionRecord) int {
 		if a.publishedAt.Equal(b.publishedAt) {
 			return cmp.Compare(b.version, a.version)
 		}
@@ -238,7 +301,7 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 	})
 
 	// ----- last_publish -----
-	newest := stamps[0]
+	newest := records[0]
 	result.RecordSignal(entityID, "last_publish", source, collectedAt, defaultTTL,
 		map[string]any{
 			"latest_version": newest.version,
@@ -246,11 +309,20 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			"days_ago":       int(collectedAt.Sub(newest.publishedAt).Hours() / 24),
 		})
 
-	// ----- version_publish_burst -----
-	window := stamps
+	// ----- sdist_only_present -----
+	result.RecordSignal(entityID, "sdist_only_present", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present":         newest.sdistOnly,
+			"version_checked": newest.version,
+		})
+
+	// ----- version_publish_burst + sdist_only_introduced -----
+	window := records
 	if len(window) > crossVersionWindow {
 		window = window[:crossVersionWindow]
 	}
+
+	recordSdistOnlyIntroduced(result, entityID, window, collectedAt)
 
 	if len(window) < 2 {
 		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
@@ -272,6 +344,52 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			"versions_in_window": len(window),
 			"window_hours":       int(span.Hours()),
 			"versions_checked":   len(window),
+		})
+}
+
+// recordSdistOnlyIntroduced detects whether the latest version is
+// sdist-only where prior versions in the window had wheels. The
+// Python analog of postinstall_introduced: dropping wheels forces
+// setup.py execution on every pip install.
+func recordSdistOnlyIntroduced(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	if len(recent) == 0 {
+		result.RecordAbsence(entityID, "sdist_only_introduced", source,
+			"no orderable versions", false, collectedAt)
+		return
+	}
+
+	latestSdistOnly := recent[0].sdistOnly
+
+	// Count older versions that were NOT sdist-only (i.e., had wheels).
+	priorWithout := 0
+	for i := 1; i < len(recent); i++ {
+		if !recent[i].sdistOnly {
+			priorWithout++
+		}
+	}
+
+	introduced := latestSdistOnly && priorWithout > 0
+
+	introducedAtVersion := ""
+	if introduced {
+		// Walk oldest→newest to find the first version that is sdist-only.
+		for i := len(recent) - 1; i >= 0; i-- {
+			if recent[i].sdistOnly {
+				introducedAtVersion = recent[i].version
+				break
+			}
+		}
+	}
+
+	result.RecordSignal(entityID, "sdist_only_introduced", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present_in_latest":      latestSdistOnly,
+			"introduced_recently":    introduced,
+			"introduced_at_version":  introducedAtVersion,
+			"prior_versions_without": priorWithout,
+			"versions_checked":       len(recent),
 		})
 }
 

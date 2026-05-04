@@ -744,11 +744,33 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Type:              "yanked_release_count",
 		Group:             profile.SignalGroupPublication,
 		ForgeryResistance: profile.ForgeryHigh,
-		Description:       "Count of yanked versions in the crate's version history. Yanking is an irreversible registry-side operation requiring owner credentials.",
+		Description:       "Count of yanked/withdrawn versions in the package's version history. Yanking is an irreversible registry-side operation requiring owner credentials (crates.io, PyPI).",
 		Caveats: []string{
-			"yanking is normal maintenance (buggy releases, security patches) — a nonzero count is expected for active crates",
+			"yanking is normal maintenance (buggy releases, security patches) — a nonzero count is expected for active packages",
 			"abnormally high counts relative to total versions may indicate cleanup of a compromised publishing spree",
 			"yanked versions remain in the index but cannot be freshly resolved — the signal captures historical shape, not current availability",
+		},
+	},
+	"sdist_only_present": {
+		Type:              "sdist_only_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published PyPI version distributes only source distributions (sdist) with no pre-built wheels. An sdist-only release executes setup.py at install time — PyPI's equivalent of npm's postinstall or cargo's build.rs.",
+		Caveats: []string{
+			"sdist-only is common for legitimate packages with C extensions or complex build requirements — presence alone is not negative",
+			"the attack surface is real: setup.py runs arbitrary Python with full system access during pip install",
+			"pure-Python packages that drop wheels force setup.py execution where none was previously needed — the transition is the anomaly, not the absolute state",
+		},
+	},
+	"sdist_only_introduced": {
+		Type:              "sdist_only_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest version distributes only sdists where prior versions included pre-built wheels. Longitudinal complement to sdist_only_present — dropping wheels forces setup.py execution on every install, the Python analog of npm's postinstall_introduced.",
+		Caveats: []string{
+			"transitions have legitimate causes — build system migration, platform-specific packaging changes — so a true positive is an anomaly flag, not a verdict",
+			"window is bounded (last N versions by publish time); a transition farther back is indistinguishable from always-sdist",
+			"a package that was always sdist-only gets introduced_recently=false, which is the correct stable-state signal",
 		},
 	},
 	"owner_count": {

@@ -16,12 +16,14 @@ type Project struct {
 	Releases map[string][]Distribution `json:"releases"`
 }
 
-// Distribution models one distribution file within a release. Only
-// the upload timestamp is needed for signal derivation; additional
-// fields (filename, packagetype, digests, etc.) are skipped by the
-// JSON decoder's unknown-field policy.
+// Distribution models one distribution file within a release.
+// Fields beyond upload_time_iso_8601, yanked, and packagetype
+// (filename, digests, size, etc.) are skipped by the JSON decoder's
+// unknown-field policy.
 type Distribution struct {
 	UploadTimeISO string `json:"upload_time_iso_8601"`
+	Yanked        bool   `json:"yanked"`
+	PackageType   string `json:"packagetype"`
 }
 
 // Info is the project-level metadata block. Modelled today:

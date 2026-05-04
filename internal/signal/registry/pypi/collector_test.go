@@ -363,10 +363,225 @@ func TestCollector_Collect_NoReleases_VersionSignalsAbsent(t *testing.T) {
 
 	assert.True(t, hasAbsence(result, "last_publish"),
 		"no releases → last_publish absence")
+	assert.True(t, hasAbsence(result, "sdist_only_present"),
+		"no releases → sdist_only_present absence")
+	assert.True(t, hasAbsence(result, "sdist_only_introduced"),
+		"no releases → sdist_only_introduced absence")
 	// version_count should still emit with count=0
 	require.True(t, hasSignal(result, "version_count"))
 	vc := getSignalValue(t, result, "version_count")
 	assert.EqualValues(t, 0, vc["count"])
+	// yanked_release_count should emit with count=0
+	require.True(t, hasSignal(result, "yanked_release_count"))
+	yr := getSignalValue(t, result, "yanked_release_count")
+	assert.EqualValues(t, 0, yr["count"])
+	assert.EqualValues(t, 0, yr["total_versions"])
+}
+
+// ----- yanked_release_count -----
+
+func TestCollector_Collect_YankedReleaseCount(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "alice"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"}},
+			"1.1.0": {{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Yanked: true}},
+			"1.2.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Yanked: true}},
+			"2.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("some-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "yanked_release_count"))
+	yr := getSignalValue(t, result, "yanked_release_count")
+	assert.EqualValues(t, 2, yr["count"], "two versions are yanked")
+	assert.EqualValues(t, 4, yr["total_versions"])
+}
+
+func TestCollector_Collect_YankedReleaseCount_NoneYanked(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "bob"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"}},
+			"2.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("clean-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "yanked_release_count"))
+	yr := getSignalValue(t, result, "yanked_release_count")
+	assert.EqualValues(t, 0, yr["count"])
+	assert.EqualValues(t, 2, yr["total_versions"])
+}
+
+// ----- sdist_only_present -----
+
+func TestCollector_Collect_SdistOnlyPresent_True(t *testing.T) {
+	t.Parallel()
+	// Latest version has only sdist — setup.py runs at install.
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("native-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "sdist_only_present"))
+	sd := getSignalValue(t, result, "sdist_only_present")
+	assert.Equal(t, true, sd["present"],
+		"latest version with only sdist should flag present=true")
+	assert.Equal(t, "2.0.0", sd["version_checked"])
+}
+
+func TestCollector_Collect_SdistOnlyPresent_False(t *testing.T) {
+	t.Parallel()
+	// Latest version has a wheel — no setup.py execution risk.
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("wheeled-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "sdist_only_present"))
+	sd := getSignalValue(t, result, "sdist_only_present")
+	assert.Equal(t, false, sd["present"],
+		"latest version with wheel should flag present=false")
+}
+
+// ----- sdist_only_introduced -----
+
+func TestCollector_Collect_SdistOnlyIntroduced_DetectsTransition(t *testing.T) {
+	t.Parallel()
+	// Versions 1.0 and 1.1 had wheels; 2.0 dropped them — the
+	// "setup.py forced" transition.
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "attacker"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"1.1.0": {
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2026-04-01T00:00:00Z", PackageType: "sdist"},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("compromised"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "sdist_only_introduced"))
+	si := getSignalValue(t, result, "sdist_only_introduced")
+	assert.Equal(t, true, si["present_in_latest"],
+		"latest is sdist-only")
+	assert.Equal(t, true, si["introduced_recently"],
+		"transition from wheel to sdist-only should flag")
+	assert.Equal(t, "2.0.0", si["introduced_at_version"])
+	assert.EqualValues(t, 2, si["prior_versions_without"],
+		"both prior versions had wheels (sdist_only=false)")
+	assert.EqualValues(t, 3, si["versions_checked"])
+}
+
+func TestCollector_Collect_SdistOnlyIntroduced_ConsistentWheel(t *testing.T) {
+	t.Parallel()
+	// All versions have wheels — no transition.
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"3.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel"},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("safe-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "sdist_only_introduced"))
+	si := getSignalValue(t, result, "sdist_only_introduced")
+	assert.Equal(t, false, si["present_in_latest"])
+	assert.Equal(t, false, si["introduced_recently"])
+}
+
+func TestCollector_Collect_SdistOnlyIntroduced_AlwaysSdist(t *testing.T) {
+	t.Parallel()
+	// All versions are sdist-only — consistent, not a transition.
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "legacy"},
+		Releases: map[string][]Distribution{
+			"0.1.0": {
+				{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"0.2.0": {
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+			"0.3.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist"},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("always-sdist"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "sdist_only_introduced"))
+	si := getSignalValue(t, result, "sdist_only_introduced")
+	assert.Equal(t, true, si["present_in_latest"],
+		"latest is sdist-only")
+	assert.Equal(t, false, si["introduced_recently"],
+		"all versions are sdist-only — not a transition")
+	assert.EqualValues(t, 0, si["prior_versions_without"],
+		"no prior version had wheels")
 }
 
 // TestCollector_Name pins the collector identifier for orchestrator
