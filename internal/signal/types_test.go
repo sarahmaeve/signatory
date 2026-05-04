@@ -236,6 +236,40 @@ func TestRegistry_MavenCollectorTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_PyPICollectorTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types the PyPI collector
+// (internal/signal/registry/pypi/) emits. Includes Phase A snapshot
+// signals and Phase B longitudinal signals.
+func TestRegistry_PyPICollectorTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"trusted_publishing", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"attestation_consistency", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"sdist_only_present", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"sdist_only_introduced", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"yanked_release_count", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"gpg_signature_present", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"version_publish_burst", profile.SignalGroupPublication, profile.ForgeryHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — pypi collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match pypi collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match pypi collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.

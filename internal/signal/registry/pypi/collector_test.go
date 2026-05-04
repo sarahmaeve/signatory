@@ -812,3 +812,259 @@ func TestCollector_Name(t *testing.T) {
 	c := NewCollector()
 	assert.Equal(t, "pypi-registry", c.Name())
 }
+
+// --- Phase B: attestation_consistency tests ---
+
+// perVersionAttestationServer builds an httptest server that returns
+// project metadata on /pypi/<name>/json and per-version attestation
+// responses on /integrity/<project>/<version>/<filename>/provenance.
+// The attestations map keys on version string; nil value → 404,
+// non-nil → 200 with the response body. Unlisted versions return 404.
+func perVersionAttestationServer(t *testing.T, proj Project, attestations map[string]*AttestationResponse) *httptest.Server {
+	t.Helper()
+	projBody, err := json.Marshal(proj)
+	require.NoError(t, err)
+
+	attestBodies := make(map[string][]byte, len(attestations))
+	for ver, attest := range attestations {
+		if attest != nil {
+			body, err := json.Marshal(attest)
+			require.NoError(t, err)
+			attestBodies[ver] = body
+		}
+	}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/integrity/"); ok {
+			// Path: /integrity/<project>/<version>/<filename>/provenance
+			parts := strings.Split(after, "/")
+			if len(parts) >= 2 {
+				version := parts[1]
+				if body, ok := attestBodies[version]; ok {
+					_, _ = w.Write(body)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+}
+
+func makeAttestation(publisher, repo, workflow string) *AttestationResponse {
+	return &AttestationResponse{
+		Version: 1,
+		Bundles: []AttestationBundle{
+			{
+				Publisher: AttestationPublisher{
+					Kind:       publisher,
+					Repository: repo,
+					Workflow:   workflow,
+				},
+			},
+		},
+	}
+}
+
+func TestCollector_AttestationConsistency_OnlyOneVersion_NoSignal(t *testing.T) {
+	t.Parallel()
+	// A package with only one version has no history to compare.
+	// No attestation_consistency signal should be emitted.
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.0.0": makeAttestation("GitHub", "owner/pkg", "release.yml"),
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	assert.False(t, hasSignal(result, "attestation_consistency"),
+		"single-version package must not emit attestation_consistency (no history)")
+}
+
+func TestCollector_AttestationConsistency_NeverAdopted_NoSignal(t *testing.T) {
+	t.Parallel()
+	// Latest and first prior are both unattested — the package never
+	// adopted trusted publishing. Progressive probe early-exits.
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+				"3.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-3.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			// All versions return 404 — no attestations anywhere.
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	assert.False(t, hasSignal(result, "attestation_consistency"),
+		"never-adopted package must not emit attestation_consistency (probe early-exit)")
+}
+
+func TestCollector_AttestationConsistency_AxiosPattern_DetectsTransition(t *testing.T) {
+	t.Parallel()
+	// The attack scenario: latest version is unattested, but prior
+	// versions were attested. This is the broken-chain fingerprint.
+	ghAttest := makeAttestation("GitHub", "psf/requests", "release.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"2.28.0": {
+					{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "requests-2.28.0-py3-none-any.whl"},
+				},
+				"2.29.0": {
+					{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "requests-2.29.0-py3-none-any.whl"},
+				},
+				"2.30.0": {
+					{UploadTimeISO: "2025-12-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "requests-2.30.0-py3-none-any.whl"},
+				},
+				"2.31.0": {
+					{UploadTimeISO: "2026-02-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "requests-2.31.0-py3-none-any.whl"},
+				},
+				"2.32.0": {
+					{UploadTimeISO: "2026-04-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "requests-2.32.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			"2.28.0": ghAttest,
+			"2.29.0": ghAttest,
+			"2.30.0": ghAttest,
+			"2.31.0": ghAttest,
+			// 2.32.0 (latest) is NOT attested — 404.
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("requests"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"),
+		"broken attestation chain must emit attestation_consistency")
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, false, val["consistent"])
+	assert.Equal(t, true, val["transition_detected"])
+	assert.Equal(t, "attested_to_unattested", val["transition_direction"])
+	assert.Equal(t, "2.32.0", val["transition_at_version"])
+	assert.Equal(t, false, val["publisher_changed"])
+}
+
+func TestCollector_AttestationConsistency_AllAttested_Consistent(t *testing.T) {
+	t.Parallel()
+	// All versions have attestations from the same publisher.
+	// This is the healthy state — unbroken chain.
+	ghAttest := makeAttestation("GitHub", "pallets/flask", "publish.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"3.0.0": {
+					{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.0.0-py3-none-any.whl"},
+				},
+				"3.1.0": {
+					{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.1.0-py3-none-any.whl"},
+				},
+				"3.2.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.2.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			"3.0.0": ghAttest,
+			"3.1.0": ghAttest,
+			"3.2.0": ghAttest,
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("flask"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"),
+		"fully-attested chain must emit attestation_consistency")
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, true, val["consistent"])
+	assert.Equal(t, false, val["transition_detected"])
+	assert.Equal(t, false, val["publisher_changed"])
+}
+
+func TestCollector_AttestationConsistency_ProbeError_RecordsAbsence(t *testing.T) {
+	t.Parallel()
+	// The probe call (first prior version) hits a 500. The signal
+	// should be recorded as absence (retryable), not crash collection.
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	latestAttest, err := json.Marshal(makeAttestation("GitHub", "owner/pkg", "ci.yml"))
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/integrity/"); ok {
+			parts := strings.Split(after, "/")
+			if len(parts) >= 2 && parts[1] == "2.0.0" {
+				// Latest version — return attestation (Phase A succeeds).
+				_, _ = w.Write(latestAttest)
+				return
+			}
+			// All other versions — 500 error.
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("broken"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	// Phase A should succeed (trusted_publishing emitted).
+	require.True(t, hasSignal(result, "trusted_publishing"))
+
+	// Phase B probe failed — should be absence, not a signal.
+	assert.False(t, hasSignal(result, "attestation_consistency"),
+		"probe error must not produce attestation_consistency signal")
+	assert.True(t, hasAbsence(result, "attestation_consistency"),
+		"probe error must record attestation_consistency absence")
+}

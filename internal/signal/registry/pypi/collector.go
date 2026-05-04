@@ -164,8 +164,16 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
-	// ----- trusted_publishing (PEP 740 Sigstore attestation) -----
-	c.recordTrustedPublishing(ctx, result, entity.ID, packageName, proj, collectedAt)
+	// ----- Build version-file list (shared by Phase A and Phase B) -----
+	versions := buildVersionFiles(proj)
+
+	// ----- trusted_publishing: Phase A (snapshot) -----
+	latestAttest := c.recordTrustedPublishing(ctx, result, entity.ID, packageName, versions, collectedAt)
+
+	// ----- attestation_consistency: Phase B (longitudinal) -----
+	// Fires regardless of Phase A outcome (attested or unattested latest).
+	// Progressive probe handles the never-adopted early-exit internally.
+	c.recordAttestationConsistency(ctx, result, entity.ID, packageName, versions, latestAttest, collectedAt)
 
 	return result, nil
 }
@@ -417,28 +425,21 @@ func recordSdistOnlyIntroduced(result *signal.CollectionResult, entityID string,
 		})
 }
 
-// recordTrustedPublishing checks the PyPI Integrity API for a PEP 740
-// Sigstore attestation on the latest version's first distribution file.
-// One additional HTTP call per Collect run (Phase A scope).
-//
-// The signal is emitted as present=true when an attestation bundle
-// exists (publisher OIDC identity confirms the artifact was built in
-// a known CI environment), or present=false when the Integrity API
-// returns 404 (publisher hasn't opted in to trusted publishing).
-//
-// Network/server errors on the Integrity API are recorded as absence
-// (retryable) so they don't block the rest of signal collection.
-func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.CollectionResult,
-	entityID, packageName string, proj *Project, collectedAt time.Time) {
+// versionFile pairs a version string with its first distribution filename
+// and publish timestamp. Used by attestation-related signals (Phase A and
+// Phase B) which need the filename to query the Integrity API per-version.
+// Built once per Collect run and shared across phases.
+type versionFile struct {
+	version  string
+	filename string
+	ts       time.Time
+}
 
-	// Determine latest version and its first distribution filename.
-	// Reuses the same sort logic as recordReleaseSignals to find the
-	// newest published version.
-	type versionFile struct {
-		version  string
-		filename string
-		ts       time.Time
-	}
+// buildVersionFiles extracts the per-version (version, filename, timestamp)
+// triples from a Project's releases. Each version uses its first distribution's
+// filename and upload timestamp. Versions without a parseable timestamp or
+// without a filename are skipped. The result is sorted newest-first.
+func buildVersionFiles(proj *Project) []versionFile {
 	var candidates []versionFile
 	for ver, dists := range proj.Releases {
 		if len(dists) == 0 {
@@ -458,13 +459,6 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 		})
 	}
 
-	if len(candidates) == 0 {
-		// No releases with valid timestamps and filenames — skip.
-		// The absence for related signals is already recorded by
-		// recordReleaseSignals.
-		return
-	}
-
 	// Sort newest-first.
 	slices.SortFunc(candidates, func(a, b versionFile) int {
 		if a.ts.Equal(b.ts) {
@@ -473,7 +467,35 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 		return b.ts.Compare(a.ts)
 	})
 
-	latest := candidates[0]
+	return candidates
+}
+
+// recordTrustedPublishing checks the PyPI Integrity API for a PEP 740
+// Sigstore attestation on the latest version's first distribution file.
+// One additional HTTP call per Collect run (Phase A scope).
+//
+// The signal is emitted as present=true when an attestation bundle
+// exists (publisher OIDC identity confirms the artifact was built in
+// a known CI environment), or present=false when the Integrity API
+// returns 404 (publisher hasn't opted in to trusted publishing).
+//
+// Network/server errors on the Integrity API are recorded as absence
+// (retryable) so they don't block the rest of signal collection.
+//
+// Returns the *AttestationResponse for the latest version so Phase B
+// (attestation_consistency) can reuse it without re-fetching.
+// Returns nil when the latest has no attestation (404) or on error.
+func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.CollectionResult,
+	entityID, packageName string, versions []versionFile, collectedAt time.Time) *AttestationResponse {
+
+	if len(versions) == 0 {
+		// No releases with valid timestamps and filenames — skip.
+		// The absence for related signals is already recorded by
+		// recordReleaseSignals.
+		return nil
+	}
+
+	latest := versions[0]
 
 	attest, err := c.client.GetAttestation(ctx, packageName, latest.version, latest.filename)
 	if err != nil {
@@ -481,7 +503,7 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 		// next analyze run re-attempts without failing the whole collection.
 		result.RecordAbsence(entityID, "trusted_publishing", source,
 			sanitizeFetchReason(err), true, collectedAt)
-		return
+		return nil
 	}
 
 	if attest == nil {
@@ -491,7 +513,7 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 				"present":         false,
 				"version_checked": latest.version,
 			})
-		return
+		return nil
 	}
 
 	// Attestation exists — extract publisher identity from the first bundle.
@@ -510,6 +532,175 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	}
 
 	result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL, value)
+	return attest
+}
+
+// attestationWindow bounds the number of prior versions checked for
+// attestation consistency. Separate from crossVersionWindow (used by
+// release-metadata longitudinal signals) because each version here
+// costs an HTTP call to the Integrity API.
+const attestationWindow = 5
+
+// recordAttestationConsistency checks whether PEP 740 attestations are
+// consistent across recent versions. Detects the broken-chain
+// fingerprint: a package that was continuously attested then publishes
+// a version without attestation (the axios-2026 attack shape on PyPI).
+//
+// Uses a progressive probe to minimize cost: checks the first prior
+// version (1 call). If both latest and first prior are unattested, the
+// package never adopted trusted publishing and no signal is emitted.
+// Only proceeds to a full sweep when a transition is detected or the
+// chain needs depth verification.
+//
+// Emits nothing when: len(versions) < 2 (no history), or the probe
+// shows the package never adopted trusted publishing, or the probe
+// call errors out (records absence instead).
+func (c *Collector) recordAttestationConsistency(ctx context.Context, result *signal.CollectionResult,
+	entityID, packageName string, versions []versionFile, latestAttest *AttestationResponse,
+	collectedAt time.Time) {
+
+	if len(versions) < 2 {
+		return // no history to compare
+	}
+
+	// Phase A already checked versions[0] (latest). Probe versions[1].
+	latestHas := latestAttest != nil
+
+	firstPrior := versions[1]
+	firstAttest, err := c.client.GetAttestation(ctx, packageName, firstPrior.version, firstPrior.filename)
+	if err != nil {
+		result.RecordAbsence(entityID, "attestation_consistency", source,
+			sanitizeFetchReason(err), true, collectedAt)
+		return
+	}
+	firstPriorHas := firstAttest != nil
+
+	// Early exit: latest and immediate prior are both unattested.
+	// Package never adopted trusted publishing — no chain to verify.
+	if !latestHas && !firstPriorHas {
+		return
+	}
+
+	// --- Full sweep: check remaining prior versions ---
+	type versionAttest struct {
+		version   string
+		attested  bool
+		publisher string // "Kind:Repository:Workflow" or "" if unattested
+	}
+
+	publisherKey := func(attest *AttestationResponse) string {
+		if attest == nil || len(attest.Bundles) == 0 {
+			return ""
+		}
+		pub := attest.Bundles[0].Publisher
+		return pub.Kind + ":" + pub.Repository + ":" + pub.Workflow
+	}
+
+	checked := []versionAttest{
+		{version: versions[0].version, attested: latestHas, publisher: publisherKey(latestAttest)},
+		{version: firstPrior.version, attested: firstPriorHas, publisher: publisherKey(firstAttest)},
+	}
+
+	// Check remaining prior versions (bounded to attestationWindow total).
+	remaining := versions[2:]
+	cap := attestationWindow - 2 // already checked 2
+	if len(remaining) > cap {
+		remaining = remaining[:cap]
+	}
+
+	for _, vf := range remaining {
+		attest, err := c.client.GetAttestation(ctx, packageName, vf.version, vf.filename)
+		if err != nil {
+			// Degrade gracefully: skip this version rather than aborting.
+			continue
+		}
+		checked = append(checked, versionAttest{
+			version:   vf.version,
+			attested:  attest != nil,
+			publisher: publisherKey(attest),
+		})
+	}
+
+	// --- Assess consistency ---
+	versionsAttested := 0
+	versionsUnattested := 0
+	publishers := map[string]struct{}{}
+	for _, r := range checked {
+		if r.attested {
+			versionsAttested++
+			if r.publisher != "" {
+				publishers[r.publisher] = struct{}{}
+			}
+		} else {
+			versionsUnattested++
+		}
+	}
+
+	consistent := versionsUnattested == 0 || versionsAttested == 0
+
+	// Detect transition: latest differs from the prior versions' state.
+	transitionDetected := false
+	transitionDirection := ""
+	transitionAtVersion := ""
+
+	if !consistent {
+		priorAttested := 0
+		for i := 1; i < len(checked); i++ {
+			if checked[i].attested {
+				priorAttested++
+			}
+		}
+
+		if !latestHas && priorAttested > 0 {
+			// Axios pattern: latest lost attestation that priors had.
+			transitionDetected = true
+			transitionDirection = "attested_to_unattested"
+			transitionAtVersion = checked[0].version
+		} else if latestHas && priorAttested < len(checked)-1 {
+			// Adoption: latest gained attestation that priors lacked.
+			transitionDetected = true
+			transitionDirection = "unattested_to_attested"
+			transitionAtVersion = checked[0].version
+		}
+	}
+
+	publisherChanged := len(publishers) > 1
+
+	// Build prior_publisher from the most recent attested version
+	// (skipping latest if it's the only attested one).
+	var priorPublisher map[string]any
+	for i := 1; i < len(checked); i++ {
+		if checked[i].attested && checked[i].publisher != "" {
+			// Find the full attestation for this version to extract details.
+			// For the probe version we have firstAttest; for others we only
+			// have the key. Use the key fields directly.
+			parts := strings.SplitN(checked[i].publisher, ":", 3)
+			if len(parts) == 3 {
+				priorPublisher = map[string]any{
+					"kind":       parts[0],
+					"repository": parts[1],
+					"workflow":   parts[2],
+				}
+			}
+			break
+		}
+	}
+
+	value := map[string]any{
+		"consistent":            consistent,
+		"versions_checked":      len(checked),
+		"versions_attested":     versionsAttested,
+		"versions_unattested":   versionsUnattested,
+		"transition_detected":   transitionDetected,
+		"transition_direction":  transitionDirection,
+		"transition_at_version": transitionAtVersion,
+		"publisher_changed":     publisherChanged,
+	}
+	if priorPublisher != nil {
+		value["prior_publisher"] = priorPublisher
+	}
+
+	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL, value)
 }
 
 // ensurePublisherEntities mints identity:pypi/<login> rows for each

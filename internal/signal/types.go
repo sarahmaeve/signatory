@@ -459,6 +459,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the _npmUser.name field is the registry's publisher stamp and cannot be rewritten post-publish; it's higher-forgery-resistance than maintainer lists which are self-declared",
 		},
 	},
+	"attestation_consistency": {
+		Type:              "attestation_consistency",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects transitions from attested to unattested publishing — the PyPI fingerprint of credential-theft attacks that bypass CI pipelines.",
+		Caveats: []string{
+			"a transition from unattested to attested is positive (adoption) not negative",
+			"publisher_changed=true across attested versions may indicate legitimate CI migration or may indicate account takeover — the analyst disambiguates",
+			"bounded to last N versions; a gap farther back is invisible",
+			"not emitted for packages that never adopted trusted publishing (progressive probe: latest + first prior both unattested → early exit)",
+		},
+	},
 	"transparency_log_present": {
 		Type:              "transparency_log_present",
 		Group:             profile.SignalGroupPublication,
