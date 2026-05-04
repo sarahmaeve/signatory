@@ -363,6 +363,61 @@ func parseSCMURL(pomBytes []byte) string {
 	return ""
 }
 
+// parseDevelopers extracts developer names from a POM's <developers>
+// section. Falls back to <id> when <name> is absent. Returns nil if no
+// developers are declared.
+func parseDevelopers(pomBytes []byte) []string {
+	pom := string(pomBytes)
+
+	devStart := strings.Index(pom, "<developers>")
+	if devStart < 0 {
+		return nil
+	}
+	devEnd := strings.Index(pom[devStart:], "</developers>")
+	if devEnd < 0 {
+		return nil
+	}
+	devSection := pom[devStart : devStart+devEnd]
+
+	var names []string
+	remaining := devSection
+	for {
+		start := strings.Index(remaining, "<developer>")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(remaining[start:], "</developer>")
+		if end < 0 {
+			break
+		}
+		dev := remaining[start : start+end]
+		remaining = remaining[start+end:]
+
+		name := extractXMLElement(dev, "name")
+		if name == "" {
+			name = extractXMLElement(dev, "id")
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+// FetchDevelopers retrieves the POM for the given version and returns
+// the developer names from the <developers> section.
+func (c *Client) FetchDevelopers(ctx context.Context, groupID, artifactID, version string) ([]string, error) {
+	body, err := c.fetchPOM(ctx, groupID, artifactID, version)
+	if err != nil {
+		return nil, err
+	}
+	return parseDevelopers(body), nil
+}
+
 // extractXMLElement extracts the text content of a simple XML element.
 func extractXMLElement(xml, tag string) string {
 	open := "<" + tag + ">"

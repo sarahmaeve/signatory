@@ -295,6 +295,103 @@ func TestCollectorsFor_NpmEntityWithoutURL_ReturnsOnlyNpm(t *testing.T) {
 		"only the npm registry collector should fire for an unresolved npm package")
 }
 
+// TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation
+// locks in the graceful-degradation contract: a pkg:<eco> entity
+// whose source resolver has stamped a github URL, but the user ran
+// --refresh without --clone or --path. The registry collector must
+// still fire — the user asked for fresh signals and we have a
+// registry path. Git-hosted collectors (github, git, repofiles,
+// openssf) are skipped because there's no clone to work against.
+//
+// This is the fix for the "exit status 64" failure on
+// `signatory analyze "pkg:maven/X/Y" --refresh` (without --clone):
+// previously, ErrCloneRequired killed the entire collector list,
+// discarding the already-queued registry collector.
+func TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		ecosystem string
+		uri       string
+		url       string
+		wantName  string
+	}{
+		{
+			name:      "maven with resolved URL, no clone",
+			ecosystem: "maven",
+			uri:       "pkg:maven/com.google.guava/guava",
+			url:       "https://github.com/google/guava",
+			wantName:  "maven-registry",
+		},
+		{
+			name:      "npm with resolved URL, no clone",
+			ecosystem: "npm",
+			uri:       "pkg:npm/express",
+			url:       "https://github.com/expressjs/express",
+			wantName:  "npm-registry",
+		},
+		{
+			name:      "cargo with resolved URL, no clone",
+			ecosystem: "cargo",
+			uri:       "pkg:cargo/serde",
+			url:       "https://github.com/serde-rs/serde",
+			wantName:  "cargo-registry",
+		},
+		{
+			name:      "gem with resolved URL, no clone",
+			ecosystem: "gem",
+			uri:       "pkg:gem/rails",
+			url:       "https://github.com/rails/rails",
+			wantName:  "gem-registry",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var stderr bytes.Buffer
+			entity := &profile.Entity{
+				ID:           "e1",
+				CanonicalURI: tc.uri,
+				Type:         profile.EntityPackage,
+				Ecosystem:    tc.ecosystem,
+				URL:          tc.url,
+			}
+			// No Path, no Clone — just --refresh.
+			collectors, err := collectorsFor(context.Background(), entity, CollectOpts{
+				Stderr: &stderr,
+			})
+			require.NoError(t, err,
+				"pkg: entity with resolved URL but no clone must NOT return an error")
+			require.Len(t, collectors, 1,
+				"only the registry collector should fire when no clone is available")
+			assert.Equal(t, tc.wantName, collectors[0].Name())
+			assert.Contains(t, stderr.String(), "pass --clone",
+				"should hint the user about --clone for additional signals")
+		})
+	}
+}
+
+// TestCollectorsFor_RepoEntity_NoPath_StillErrors confirms that
+// repo: entities (no registry collector) still fail loudly when
+// neither --path nor --clone is provided. The graceful degradation
+// only applies to pkg: entities that have registry collectors.
+func TestCollectorsFor_RepoEntity_NoPath_StillErrors(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:github/foo/bar",
+		URL:          "https://github.com/foo/bar",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCloneRequired,
+		"repo: entities with no registry collector must still fail on missing clone")
+}
+
 // TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll verifies
 // the other side of the contract: once A.5 has stamped a github URL
 // on an npm entity, all three collectors dispatch and the clone

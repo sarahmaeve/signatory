@@ -137,9 +137,10 @@ func TestLive_Collector_Dropwizard(t *testing.T) {
 	require.NoError(t, err, "Collect must not return an error for a real Maven artifact")
 
 	// Should emit at least: last_publish, version_count,
-	// version_publish_burst, gpg_signature_present.
-	assert.GreaterOrEqual(t, result.SignalCount(), 4,
-		"expected at least 4 signals from live Maven Central, got %d", result.SignalCount())
+	// version_publish_burst, gpg_signature_present, missing_artifact_count,
+	// signature_consistency. (maintainer_count + author_drift depend on POM.)
+	assert.GreaterOrEqual(t, result.SignalCount(), 6,
+		"expected at least 6 signals from live Maven Central, got %d", result.SignalCount())
 
 	signals := result.Signals()
 	signalMap := map[string]json.RawMessage{}
@@ -184,6 +185,22 @@ func TestLive_Collector_Dropwizard(t *testing.T) {
 		"Maven Central requires GPG signing; dropwizard should be signed")
 	t.Logf("gpg_signature_present: present=%v, version_checked=%v",
 		gpg["present"], gpg["version_checked"])
+
+	// missing_artifact_count: well-maintained artifact should have 0 missing.
+	require.Contains(t, signalMap, "missing_artifact_count")
+	var mac map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["missing_artifact_count"], &mac))
+	t.Logf("missing_artifact_count: count=%v, versions_checked=%v",
+		mac["count"], mac["versions_checked"])
+
+	// signature_consistency: Maven Central requires signing — should be all signed.
+	require.Contains(t, signalMap, "signature_consistency")
+	var sc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["signature_consistency"], &sc))
+	assert.Equal(t, true, sc["all_signed"],
+		"Maven Central requires GPG signing; all versions should be signed")
+	t.Logf("signature_consistency: all_signed=%v, signed=%v, unsigned=%v",
+		sc["all_signed"], sc["signed_count"], sc["unsigned_count"])
 }
 
 func TestLive_Collector_Guava(t *testing.T) {
@@ -196,7 +213,7 @@ func TestLive_Collector_Guava(t *testing.T) {
 
 	result, err := c.Collect(context.Background(), entity)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.SignalCount(), 4)
+	assert.GreaterOrEqual(t, result.SignalCount(), 6)
 
 	signals := result.Signals()
 	signalMap := map[string]json.RawMessage{}
@@ -222,7 +239,7 @@ func TestLive_Collector_CommonsLang3(t *testing.T) {
 
 	result, err := c.Collect(context.Background(), entity)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.SignalCount(), 4)
+	assert.GreaterOrEqual(t, result.SignalCount(), 6)
 
 	signals := result.Signals()
 	signalMap := map[string]json.RawMessage{}
@@ -248,6 +265,6 @@ func TestLive_Collector_JacksonDatabind(t *testing.T) {
 
 	result, err := c.Collect(context.Background(), entity)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.SignalCount(), 4)
+	assert.GreaterOrEqual(t, result.SignalCount(), 6)
 	t.Logf("jackson-databind: %d signals", result.SignalCount())
 }

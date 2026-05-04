@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,8 +50,8 @@ var versionTimestamps = map[string]time.Time{
 // guavaTestServer returns an httptest.Server that serves:
 //   - maven-metadata.xml at the expected path
 //   - HEAD with Last-Modified for each version's jar
-//   - HEAD 200 for .jar.asc (signature present)
-//   - POM with SCM URL for the latest version
+//   - HEAD 200 for .jar.asc (all versions signed)
+//   - POM with <developers> for every version
 func guavaTestServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -60,20 +61,29 @@ func guavaTestServer() *httptest.Server {
 			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
 
 		// HEAD on jars — return Last-Modified for timestamp resolution.
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar":
-			w.Header().Set("Last-Modified", versionTimestamps["33.2.1-jre"].Format(http.TimeFormat))
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.0-jre/guava-33.2.0-jre.jar":
-			w.Header().Set("Last-Modified", versionTimestamps["33.2.0-jre"].Format(http.TimeFormat))
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.1.0-jre/guava-33.1.0-jre.jar":
-			w.Header().Set("Last-Modified", versionTimestamps["33.1.0-jre"].Format(http.TimeFormat))
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar":
-			w.Header().Set("Last-Modified", versionTimestamps["33.0.0-jre"].Format(http.TimeFormat))
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/32.1.3-jre/guava-32.1.3-jre.jar":
-			w.Header().Set("Last-Modified", versionTimestamps["32.1.3-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar") && !contains(r.URL.Path, ".asc"):
+			for v, ts := range versionTimestamps {
+				if contains(r.URL.Path, v) {
+					w.Header().Set("Last-Modified", ts.Format(http.TimeFormat))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
 
-		// Signature check — present.
-		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar.asc":
+		// Signature check — all versions signed.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
 			w.WriteHeader(http.StatusOK)
+
+		// POM with developers for every version.
+		case contains(r.URL.Path, ".pom"):
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <developers>
+    <developer><name>Kevin Bourrillion</name></developer>
+    <developer><name>Chris Povirk</name></developer>
+  </developers>
+</project>`)) //nolint:errcheck
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -129,9 +139,10 @@ func TestCollector_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should emit: last_publish, version_count, version_publish_burst,
-	// gpg_signature_present.
-	assert.GreaterOrEqual(t, result.SignalCount(), 4,
-		"expected at least 4 signals, got %d: %s", result.SignalCount(), result.Summary())
+	// gpg_signature_present, missing_artifact_count, signature_consistency,
+	// maintainer_count, author_drift.
+	assert.GreaterOrEqual(t, result.SignalCount(), 8,
+		"expected at least 8 signals, got %d: %s", result.SignalCount(), result.Summary())
 
 	// Verify specific signals by type.
 	signals := result.Signals()
@@ -166,6 +177,32 @@ func TestCollector_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(signalMap["gpg_signature_present"], &gpg))
 	assert.Equal(t, true, gpg["present"])
 	assert.Equal(t, "33.2.1-jre", gpg["version_checked"])
+
+	// missing_artifact_count — all jars are present in the test server.
+	assert.Contains(t, signalMap, "missing_artifact_count")
+	var mac map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["missing_artifact_count"], &mac))
+	assert.Equal(t, float64(0), mac["count"])
+
+	// signature_consistency — all versions signed.
+	assert.Contains(t, signalMap, "signature_consistency")
+	var sc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["signature_consistency"], &sc))
+	assert.Equal(t, true, sc["all_signed"])
+	assert.Equal(t, float64(5), sc["signed_count"])
+
+	// maintainer_count — from POM <developers>.
+	assert.Contains(t, signalMap, "maintainer_count")
+	var mc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["maintainer_count"], &mc))
+	assert.Equal(t, float64(2), mc["count"])
+
+	// author_drift — same developers across all versions.
+	assert.Contains(t, signalMap, "author_drift")
+	var ad map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["author_drift"], &ad))
+	assert.Equal(t, float64(1), ad["distinct_developer_sets"],
+		"all versions have the same developers — no drift")
 }
 
 func TestCollector_NotFound(t *testing.T) {
@@ -430,6 +467,355 @@ func TestResolveRepoURL_DirectSCM(t *testing.T) {
 		"com.fasterxml.jackson.core", "jackson-databind", "2.18.0")
 	require.NoError(t, err)
 	assert.Equal(t, "https://github.com/FasterXML/jackson-databind", url)
+}
+
+// --- Tests for new longitudinal/governance signals ---
+
+// TestCollector_MaintainerCount verifies maintainer_count is emitted
+// from the POM's <developers> section.
+func TestCollector_MaintainerCount(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// HEAD on jars — timestamps.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar") && !contains(r.URL.Path, ".asc"):
+			for v, ts := range versionTimestamps {
+				if contains(r.URL.Path, v) {
+					w.Header().Set("Last-Modified", ts.Format(http.TimeFormat))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+
+		// Signature — present.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
+			w.WriteHeader(http.StatusOK)
+
+		// POM with <developers> for latest version.
+		case r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.pom":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <developers>
+    <developer>
+      <name>Kevin Bourrillion</name>
+      <email>kevinb@google.com</email>
+    </developer>
+    <developer>
+      <name>Chris Povirk</name>
+      <email>cpovirk@google.com</email>
+    </developer>
+    <developer>
+      <name>Kurt Kluever</name>
+    </developer>
+  </developers>
+</project>`)) //nolint:errcheck
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-guava-mc",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "maintainer_count")
+	var mc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["maintainer_count"], &mc))
+	assert.Equal(t, float64(3), mc["count"])
+	names := mc["names"].([]any)
+	assert.Contains(t, names, "Kevin Bourrillion")
+	assert.Contains(t, names, "Chris Povirk")
+	assert.Contains(t, names, "Kurt Kluever")
+}
+
+// TestCollector_MissingArtifactCount verifies that versions listed in
+// maven-metadata.xml but returning 404 on HEAD are counted as "missing"
+// (Maven's analog of yanked releases).
+func TestCollector_MissingArtifactCount(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// All .asc present.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
+			w.WriteHeader(http.StatusOK)
+
+		// HEAD on jars — 2 versions are missing (404), 3 have timestamps.
+		case r.Method == http.MethodHead && contains(r.URL.Path, "33.2.1-jre"):
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.1-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && contains(r.URL.Path, "33.2.0-jre"):
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && contains(r.URL.Path, "33.1.0-jre"):
+			w.Header().Set("Last-Modified", versionTimestamps["33.1.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && contains(r.URL.Path, "33.0.0-jre"):
+			// Missing — 404
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodHead && contains(r.URL.Path, "32.1.3-jre"):
+			// Missing — 404
+			w.WriteHeader(http.StatusNotFound)
+
+		// POM for maintainer_count.
+		case contains(r.URL.Path, ".pom"):
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<project><developers><developer><name>Dev</name></developer></developers></project>`)) //nolint:errcheck
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-missing-art",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "missing_artifact_count")
+	var mac map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["missing_artifact_count"], &mac))
+	assert.Equal(t, float64(2), mac["count"])
+	assert.Equal(t, float64(5), mac["versions_checked"])
+}
+
+// TestCollector_SignatureConsistency verifies that the collector checks
+// .asc presence across the version window, not just the latest version.
+func TestCollector_SignatureConsistency(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// HEAD on jars — all return timestamps.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar") && !contains(r.URL.Path, ".asc"):
+			for v, ts := range versionTimestamps {
+				if contains(r.URL.Path, v) {
+					w.Header().Set("Last-Modified", ts.Format(http.TimeFormat))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+
+		// Signatures: latest 3 versions signed, older 2 not signed.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
+			if contains(r.URL.Path, "33.2.1-jre") ||
+				contains(r.URL.Path, "33.2.0-jre") ||
+				contains(r.URL.Path, "33.1.0-jre") {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+
+		// POM for maintainer_count.
+		case contains(r.URL.Path, ".pom"):
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<project><developers><developer><name>Dev</name></developer></developers></project>`)) //nolint:errcheck
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-sig-consistency",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "signature_consistency")
+	var sc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["signature_consistency"], &sc))
+	assert.Equal(t, float64(3), sc["signed_count"])
+	assert.Equal(t, float64(2), sc["unsigned_count"])
+	assert.Equal(t, float64(5), sc["versions_checked"])
+	assert.Equal(t, false, sc["all_signed"],
+		"2 of 5 versions lack .asc — not all signed")
+}
+
+// TestCollector_AuthorDrift verifies that the collector detects changes
+// in the POM <developers> section across the version window.
+func TestCollector_AuthorDrift(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// HEAD on jars — all return timestamps.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar") && !contains(r.URL.Path, ".asc"):
+			for v, ts := range versionTimestamps {
+				if contains(r.URL.Path, v) {
+					w.Header().Set("Last-Modified", ts.Format(http.TimeFormat))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+
+		// All .asc present.
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
+			w.WriteHeader(http.StatusOK)
+
+		// POMs with different developers per version.
+		case contains(r.URL.Path, "33.2.1-jre") && contains(r.URL.Path, ".pom"):
+			w.Write([]byte(`<project><developers>
+				<developer><name>Alice</name></developer>
+				<developer><name>Bob</name></developer>
+			</developers></project>`)) //nolint:errcheck
+		case contains(r.URL.Path, "33.2.0-jre") && contains(r.URL.Path, ".pom"):
+			w.Write([]byte(`<project><developers>
+				<developer><name>Alice</name></developer>
+				<developer><name>Bob</name></developer>
+			</developers></project>`)) //nolint:errcheck
+		case contains(r.URL.Path, "33.1.0-jre") && contains(r.URL.Path, ".pom"):
+			w.Write([]byte(`<project><developers>
+				<developer><name>Alice</name></developer>
+			</developers></project>`)) //nolint:errcheck
+		case contains(r.URL.Path, "33.0.0-jre") && contains(r.URL.Path, ".pom"):
+			w.Write([]byte(`<project><developers>
+				<developer><name>Charlie</name></developer>
+			</developers></project>`)) //nolint:errcheck
+		case contains(r.URL.Path, "32.1.3-jre") && contains(r.URL.Path, ".pom"):
+			w.Write([]byte(`<project><developers>
+				<developer><name>Charlie</name></developer>
+			</developers></project>`)) //nolint:errcheck
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-author-drift",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "author_drift")
+	var ad map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["author_drift"], &ad))
+	// 3 distinct developer sets: "Alice, Bob", "Alice", "Charlie"
+	assert.Equal(t, float64(3), ad["distinct_developer_sets"])
+	assert.Equal(t, float64(5), ad["versions_checked"])
+}
+
+// TestParseDevelopers verifies the POM <developers> parser.
+func TestParseDevelopers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pom  string
+		want []string
+	}{
+		{
+			name: "three developers",
+			pom: `<project><developers>
+				<developer><name>Alice</name></developer>
+				<developer><name>Bob</name></developer>
+				<developer><name>Charlie</name></developer>
+			</developers></project>`,
+			want: []string{"Alice", "Bob", "Charlie"},
+		},
+		{
+			name: "no developers section",
+			pom:  `<project><groupId>com.example</groupId></project>`,
+			want: nil,
+		},
+		{
+			name: "empty developers",
+			pom:  `<project><developers></developers></project>`,
+			want: nil,
+		},
+		{
+			name: "developer with id but no name",
+			pom: `<project><developers>
+				<developer><id>alice</id></developer>
+			</developers></project>`,
+			want: []string{"alice"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseDevelopers([]byte(tc.pom))
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// contains is a test helper for URL path matching.
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 // mockEntityStore tracks which entity URIs were minted.

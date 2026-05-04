@@ -2,6 +2,7 @@ package maven
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -109,17 +110,18 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// each jar. Take the tail of the version list (metadata lists
 	// versions oldest-first).
 	versions := meta.Versioning.Versions
-	windowStart := len(versions) - crossVersionWindow
-	if windowStart < 0 {
-		windowStart = 0
-	}
+	windowStart := max(len(versions)-crossVersionWindow, 0)
 	recentVersions := versions[windowStart:]
 
 	var stamps []VersionTimestamp
+	missingCount := 0
 	for _, v := range recentVersions {
 		t, headErr := c.client.HeadTimestamp(ctx, groupID, artifactID, v)
 		if headErr != nil {
-			continue // skip versions we can't timestamp
+			if errors.Is(headErr, ErrNotFound) {
+				missingCount++
+			}
+			continue
 		}
 		if t.IsZero() {
 			continue
@@ -157,7 +159,10 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- version_publish_burst (publication) -----
 	recordVersionPublishBurst(result, entity.ID, stamps, collectedAt)
 
-	// ----- gpg_signature_present (publication) -----
+	// ----- missing_artifact_count (publication) -----
+	recordMissingArtifactCount(result, entity.ID, missingCount, len(recentVersions), collectedAt)
+
+	// ----- gpg_signature_present (publication, latest version) -----
 	sigPresent, sigErr := c.client.CheckSignature(ctx, groupID, artifactID, latestVersion)
 	if sigErr != nil {
 		result.RecordFailure(entity.ID, "gpg_signature_present", collectorSource,
@@ -165,6 +170,26 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	} else {
 		recordGPGSignaturePresent(result, entity.ID, latestVersion, sigPresent, collectedAt)
 	}
+
+	// ----- signature_consistency (publication, cross-version) -----
+	signedCount, unsignedCount := 0, 0
+	for _, v := range recentVersions {
+		present, ascErr := c.client.CheckSignature(ctx, groupID, artifactID, v)
+		if ascErr != nil {
+			continue
+		}
+		if present {
+			signedCount++
+		} else {
+			unsignedCount++
+		}
+	}
+	recordSignatureConsistency(result, entity.ID, signedCount, unsignedCount,
+		len(recentVersions), collectedAt)
+
+	// ----- maintainer_count + author_drift (governance, POM-based) -----
+	c.collectPOMSignals(ctx, result, entity.ID, groupID, artifactID,
+		latestVersion, recentVersions, collectedAt)
 
 	// ----- org entity minting -----
 	c.ensureOrgEntity(ctx, groupID)
@@ -266,6 +291,91 @@ func recordGPGSignaturePresent(result *signal.CollectionResult, entityID string,
 			"present":         present,
 			"version_checked": version,
 		})
+}
+
+// recordMissingArtifactCount emits the number of versions listed in
+// maven-metadata.xml whose jars returned 404 — Maven's analog of yanked
+// releases. Zero additional HTTP calls: derived from the existing HEAD loop.
+func recordMissingArtifactCount(result *signal.CollectionResult, entityID string,
+	missing, versionsChecked int, collectedAt time.Time) {
+
+	result.RecordSignal(entityID, "missing_artifact_count", collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"count":            missing,
+			"versions_checked": versionsChecked,
+		})
+}
+
+// recordSignatureConsistency emits whether .asc signatures are present
+// across the version window, not just the latest version. A transition
+// from signed→unsigned (or vice versa) is a governance change worth noting.
+func recordSignatureConsistency(result *signal.CollectionResult, entityID string,
+	signed, unsigned, versionsChecked int, collectedAt time.Time) {
+
+	result.RecordSignal(entityID, "signature_consistency", collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"all_signed":       unsigned == 0 && signed > 0,
+			"signed_count":     signed,
+			"unsigned_count":   unsigned,
+			"versions_checked": versionsChecked,
+		})
+}
+
+// collectPOMSignals fetches POMs to derive maintainer_count (latest
+// version only) and author_drift (across the version window).
+func (c *Collector) collectPOMSignals(ctx context.Context, result *signal.CollectionResult,
+	entityID, groupID, artifactID, latestVersion string,
+	recentVersions []string, collectedAt time.Time) {
+
+	// ----- maintainer_count (governance) -----
+	latestDevs, err := c.client.FetchDevelopers(ctx, groupID, artifactID, latestVersion)
+	if err != nil {
+		// POM fetch failed — record absence, don't block.
+		result.RecordAbsence(entityID, "maintainer_count", collectorSource,
+			fmt.Sprintf("POM fetch failed: %v", err), true, collectedAt)
+	} else if len(latestDevs) == 0 {
+		result.RecordAbsence(entityID, "maintainer_count", collectorSource,
+			"no <developers> section in POM", false, collectedAt)
+	} else {
+		result.RecordSignal(entityID, "maintainer_count", collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"count": len(latestDevs),
+				"names": latestDevs,
+			})
+	}
+
+	// ----- author_drift (governance, longitudinal) -----
+	developerSets := map[string]struct{}{}
+	for _, v := range recentVersions {
+		devs, devErr := c.client.FetchDevelopers(ctx, groupID, artifactID, v)
+		if devErr != nil || len(devs) == 0 {
+			continue
+		}
+		// Canonical key: sorted, joined developer names.
+		sorted := make([]string, len(devs))
+		copy(sorted, devs)
+		slices.Sort(sorted)
+		key := strings.Join(sorted, ", ")
+		developerSets[key] = struct{}{}
+	}
+
+	if len(developerSets) == 0 {
+		result.RecordAbsence(entityID, "author_drift", collectorSource,
+			"no <developers> found in any version POM", false, collectedAt)
+	} else {
+		setList := make([]string, 0, len(developerSets))
+		for k := range developerSets {
+			setList = append(setList, k)
+		}
+		slices.Sort(setList)
+
+		result.RecordSignal(entityID, "author_drift", collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"distinct_developer_sets": len(developerSets),
+				"developer_sets":          setList,
+				"versions_checked":        len(recentVersions),
+			})
+	}
 }
 
 // ensureOrgEntity mints an org:maven/<groupID> entity row.

@@ -843,9 +843,31 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		ForgeryResistance: profile.ForgeryMediumDeclining,
 		Description:       "Count of distinct author strings across recent versions. A change in the authors field between versions may indicate account takeover or maintainer handoff.",
 		Caveats: []string{
-			"the authors field is self-declared in the gemspec — it can be set to anything by whoever publishes",
+			"the authors field is self-declared in the gemspec/POM — it can be set to anything by whoever publishes",
 			"legitimate author drift occurs on maintainer succession, corporate sponsorship changes, and name updates",
 			"forgery resistance is medium-declining because the field is publisher-controlled, but a change IS visible in the immutable version history",
+		},
+	},
+	"missing_artifact_count": {
+		Type:              "missing_artifact_count",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Number of versions listed in maven-metadata.xml whose artifact jars are absent (404) on repo1.maven.org. Maven Central does not support formal yanking, but artifacts can be removed or fail to sync — a version listed in metadata but missing its jar is the Maven analog of a yanked release.",
+		Caveats: []string{
+			"a missing artifact may indicate intentional removal, sync failure, or packaging variant (e.g. -sources instead of plain jar)",
+			"the count covers only the most recent cross-version window, not the full version history",
+			"derived from the same HEAD requests used for timestamp resolution — zero additional HTTP calls",
+		},
+	},
+	"signature_consistency": {
+		Type:              "signature_consistency",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether GPG signatures (.asc) are present consistently across the recent version window on Maven Central. A transition from signed to unsigned (or vice versa) across versions indicates a governance or tooling change worth investigating.",
+		Caveats: []string{
+			"checks .asc presence via HEAD, not cryptographic verification — a present but invalid signature is counted as signed",
+			"Maven Central mandates GPG signing for new uploads, so inconsistency typically indicates older pre-requirement versions or migration artifacts",
+			"this is an artifact-level signal (the .jar was signed for the registry), distinct from git tag signing which the git collector handles separately",
 		},
 	},
 }

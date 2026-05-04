@@ -208,9 +208,30 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 	// time, or from an npm package whose A.5 resolution found a
 	// github-hosted repository. Empty URL → no git origin → skip
 	// the github/git collector pair and do not require --path/--clone.
+	//
+	// Graceful degradation: when registry collectors are already
+	// queued (pkg:<eco> targets) and the clone path can't be
+	// satisfied (no --path, no --clone), warn and skip git-hosted
+	// collectors rather than aborting the entire run. The user's
+	// `--refresh` intent is "collect whatever you can"; refusing
+	// all signals because a clone wasn't requested is hostile.
+	// Hard errors (origin mismatch, path not a clone) still fail
+	// loudly — those indicate user misconfiguration, not a missing
+	// optional flag.
 	if isGitHostedEntity(entity) {
 		clonePath, err := resolveClonePath(ctx, entity, opts)
 		if err != nil {
+			// If the ONLY problem is that --path/--clone wasn't
+			// passed, and we already have registry collectors, degrade
+			// gracefully: skip git-hosted collectors, warn the user.
+			if errors.Is(err, ErrCloneRequired) && len(collectors) > 0 {
+				if opts.Stderr != nil {
+					_, _ = fmt.Fprintf(opts.Stderr,
+						"note: pass --clone to also collect github + git + repofiles + openssf signals from %s\n",
+						entity.URL)
+				}
+				return collectors, nil
+			}
 			return nil, err
 		}
 		collectors = append(collectors,
