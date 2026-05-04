@@ -175,6 +175,7 @@ type versionRecord struct {
 	publishedAt time.Time
 	sdistOnly   bool // true when ALL dists for this version are sdist (no wheels)
 	yanked      bool // true when ANY dist for this version is yanked
+	hasSig      bool // true when ANY dist for this version has has_sig=true
 }
 
 // recordVersionCount emits the total number of published versions.
@@ -236,6 +237,18 @@ func isYanked(dists []Distribution) bool {
 	return false
 }
 
+// hasGPGSig returns true when any distribution in the version was
+// uploaded with a GPG signature (the legacy has_sig field, deprecated
+// May 2023 in favor of PEP 740 Sigstore attestations).
+func hasGPGSig(dists []Distribution) bool {
+	for _, d := range dists {
+		if d.HasSig {
+			return true
+		}
+	}
+	return false
+}
+
 // recordReleaseSignals derives last_publish, version_publish_burst,
 // sdist_only_present, and sdist_only_introduced from the releases map.
 // All share the sorted version records, so they're computed together.
@@ -278,6 +291,7 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			publishedAt: t,
 			sdistOnly:   isSdistOnly(dists),
 			yanked:      isYanked(dists),
+			hasSig:      hasGPGSig(dists),
 		})
 	}
 
@@ -313,6 +327,13 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 	result.RecordSignal(entityID, "sdist_only_present", source, collectedAt, defaultTTL,
 		map[string]any{
 			"present":         newest.sdistOnly,
+			"version_checked": newest.version,
+		})
+
+	// ----- gpg_signature_present (legacy has_sig) -----
+	result.RecordSignal(entityID, "gpg_signature_present", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present":         newest.hasSig,
 			"version_checked": newest.version,
 		})
 

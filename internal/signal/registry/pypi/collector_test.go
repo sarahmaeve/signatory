@@ -584,6 +584,58 @@ func TestCollector_Collect_SdistOnlyIntroduced_AlwaysSdist(t *testing.T) {
 		"no prior version had wheels")
 }
 
+// ----- gpg_signature_present (legacy has_sig) -----
+
+func TestCollector_Collect_GPGSignaturePresent_True(t *testing.T) {
+	t.Parallel()
+	// Latest version was uploaded with a GPG signature (pre-2023 artifact).
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "signer"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2022-06-01T00:00:00Z", PackageType: "bdist_wheel", HasSig: true},
+				{UploadTimeISO: "2022-06-01T00:00:00Z", PackageType: "sdist", HasSig: true},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("old-signed"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "gpg_signature_present"))
+	gs := getSignalValue(t, result, "gpg_signature_present")
+	assert.Equal(t, true, gs["present"])
+	assert.Equal(t, "1.0.0", gs["version_checked"])
+}
+
+func TestCollector_Collect_GPGSignaturePresent_False(t *testing.T) {
+	t.Parallel()
+	// Latest version has no GPG signature (post-2023, expected).
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "modern"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2022-01-01T00:00:00Z", PackageType: "bdist_wheel", HasSig: true},
+			},
+			"2.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", HasSig: false},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("no-sig"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "gpg_signature_present"))
+	gs := getSignalValue(t, result, "gpg_signature_present")
+	assert.Equal(t, false, gs["present"])
+	assert.Equal(t, "2.0.0", gs["version_checked"])
+}
+
 // TestCollector_Name pins the collector identifier for orchestrator
 // dispatch and progress narration. Mirrors the npm collector's name
 // pattern so log lines read consistently.

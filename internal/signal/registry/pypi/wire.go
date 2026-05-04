@@ -17,13 +17,13 @@ type Project struct {
 }
 
 // Distribution models one distribution file within a release.
-// Fields beyond upload_time_iso_8601, yanked, and packagetype
-// (filename, digests, size, etc.) are skipped by the JSON decoder's
-// unknown-field policy.
+// Fields beyond the ones modelled here (filename, digests, size,
+// url, etc.) are skipped by the JSON decoder's unknown-field policy.
 type Distribution struct {
 	UploadTimeISO string `json:"upload_time_iso_8601"`
 	Yanked        bool   `json:"yanked"`
 	PackageType   string `json:"packagetype"`
+	HasSig        bool   `json:"has_sig"`
 }
 
 // Info is the project-level metadata block. Modelled today:

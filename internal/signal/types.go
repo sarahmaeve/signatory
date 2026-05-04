@@ -852,11 +852,12 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Type:              "gpg_signature_present",
 		Group:             profile.SignalGroupPublication,
 		ForgeryResistance: profile.ForgeryVeryHigh,
-		Description:       "Whether the latest published artifact version has a GPG signature (.asc) on Maven Central. Maven Central requires GPG signing for all uploads; presence is expected and absence indicates a tooling or policy anomaly.",
+		Description:       "Whether the latest published artifact version has a GPG signature. On Maven Central (.asc file, mandatory); on PyPI (legacy has_sig field, deprecated since 2023 in favor of PEP 740 Sigstore attestations).",
 		Caveats: []string{
 			"presence confirms a signature exists but does not verify its validity or the signing key's trustworthiness — verification is a Phase B.5 concern",
-			"Maven Central mandates GPG signing, so absence is more alarming on Central than it would be on registries where signing is optional",
-			"the .asc file is checked via HEAD on repo1.maven.org — network failures produce an absence, not a false negative",
+			"Maven Central mandates GPG signing, so absence is more alarming on Central than on registries where signing is optional",
+			"on PyPI, has_sig is a legacy field — new uploads cannot set it (disabled May 2023); presence indicates the artifact was signed before the deprecation, absence on post-2023 uploads is expected behavior, not a red flag",
+			"PyPI's successor to GPG signing is PEP 740 Sigstore attestations (GA November 2024) — see the Integrity API endpoint for modern provenance signals",
 		},
 	},
 	"author_drift": {
