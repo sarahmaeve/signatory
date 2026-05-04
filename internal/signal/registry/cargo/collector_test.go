@@ -119,10 +119,10 @@ func TestCollector_Success(t *testing.T) {
 	// Should emit: last_publish, maintainer_count, recent_downloads,
 	// build_script_present, yanked_release_count, owner_count,
 	// owner_team_present, publish_origin_consistency,
-	// build_script_introduced, version_count.
-	// Total: 10 signals.
-	assert.GreaterOrEqual(t, result.SignalCount(), 10,
-		"expected at least 10 signals, got %d: %s", result.SignalCount(), result.Summary())
+	// build_script_introduced, version_count, version_publish_burst.
+	// Total: 11 signals.
+	assert.GreaterOrEqual(t, result.SignalCount(), 11,
+		"expected at least 11 signals, got %d: %s", result.SignalCount(), result.Summary())
 
 	// Verify specific signals by type.
 	signals := result.Signals()
@@ -323,6 +323,149 @@ func TestCollector_BuildScriptIntroduced(t *testing.T) {
 	require.NoError(t, json.Unmarshal(signalMap["publish_origin_consistency"], &poc))
 	assert.Equal(t, float64(2), poc["distinct_publishers"],
 		"attacker + original = 2 distinct publishers")
+}
+
+func TestCollector_VersionPublishBurst_DetectsBurst(t *testing.T) {
+	t.Parallel()
+
+	// Four versions published within 36 hours — the version-pumping shape.
+	resp := CrateResponse{
+		Crate: Crate{
+			Name:            "spam-crate",
+			RecentDownloads: 5,
+			CreatedAt:       "2026-04-10T00:00:00Z",
+			MaxStableVer:    "1.3.0",
+		},
+		Versions: []Version{
+			{
+				Num: "1.3.0", CreatedAt: "2026-04-11T18:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "newacct"},
+			},
+			{
+				Num: "1.2.0", CreatedAt: "2026-04-11T06:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "newacct"},
+			},
+			{
+				Num: "1.1.0", CreatedAt: "2026-04-10T18:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "newacct"},
+			},
+			{
+				Num: "1.0.0", CreatedAt: "2026-04-10T06:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "newacct"},
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/spam-crate":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/spam-crate/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{
+				Users: []Owner{{Login: "newacct", Kind: "user"}},
+			}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-spam",
+		CanonicalURI: "pkg:cargo/spam-crate",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "version_publish_burst")
+	var vpb map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_publish_burst"], &vpb))
+	assert.Equal(t, true, vpb["burst_detected"],
+		"4 versions in 36 hours should trigger burst detection")
+	assert.EqualValues(t, 4, vpb["versions_in_window"])
+	assert.EqualValues(t, 36, vpb["window_hours"])
+	assert.EqualValues(t, 4, vpb["versions_checked"])
+}
+
+func TestCollector_VersionPublishBurst_NoBurst(t *testing.T) {
+	t.Parallel()
+
+	// Versions spread over months — healthy cadence.
+	resp := CrateResponse{
+		Crate: Crate{
+			Name:            "steady-crate",
+			RecentDownloads: 50000,
+			CreatedAt:       "2023-01-01T00:00:00Z",
+			MaxStableVer:    "3.0.0",
+		},
+		Versions: []Version{
+			{
+				Num: "3.0.0", CreatedAt: "2026-02-10T00:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "solid"},
+			},
+			{
+				Num: "2.0.0", CreatedAt: "2025-03-20T00:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "solid"},
+			},
+			{
+				Num: "1.0.0", CreatedAt: "2024-01-15T00:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "solid"},
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/steady-crate":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/steady-crate/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{
+				Users: []Owner{{Login: "solid", Kind: "user"}},
+			}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-steady",
+		CanonicalURI: "pkg:cargo/steady-crate",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "version_publish_burst")
+	var vpb map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_publish_burst"], &vpb))
+	assert.Equal(t, false, vpb["burst_detected"],
+		"versions spread over months should not trigger burst")
+	assert.EqualValues(t, 3, vpb["versions_in_window"])
+	assert.EqualValues(t, 3, vpb["versions_checked"])
 }
 
 func TestCollector_EntityStore_MintsPublisherEntities(t *testing.T) {

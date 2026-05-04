@@ -146,6 +146,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 			err.Error(), false, collectedAt)
 	}
 
+	// ----- version_count (vitality) -----
+	recordVersionCount(result, entity.ID, pkg, collectedAt)
+
 	// ----- maintainer_count (governance) -----
 	recordMaintainerCount(result, entity.ID, pkg, collectedAt)
 
@@ -276,6 +279,17 @@ func recordLastPublish(result *signal.CollectionResult, entityID string,
 			"days_ago":       int(collectedAt.Sub(t).Hours() / 24),
 		})
 	return nil
+}
+
+// recordVersionCount emits the total number of published versions
+// from the packument's versions map.
+func recordVersionCount(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	result.RecordSignal(entityID, "version_count", source, collectedAt, defaultTTL,
+		map[string]any{
+			"count": len(pkg.Versions),
+		})
 }
 
 // recordMaintainerCount emits the maintainer count and the list of

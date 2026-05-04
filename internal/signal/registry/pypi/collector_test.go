@@ -232,6 +232,143 @@ func TestCollector_Collect_SignalSourceIsPypiRegistry(t *testing.T) {
 	t.Fatalf("expected a maintainer_count signal in the result; got none")
 }
 
+// projectServer returns an httptest server that responds with a full
+// Project response including releases. Used by tests that exercise
+// vitality/publication signals derived from release timestamps.
+func projectServer(t *testing.T, proj Project) *httptest.Server {
+	t.Helper()
+	body, err := json.Marshal(proj)
+	require.NoError(t, err)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+}
+
+// TestCollector_Collect_VersionCount emits the total number of
+// published versions from the releases map.
+func TestCollector_Collect_VersionCount(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-01T00:00:00Z"}},
+			"1.1.0": {{UploadTimeISO: "2025-01-01T00:00:00Z"}},
+			"2.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "version_count"),
+		"pypi package with releases must emit version_count")
+	vc := getSignalValue(t, result, "version_count")
+	assert.EqualValues(t, 3, vc["count"])
+}
+
+// TestCollector_Collect_LastPublish emits the latest version's
+// publish timestamp from the releases map.
+func TestCollector_Collect_LastPublish(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-01T00:00:00Z"}},
+			"2.0.0": {{UploadTimeISO: "2026-03-15T12:00:00Z"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "last_publish"),
+		"pypi package with releases must emit last_publish")
+	lp := getSignalValue(t, result, "last_publish")
+	assert.Equal(t, "2.0.0", lp["latest_version"])
+	assert.Equal(t, "2026-03-15T12:00:00Z", lp["published_at"])
+	daysAgo, ok := lp["days_ago"].(float64)
+	assert.True(t, ok)
+	assert.GreaterOrEqual(t, daysAgo, float64(0))
+}
+
+// TestCollector_Collect_VersionPublishBurst_Burst detects rapid-fire
+// publishing: 4 versions within 36 hours.
+func TestCollector_Collect_VersionPublishBurst_Burst(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "spam"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-04-10T06:00:00Z"}},
+			"1.1.0": {{UploadTimeISO: "2026-04-10T18:00:00Z"}},
+			"1.2.0": {{UploadTimeISO: "2026-04-11T06:00:00Z"}},
+			"1.3.0": {{UploadTimeISO: "2026-04-11T18:00:00Z"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("spam-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "version_publish_burst"),
+		"pypi package with recent releases must emit version_publish_burst")
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, true, vpb["burst_detected"])
+	assert.EqualValues(t, 4, vpb["versions_in_window"])
+	assert.EqualValues(t, 36, vpb["window_hours"])
+}
+
+// TestCollector_Collect_VersionPublishBurst_NoBurst — versions spread
+// over months.
+func TestCollector_Collect_VersionPublishBurst_NoBurst(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "stable"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2024-01-15T00:00:00Z"}},
+			"2.0.0": {{UploadTimeISO: "2025-03-20T00:00:00Z"}},
+			"3.0.0": {{UploadTimeISO: "2026-02-10T00:00:00Z"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("stable-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "version_publish_burst"))
+	vpb := getSignalValue(t, result, "version_publish_burst")
+	assert.Equal(t, false, vpb["burst_detected"])
+	assert.EqualValues(t, 3, vpb["versions_in_window"])
+}
+
+// TestCollector_Collect_NoReleases_VersionSignalsAbsent — when the
+// releases map is empty, version-derived signals record absence.
+func TestCollector_Collect_NoReleases_VersionSignalsAbsent(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "ofek"},
+		// No releases — common for newly-registered but unpublished projects.
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("empty-pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	assert.True(t, hasAbsence(result, "last_publish"),
+		"no releases → last_publish absence")
+	// version_count should still emit with count=0
+	require.True(t, hasSignal(result, "version_count"))
+	vc := getSignalValue(t, result, "version_count")
+	assert.EqualValues(t, 0, vc["count"])
+}
+
 // TestCollector_Name pins the collector identifier for orchestrator
 // dispatch and progress narration. Mirrors the npm collector's name
 // pattern so log lines read consistently.

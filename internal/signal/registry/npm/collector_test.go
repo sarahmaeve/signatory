@@ -119,13 +119,13 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// All seven signals land, zero absences. (Five snapshot
-	// signals from Phase A+B plus two cross-version signals from
-	// Phase B.6. The sample response has only a single version
+	// All signals land, zero absences. (Five snapshot signals from
+	// Phase A+B, three cross-version signals from Phase B.6, plus
+	// version_count. The sample response has only a single version
 	// entry, so the cross-version signals land with stable-state
 	// payloads rather than transition flags.)
-	assert.Equal(t, 8, result.SignalCount(),
-		"all eight signals should land on happy path (5 snapshot + 3 cross-version)")
+	assert.Equal(t, 9, result.SignalCount(),
+		"all nine signals should land on happy path (5 snapshot + 3 cross-version + version_count)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// last_publish
@@ -160,6 +160,12 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	wd := getSignalValue(t, result, "weekly_downloads")
 	assert.EqualValues(t, 28_500_000, wd["count"])
 	assert.Equal(t, "last-week", wd["window"])
+
+	// version_count
+	require.True(t, hasSignal(result, "version_count"))
+	vc := getSignalValue(t, result, "version_count")
+	assert.EqualValues(t, 1, vc["count"],
+		"sample response has one version entry")
 }
 
 // ----- non-npm entity: empty result, no HTTP calls -----
@@ -247,11 +253,11 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Seven real signals (everything except weekly_downloads), one
+	// Eight real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
 	// failure must not poison the other signals. The three cross-
 	// version signals land from the same-wire versions map.
-	assert.Equal(t, 7, result.SignalCount())
+	assert.Equal(t, 8, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -512,7 +518,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 8, result.SignalCount())
+	assert.Equal(t, 9, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -849,7 +855,7 @@ func TestCollector_Collect_CrossVersion_TiebreakDeterministic(t *testing.T) {
 	// because Go's map iteration and sort.Slice are both randomized.
 	const runs = 5
 	seen := make(map[string]struct{})
-	for i := 0; i < runs; i++ {
+	for range runs {
 		result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("tiebreak"))
 		require.NoError(t, err)
 		poc := getSignalValue(t, result, "publish_origin_consistency")

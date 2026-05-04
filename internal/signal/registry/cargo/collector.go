@@ -28,6 +28,11 @@ const collectorSource = "cargo-registry"
 // Matches npm and PyPI.
 const defaultTTL = 24 * time.Hour
 
+// burstThreshold is the maximum duration between oldest and newest
+// version in the window that triggers a burst detection. 72 hours
+// matches the gem, npm, and maven collectors.
+const burstThreshold = 72 * time.Hour
+
 // EntityStore is the narrow interface the cargo collector uses to
 // mint identity:cargo/<login> entity rows for the owners and
 // publishers it observes. Optional: nil-safe via WithEntityStore.
@@ -338,11 +343,14 @@ func recordCrossVersionSignals(result *signal.CollectionResult, entityID string,
 			reason, false, collectedAt)
 		result.RecordAbsence(entityID, "publish_origin_consistency", collectorSource,
 			reason, false, collectedAt)
+		result.RecordAbsence(entityID, "version_publish_burst", collectorSource,
+			reason, false, collectedAt)
 		return
 	}
 
 	recordBuildScriptIntroduced(result, entityID, recent, collectedAt)
 	recordPublishOriginConsistency(result, entityID, recent, collectedAt)
+	recordVersionPublishBurst(result, entityID, recent, collectedAt)
 }
 
 // recordBuildScriptIntroduced detects whether build.rs appeared in the
@@ -410,6 +418,60 @@ func recordPublishOriginConsistency(result *signal.CollectionResult, entityID st
 			"publisher_logins":           logins,
 			"versions_checked":           len(recent),
 			"versions_without_publisher": unknownCount,
+		})
+}
+
+// recordVersionPublishBurst detects whether multiple versions were
+// published within a short time window (burstThreshold). Matches the
+// npm, gem, and maven collectors' pattern. Timestamps come from
+// CreatedAt parsed as RFC3339.
+func recordVersionPublishBurst(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	if len(recent) < 2 {
+		result.RecordSignal(entityID, "version_publish_burst", collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(recent),
+				"window_hours":       0,
+				"versions_checked":   len(recent),
+			})
+		return
+	}
+
+	// recent is sorted newest-first by recentVersionsByPublishTime.
+	newest, err := time.Parse(time.RFC3339, recent[0].createdAt)
+	if err != nil {
+		result.RecordSignal(entityID, "version_publish_burst", collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(recent),
+				"window_hours":       0,
+				"versions_checked":   len(recent),
+			})
+		return
+	}
+	oldest, err := time.Parse(time.RFC3339, recent[len(recent)-1].createdAt)
+	if err != nil {
+		result.RecordSignal(entityID, "version_publish_burst", collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(recent),
+				"window_hours":       0,
+				"versions_checked":   len(recent),
+			})
+		return
+	}
+
+	span := newest.Sub(oldest)
+	burst := len(recent) >= 3 && span <= burstThreshold
+
+	result.RecordSignal(entityID, "version_publish_burst", collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"burst_detected":     burst,
+			"versions_in_window": len(recent),
+			"window_hours":       int(span.Hours()),
+			"versions_checked":   len(recent),
 		})
 }
 

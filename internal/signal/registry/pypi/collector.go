@@ -1,16 +1,27 @@
 package pypi
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
+
+// crossVersionWindow bounds the number of recent versions consulted
+// for longitudinal signals. Matches npm, cargo, gem, and maven.
+const crossVersionWindow = 10
+
+// burstThreshold is the maximum duration between oldest and newest
+// version in the window that triggers a burst detection. 72 hours
+// matches the npm, cargo, gem, and maven collectors.
+const burstThreshold = 72 * time.Hour
 
 // source is the collector's name — the value lands in
 // profile.Signal.Source for every emission and in the orchestrator's
@@ -117,7 +128,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	result := &signal.CollectionResult{}
 	collectedAt := time.Now().UTC()
 
-	info, err := c.client.GetProjectInfo(ctx, packageName)
+	proj, err := c.client.GetProject(ctx, packageName)
 	if err != nil {
 		// Treat fetch failure (404, network, size-cap, ...) as an
 		// absence so the entity profile reflects "we tried, registry
@@ -130,36 +141,138 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 
 	// ----- maintainer_count + publisher-entity minting -----
-	//
-	// extractPyPILogins runs the conservative login-shape filter
-	// (login.go); the resulting list is what gets minted (when an
-	// EntityStore is wired) AND what populates the maintainer_count
-	// signal value. Both sides see the same set, so the cascade
-	// resolver's signal-derived candidates align with the entities
-	// that actually exist in the store.
-	logins := extractPyPILogins(info)
+	logins := extractPyPILogins(&proj.Info)
 	if len(logins) == 0 {
-		// The publisher-supplied metadata had no extractable login
-		// (only display names, only emails, or empty entirely).
-		// Record absence — the cascade resolver gets no candidates,
-		// the maintainer_count column stays empty, and a future
-		// collector enhancement (HTML scrape, PyPI API expansion)
-		// can fill the gap.
 		reason := "no login-shaped value in info.maintainer / info.author / info.maintainers"
 		result.RecordAbsence(entity.ID, "maintainer_count", source,
 			reason, false, collectedAt)
-		return result, nil
+	} else {
+		c.ensurePublisherEntities(ctx, logins)
+		result.RecordSignal(entity.ID, "maintainer_count", source, collectedAt, defaultTTL,
+			map[string]any{
+				"count":  len(logins),
+				"logins": logins,
+			})
 	}
 
-	c.ensurePublisherEntities(ctx, logins)
+	// ----- version_count (vitality) -----
+	recordVersionCount(result, entity.ID, proj, collectedAt)
 
-	result.RecordSignal(entity.ID, "maintainer_count", source, collectedAt, defaultTTL,
-		map[string]any{
-			"count":  len(logins),
-			"logins": logins,
-		})
+	// ----- last_publish + version_publish_burst (vitality / publication) -----
+	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
 	return result, nil
+}
+
+// versionTimestamp pairs a version string with its parsed upload time.
+type versionTimestamp struct {
+	version     string
+	publishedAt time.Time
+}
+
+// recordVersionCount emits the total number of published versions.
+func recordVersionCount(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	result.RecordSignal(entityID, "version_count", source, collectedAt, defaultTTL,
+		map[string]any{
+			"count": len(proj.Releases),
+		})
+}
+
+// recordReleaseSignals derives last_publish and version_publish_burst
+// from the releases map. Both share the sorted timestamps, so they're
+// computed together.
+func recordReleaseSignals(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	if len(proj.Releases) == 0 {
+		result.RecordAbsence(entityID, "last_publish", source,
+			"no releases in PyPI response", false, collectedAt)
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": 0,
+				"window_hours":       0,
+				"versions_checked":   0,
+			})
+		return
+	}
+
+	// Build timestamped records from the first distribution in each
+	// release (all dists within a version share the same upload time).
+	var stamps []versionTimestamp
+	for ver, dists := range proj.Releases {
+		if len(dists) == 0 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
+		if err != nil {
+			continue
+		}
+		stamps = append(stamps, versionTimestamp{
+			version:     ver,
+			publishedAt: t,
+		})
+	}
+
+	if len(stamps) == 0 {
+		result.RecordAbsence(entityID, "last_publish", source,
+			"no parseable timestamps in releases", false, collectedAt)
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": 0,
+				"window_hours":       0,
+				"versions_checked":   0,
+			})
+		return
+	}
+
+	// Sort newest-first.
+	slices.SortFunc(stamps, func(a, b versionTimestamp) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.publishedAt.Compare(a.publishedAt)
+	})
+
+	// ----- last_publish -----
+	newest := stamps[0]
+	result.RecordSignal(entityID, "last_publish", source, collectedAt, defaultTTL,
+		map[string]any{
+			"latest_version": newest.version,
+			"published_at":   newest.publishedAt.UTC().Format(time.RFC3339),
+			"days_ago":       int(collectedAt.Sub(newest.publishedAt).Hours() / 24),
+		})
+
+	// ----- version_publish_burst -----
+	window := stamps
+	if len(window) > crossVersionWindow {
+		window = window[:crossVersionWindow]
+	}
+
+	if len(window) < 2 {
+		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+			map[string]any{
+				"burst_detected":     false,
+				"versions_in_window": len(window),
+				"window_hours":       0,
+				"versions_checked":   len(window),
+			})
+		return
+	}
+
+	span := window[0].publishedAt.Sub(window[len(window)-1].publishedAt)
+	burst := len(window) >= 3 && span <= burstThreshold
+
+	result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
+		map[string]any{
+			"burst_detected":     burst,
+			"versions_in_window": len(window),
+			"window_hours":       int(span.Hours()),
+			"versions_checked":   len(window),
+		})
 }
 
 // ensurePublisherEntities mints identity:pypi/<login> rows for each

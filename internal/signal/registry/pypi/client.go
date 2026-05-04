@@ -122,20 +122,14 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// GetProjectInfo fetches the info block for a project from the
-// PyPI registry's legacy JSON endpoint. Returns ErrNotFound
-// (wrapped) on 404. Other non-2xx statuses surface as a sanitized
-// error — the response body is discarded before reaching the
-// caller (npm's #93 applies symmetrically to PyPI).
-//
-// The full /pypi/<name>/json response also contains releases and
-// urls; these are intentionally not modelled in wire.go (Layer 6
-// only needs info), so the json decoder skips them. They still
-// transit the wire, which is why maxResponseSize is sized for
-// realistic PyPI response volumes.
-func (c *Client) GetProjectInfo(ctx context.Context, name string) (*Info, error) {
+// GetProject fetches the full project response from PyPI's legacy
+// JSON endpoint. Returns ErrNotFound (wrapped) on 404. Other non-2xx
+// statuses surface as a sanitized error — the response body is
+// discarded before reaching the caller (npm's #93 applies
+// symmetrically to PyPI).
+func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
 	if err := ValidatePackageName(name); err != nil {
-		return nil, fmt.Errorf("get project info: %w", err)
+		return nil, fmt.Errorf("get project: %w", err)
 	}
 
 	// Path-escape the name for defense-in-depth even though
@@ -185,6 +179,17 @@ func (c *Client) GetProjectInfo(ctx context.Context, name string) (*Info, error)
 	var proj Project
 	if err := json.Unmarshal(body, &proj); err != nil {
 		return nil, fmt.Errorf("decode pypi registry response for %q: %w", name, err)
+	}
+	return &proj, nil
+}
+
+// GetProjectInfo fetches the info block for a project from PyPI's
+// legacy JSON endpoint. Convenience wrapper around GetProject for
+// callers that only need the Info section (e.g., the resolver).
+func (c *Client) GetProjectInfo(ctx context.Context, name string) (*Info, error) {
+	proj, err := c.GetProject(ctx, name)
+	if err != nil {
+		return nil, err
 	}
 	return &proj.Info, nil
 }

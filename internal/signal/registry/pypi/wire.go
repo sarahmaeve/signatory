@@ -1,19 +1,27 @@
 package pypi
 
 // Project models the subset of PyPI's /pypi/<name>/json response
-// signatory's Layer 6 source-resolution slice reads. The legacy
-// JSON endpoint also returns "releases" (the full historical
-// version map, multi-MB for popular packages) and "urls" (the
-// latest release's distribution files); both are deliberately
-// unmodelled here — the json package skips unknown fields by
-// default, so they're decoded but not allocated.
+// signatory reads. The legacy JSON endpoint returns "info" (project
+// metadata), "releases" (the full historical version map), and "urls"
+// (the latest release's distribution files); "urls" is deliberately
+// unmodelled — the json package skips unknown fields by default, so
+// it's decoded but not allocated.
 //
-// When Layer 5's signal collector lands it will extend this file
-// with Releases / Distribution / Vulnerabilities — additive only,
-// no shape changes to the existing fields, so commit 5's resolver
-// stays stable across the v0.1 → Layer 5 transition.
+// Releases is modelled as a map from version string to a slice of
+// distribution records. Each version can have multiple distributions
+// (sdist, wheel, etc.); we read the upload_time_iso_8601 from the
+// first entry to derive timestamps for last_publish and burst signals.
 type Project struct {
-	Info Info `json:"info"`
+	Info     Info                      `json:"info"`
+	Releases map[string][]Distribution `json:"releases"`
+}
+
+// Distribution models one distribution file within a release. Only
+// the upload timestamp is needed for signal derivation; additional
+// fields (filename, packagetype, digests, etc.) are skipped by the
+// JSON decoder's unknown-field policy.
+type Distribution struct {
+	UploadTimeISO string `json:"upload_time_iso_8601"`
 }
 
 // Info is the project-level metadata block. Modelled today:
