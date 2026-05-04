@@ -193,3 +193,86 @@ func (c *Client) GetProjectInfo(ctx context.Context, name string) (*Info, error)
 	}
 	return &proj.Info, nil
 }
+
+// GetAttestation fetches PEP 740 Sigstore attestation data for a
+// specific distribution file from PyPI's Integrity API. The endpoint
+// is /integrity/<project>/<version>/<filename>/provenance.
+//
+// Returns nil (not an error) on 404 — the absence of attestation is
+// a valid signal state (the publisher hasn't opted into trusted
+// publishing). Other non-2xx statuses surface as errors.
+//
+// The Integrity API is GA since November 2024 and returns a JSON
+// envelope containing attestation bundles with publisher OIDC
+// identity. Phase A reads the publisher block only; Phase B (future)
+// would verify the DSSE envelope against Sigstore's transparency log.
+func (c *Client) GetAttestation(ctx context.Context, project, version, filename string) (*AttestationResponse, error) {
+	if err := ValidatePackageName(project); err != nil {
+		return nil, fmt.Errorf("get attestation: %w", err)
+	}
+	if version == "" {
+		return nil, fmt.Errorf("get attestation: version is empty")
+	}
+	if filename == "" {
+		return nil, fmt.Errorf("get attestation: filename is empty")
+	}
+
+	// Construct the Integrity API URL. Each path segment is escaped
+	// independently — defense-in-depth against injection via version
+	// or filename strings (both are publisher-supplied values from the
+	// release data, not attacker-controlled in practice, but the client
+	// boundary closes the hole up front).
+	escapedProject := url.PathEscape(project)
+	escapedVersion := url.PathEscape(version)
+	escapedFilename := url.PathEscape(filename)
+
+	reqURL := c.registryURL + "/integrity/" + escapedProject + "/" +
+		escapedVersion + "/" + escapedFilename + "/provenance"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build attestation request for %s/%s/%s: %w",
+			project, version, filename, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "signatory/0.1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pypi integrity request for %s/%s/%s failed: %w",
+			project, version, filename, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
+
+	if resp.StatusCode == http.StatusNotFound {
+		// 404 means no attestation exists for this distribution.
+		// This is a valid state — the publisher hasn't opted in.
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
+		return nil, fmt.Errorf("pypi integrity returned status %d for %s/%s/%s",
+			resp.StatusCode, project, version, filename)
+	}
+
+	// Attestation responses are small (typically < 10 KB); use a
+	// tighter cap than the project endpoint.
+	const attestationMaxSize = 256 * 1024
+	limited := io.LimitReader(resp.Body, attestationMaxSize+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read pypi integrity response for %s/%s/%s: %w",
+			project, version, filename, err)
+	}
+	if int64(len(body)) > attestationMaxSize {
+		return nil, fmt.Errorf("pypi integrity response for %s/%s/%s exceeds %d-byte cap",
+			project, version, filename, attestationMaxSize)
+	}
+
+	var attest AttestationResponse
+	if err := json.Unmarshal(body, &attest); err != nil {
+		return nil, fmt.Errorf("decode pypi integrity response for %s/%s/%s: %w",
+			project, version, filename, err)
+	}
+	return &attest, nil
+}

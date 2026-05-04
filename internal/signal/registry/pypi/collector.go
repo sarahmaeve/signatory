@@ -164,6 +164,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
+	// ----- trusted_publishing (PEP 740 Sigstore attestation) -----
+	c.recordTrustedPublishing(ctx, result, entity.ID, packageName, proj, collectedAt)
+
 	return result, nil
 }
 
@@ -412,6 +415,101 @@ func recordSdistOnlyIntroduced(result *signal.CollectionResult, entityID string,
 			"prior_versions_without": priorWithout,
 			"versions_checked":       len(recent),
 		})
+}
+
+// recordTrustedPublishing checks the PyPI Integrity API for a PEP 740
+// Sigstore attestation on the latest version's first distribution file.
+// One additional HTTP call per Collect run (Phase A scope).
+//
+// The signal is emitted as present=true when an attestation bundle
+// exists (publisher OIDC identity confirms the artifact was built in
+// a known CI environment), or present=false when the Integrity API
+// returns 404 (publisher hasn't opted in to trusted publishing).
+//
+// Network/server errors on the Integrity API are recorded as absence
+// (retryable) so they don't block the rest of signal collection.
+func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.CollectionResult,
+	entityID, packageName string, proj *Project, collectedAt time.Time) {
+
+	// Determine latest version and its first distribution filename.
+	// Reuses the same sort logic as recordReleaseSignals to find the
+	// newest published version.
+	type versionFile struct {
+		version  string
+		filename string
+		ts       time.Time
+	}
+	var candidates []versionFile
+	for ver, dists := range proj.Releases {
+		if len(dists) == 0 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
+		if err != nil {
+			continue
+		}
+		if dists[0].Filename == "" {
+			continue
+		}
+		candidates = append(candidates, versionFile{
+			version:  ver,
+			filename: dists[0].Filename,
+			ts:       t,
+		})
+	}
+
+	if len(candidates) == 0 {
+		// No releases with valid timestamps and filenames — skip.
+		// The absence for related signals is already recorded by
+		// recordReleaseSignals.
+		return
+	}
+
+	// Sort newest-first.
+	slices.SortFunc(candidates, func(a, b versionFile) int {
+		if a.ts.Equal(b.ts) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.ts.Compare(a.ts)
+	})
+
+	latest := candidates[0]
+
+	attest, err := c.client.GetAttestation(ctx, packageName, latest.version, latest.filename)
+	if err != nil {
+		// Integrity API failure — record as retryable absence so the
+		// next analyze run re-attempts without failing the whole collection.
+		result.RecordAbsence(entityID, "trusted_publishing", source,
+			sanitizeFetchReason(err), true, collectedAt)
+		return
+	}
+
+	if attest == nil {
+		// 404 — no attestation exists. Emit present=false.
+		result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL,
+			map[string]any{
+				"present":         false,
+				"version_checked": latest.version,
+			})
+		return
+	}
+
+	// Attestation exists — extract publisher identity from the first bundle.
+	value := map[string]any{
+		"present":         true,
+		"version_checked": latest.version,
+	}
+	if len(attest.Bundles) > 0 {
+		pub := attest.Bundles[0].Publisher
+		value["publisher_kind"] = pub.Kind
+		value["source_repository"] = pub.Repository
+		value["workflow"] = pub.Workflow
+		if pub.Environment != "" {
+			value["environment"] = pub.Environment
+		}
+	}
+
+	result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL, value)
 }
 
 // ensurePublisherEntities mints identity:pypi/<login> rows for each

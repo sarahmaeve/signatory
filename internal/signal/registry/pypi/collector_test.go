@@ -636,6 +636,174 @@ func TestCollector_Collect_GPGSignaturePresent_False(t *testing.T) {
 	assert.Equal(t, "2.0.0", gs["version_checked"])
 }
 
+// ----- trusted_publishing (PEP 740 Sigstore attestation) -----
+
+// attestationProjectServer serves both the /pypi/<name>/json endpoint
+// and the /integrity/<project>/<version>/<filename>/provenance endpoint.
+// Models the real PyPI architecture where attestation data is a
+// separate API call from the project metadata.
+func attestationProjectServer(t *testing.T, proj Project, attestation *AttestationResponse) *httptest.Server {
+	t.Helper()
+	projBody, err := json.Marshal(proj)
+	require.NoError(t, err)
+
+	var attestBody []byte
+	if attestation != nil {
+		attestBody, err = json.Marshal(attestation)
+		require.NoError(t, err)
+	}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/integrity/") {
+			if attestation == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write(attestBody)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+}
+
+func TestCollector_Collect_TrustedPublishing_Present(t *testing.T) {
+	t.Parallel()
+	// Latest version has a Sigstore attestation from a GitHub Actions
+	// trusted publisher.
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-2.0.0.tar.gz"},
+				},
+			},
+		},
+		&AttestationResponse{
+			Version: 1,
+			Bundles: []AttestationBundle{
+				{
+					Publisher: AttestationPublisher{
+						Kind:        "GitHub",
+						Repository:  "octocat/pkg",
+						Workflow:    "release.yml",
+						Environment: "release",
+					},
+				},
+			},
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "trusted_publishing"),
+		"package with attestation must emit trusted_publishing")
+	tp := getSignalValue(t, result, "trusted_publishing")
+	assert.Equal(t, true, tp["present"])
+	assert.Equal(t, "2.0.0", tp["version_checked"])
+	assert.Equal(t, "GitHub", tp["publisher_kind"])
+	assert.Equal(t, "octocat/pkg", tp["source_repository"])
+	assert.Equal(t, "release.yml", tp["workflow"])
+}
+
+func TestCollector_Collect_TrustedPublishing_Absent(t *testing.T) {
+	t.Parallel()
+	// Latest version has no attestation (Integrity API returns 404).
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "old-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "old-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		nil, // no attestation
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("old"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "trusted_publishing"),
+		"package without attestation must still emit trusted_publishing (with present=false)")
+	tp := getSignalValue(t, result, "trusted_publishing")
+	assert.Equal(t, false, tp["present"])
+	assert.Equal(t, "2.0.0", tp["version_checked"])
+}
+
+func TestCollector_Collect_TrustedPublishing_IntegrityError_RecordsAbsence(t *testing.T) {
+	t.Parallel()
+	// The Integrity API returns 500 — the signal is recorded as absence
+	// (retryable) rather than failing the entire collection.
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "dev"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {
+				{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/integrity/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(projBody)
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("broken"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	// The other signals should still emit normally.
+	require.True(t, hasSignal(result, "last_publish"),
+		"non-attestation signals must not be affected by integrity API failure")
+	// trusted_publishing should be absent, not emitted.
+	assert.True(t, hasAbsence(result, "trusted_publishing"),
+		"integrity API 500 should produce absence:trusted_publishing")
+}
+
+func TestCollector_Collect_TrustedPublishing_NoReleases_SkipsAttestation(t *testing.T) {
+	t.Parallel()
+	// When there are no releases, the attestation check is skipped
+	// (no version/filename to look up).
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/integrity/") {
+			calls++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(Project{
+			Info: Info{Maintainer: "dev"},
+		})
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("empty"))
+	require.NoError(t, err)
+	_ = wrap(t, raw)
+
+	assert.Equal(t, 0, calls, "no integrity API call when there are no releases")
+}
+
 // TestCollector_Name pins the collector identifier for orchestrator
 // dispatch and progress narration. Mirrors the npm collector's name
 // pattern so log lines read consistently.

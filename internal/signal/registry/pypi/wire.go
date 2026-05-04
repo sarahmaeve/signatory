@@ -17,13 +17,40 @@ type Project struct {
 }
 
 // Distribution models one distribution file within a release.
-// Fields beyond the ones modelled here (filename, digests, size,
-// url, etc.) are skipped by the JSON decoder's unknown-field policy.
+// Fields beyond the ones modelled here (digests, size, url, etc.)
+// are skipped by the JSON decoder's unknown-field policy.
 type Distribution struct {
 	UploadTimeISO string `json:"upload_time_iso_8601"`
 	Yanked        bool   `json:"yanked"`
 	PackageType   string `json:"packagetype"`
 	HasSig        bool   `json:"has_sig"`
+	Filename      string `json:"filename"`
+}
+
+// AttestationResponse models the PyPI Integrity API response at
+// /integrity/<project>/<version>/<filename>/provenance.
+// See PEP 740 and https://docs.pypi.org/api/integrity/.
+type AttestationResponse struct {
+	Version int                 `json:"version"`
+	Bundles []AttestationBundle `json:"attestation_bundles"`
+}
+
+// AttestationBundle contains a publisher identity and its associated
+// attestation envelopes. We only read the publisher block for signal
+// emission — the envelope/verification_material are used by verifiers,
+// not by presence-detection.
+type AttestationBundle struct {
+	Publisher AttestationPublisher `json:"publisher"`
+}
+
+// AttestationPublisher identifies the OIDC identity that published
+// the distribution. Kind is typically "GitHub" or "GitLab"; the
+// remaining fields locate the CI workflow that produced the artifact.
+type AttestationPublisher struct {
+	Kind        string `json:"kind"`
+	Repository  string `json:"repository"`
+	Workflow    string `json:"workflow"`
+	Environment string `json:"environment"`
 }
 
 // Info is the project-level metadata block. Modelled today:

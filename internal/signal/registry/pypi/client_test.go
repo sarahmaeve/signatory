@@ -218,3 +218,121 @@ func TestGetProjectInfo_RespectsContextCancel(t *testing.T) {
 	assert.True(t, errors.Is(err, context.Canceled),
 		"cancelled context should surface as context.Canceled, got: %v", err)
 }
+
+// ================================================================
+// GetAttestation — PEP 740 Integrity API client tests
+// ================================================================
+
+// TestGetAttestation_RejectsInvalidInputs covers the validation
+// boundary: empty/invalid project names, empty version, empty
+// filename all fail before any HTTP call fires.
+func TestGetAttestation_RejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL(srv.URL)
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		project  string
+		version  string
+		filename string
+	}{
+		{"empty project", "", "1.0.0", "pkg-1.0.0.tar.gz"},
+		{"invalid project", "../etc", "1.0.0", "pkg-1.0.0.tar.gz"},
+		{"empty version", "requests", "", "pkg-1.0.0.tar.gz"},
+		{"empty filename", "requests", "1.0.0", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := c.GetAttestation(ctx, tc.project, tc.version, tc.filename)
+			assert.Error(t, err, "GetAttestation(%q, %q, %q) should error",
+				tc.project, tc.version, tc.filename)
+		})
+	}
+	assert.Equal(t, 0, hits, "invalid inputs must not fire HTTP requests")
+}
+
+// TestGetAttestation_404ReturnsNil pins the "no attestation" path:
+// 404 from the Integrity API returns (nil, nil) — the caller interprets
+// this as "publisher hasn't opted in," not as an error.
+func TestGetAttestation_404ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Contains(t, r.URL.Path, "/integrity/requests/2.31.0/requests-2.31.0-py3-none-any.whl/provenance")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL(srv.URL)
+	resp, err := c.GetAttestation(context.Background(),
+		"requests", "2.31.0", "requests-2.31.0-py3-none-any.whl")
+	require.NoError(t, err)
+	assert.Nil(t, resp, "404 must return nil response, not error")
+}
+
+// TestGetAttestation_DecodesResponse verifies the happy path: the
+// Integrity API returns an attestation bundle and the client decodes
+// the publisher identity correctly.
+func TestGetAttestation_DecodesResponse(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"version": 1,
+			"attestation_bundles": [{
+				"publisher": {
+					"kind": "GitHub",
+					"repository": "psf/requests",
+					"workflow": "publish.yml",
+					"environment": "pypi"
+				}
+			}]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL(srv.URL)
+	resp, err := c.GetAttestation(context.Background(),
+		"requests", "2.32.0", "requests-2.32.0-py3-none-any.whl")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, 1, resp.Version)
+	require.Len(t, resp.Bundles, 1)
+	assert.Equal(t, "GitHub", resp.Bundles[0].Publisher.Kind)
+	assert.Equal(t, "psf/requests", resp.Bundles[0].Publisher.Repository)
+	assert.Equal(t, "publish.yml", resp.Bundles[0].Publisher.Workflow)
+	assert.Equal(t, "pypi", resp.Bundles[0].Publisher.Environment)
+}
+
+// TestGetAttestation_5xxReturnsError confirms non-2xx non-404 surfaces
+// as an error (the collector's policy is to record this as retryable
+// absence).
+func TestGetAttestation_5xxReturnsError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`SENSITIVE-CANARY`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL(srv.URL)
+	resp, err := c.GetAttestation(context.Background(),
+		"requests", "2.32.0", "requests-2.32.0-py3-none-any.whl")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.NotContains(t, err.Error(), "SENSITIVE-CANARY",
+		"server body must not leak into error string")
+	assert.Contains(t, err.Error(), "500")
+}
