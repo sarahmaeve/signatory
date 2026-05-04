@@ -30,6 +30,9 @@ const (
 	// EcosystemGem is rubygems.org (Ruby). Signal: `Gemfile`.
 	EcosystemGem Ecosystem = "gem"
 
+	// EcosystemMaven is Maven Central (Java/JVM). Signal: `pom.xml`.
+	EcosystemMaven Ecosystem = "maven"
+
 	// EcosystemUnknown is the null ecosystem — returned when no
 	// recognized manifest is present. The caller should treat this
 	// as "unable to determine" rather than "no package here."
@@ -166,6 +169,9 @@ var manifestSignals = map[Ecosystem][]string{
 	EcosystemGem: {
 		"Gemfile", // Gemfile.lock strengthens but isn't required.
 	},
+	EcosystemMaven: {
+		"pom.xml", // Maven POM; Gradle deferred to a follow-up.
+	},
 }
 
 // priorityOrder defines which ecosystem wins when a repo has
@@ -188,6 +194,7 @@ var priorityOrder = []Ecosystem{
 	EcosystemGo,
 	EcosystemCrates,
 	EcosystemGem,
+	EcosystemMaven,
 	EcosystemPyPI,
 	EcosystemNPM,
 }

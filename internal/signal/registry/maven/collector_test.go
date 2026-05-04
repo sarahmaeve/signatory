@@ -1,0 +1,337 @@
+package maven
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/profile"
+)
+
+// guavaMetadataXML is a realistic maven-metadata.xml modeled on
+// com.google.guava:guava with 5 versions — enough to exercise
+// version_count, last_publish, and version_publish_burst (no burst
+// in this fixture because versions span months).
+const guavaMetadataXML = `<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>com.google.guava</groupId>
+  <artifactId>guava</artifactId>
+  <versioning>
+    <latest>33.2.1-jre</latest>
+    <release>33.2.1-jre</release>
+    <versions>
+      <version>32.1.3-jre</version>
+      <version>33.0.0-jre</version>
+      <version>33.1.0-jre</version>
+      <version>33.2.0-jre</version>
+      <version>33.2.1-jre</version>
+    </versions>
+    <lastUpdated>20240617200000</lastUpdated>
+  </versioning>
+</metadata>`
+
+// versionTimestamps maps version → Last-Modified for the test fixture.
+// Spread across several months — no burst.
+var versionTimestamps = map[string]time.Time{
+	"33.2.1-jre": time.Date(2024, 6, 17, 20, 0, 0, 0, time.UTC),
+	"33.2.0-jre": time.Date(2024, 6, 3, 20, 0, 0, 0, time.UTC),
+	"33.1.0-jre": time.Date(2024, 5, 4, 20, 0, 0, 0, time.UTC),
+	"33.0.0-jre": time.Date(2024, 1, 25, 0, 0, 0, 0, time.UTC),
+	"32.1.3-jre": time.Date(2023, 10, 19, 20, 0, 0, 0, time.UTC),
+}
+
+// guavaTestServer returns an httptest.Server that serves:
+//   - maven-metadata.xml at the expected path
+//   - HEAD with Last-Modified for each version's jar
+//   - HEAD 200 for .jar.asc (signature present)
+//   - POM with SCM URL for the latest version
+func guavaTestServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		// Metadata
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// HEAD on jars — return Last-Modified for timestamp resolution.
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.1-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.0-jre/guava-33.2.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.1.0-jre/guava-33.1.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.1.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.0.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/32.1.3-jre/guava-32.1.3-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["32.1.3-jre"].Format(http.TimeFormat))
+
+		// Signature check — present.
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar.asc":
+			w.WriteHeader(http.StatusOK)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestCollector_Name(t *testing.T) {
+	t.Parallel()
+	c := NewCollector()
+	assert.Equal(t, "maven-registry", c.Name())
+}
+
+func TestCollector_NonMavenEntity(t *testing.T) {
+	t.Parallel()
+
+	c := NewCollector()
+	entity := &profile.Entity{
+		ID:           "test-npm-entity",
+		CanonicalURI: "pkg:npm/express",
+		Ecosystem:    "npm",
+	}
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SignalCount())
+}
+
+func TestCollector_NilEntity(t *testing.T) {
+	t.Parallel()
+
+	c := NewCollector()
+	result, err := c.Collect(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SignalCount())
+}
+
+func TestCollector_Success(t *testing.T) {
+	t.Parallel()
+
+	srv := guavaTestServer()
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-guava",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Should emit: last_publish, version_count, version_publish_burst,
+	// gpg_signature_present.
+	assert.GreaterOrEqual(t, result.SignalCount(), 4,
+		"expected at least 4 signals, got %d: %s", result.SignalCount(), result.Summary())
+
+	// Verify specific signals by type.
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	// last_publish
+	assert.Contains(t, signalMap, "last_publish")
+	var lp map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["last_publish"], &lp))
+	assert.Equal(t, "33.2.1-jre", lp["latest_version"])
+	assert.NotEmpty(t, lp["published_at"])
+
+	// version_count
+	assert.Contains(t, signalMap, "version_count")
+	var vc map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_count"], &vc))
+	assert.Equal(t, float64(5), vc["count"])
+
+	// version_publish_burst
+	assert.Contains(t, signalMap, "version_publish_burst")
+	var vpb map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["version_publish_burst"], &vpb))
+	assert.Equal(t, false, vpb["burst_detected"],
+		"guava versions are spread over months — no burst")
+
+	// gpg_signature_present
+	assert.Contains(t, signalMap, "gpg_signature_present")
+	var gpg map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["gpg_signature_present"], &gpg))
+	assert.Equal(t, true, gpg["present"])
+	assert.Equal(t, "33.2.1-jre", gpg["version_checked"])
+}
+
+func TestCollector_NotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-missing",
+		CanonicalURI: "pkg:maven/com.example/nonexistent",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	assert.True(t, result.HasFailures())
+}
+
+func TestCollector_SignatureAbsent(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+
+		// HEAD on jars — return timestamps.
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.1-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.0-jre/guava-33.2.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.2.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.1.0-jre/guava-33.1.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.1.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["33.0.0-jre"].Format(http.TimeFormat))
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/32.1.3-jre/guava-32.1.3-jre.jar":
+			w.Header().Set("Last-Modified", versionTimestamps["32.1.3-jre"].Format(http.TimeFormat))
+
+		// Signature — absent (404).
+		case r.Method == http.MethodHead && r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.jar.asc":
+			w.WriteHeader(http.StatusNotFound)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-guava-nosig",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	assert.Contains(t, signalMap, "gpg_signature_present")
+	var gpg map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["gpg_signature_present"], &gpg))
+	assert.Equal(t, false, gpg["present"])
+}
+
+func TestCollector_EntityStore_MintsOrgEntity(t *testing.T) {
+	t.Parallel()
+
+	srv := guavaTestServer()
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	store := &mockEntityStore{}
+	c := NewCollectorWithClient(client).WithEntityStore(store)
+
+	entity := &profile.Entity{
+		ID:           "test-guava",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	_, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Should mint org:maven/com.google.guava.
+	assert.Contains(t, store.minted, "org:maven/com.google.guava")
+}
+
+func TestExtractMavenCoordinate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		entity    *profile.Entity
+		wantGroup string
+		wantArt   string
+		wantOK    bool
+	}{
+		{
+			name:      "valid maven URI",
+			entity:    &profile.Entity{CanonicalURI: "pkg:maven/com.google.guava/guava"},
+			wantGroup: "com.google.guava",
+			wantArt:   "guava",
+			wantOK:    true,
+		},
+		{
+			name:      "npm entity",
+			entity:    &profile.Entity{CanonicalURI: "pkg:npm/express"},
+			wantGroup: "",
+			wantArt:   "",
+			wantOK:    false,
+		},
+		{
+			name:      "nil entity",
+			entity:    nil,
+			wantGroup: "",
+			wantArt:   "",
+			wantOK:    false,
+		},
+		{
+			name:      "maven prefix but no artifact",
+			entity:    &profile.Entity{CanonicalURI: "pkg:maven/com.google.guava"},
+			wantGroup: "",
+			wantArt:   "",
+			wantOK:    false,
+		},
+		{
+			name:      "maven prefix but empty after trim",
+			entity:    &profile.Entity{CanonicalURI: "pkg:maven/"},
+			wantGroup: "",
+			wantArt:   "",
+			wantOK:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g, a, ok := extractMavenCoordinate(tc.entity)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantGroup, g)
+			assert.Equal(t, tc.wantArt, a)
+		})
+	}
+}
+
+// mockEntityStore tracks which entity URIs were minted.
+type mockEntityStore struct {
+	minted []string
+}
+
+func (m *mockEntityStore) EnsureEntityByCanonicalURI(_ context.Context, uri, shortName string) (*profile.Entity, bool, error) {
+	m.minted = append(m.minted, uri)
+	return &profile.Entity{ID: "mock-" + shortName, CanonicalURI: uri}, true, nil
+}

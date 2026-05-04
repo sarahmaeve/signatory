@@ -204,6 +204,38 @@ func TestRegistry_SourceEvolutionTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_MavenCollectorTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for signal types the Maven Central
+// collector (internal/signal/registry/maven/) emits. Same coupling
+// contract as the sibling tests: registry drift and collector intent
+// stay aligned, caught in a single place.
+func TestRegistry_MavenCollectorTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"last_publish", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
+		{"version_count", profile.SignalGroupVitality, profile.ForgeryHigh},
+		{"version_publish_burst", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"gpg_signature_present", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — maven collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match maven collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match maven collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_AbsenceGroupInheritanceMatchesLegacyMapping locks in the
 // previous signalGroupForType behavior so the post-refactor absence
 // path produces the same Group assignments.

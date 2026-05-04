@@ -243,6 +243,9 @@ func (s *SQLite) EffectiveBurnByURI(ctx context.Context, canonicalURI string) (*
 //   - pkg:npm/@<scope>/<name>    → identity:npm/<scope>,
 //     org:npm/<scope> (npm scopes usually map to orgs but the
 //     scheme allows user-owned scopes too)
+//   - pkg:maven/<groupId>/<artifact> → org:maven/<groupId>
+//     (Maven Central verifies groupId namespace ownership; every
+//     Maven package has one, so cascade coverage is universal)
 //
 // Other URI shapes (unscoped npm, pypi, golang vanity hosts,
 // non-pkg/non-repo schemes) return an empty slice — the cascade
@@ -276,6 +279,22 @@ func candidatesFromURI(uri string) []cascadeCandidate {
 		return []cascadeCandidate{
 			{URI: profile.CanonicalIdentityURI("npm", scope), Role: "maintainer"},
 			{URI: profile.CanonicalOrgURI("npm", scope), Role: "maintainer"},
+		}
+	}
+
+	// pkg:maven/<groupId>/<artifactId> — Maven Central packages.
+	// Every Maven package has a groupId, and Sonatype verifies
+	// namespace ownership before granting one, so the groupId is a
+	// verified namespace entity. Burning org:maven/<groupId> cascades
+	// to all artifacts under that group — universal coverage (unlike
+	// npm where only scoped packages encode ownership).
+	if rest, ok := strings.CutPrefix(uri, "pkg:maven/"); ok {
+		groupID, _, found := strings.Cut(rest, "/")
+		if !found || groupID == "" {
+			return nil
+		}
+		return []cascadeCandidate{
+			{URI: profile.CanonicalOrgURI("maven", groupID), Role: "publisher"},
 		}
 	}
 

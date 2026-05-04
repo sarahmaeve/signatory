@@ -826,6 +826,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"gpg_signature_present": {
+		Type:              "gpg_signature_present",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Whether the latest published artifact version has a GPG signature (.asc) on Maven Central. Maven Central requires GPG signing for all uploads; presence is expected and absence indicates a tooling or policy anomaly.",
+		Caveats: []string{
+			"presence confirms a signature exists but does not verify its validity or the signing key's trustworthiness — verification is a Phase B.5 concern",
+			"Maven Central mandates GPG signing, so absence is more alarming on Central than it would be on registries where signing is optional",
+			"the .asc file is checked via HEAD on repo1.maven.org — network failures produce an absence, not a false negative",
+		},
+	},
 	"author_drift": {
 		Type:              "author_drift",
 		Group:             profile.SignalGroupPublication,

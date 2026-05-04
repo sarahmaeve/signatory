@@ -203,6 +203,13 @@ type Globals struct {
 	// pkg:gem/<name> targets. Empty means the production registry
 	// (https://rubygems.org). Tests point this at an httptest server.
 	GemRegistryURL string
+
+	// MavenRegistryURL overrides the base URL for Maven Central repo
+	// access (repo1.maven.org) — metadata, POM fetch, signature
+	// checks, timestamp resolution. Everything goes through one host.
+	// Empty means the production endpoint (https://repo1.maven.org).
+	// Tests point this at an httptest server.
+	MavenRegistryURL string
 }
 
 // OpenStore resolves the database path and opens the SQLite store.

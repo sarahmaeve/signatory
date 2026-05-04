@@ -164,6 +164,20 @@ func TestDetect_DirInsteadOfFile(t *testing.T) {
 	require.Error(t, err, "a directory named go.mod must not count as a manifest")
 }
 
+func TestDetect_FindsPomXML(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pomPath := filepath.Join(dir, "pom.xml")
+	require.NoError(t, os.WriteFile(pomPath, []byte(`<?xml version="1.0"?>
+<project><groupId>com.example</groupId><artifactId>x</artifactId></project>`), 0o600))
+
+	path, ecosystem, err := Detect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "maven", ecosystem)
+	assert.Equal(t, "pom.xml", filepath.Base(path))
+}
+
 func TestDetect_NonexistentDir(t *testing.T) {
 	t.Parallel()
 

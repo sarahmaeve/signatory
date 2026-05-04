@@ -170,3 +170,41 @@ func TestEffectiveBurnByURI_NpmUnscopedPackage_NoURIDerivedCandidates(t *testing
 	require.ErrorIs(t, err, ErrNotFound,
 		"unscoped npm packages must NOT speculatively cascade through identity:npm/<package-name> — that mistakes the package name for a publisher login")
 }
+
+// TestEffectiveBurnByURI_MavenPackage_BurnedGroupNamespace pins the
+// Maven cascade: pkg:maven/<groupId>/<artifactId> encodes the groupId,
+// which is the verified namespace on Maven Central. A burned groupId
+// (org:maven/<groupId>) cascades to every artifact under that group —
+// same structural pattern as npm scoped packages, but universal for
+// Maven (all Maven packages have a groupId, unlike npm where only
+// scoped packages encode ownership).
+func TestEffectiveBurnByURI_MavenPackage_BurnedGroupNamespace(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	groupID := seedOwnerEntity(t, s, "org:maven/com.zerobuffercorp", "com.zerobuffercorp")
+	seedBurn(t, s, groupID, "test: compromised Maven namespace — typosquat campaign")
+
+	burn, ctx, err := s.EffectiveBurnByURI(t.Context(), "pkg:maven/com.zerobuffercorp/grpc-client")
+	require.NoError(t, err,
+		"Maven groupId cascade: pkg:maven/<group>/<artifact> → org:maven/<group>")
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "org:maven/com.zerobuffercorp", ctx.ViaOwner.CanonicalURI,
+		"the cascade must resolve through the groupId namespace entity")
+	assert.Equal(t, "publisher", ctx.ViaRole)
+	assert.Contains(t, burn.Reason, "typosquat campaign")
+}
+
+// TestEffectiveBurnByURI_MavenPackage_NoBurn confirms that an
+// unburned Maven groupId does not trigger a false-positive cascade.
+func TestEffectiveBurnByURI_MavenPackage_NoBurn(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	// Seed the group entity but don't burn it.
+	_ = seedOwnerEntity(t, s, "org:maven/org.apache.commons", "org.apache.commons")
+
+	_, _, err := s.EffectiveBurnByURI(t.Context(), "pkg:maven/org.apache.commons/commons-lang3")
+	require.ErrorIs(t, err, ErrNotFound,
+		"unburned Maven namespace must not trigger cascade")
+}

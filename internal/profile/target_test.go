@@ -607,6 +607,97 @@ func TestResolveTarget_RubyGemsURLs(t *testing.T) {
 	}
 }
 
+// TestResolveTarget_MavenCentralURLs covers the Maven Central URL
+// copy-paste-from-browser convenience path. Three hosts share the same
+// path pattern: central.sonatype.com (current portal),
+// search.maven.org (legacy), and mvnrepository.com (third-party index).
+// All produce pkg:maven/<groupId>/<artifactId> canonical URIs.
+func TestResolveTarget_MavenCentralURLs(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in      string
+		wantURI string
+	}{
+		// --- central.sonatype.com (current Maven Central portal) ---
+		// Basic shape — with/without trailing slash.
+		{"https://central.sonatype.com/artifact/com.google.guava/guava", "pkg:maven/com.google.guava/guava"},
+		{"https://central.sonatype.com/artifact/com.google.guava/guava/", "pkg:maven/com.google.guava/guava"},
+		// Versioned page.
+		{"https://central.sonatype.com/artifact/com.google.guava/guava/33.2.1-jre", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+		{"https://central.sonatype.com/artifact/com.google.guava/guava/33.2.1-jre/", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+		// http:// rather than https://.
+		{"http://central.sonatype.com/artifact/com.google.guava/guava", "pkg:maven/com.google.guava/guava"},
+		// Query strings + fragments are UI state; strip.
+		{"https://central.sonatype.com/artifact/com.google.guava/guava?smo=true", "pkg:maven/com.google.guava/guava"},
+		{"https://central.sonatype.com/artifact/com.google.guava/guava#overview", "pkg:maven/com.google.guava/guava"},
+
+		// --- search.maven.org (legacy search interface) ---
+		{"https://search.maven.org/artifact/com.google.guava/guava", "pkg:maven/com.google.guava/guava"},
+		{"https://search.maven.org/artifact/com.google.guava/guava/33.2.1-jre", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+		// search.maven.org appends packaging type — strip it.
+		{"https://search.maven.org/artifact/com.google.guava/guava/33.2.1-jre/jar", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+		{"https://search.maven.org/artifact/com.google.guava/guava/33.2.1-jre/jar/", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+
+		// --- mvnrepository.com (popular third-party index) ---
+		{"https://mvnrepository.com/artifact/com.google.guava/guava", "pkg:maven/com.google.guava/guava"},
+		{"https://mvnrepository.com/artifact/com.google.guava/guava/33.2.1-jre", "pkg:maven/com.google.guava/guava@33.2.1-jre"},
+		{"https://www.mvnrepository.com/artifact/com.google.guava/guava", "pkg:maven/com.google.guava/guava"},
+
+		// Dotted groupId with deep nesting.
+		{"https://central.sonatype.com/artifact/org.apache.commons/commons-lang3", "pkg:maven/org.apache.commons/commons-lang3"},
+		// Single-segment groupId (rare but valid).
+		{"https://central.sonatype.com/artifact/junit/junit", "pkg:maven/junit/junit"},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.in)
+			require.NoError(t, err, "ResolveTarget(%q)", tc.in)
+			assert.Equal(t, tc.wantURI, got.CanonicalURI)
+			assert.Equal(t, "pkg", got.Scheme)
+			assert.Equal(t, "maven", got.Ecosystem)
+		})
+	}
+
+	rejected := []struct {
+		name string
+		in   string
+	}{
+		// Lookalike hosts — must not be accepted.
+		{"sonatype lookalike", "https://central.sonatype.com.evil.com/artifact/com.google.guava/guava"},
+		{"maven lookalike", "https://search.maven.org.evil.com/artifact/com.google.guava/guava"},
+		{"mvnrepo lookalike", "https://mvnrepository.com.evil.com/artifact/com.google.guava/guava"},
+		// Wrong path prefix (not /artifact/).
+		{"sonatype search path", "https://central.sonatype.com/search?q=guava"},
+		{"root", "https://central.sonatype.com/"},
+		// /artifact/ with no groupId.
+		{"artifact no group", "https://central.sonatype.com/artifact/"},
+		// /artifact/<groupId> with no artifactId.
+		{"artifact no artifact", "https://central.sonatype.com/artifact/com.google.guava"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(tc.in)
+			require.Error(t, err, "ResolveTarget(%q) must reject", tc.in)
+		})
+	}
+}
+
+// TestResolveTarget_MavenCasePreserved guards that Maven coordinates
+// are case-sensitive. Maven Central is case-sensitive — groupId
+// "com.Google.Guava" and "com.google.guava" are different coordinates.
+// No normalization should be applied.
+func TestResolveTarget_MavenCasePreserved(t *testing.T) {
+	t.Parallel()
+
+	got, err := ResolveTarget("pkg:maven/com.Google.Guava/guava")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg:maven/com.Google.Guava/guava", got.CanonicalURI,
+		"maven coordinates are case-sensitive; URI must preserve case")
+}
+
 // TestResolveTarget_NpmCasePreserved is the regression guard for
 // the asymmetric normalization policy: npm is case-sensitive at
 // the registry level, so `pkg:npm/Express` and `pkg:npm/express`

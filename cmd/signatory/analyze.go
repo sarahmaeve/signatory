@@ -20,6 +20,7 @@ import (
 	cargoregistry "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemregistry "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	"github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
+	mavenregistry "github.com/sarahmaeve/signatory/internal/signal/registry/maven"
 	npmregistry "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypiregistry "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	"github.com/sarahmaeve/signatory/internal/store"
@@ -203,6 +204,7 @@ var resolvableEcosystems = map[string]bool{
 	"cargo":  true,
 	"crates": true,
 	"gem":    true,
+	"maven":  true,
 }
 
 // AnalysisDisplay wraps the runtime profile with any ingested
@@ -654,6 +656,35 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 					entity.CanonicalURI, resolveErr)
 			}
 			_, _ = fmt.Fprintf(stderr, "warning: gem repo resolution for %s failed: %v\n",
+				entity.CanonicalURI, resolveErr)
+		}
+	}
+
+	// Maven POM-based source resolution: parallel to npm/pypi/cargo/gem
+	// above. The Maven client's two-step flow (SearchVersions for the
+	// latest version, then POM fetch for the SCM URL) is orchestrated
+	// by resolveMavenRepo. An artifact whose POM declares no <scm>
+	// section leaves URL empty — the git-side collectors gate
+	// themselves out, user still gets the 4 maven-registry signals.
+	if entity.Ecosystem == "maven" {
+		if resolveErr := resolveMavenRepo(ctx, s, entity, globals); resolveErr != nil {
+			absenceSig := signal.MakeAbsence(
+				entity.ID,
+				"repo_declaration",
+				"maven-registry",
+				resolveErr.Error(),
+				true,
+				time.Now().UTC(),
+			)
+			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
+
+			if cmd.Refresh {
+				_, _ = fmt.Fprintf(stderr, "warning: maven repo resolution for %s failed: %v\n",
+					entity.CanonicalURI, resolveErr)
+				return fmt.Errorf("refresh maven repo resolution for %s: %w",
+					entity.CanonicalURI, resolveErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: maven repo resolution for %s failed: %v\n",
 				entity.CanonicalURI, resolveErr)
 		}
 	}
@@ -1470,6 +1501,77 @@ func resolveGemRepo(ctx context.Context, s store.Store, entity *profile.Entity, 
 		// Gem doesn't declare a github-hosted repository. Nothing to
 		// stamp; stay silent. Downstream dispatch will skip the github
 		// + git collectors via isGitHostedEntity.
+		return nil
+	}
+
+	entity.URL = repoURL
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("persist resolved URL on entity: %w", err)
+	}
+	return nil
+}
+
+// resolveMavenRepo asks Maven Central for the artifact's declared
+// source repository URL by fetching the POM and extracting the <scm>
+// section. Maven requires a two-step flow: first search for the latest
+// version (since POM URLs include the version), then fetch that
+// version's POM to extract the SCM URL.
+//
+// Parallel to resolveNpmRepo / resolvePyPIRepo / resolveCargoRepo /
+// resolveGemRepo: the POM's <scm><url> answers the "where is this
+// artifact's source?" question, the orchestrator stamps it, and
+// downstream collectors operate against the resolved entity. The POM's
+// SCM URL is publisher-declared (self-reported, not cryptographically
+// bound).
+func resolveMavenRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
+	const prefix = "pkg:maven/"
+	rest := strings.TrimPrefix(entity.CanonicalURI, prefix)
+	if rest == "" || rest == entity.CanonicalURI {
+		return fmt.Errorf("entity %q is not a maven package URI", entity.CanonicalURI)
+	}
+
+	groupID, artifactID, found := strings.Cut(rest, "/")
+	if !found || groupID == "" || artifactID == "" {
+		return fmt.Errorf("entity %q: cannot extract groupId/artifactId", entity.CanonicalURI)
+	}
+
+	// Strip any @version suffix from the artifactID (the entity URI
+	// may carry pkg:maven/g/a@v from versioned resolution).
+	if name, _, ok := strings.Cut(artifactID, "@"); ok {
+		artifactID = name
+	}
+
+	client := mavenregistry.NewClient()
+	if globals != nil && globals.MavenRegistryURL != "" {
+		client = mavenregistry.NewClientWithBaseURL(globals.MavenRegistryURL)
+	}
+
+	// Step 1: fetch metadata for the latest version.
+	meta, err := client.FetchMetadata(ctx, groupID, artifactID)
+	if err != nil {
+		return fmt.Errorf("query Maven Central metadata: %w", err)
+	}
+	latestVersion := meta.Versioning.Release
+	if latestVersion == "" {
+		latestVersion = meta.Versioning.Latest
+	}
+	if latestVersion == "" && len(meta.Versioning.Versions) > 0 {
+		latestVersion = meta.Versioning.Versions[len(meta.Versioning.Versions)-1]
+	}
+	if latestVersion == "" {
+		return fmt.Errorf("no versions found for %s:%s on Maven Central", groupID, artifactID)
+	}
+
+	// Step 2: fetch the POM and extract the SCM URL.
+	repoURL, err := client.ResolveRepoURL(ctx, groupID, artifactID, latestVersion)
+	if err != nil {
+		return fmt.Errorf("fetch POM for %s:%s:%s: %w", groupID, artifactID, latestVersion, err)
+	}
+	if repoURL == "" {
+		// Artifact's POM doesn't declare an SCM URL. Nothing to stamp;
+		// stay silent. Downstream dispatch will skip the github + git
+		// collectors via isGitHostedEntity.
 		return nil
 	}
 

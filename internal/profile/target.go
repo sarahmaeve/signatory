@@ -165,6 +165,21 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return resolveCanonicalURI(uri)
 	}
 
+	// Maven Central URLs: copy-paste-from-browser for Maven packages.
+	// Three hosts share the same /artifact/<groupId>/<artifactId> path
+	// structure: central.sonatype.com (current portal),
+	// search.maven.org (legacy search), and mvnrepository.com (popular
+	// third-party index).
+	// https://central.sonatype.com/artifact/com.google.guava/guava
+	//   → pkg:maven/com.google.guava/guava
+	if mvnGroup, mvnArtifact, mvnVersion, ok := parseMavenCentralURL(s); ok {
+		uri := "pkg:maven/" + mvnGroup + "/" + mvnArtifact
+		if mvnVersion != "" {
+			uri += "@" + mvnVersion
+		}
+		return resolveCanonicalURI(uri)
+	}
+
 	// pkg.go.dev module/package URLs: copy-paste-from-browser
 	// convenience for Go modules. Output is the pkg:golang/<import-path>
 	// canonical form per the purl spec — the same form an analyst
@@ -194,7 +209,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// wrong canonical form.
 	if strings.Contains(s, "://") && !isGitHubURL(s) {
 		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, or rubygems.org URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, rubygems.org, or Maven Central URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
@@ -616,6 +631,92 @@ func parseRubyGemsURL(input string) (name, version string, ok bool) {
 	}
 
 	return rawName, rawVersion, true
+}
+
+// parseMavenCentralURL recognizes Maven Central and related URLs and
+// extracts the groupId, artifactId, and optional version. Three hosts
+// share the same /artifact/<groupId>/<artifactId>[/<version>] pattern:
+//
+//   - central.sonatype.com — the current Maven Central portal
+//   - search.maven.org     — the legacy search interface
+//   - mvnrepository.com    — popular third-party Maven index
+//
+// Returns (groupID, artifactID, version, true) on a match; version is
+// "" when the URL has no version segment. Returns ("", "", "", false)
+// on anything that isn't a recognized Maven URL.
+//
+// Accepted shapes:
+//
+//	https://central.sonatype.com/artifact/com.google.guava/guava
+//	https://central.sonatype.com/artifact/com.google.guava/guava/33.2.1-jre
+//	https://search.maven.org/artifact/com.google.guava/guava/33.2.1-jre/jar
+//	https://mvnrepository.com/artifact/com.google.guava/guava
+//
+// Host-anchoring: rejects lookalike hosts like
+// `central.sonatype.com.evil.com` by requiring an exact match after
+// scheme strip.
+//
+// Maven coordinates are case-sensitive — no normalization is applied.
+// The fourth segment on search.maven.org URLs (packaging type like
+// "jar") is stripped since it's not part of the coordinate identity.
+func parseMavenCentralURL(input string) (groupID, artifactID, version string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+
+	// Host anchoring: try each known Maven host. We need the rest
+	// (path after host) so we use CutPrefix for each.
+	var rest string
+	var hostOK bool
+	for _, host := range []string{
+		"central.sonatype.com/",
+		"search.maven.org/",
+		"mvnrepository.com/",
+	} {
+		if rest, hostOK = strings.CutPrefix(s, host); hostOK {
+			break
+		}
+	}
+	if !hostOK {
+		return "", "", "", false
+	}
+
+	// Path must start with "artifact/".
+	rest, pathOK := strings.CutPrefix(rest, "artifact/")
+	if !pathOK || rest == "" {
+		return "", "", "", false
+	}
+
+	// Drop fragment and query.
+	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
+		rest = before
+	}
+	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
+		rest = before
+	}
+
+	// Split remaining path: <groupId>/<artifactId>[/<version>[/<packaging>]]
+	segs := strings.Split(rest, "/")
+	for len(segs) > 0 && segs[len(segs)-1] == "" {
+		segs = segs[:len(segs)-1]
+	}
+
+	// Need at least groupId + artifactId (2 segments).
+	if len(segs) < 2 || segs[0] == "" || segs[1] == "" {
+		return "", "", "", false
+	}
+
+	group := segs[0]
+	artifact := segs[1]
+	ver := ""
+
+	// Third segment is the version (if present).
+	if len(segs) >= 3 && segs[2] != "" {
+		ver = segs[2]
+	}
+	// Fourth segment (packaging type like "jar") is ignored.
+
+	return group, artifact, ver, true
 }
 
 // isGitHubURL returns true when input is an http(s) URL whose host

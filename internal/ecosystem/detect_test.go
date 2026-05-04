@@ -65,6 +65,10 @@ func TestClassifyRootFiles_PyPI_Both(t *testing.T) {
 	)
 }
 
+func TestClassifyRootFiles_Maven(t *testing.T) {
+	assert.Equal(t, []Ecosystem{EcosystemMaven}, classifyRootFiles([]string{"pom.xml"}))
+}
+
 func TestClassifyRootFiles_NPM(t *testing.T) {
 	assert.Equal(t, []Ecosystem{EcosystemNPM}, classifyRootFiles([]string{"package.json"}))
 }
@@ -84,13 +88,13 @@ func TestClassifyRootFiles_PriorityGoBeatsNPM(t *testing.T) {
 }
 
 func TestClassifyRootFiles_PriorityOrder(t *testing.T) {
-	// All four manifests present at once — verifies the documented
-	// priority order Go > Crates > PyPI > NPM.
+	// All manifests present at once — verifies the documented
+	// priority order Go > Crates > Gem > Maven > PyPI > NPM.
 	got := classifyRootFiles([]string{
-		"package.json", "setup.py", "Cargo.toml", "go.mod",
+		"package.json", "setup.py", "Cargo.toml", "go.mod", "Gemfile", "pom.xml",
 	})
 	assert.Equal(t,
-		[]Ecosystem{EcosystemGo, EcosystemCrates, EcosystemPyPI, EcosystemNPM},
+		[]Ecosystem{EcosystemGo, EcosystemCrates, EcosystemGem, EcosystemMaven, EcosystemPyPI, EcosystemNPM},
 		got,
 	)
 }

@@ -20,6 +20,7 @@ import (
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
+	mavencollector "github.com/sarahmaeve/signatory/internal/signal/registry/maven"
 	npmcollector "github.com/sarahmaeve/signatory/internal/signal/registry/npm"
 	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
@@ -195,6 +196,8 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			collectors = append(collectors, cargocollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "gem":
 			collectors = append(collectors, gemcollector.NewCollector().WithEntityStore(opts.EntityStore))
+		case "maven":
+			collectors = append(collectors, mavencollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "golang", "go":
 			collectors = append(collectors, gopublishcollector.NewCollector())
 		}
