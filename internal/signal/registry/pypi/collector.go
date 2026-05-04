@@ -582,30 +582,41 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 	}
 
 	// --- Full sweep: check remaining prior versions ---
+
+	// publisherID is a comparable struct used as a map key for detecting
+	// distinct publishers. Using a struct avoids delimiter-based
+	// serialization which would be ambiguous if any field contained the
+	// delimiter character.
+	type publisherID struct {
+		kind       string
+		repository string
+		workflow   string
+	}
+
 	type versionAttest struct {
 		version   string
 		attested  bool
-		publisher string // "Kind:Repository:Workflow" or "" if unattested
+		publisher publisherID
 	}
 
-	publisherKey := func(attest *AttestationResponse) string {
+	extractPublisher := func(attest *AttestationResponse) publisherID {
 		if attest == nil || len(attest.Bundles) == 0 {
-			return ""
+			return publisherID{}
 		}
 		pub := attest.Bundles[0].Publisher
-		return pub.Kind + ":" + pub.Repository + ":" + pub.Workflow
+		return publisherID{kind: pub.Kind, repository: pub.Repository, workflow: pub.Workflow}
 	}
 
 	checked := []versionAttest{
-		{version: versions[0].version, attested: latestHas, publisher: publisherKey(latestAttest)},
-		{version: firstPrior.version, attested: firstPriorHas, publisher: publisherKey(firstAttest)},
+		{version: versions[0].version, attested: latestHas, publisher: extractPublisher(latestAttest)},
+		{version: firstPrior.version, attested: firstPriorHas, publisher: extractPublisher(firstAttest)},
 	}
 
 	// Check remaining prior versions (bounded to attestationWindow total).
 	remaining := versions[2:]
-	cap := attestationWindow - 2 // already checked 2
-	if len(remaining) > cap {
-		remaining = remaining[:cap]
+	maxRemaining := attestationWindow - 2 // already checked 2
+	if len(remaining) > maxRemaining {
+		remaining = remaining[:maxRemaining]
 	}
 
 	for _, vf := range remaining {
@@ -617,18 +628,19 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 		checked = append(checked, versionAttest{
 			version:   vf.version,
 			attested:  attest != nil,
-			publisher: publisherKey(attest),
+			publisher: extractPublisher(attest),
 		})
 	}
 
 	// --- Assess consistency ---
 	versionsAttested := 0
 	versionsUnattested := 0
-	publishers := map[string]struct{}{}
+	publishers := map[publisherID]struct{}{}
+	emptyPub := publisherID{}
 	for _, r := range checked {
 		if r.attested {
 			versionsAttested++
-			if r.publisher != "" {
+			if r.publisher != emptyPub {
 				publishers[r.publisher] = struct{}{}
 			}
 		} else {
@@ -666,21 +678,15 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 
 	publisherChanged := len(publishers) > 1
 
-	// Build prior_publisher from the most recent attested version
-	// (skipping latest if it's the only attested one).
+	// Build prior_publisher from the most recent attested prior version.
 	var priorPublisher map[string]any
 	for i := 1; i < len(checked); i++ {
-		if checked[i].attested && checked[i].publisher != "" {
-			// Find the full attestation for this version to extract details.
-			// For the probe version we have firstAttest; for others we only
-			// have the key. Use the key fields directly.
-			parts := strings.SplitN(checked[i].publisher, ":", 3)
-			if len(parts) == 3 {
-				priorPublisher = map[string]any{
-					"kind":       parts[0],
-					"repository": parts[1],
-					"workflow":   parts[2],
-				}
+		if checked[i].attested && checked[i].publisher != emptyPub {
+			pub := checked[i].publisher
+			priorPublisher = map[string]any{
+				"kind":       pub.kind,
+				"repository": pub.repository,
+				"workflow":   pub.workflow,
 			}
 			break
 		}

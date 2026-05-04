@@ -1068,3 +1068,102 @@ func TestCollector_AttestationConsistency_ProbeError_RecordsAbsence(t *testing.T
 	assert.True(t, hasAbsence(result, "attestation_consistency"),
 		"probe error must record attestation_consistency absence")
 }
+
+func TestCollector_AttestationConsistency_PublisherChanged_DetectedCorrectly(t *testing.T) {
+	t.Parallel()
+	// Two different publishers across attested versions — verifies that
+	// publisher_changed is reported correctly and prior_publisher is
+	// extracted without corruption (regression: colon in field values
+	// must not confuse the publisher identity comparison).
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2025-12-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+				"3.0.0": {
+					{UploadTimeISO: "2026-03-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-3.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.0.0": makeAttestation("GitHub", "original-org/pkg", "release.yml"),
+			"2.0.0": makeAttestation("GitHub", "new-org/pkg", "publish.yml"),
+			"3.0.0": makeAttestation("GitHub", "new-org/pkg", "publish.yml"),
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"),
+		"all-attested chain with different publishers must emit signal")
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, true, val["consistent"],
+		"all versions attested → consistent=true (publisher_changed is orthogonal)")
+	assert.Equal(t, true, val["publisher_changed"],
+		"different publishers across versions must set publisher_changed=true")
+
+	// Verify prior_publisher is extracted correctly from the most recent
+	// attested prior version (versions[1] = 2.0.0, publisher "new-org/pkg").
+	pp, ok := val["prior_publisher"].(map[string]any)
+	require.True(t, ok, "prior_publisher must be present as a map")
+	assert.Equal(t, "GitHub", pp["kind"])
+	assert.Equal(t, "new-org/pkg", pp["repository"])
+	assert.Equal(t, "publish.yml", pp["workflow"])
+}
+
+func TestCollector_AttestationConsistency_PublisherKey_ColonInFieldsNoCollision(t *testing.T) {
+	t.Parallel()
+	// Regression test: if a publisher field contains ":", the publisher
+	// identity comparison must still distinguish different publishers
+	// and the prior_publisher extraction must not corrupt the values.
+	//
+	// Publisher A: Kind="GitHub", Repository="group:sub/repo", Workflow="ci.yml"
+	// Publisher B: Kind="GitHub", Repository="group", Workflow="sub/repo:ci.yml"
+	// These are different publishers — publisher_changed must be true.
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		map[string]*AttestationResponse{
+			// Publisher A — repository contains ":"
+			"1.0.0": makeAttestation("GitHub", "group:sub/repo", "ci.yml"),
+			// Publisher B — workflow contains ":"
+			"2.0.0": makeAttestation("GitHub", "group", "sub/repo:ci.yml"),
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(context.Background(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "attestation_consistency"))
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, true, val["publisher_changed"],
+		"publishers with colon in different fields must NOT collide — they are distinct")
+
+	// Verify prior_publisher reconstruction doesn't corrupt the fields.
+	pp, ok := val["prior_publisher"].(map[string]any)
+	require.True(t, ok, "prior_publisher must be present")
+	assert.Equal(t, "GitHub", pp["kind"])
+	assert.Equal(t, "group:sub/repo", pp["repository"],
+		"repository field must survive round-trip without colon-separator corruption")
+	assert.Equal(t, "ci.yml", pp["workflow"],
+		"workflow field must survive round-trip without colon-separator corruption")
+}
