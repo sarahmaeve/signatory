@@ -605,7 +605,7 @@ func TestSanitizeErrorForStorage_SurfacesStatusCode(t *testing.T) {
 		errMsg   string
 		wantCode string
 	}{
-		{"4xx - 401 unauthorized", "GitHub API returned status 401", "401"},
+		{"4xx - 401 unauthorized", "GitHub API returned status 401", "GITHUB_TOKEN"},
 		{"4xx - 403 forbidden", "GitHub API returned status 403", "403"},
 		{"4xx - 422 unprocessable", "GitHub API returned status 422", "422"},
 		{"5xx - 500 internal", "GitHub API returned status 500", "500"},

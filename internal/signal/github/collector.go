@@ -480,10 +480,12 @@ func sanitizeErrorForStorage(err error) string {
 	// upstream error after #93's sanitization; the body is already
 	// gone by the time we reach this classifier.
 	if code := extractGitHubAPIStatusCode(errMsg); code != "" {
-		switch code[0] {
-		case '5':
+		switch {
+		case code == "401":
+			return "GitHub API 401 — set GITHUB_TOKEN to authenticate"
+		case code[0] == '5':
 			return "GitHub API " + code + " (server error)"
-		case '4':
+		case code[0] == '4':
 			return "GitHub API " + code
 		}
 	}

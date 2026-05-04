@@ -738,6 +738,10 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// See maybeWarnGoModuleViaRepoForm for the full rationale.
 	maybeWarnGoModuleViaRepoForm(stderr, entity, cmd.Path)
 
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		_, _ = fmt.Fprintf(stderr, "warning: GITHUB_TOKEN not set — GitHub API signals may be absent or rate-limited\n")
+	}
+
 	_, _ = fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
 
 	// Decide which collectors to run. Tests inject mocks via

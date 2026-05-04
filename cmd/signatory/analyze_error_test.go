@@ -1435,3 +1435,49 @@ func TestFunctional_AnalyzeRefresh_GemResolution_NoRepository(t *testing.T) {
 	assert.Equal(t, "", entity.URL,
 		"gem with no github source must leave URL empty — downstream isGitHostedEntity gates collectors out cleanly")
 }
+
+// TestFunctional_AnalyzeRefresh_WarnsNoGitHubToken verifies that when
+// GITHUB_TOKEN is unset in the environment, the analyze --refresh path
+// emits a warning to stderr so the user knows GitHub signals may be
+// degraded. Without this, a bare 401 absence in the output is opaque.
+func TestFunctional_AnalyzeRefresh_WarnsNoGitHubToken(t *testing.T) {
+	// Not parallel: t.Setenv mutates process-wide env.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	{
+		s, err := store.OpenSQLite(t.Context(), dbPath)
+		require.NoError(t, err)
+		e := &profile.Entity{
+			ID:           profile.NewEntityID(),
+			CanonicalURI: "pkg:npm/express",
+			Type:         profile.EntityPackage,
+			ShortName:    "express",
+			Ecosystem:    "npm",
+			URL:          "https://github.com/expressjs/express",
+			CreatedAt:    time.Now().UTC(),
+			UpdatedAt:    time.Now().UTC(),
+		}
+		require.NoError(t, s.PutEntity(t.Context(), e))
+		require.NoError(t, s.Close())
+	}
+
+	// Clear GITHUB_TOKEN for this test.
+	t.Setenv("GITHUB_TOKEN", "")
+
+	var stderr bytes.Buffer
+	globals := &Globals{
+		DBPath:        dbPath,
+		Collectors:    []signal.Collector{newMockCollector()},
+		AuditFilePath: filepath.Join(dir, "audit.log"),
+	}
+	cmd := &AnalyzeCmd{
+		Target:  "pkg:npm/express",
+		Refresh: true,
+		Stderr:  &stderr,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	out := stderr.String()
+	assert.Contains(t, out, "GITHUB_TOKEN",
+		"analyze --refresh must warn when GITHUB_TOKEN is unset so the user knows why GitHub signals may 401")
+}
