@@ -140,8 +140,13 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// CI/CD presence — independent.
 	c.collectCI(ctx, &result, entity.ID, owner, repoName, now, ttl)
 
-	// Go dependencies — independent.
-	c.collectGoDeps(ctx, &result, entity.ID, owner, repoName, now, ttl)
+	// Go dependencies — only applicable when the ecosystem is Go or
+	// unknown (bare repo targets where ecosystem isn't pre-classified).
+	// A "no go.mod found" absence on a PyPI or npm package is
+	// nonsensical noise that makes the scan appear suspect.
+	if entity.Ecosystem == "" || entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
+		c.collectGoDeps(ctx, &result, entity.ID, owner, repoName, now, ttl)
+	}
 
 	return &result, nil
 }

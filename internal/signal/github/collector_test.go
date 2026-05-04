@@ -764,6 +764,95 @@ func TestIsRetryable_ContextSentinels(t *testing.T) {
 	}
 }
 
+// TestCollector_GoDepsSkippedForNonGoEcosystem verifies that the github
+// collector does NOT emit go_dependencies (signal or absence) when the
+// entity's ecosystem is known to be non-Go. A "no go.mod found" absence
+// on a PyPI or npm package is nonsensical noise that makes the scan
+// appear suspect.
+func TestCollector_GoDepsSkippedForNonGoEcosystem(t *testing.T) {
+	t.Parallel()
+
+	nonGoEcosystems := []string{"pypi", "npm", "cargo", "gem", "maven"}
+
+	for _, eco := range nonGoEcosystems {
+		t.Run(eco, func(t *testing.T) {
+			t.Parallel()
+			c := newTestCollector(t, mockGitHubAPI())
+
+			entity := &profile.Entity{
+				ID:        "pkg:" + eco + "/example",
+				Type:      profile.EntityPackage,
+				ShortName: "alecthomas/kong",
+				URL:       "https://github.com/alecthomas/kong",
+				Ecosystem: eco,
+			}
+
+			result, err := c.Collect(t.Context(), entity)
+			require.NoError(t, err)
+
+			for _, s := range result.Collected {
+				var typ string
+				switch {
+				case s.Signal != nil:
+					typ = s.Signal.Type
+				case s.Absence != nil:
+					typ = s.Absence.SignalType
+				}
+				assert.NotEqual(t, "go_dependencies", typ,
+					"go_dependencies must not be emitted (signal or absence) for ecosystem %q", eco)
+			}
+		})
+	}
+}
+
+// TestCollector_GoDepsCollectedForGoAndUnknownEcosystem verifies that
+// go_dependencies IS still collected when the ecosystem is Go or empty
+// (bare repo targets where ecosystem isn't pre-classified).
+func TestCollector_GoDepsCollectedForGoAndUnknownEcosystem(t *testing.T) {
+	t.Parallel()
+
+	goEcosystems := []string{"golang", "go", ""}
+
+	for _, eco := range goEcosystems {
+		name := eco
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestCollector(t, mockGitHubAPI())
+
+			entity := &profile.Entity{
+				ID:        "test-entity",
+				Type:      profile.EntityPackage,
+				ShortName: "alecthomas/kong",
+				URL:       "https://github.com/alecthomas/kong",
+				Ecosystem: eco,
+			}
+
+			result, err := c.Collect(t.Context(), entity)
+			require.NoError(t, err)
+
+			found := false
+			for _, s := range result.Collected {
+				var typ string
+				switch {
+				case s.Signal != nil:
+					typ = s.Signal.Type
+				case s.Absence != nil:
+					typ = s.Absence.SignalType
+				}
+				if typ == "go_dependencies" {
+					found = true
+					break
+				}
+			}
+			assert.True(t, found,
+				"go_dependencies must be collected for ecosystem %q", eco)
+		})
+	}
+}
+
 // testErr is a tiny helper to construct an error with a known message
 // without dragging in 'errors.New' at every callsite. Local to this
 // file to avoid polluting the package test surface.
