@@ -48,72 +48,47 @@ documented below.
 - **GitHub URL**: `{TARGET_URL}`
 - **Notes from the user**: {INTAKE_QUESTION}
 
-## Pre-collected signals (trust as ground truth)
+## Cached signals — query signatory_signals first
 
-Signatory's mechanical collectors have already gathered the
-Layer-1 signals below and cached them in the store. **Treat the
-values as ground truth.** They come from the same sources you
-would query (GitHub API, registry metadata, git history) but
-collected once, at cache time, and shared across analyst runs.
-
-Rules for using this block:
-
-- **Cite values directly.** A conclusion about commit-signing
-  ratio should reference the `governance.commit_signing.ratio`
-  field below, not a fresh `WebFetch` against the GitHub commits
-  endpoint.
-- **Do NOT use WebFetch to re-derive facts already in this
-  block.** Every such re-derivation is wasted tokens + wasted
-  rate budget + a divergence risk (your re-fetch may disagree
-  with what the synthesist sees in its own copy).
-- **Do follow up when a signal surprises you.** If something in
-  the block looks anomalous or contradicts what the source tree
-  suggests, investigate — read the relevant files in the clone,
-  or WebFetch the specific corroborating record. Follow-up is a
-  legitimate use of your tools; routine re-collection is not.
-- **When the block is empty** (fallback marker shown instead
-  of JSON): signatory has no cached signals for this target.
-  Fall back to collecting yourself per the Standard Methodology
-  below. This is expected on fresh targets.
-
-```json
 {LAYER_1_SIGNALS}
-```
 
-Your job is to apply judgment to this brief AND investigate the
-aspects the mechanical collectors can't see: CI workflow pinning,
-repo-root hygiene files (SECURITY.md / CODEOWNERS / .mailmap /
-CHANGELOG), tool-pinning for reproducibility, registry ↔ source
-SHA match, owner-email ↔ commit-email domain consistency, open
-advisories, orphan-tag / publish-pipeline defects, dep-tree
-health, and the ecosystem-specific patterns below. Produce v1-
-schema conclusions that weigh the facts in the block + what you
-find on top of them.
+Call `signatory_signals target=<canonical URI>` as your **first
+action**. The store is pre-populated by the orchestrator's Layer-1
+collectors (GitHub API, registry metadata, git history, scorecards).
+Treat cached values as ground truth — cite them directly in your
+conclusions.
+
+**Do NOT WebFetch data the store already has.** Each re-derivation
+wastes tokens, rate budget, and risks divergence with what the
+synthesist sees from the same store.
+
+**Do follow up when a signal surprises you.** Anomalies warrant
+investigation — read files in the clone, or WebFetch a specific
+corroborating record. Follow-up is legitimate; routine
+re-collection is not.
+
+Your job is to apply judgment on top of the cached signals AND
+investigate aspects the mechanical collectors can't see: CI
+workflow pinning, repo-root hygiene files (SECURITY.md / CODEOWNERS
+/ .mailmap / CHANGELOG), tool-pinning for reproducibility,
+registry ↔ source SHA match, owner-email ↔ commit-email domain
+consistency, open advisories, orphan-tag / publish-pipeline
+defects, dep-tree health, and the ecosystem-specific patterns
+below.
 
 ## Independence rule
 
 Previous reports do not corroborate new conclusions — only evidence does. Cite only source code you read, registry data you queried, or git history you inspected. Code comparison with other projects is fine; reading other analysts' conclusions is not — skip `filestore/analysis/` and `design/`.
 
-## Data sourcing — use signatory's cache first
+## Data sourcing — MCP first, WebFetch only for gaps
 
-Before reaching for `WebFetch` against forge/registry APIs (or `gh api` / `curl` if your environment provides them), check whether signatory has the data cached. The MCP surface returns every signal already collected for the target — contributors, commit history, tags, owner profile, adoption metrics, CI presence, and the language-specific signals each ecosystem collector emits.
+Your MCP tools for reading the store:
 
-Reach for these MCP tools first:
+- `signatory_signals target=<X>` — every collector's cached output (GitHub API, registry, git history, scorecards).
+- `signatory_summary target=<X>` — posture, related identities, analyses-rollup.
+- `signatory_detail target=<X>` — entity metadata (short_name, ecosystem, URL).
 
-- `signatory_summary target=<X>` — the breadth pass: posture, related identities, analyses-rollup. Always your starting point.
-- `signatory_signals target=<X>` — the cached signal records (every collector's output for this target).
-- `signatory_detail target=<X>` — entity metadata when you need short_name, ecosystem, URL.
-
-Specific cached signals worth knowing about:
-
-- **OpenSSF Scorecard** — read `signal_type=scorecard-check` from `signatory_signals` instead of WebFetching `api.securityscorecards.dev`. The cached value carries the aggregate score, per-check breakdown (Code-Review, Branch-Protection, Signed-Releases, etc.), and the commit Scorecard analyzed. An absence with reason `not in scorecards index` means the project hasn't been picked up by Scorecard's crawler — a real piece of information, not a fetch failure.
-
-Reach for `WebFetch` (or other direct upstream APIs) only when:
-
-1. The signal you need isn't in `signatory_signals` — when this happens, note the gap in your `round_notes` field so a future signal collector can close it. The dogfood-metrics report flags every direct upstream call as a cache-miss candidate; closing those gaps is how signatory's economics improve.
-2. You're verifying a specific claim that needs an independent fetch — e.g., the three-way SHA verification before pinning, which is by-design redundant.
-
-Each direct upstream call costs tokens (you load the response body), wall-clock time (sequential network round-trip), and rate-limit budget. The cache exists to reduce all three.
+Use `WebFetch` only when `signatory_signals` has no cached value for a field you need. When this happens, note the gap in `round_notes` so a future collector can close it.
 
 ## Tools you have
 
@@ -129,20 +104,10 @@ NOT have Bash, git, gh, or curl. Plan your analysis accordingly:
 - **WebFetch** for HTTP APIs — GitHub REST API, registry APIs.
   All URLs below are public and need no authentication.
 
-### What you CANNOT do (deferred to v0.2)
-
-- **Commit signing analysis** (`git log --format='%G?'`) —
-  requires git CLI. Note this gap in your round-notes.
-- **Tag object type inspection** (`git for-each-ref`) —
-  requires git CLI. Note this gap in your round-notes.
-- **Year-by-year commit activity shape** — requires git CLI.
-  You CAN approximate vitality from the GitHub API commits
-  endpoint (recent commits, timestamps) and from the releases
-  endpoint (release cadence).
-
-Mark any conclusion that would benefit from these deferred
-signals with a note in the rationale: "confidence would improve
-with git-level signing data (deferred to v0.2)."
+Commit signing analysis, tag object types, and year-by-year
+commit activity shape are available from `signatory_signals`
+(the git collector now gathers these). Check
+`signal_type=commit_signing` and `signal_type=tags`.
 
 ## Calibration notes
 
@@ -335,9 +300,8 @@ Provenance analysis focused on: vitality, publish path, identity
 consistency. Dominant signal is project fallow status — this
 amplifies every other concern.
 
-Known gaps: commit signing distribution and tag object types
-require git CLI access (deferred to v0.2). Conclusions about
-signing are based on GitHub API verification flags only.
+Commit signing distribution and tag object types are available
+from signatory_signals (signal_type=commit_signing, tags).
 ```
 
 ### Schema precision — validator traps
@@ -543,18 +507,16 @@ Vitality:
   patterns
 
 Governance:
-- `per_developer_commit_signing_ratio` — (deferred to v0.2:
-  requires git CLI for `%G?` distribution)
-- `web_flow_signing_ratio` — approximable from GitHub API commit
+- `per_developer_commit_signing_ratio` — from git collector
+- `web_flow_signing_ratio` — from GitHub API commit
   verification flags
 - `effective_maintainer_concentration` — bus-factor analysis
 - `analyst_self_correction` — meta-signal about the analyst (only
   on supersession rounds)
 
 Publication integrity:
-- `tag_signing_status` — (deferred to v0.2: requires git
-  `for-each-ref` for `signed_annotated` / `annotated_unsigned`
-  / `lightweight` distinction)
+- `tag_signing_status` — from git collector (`signed_annotated` /
+  `annotated_unsigned` / `lightweight` distinction)
 - `registry_publish_origin` — `oidc_ci` / `long_lived_token_ci`
   / `local_maintainer_machine` / `unknown`
 - `build_provenance_attestation` — Sigstore / SLSA-style
@@ -601,89 +563,21 @@ Criticality / amplifiers:
 If a useful signal type isn't in this list, omit the field and
 note the gap in `round_notes` so the registry can grow.
 
-## Provenance-specific data sources to walk
+## Provenance-specific investigation areas
 
-Your standard pass should touch these. Not exhaustive — go
-deeper based on what surfaces.
-
-### GitHub API metadata (via WebFetch)
-
-Fetch these URLs using WebFetch. All are public endpoints.
-Replace `{owner}` and `{repo}` with the target's values
-(derived from `{TARGET_URL}`).
-
-**Repository metadata:**
-```
-https://api.github.com/repos/{owner}/{repo}
-```
-Extract: `name`, `owner.login`, `owner.type` (User vs
-Organization), `created_at`, `updated_at`, `pushed_at`,
-`stargazers_count`, `forks_count`, `open_issues_count`,
-`archived`, `license.spdx_id`, `language`, `default_branch`.
-
-**Top contributors:**
-```
-https://api.github.com/repos/{owner}/{repo}/contributors?per_page=20
-```
-Extract: `login`, `contributions` for each.
-
-**Recent commits (with verification status):**
-```
-https://api.github.com/repos/{owner}/{repo}/commits?per_page=15
-```
-Extract: `commit.author.date`, `commit.message` (first 80 chars),
-`commit.author.name`, `commit.verification.verified`,
-`commit.verification.reason`. The `verified` field gives partial
-signing signal without needing `git log --format='%G?'`.
-
-**Releases:**
-```
-https://api.github.com/repos/{owner}/{repo}/releases?per_page=10
-```
-Extract: `tag_name`, `name`, `published_at`, `prerelease`, `draft`.
-
-**Security advisories:**
-```
-https://api.github.com/repos/{owner}/{repo}/security-advisories?per_page=10
-```
-
-**Community health:**
-```
-https://api.github.com/repos/{owner}/{repo}/community/profile
-```
-
-### Owner / maintainer profile (via WebFetch)
-
-```
-https://api.github.com/users/{owner}
-```
-Extract: `login`, `name`, `company`, `location`, `bio`, `blog`,
-`twitter_username`, `created_at`, `public_repos`, `followers`,
-`email`.
-
-For organization-owned repos, also fetch
-`https://api.github.com/orgs/{owner}` and note whether the
-owner is `User` vs `Organization`.
+Most data for the areas below is already in `signatory_signals`.
+Query the store first; only WebFetch for gaps the collector
+doesn't cover yet.
 
 ### Local clone analysis (via Read / Glob / Grep)
 
 Since you have the clone at `{TARGET_PATH}`, read these directly:
 
-**Identity graph:**
-- Read `{TARGET_PATH}/.mailmap` — presence and depth of identity
-  mappings indicates maintainer care about attribution history.
-
-**First commit / repo age:**
-- Read `{TARGET_PATH}/.git/refs/heads/{default_branch}` for HEAD
-  SHA (approximate; exact history requires git CLI).
-
-**CI and release configuration:**
-- Glob `{TARGET_PATH}/.github/workflows/*.yml` — read each workflow.
-- Read `{TARGET_PATH}/.github/dependabot.yml` if present.
-- For Rust: read `{TARGET_PATH}/deny.toml`,
-  `{TARGET_PATH}/audit.toml`, `{TARGET_PATH}/.cargo-audit-ignore`.
-- Read `{TARGET_PATH}/Makefile`, `{TARGET_PATH}/justfile`,
-  `{TARGET_PATH}/cliff.toml` (release tooling).
+- `.mailmap` — identity graph depth
+- `.github/workflows/*.yml` — CI and release configuration
+- `.github/dependabot.yml` — update automation
+- Ecosystem-specific: `deny.toml`, `audit.toml` (Rust);
+  `Makefile`, `justfile`, `cliff.toml` (release tooling)
 
 For each CI workflow, check:
 - Is publishing done in CI, or via a local script?
@@ -692,83 +586,26 @@ For each CI workflow, check:
 - Is there a supply-chain gate (`cargo-deny check`, `pip-audit`,
   `npm audit`, `govulncheck`)?
 
-### Ecosystem-specific registry metadata (via WebFetch)
-
-For `{ECOSYSTEM}` = PyPI:
-```
-https://pypi.org/pypi/{TARGET_NAME}/json
-```
-Extract: `info.version`, `info.author`, `info.author_email`,
-`info.maintainer`, `info.license`, `info.project_urls`,
-release count (`len(releases)`), latest upload time
-(`urls[0].upload_time`), file types.
-
-For `{ECOSYSTEM}` = crates:
-```
-https://crates.io/api/v1/crates/{TARGET_NAME}
-```
-Extract: latest version (`versions[0].num`), download counts,
-`created_at`, `updated_at`.
-
-Also fetch reverse dependencies:
-```
-https://crates.io/api/v1/crates/{TARGET_NAME}/reverse_dependencies?per_page=1
-```
-Extract: `meta.total` for reverse-dep count.
-
-For `{ECOSYSTEM}` = npm:
-```
-https://registry.npmjs.org/{TARGET_NAME}
-```
-Extract: `dist-tags.latest`, `maintainers`, `time` (publish
-timestamps).
-
-Also fetch download stats:
-```
-https://api.npmjs.org/downloads/point/last-week/{TARGET_NAME}
-```
-
-For `{ECOSYSTEM}` = go:
-```
-https://proxy.golang.org/{module-path}/@latest
-```
-Module metadata and latest version.
-
 ### Manifests and lockfiles (via Read)
 
-For `{ECOSYSTEM}` = PyPI:
-- Read `{TARGET_PATH}/setup.py` / `{TARGET_PATH}/pyproject.toml`
-- Read `{TARGET_PATH}/requirements.txt` and any
-  `requirements*.txt` variants
-- Read `{TARGET_PATH}/Pipfile.lock`, `poetry.lock`, `pdm.lock`,
-  `uv.lock` if present
-- Grep for `git+https://`, `--index-url`, `--extra-index-url`
+- **PyPI**: `setup.py` / `pyproject.toml`, `requirements*.txt`,
+  lockfiles. Grep for `git+https://`, `--extra-index-url`.
+- **crates**: `Cargo.toml`, `Cargo.lock` (count crates.io vs
+  git vs path sources), `deny.toml`.
+- **npm**: `package.json` (scripts: `postinstall`, `preinstall`),
+  `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml`.
+- **Go**: `go.mod`, `go.sum`.
 
-For `{ECOSYSTEM}` = crates:
-- Read `{TARGET_PATH}/Cargo.toml` — declared deps
-- Read `{TARGET_PATH}/Cargo.lock` — resolved tree (count
-  crates.io vs git vs path sources)
-- Read `{TARGET_PATH}/deny.toml` if present — declared
-  supply-chain policy
+### WebFetch fallbacks (no collector yet)
 
-For `{ECOSYSTEM}` = npm:
-- Read `{TARGET_PATH}/package.json` — declared deps and
-  scripts (especially `postinstall`, `preinstall`)
-- Read `{TARGET_PATH}/package-lock.json`, `yarn.lock`, or
-  `pnpm-lock.yaml`
+These endpoints have no signatory collector — WebFetch them
+directly and note the gap in `round_notes`:
 
-### Issues and PR responsiveness (via WebFetch)
-
-**Open PRs:**
-```
-https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=10&sort=created&direction=desc
-```
-
-**Open issues (excluding PRs):**
-```
-https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=10&sort=created&direction=desc
-```
-Filter: items where `pull_request` is null are issues.
+- `https://api.github.com/repos/{owner}/{repo}/security-advisories?per_page=10`
+- `https://api.github.com/repos/{owner}/{repo}/community/profile`
+- `https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=10&sort=created&direction=desc`
+- `https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=10&sort=created&direction=desc`
+  (filter: items where `pull_request` is null are issues)
 
 Look for a "is this maintained?" issue — that's a community
 signal, not just metadata inference.

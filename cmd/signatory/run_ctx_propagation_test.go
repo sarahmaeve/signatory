@@ -122,11 +122,11 @@ func TestRunMethods_PropagateGlobalsContext(t *testing.T) {
 
 	// HandoffCmd's Run inlines context.Background() at multiple call
 	// sites (applyNetworkPrecheck, applyClone, validateAnalysisSession,
-	// assembleSynthesisEvidence, assembleProvenanceSignals) plus
-	// depositRendered constructs Background internally. Reaching
-	// validateAnalysisSession requires AnalysisSessionID set + a
-	// resolvable Target + a role with a known template; that path
-	// terminates in OpenStore which observes a pre-cancelled ctx.
+	// assembleSynthesisEvidence) plus depositRendered constructs
+	// Background internally. Reaching validateAnalysisSession requires
+	// AnalysisSessionID set + a resolvable Target + a role with a known
+	// template; that path terminates in OpenStore which observes a
+	// pre-cancelled ctx.
 	t.Run("HandoffCmd_ValidateAnalysisSession", func(t *testing.T) {
 		t.Parallel()
 		err := (&HandoffCmd{

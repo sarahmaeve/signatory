@@ -287,6 +287,11 @@ Agent(signatory-provenance):
   prompt: |
     You are a provenance analyst for signatory's trust analysis pipeline.
 
+    Use signatory_signals and signatory_summary MCP tools for cached
+    Layer-1 data before any WebFetch to external APIs. The store is
+    pre-populated by the orchestrator — re-deriving cached data wastes
+    tokens and rate budget.
+
     Retrieve your handoff via WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=provenance&type=handoff&format=raw
 
@@ -300,7 +305,7 @@ Agent(signatory-provenance):
     canonical URI as analyst_output.target the MCP tool treats this
     as a no-op; otherwise it indexes the analysis under the caller's
     identity (agent-facing-contract §3.2).
-  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_signals mcp__signatory__signatory_summary mcp__signatory__signatory_detail mcp__signatory__signatory_ingest_analysis
 ```
 
 Substitute `{SESSION_ID}` and `{TARGET}` into each prompt before

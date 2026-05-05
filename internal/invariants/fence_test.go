@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,9 +64,22 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 }
 
 // analystAgentRoles enumerates the reasoning-agent roles that must
-// be denied Bash, Write, and MCP read tools in
+// be denied Bash, Write, and MCP judgment-read tools in
 // .claude/skills/analyze/SKILL.md.
 var analystAgentRoles = []string{"signatory-security", "signatory-provenance"}
+
+// provenanceAllowedCacheTools are read-side MCP tools the provenance
+// analyst IS allowed to call. These return cached Layer-1 mechanical
+// data (the same GitHub/registry/git responses a WebFetch would
+// return) — not prior analyst judgment. Granting these eliminates
+// the re-derivation antipattern where the provenance analyst makes
+// 14+ external API calls for data the orchestrator already collected.
+// See dogfood session c684d13b metrics report.
+var provenanceAllowedCacheTools = []string{
+	"mcp__signatory__signatory_signals",
+	"mcp__signatory__signatory_summary",
+	"mcp__signatory__signatory_detail",
+}
 
 // synthesistAgentRole is checked separately so a regression back
 // into Bash / Write / MCP-read tools surfaces clearly. The D9
@@ -142,6 +156,13 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 			for i, match := range matches {
 				toolsLine := match[1]
 				for _, forbidden := range forbiddenAnalystTools {
+					// The provenance analyst is allowed read-side cache
+					// tools (Layer-1 mechanical data). These return the
+					// same GitHub/registry/git responses a WebFetch would
+					// — not prior analyst judgment. Skip them.
+					if role == "signatory-provenance" && isAllowedCacheTool(forbidden) {
+						continue
+					}
 					// Word-boundary guard: "Write" must not match as a
 					// substring of "WriteToolName" if such a thing
 					// existed. Build the pattern fresh per forbidden
@@ -188,4 +209,11 @@ func TestSynthesistAgent_AllowedToolsMinimized(t *testing.T) {
 					"Line: %s", i, forbidden, toolsLine)
 		}
 	}
+}
+
+// isAllowedCacheTool reports whether tool is in
+// provenanceAllowedCacheTools — the read-side MCP tools that return
+// cached Layer-1 mechanical data (not prior analyst judgment).
+func isAllowedCacheTool(tool string) bool {
+	return slices.Contains(provenanceAllowedCacheTools, tool)
 }

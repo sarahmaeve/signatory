@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/sarahmaeve/signatory"
 	"github.com/sarahmaeve/signatory/internal/config"
@@ -65,6 +66,19 @@ func (cmd *InitCmd) Run(globals *Globals) error {
 			fmt.Fprintf(os.Stderr, "config:    wrote %s\n", result.ConfigPath)
 		} else {
 			fmt.Fprintf(os.Stderr, "config:    preserved %s\n", result.ConfigPath)
+		}
+
+		// Report MCP integration status. The .mcp.json at repo root
+		// is the project-scope MCP config Claude Code discovers
+		// automatically — no user action needed beyond having the
+		// signatory binary installed.
+		absDir, _ := filepath.Abs(cmd.Dir)
+		mcpPath := filepath.Join(absDir, ".mcp.json")
+		if _, err := os.Stat(mcpPath); err == nil {
+			fmt.Fprintf(os.Stderr, "mcp:       %s (Claude Code will auto-discover signatory MCP server)\n", mcpPath)
+		} else {
+			fmt.Fprintf(os.Stderr, "mcp:       no .mcp.json found — Claude Code MCP integration not configured\n")
+			fmt.Fprintf(os.Stderr, "           create .mcp.json at project root to enable (see design/mcp-server-architecture.md)\n")
 		}
 	}
 	return nil
