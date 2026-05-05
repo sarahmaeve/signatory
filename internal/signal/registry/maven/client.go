@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrNotFound is returned (wrapped via %w) when Maven Central responds
@@ -423,6 +424,10 @@ func (c *Client) FetchDevelopers(ctx context.Context, groupID, artifactID, versi
 }
 
 // extractXMLElement extracts the text content of a simple XML element.
+// Returns "" if the element is absent, its content is not valid UTF-8,
+// or it contains ASCII control characters (0x00–0x1F except TAB).
+// A POM with control characters in a coordinate or name is either
+// corrupted or adversarial — treat as absent rather than propagate.
 func extractXMLElement(xml, tag string) string {
 	open := "<" + tag + ">"
 	close := "</" + tag + ">"
@@ -435,5 +440,24 @@ func extractXMLElement(xml, tag string) string {
 	if end < 0 {
 		return ""
 	}
-	return strings.TrimSpace(xml[start : start+end])
+	content := strings.TrimSpace(xml[start : start+end])
+	if !utf8.ValidString(content) {
+		return ""
+	}
+	if containsControlChars(content) {
+		return ""
+	}
+	return content
+}
+
+// containsControlChars reports whether s includes any ASCII control
+// character (0x00–0x1F) other than horizontal tab (0x09). These never
+// appear in legitimate Maven coordinates, URLs, or developer names.
+func containsControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\t' {
+			return true
+		}
+	}
+	return false
 }

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // parseGoImportMeta extracts the first go-import meta tag from an
@@ -108,10 +109,29 @@ func parseMetaContent(body []byte, metaName string) (string, bool) {
 			if len(match) < 2 {
 				continue
 			}
-			return strings.TrimSpace(string(match[1])), true
+			content := strings.TrimSpace(string(match[1]))
+			// Reject content containing invalid UTF-8 or ASCII control
+			// characters. A legitimate meta tag never contains these;
+			// their presence signals a corrupted or adversarial page.
+			if !utf8.ValidString(content) || containsControlChars(content) {
+				continue
+			}
+			return content, true
 		}
 	}
 	return "", false
+}
+
+// containsControlChars reports whether s includes any ASCII control
+// character (0x00–0x1F) other than horizontal tab (0x09). Legitimate
+// HTML meta tag content never contains these.
+func containsControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\t' {
+			return true
+		}
+	}
+	return false
 }
 
 // metaContentPatternsFor compiles (or returns from cache) the two
@@ -170,7 +190,7 @@ func extractGitHubURLFromString(s string) string {
 		return ""
 	}
 	owner := readPathSegment(rest)
-	if owner == "" {
+	if !isValidPathSegment(owner) {
 		return ""
 	}
 	if len(rest) <= len(owner) || rest[len(owner)] != '/' {
@@ -179,10 +199,30 @@ func extractGitHubURLFromString(s string) string {
 	rest = rest[len(owner)+1:]
 	repo := readPathSegment(rest)
 	repo = strings.TrimSuffix(repo, ".git")
-	if repo == "" {
+	if !isValidPathSegment(repo) {
 		return ""
 	}
 	return "https://github.com/" + owner + "/" + repo
+}
+
+// isValidPathSegment validates that a path segment extracted from a URL
+// is safe to use: non-empty, no path traversal (. or ..), no control
+// characters, and valid UTF-8. A hostile vanity host could embed "../"
+// in a go-source template to confuse downstream path logic, or inject
+// invalid byte sequences to corrupt stored URLs.
+func isValidPathSegment(seg string) bool {
+	if seg == "" || seg == "." || seg == ".." {
+		return false
+	}
+	if !utf8.ValidString(seg) {
+		return false
+	}
+	for _, r := range seg {
+		if r < 0x20 {
+			return false
+		}
+	}
+	return true
 }
 
 // readPathSegment returns s up to (but not including) the first

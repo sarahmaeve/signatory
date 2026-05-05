@@ -224,11 +224,17 @@ type Repository struct {
 
 // UnmarshalJSON accepts either shape that appears in registry
 // responses. Absence (null or missing) leaves the zero struct.
+// Returns an error if the decoded URL or Type contains ASCII control
+// characters — a legitimate registry response never includes them;
+// their presence signals corruption or an adversarial payload.
 func (r *Repository) UnmarshalJSON(data []byte) error {
 	// Try string first: `"repository": "github:user/repo"` or
 	// `"repository": "https://..."`.
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
+		if containsControlChars(s) {
+			return fmt.Errorf("repository URL contains control characters")
+		}
 		r.URL = s
 		return nil
 	}
@@ -239,8 +245,23 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return fmt.Errorf("repository field: expected string or object, got %s", string(data))
 	}
+	if containsControlChars(obj.URL) || containsControlChars(obj.Type) {
+		return fmt.Errorf("repository object contains control characters")
+	}
 	*r = Repository(obj)
 	return nil
+}
+
+// containsControlChars reports whether s includes any ASCII control
+// character (0x00–0x1F) other than horizontal tab (0x09). These never
+// appear in legitimate registry URLs or identifiers.
+func containsControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\t' {
+			return true
+		}
+	}
+	return false
 }
 
 // GetPackage fetches metadata for a package from the registry.
@@ -377,6 +398,14 @@ func (c *Client) GetWeeklyDownloads(ctx context.Context, name string) (int, erro
 	var dl downloadsResponse
 	if err := dec.Decode(&dl); err != nil {
 		return 0, fmt.Errorf("decode npm downloads response for %q: %w", name, err)
+	}
+	// Guard against malicious/malformed responses serving negative
+	// counts. JSON decodes them into int without complaint; downstream
+	// code using this value for criticality scoring must not see
+	// nonsensical negatives.
+	if dl.Downloads < 0 {
+		return 0, fmt.Errorf("npm downloads response for %q reports negative count (%d)",
+			name, dl.Downloads)
 	}
 	return dl.Downloads, nil
 }
