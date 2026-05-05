@@ -268,6 +268,14 @@ Agent(signatory-security):
   prompt: |
     You are a security analyst for signatory's trust analysis pipeline.
 
+    A full clone of the target is at: filestore/clones/{TARGET_NAME}
+    Use Read, Glob, and Grep on this LOCAL CLONE for all source code
+    inspection. Do NOT WebFetch source files from raw.githubusercontent.com
+    or list directories via api.github.com/repos/.../contents/ — the
+    clone is current and reading locally is faster and cheaper. Use Glob
+    to discover files (e.g., Glob("filestore/clones/{TARGET_NAME}/**/*.js"))
+    and Read to inspect them.
+
     Retrieve your handoff via WebFetch:
       https://127.0.0.1:21517/api/sessions/{SESSION_ID}/messages?role=security&type=handoff&format=raw
 
@@ -281,7 +289,7 @@ Agent(signatory-security):
     canonical URI as analyst_output.target the MCP tool treats this
     as a no-op; otherwise it indexes the analysis under the caller's
     identity (agent-facing-contract §3.2).
-  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_signals mcp__signatory__signatory_summary mcp__signatory__signatory_detail mcp__signatory__signatory_ingest_analysis
 
 Agent(signatory-provenance):
   prompt: |
@@ -308,13 +316,14 @@ Agent(signatory-provenance):
   allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_signals mcp__signatory__signatory_summary mcp__signatory__signatory_detail mcp__signatory__signatory_ingest_analysis
 ```
 
-Substitute `{SESSION_ID}` and `{TARGET}` into each prompt before
-dispatching. `{TARGET}` is the original `$TARGET` value the user
-supplied to the skill (unresolved; the MCP tool canonicalizes).
-The audit session id is embedded in the handoff body (via the
-handoff's SESSION_INSTRUCTION block) — the agent reads it from
-WebFetch and forwards it unchanged, so the dispatch prompt doesn't
-need to carry it.
+Substitute `{SESSION_ID}`, `{TARGET}`, `{TARGET_NAME}`, and
+`{ANALYSIS_SID}` into each prompt before dispatching. `{TARGET}` is
+the original `$TARGET` value the user supplied to the skill
+(unresolved; the MCP tool canonicalizes). `{TARGET_NAME}` is the
+basename derived in Step 1. `{ANALYSIS_SID}` is the analysis session
+id from Step 1's `signatory analysis begin` output — the synthesist
+dispatch prompt carries it explicitly to prevent confusion with the
+pipeline session id in the WebFetch URL.
 
 Wait for BOTH agents to complete before proceeding.
 
@@ -394,6 +403,12 @@ Agent(signatory-synthesis):
     you need, specifies your analyst_id, the v1 synthesis_supplement
     shape, the signatory_ingest_analysis call, and the
     analysis_session_id you must include.
+
+    IMPORTANT — two different session IDs exist in this pipeline:
+    - Pipeline session: {SESSION_ID} (in the WebFetch URL above — transport only)
+    - Analysis session: {ANALYSIS_SID} (the one you pass to signatory_ingest_analysis)
+    Use {ANALYSIS_SID} as your analysis_session_id. Do NOT use the
+    pipeline session ID from the URL — the store will reject it.
 
     Two orchestrator-level rules not in the handoff:
 
