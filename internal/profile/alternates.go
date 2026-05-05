@@ -58,26 +58,20 @@ func AlternateURIs(canonical string) []string {
 		}
 	}
 
-	switch {
-	case strings.HasPrefix(base, "pkg:go/github.com/"):
-		rest := strings.TrimPrefix(base, "pkg:go/github.com/")
+	if rest, ok := strings.CutPrefix(base, "pkg:go/github.com/"); ok {
 		add("repo:github/" + rest)
 		add("pkg:golang/github.com/" + rest)
-	case strings.HasPrefix(base, "pkg:golang/github.com/"):
-		rest := strings.TrimPrefix(base, "pkg:golang/github.com/")
+	} else if rest, ok := strings.CutPrefix(base, "pkg:golang/github.com/"); ok {
 		add("repo:github/" + rest)
 		add("pkg:go/github.com/" + rest)
-	case strings.HasPrefix(base, "repo:github/"):
-		rest := strings.TrimPrefix(base, "repo:github/")
+	} else if rest, ok := strings.CutPrefix(base, "repo:github/"); ok {
 		add("pkg:go/github.com/" + rest)
 		add("pkg:golang/github.com/" + rest)
-	case strings.HasPrefix(base, "pkg:go/"):
+	} else if rest, ok := strings.CutPrefix(base, "pkg:go/"); ok {
 		// Non-github pkg:go/ (vanity host). Add pkg:golang/ as the
 		// purl-spec equivalent.
-		rest := strings.TrimPrefix(base, "pkg:go/")
 		add("pkg:golang/" + rest)
-	case strings.HasPrefix(base, "pkg:golang/"):
-		rest := strings.TrimPrefix(base, "pkg:golang/")
+	} else if rest, ok := strings.CutPrefix(base, "pkg:golang/"); ok {
 		add("pkg:go/" + rest)
 	}
 

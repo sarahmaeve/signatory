@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -132,6 +134,162 @@ func TestRunMethods_PropagateGlobalsContext(t *testing.T) {
 			Role:              "security",
 			AnalysisSessionID: "00000000-0000-0000-0000-000000000000",
 		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Prune commands (destructive verbs — highest priority) ---
+
+	t.Run("PruneEntityCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&PruneEntityCmd{Target: "pkg:npm/anything"}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("PruneVersionedCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&PruneVersionedCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("PruneOrphansCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&PruneOrphansCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("PruneDuplicatesCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&PruneDuplicatesCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Burn commands ---
+
+	t.Run("BurnAddCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&BurnAddCmd{
+			Target: "pkg:npm/anything",
+			Reason: "ctx propagation test",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("BurnRemoveCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&BurnRemoveCmd{
+			Target: "pkg:npm/anything",
+			Reason: "ctx propagation test",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("BurnListCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&BurnListCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Show commands ---
+
+	t.Run("ShowSynthesisCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&ShowSynthesisCmd{
+			OutputID: "00000000-0000-0000-0000-000000000000",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Analysis session commands ---
+
+	t.Run("AnalysisBeginCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&AnalysisBeginCmd{
+			Target: "pkg:npm/anything",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("AnalysisEndCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&AnalysisEndCmd{
+			SessionID: "00000000-0000-0000-0000-000000000000",
+			Status:    "failed",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("AnalysisListCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&AnalysisListCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("AnalysisShowCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&AnalysisShowCmd{
+			SessionID: "00000000-0000-0000-0000-000000000000",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	t.Run("AnalysisTimingCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&AnalysisTimingCmd{
+			SessionID: "00000000-0000-0000-0000-000000000000",
+		}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Ingest (needs a valid file to pass pre-store validation) ---
+
+	t.Run("IngestCmd", func(t *testing.T) {
+		t.Parallel()
+		path := writeTempFile(t, "valid.json", minimalValidJSON)
+		err := (&IngestCmd{File: path, Format: "json", Quiet: true}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
+	// --- Survey (needs a manifest path to skip auto-detect) ---
+
+	t.Run("SurveyCmd", func(t *testing.T) {
+		t.Parallel()
+		g := preCancelledGlobals(t)
+		// Write a minimal go.mod so manifest parsing succeeds before
+		// the store-open call observes the cancelled context.
+		dir := t.TempDir()
+		gomod := filepath.Join(dir, "go.mod")
+		os.WriteFile(gomod, []byte("module test\n\ngo 1.24\n"), 0o644)
+		err := (&SurveyCmd{Manifest: gomod}).Run(g)
 		require.Error(t, err)
 		require.Truef(t, errors.Is(err, context.Canceled),
 			"expected context.Canceled in error chain, got: %v", err)

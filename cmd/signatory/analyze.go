@@ -1140,7 +1140,7 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 			var val map[string]any
 			_ = json.Unmarshal(s.Value, &val) //nolint:errcheck // see comment above: nil-safe render on decode failure
 
-			if strings.HasPrefix(s.Type, "absence:") {
+			if name, ok := strings.CutPrefix(s.Type, "absence:"); ok {
 				absenceCount++
 				retryable := false
 				if r, ok := val["retryable"].(bool); ok {
@@ -1150,7 +1150,6 @@ func displayHuman(w io.Writer, d *AnalysisDisplay, maxAge time.Duration) error {
 				if r, ok := val["reason"].(string); ok {
 					reason = r
 				}
-				name := strings.TrimPrefix(s.Type, "absence:")
 				absences = append(absences, absenceRow{
 					name: name, reason: reason, retryable: retryable,
 				})

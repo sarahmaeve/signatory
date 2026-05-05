@@ -1,10 +1,11 @@
 package repofiles
 
 import (
+	"cmp"
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -87,11 +88,11 @@ func Scan(clonePath string, fams []Family) ([]Match, error) {
 		}
 	}
 
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].Family != matches[j].Family {
-			return matches[i].Family < matches[j].Family
-		}
-		return matches[i].Path < matches[j].Path
+	slices.SortFunc(matches, func(a, b Match) int {
+		return cmp.Or(
+			cmp.Compare(a.Family, b.Family),
+			cmp.Compare(a.Path, b.Path),
+		)
 	})
 	return matches, nil
 }

@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
@@ -225,12 +226,7 @@ func groupPatternsBySignalGroup(patterns []exchange.MethodologyPattern) map[stri
 // sortedKeys returns the map's keys in lexicographic order so the
 // summary output is deterministic across runs.
 func sortedKeys(m map[string][]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
 
 // detectAnalystOutputFormat picks json or markdown for an input file

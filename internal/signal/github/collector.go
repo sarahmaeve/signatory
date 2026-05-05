@@ -598,8 +598,7 @@ func parseGoModDeps(content string) (goModDeps, error) {
 		}
 
 		// Single-line require: "require github.com/pkg/foo v1.0.0 // indirect"
-		if strings.HasPrefix(line, "require ") && !strings.HasPrefix(line, "require (") {
-			dep := strings.TrimPrefix(line, "require ")
+		if dep, ok := strings.CutPrefix(line, "require "); ok && !strings.HasPrefix(dep, "(") {
 			if strings.Contains(dep, "// indirect") {
 				deps.indirectCount++
 			} else {

@@ -32,7 +32,10 @@ type ShowSynthesisCmd struct {
 }
 
 func (cmd *ShowSynthesisCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

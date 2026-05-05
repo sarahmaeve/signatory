@@ -27,7 +27,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -130,12 +131,7 @@ func (s *Server) ClientInfo() clientInfo {
 func (s *Server) RegisteredToolNames() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	names := make([]string, 0, len(s.tools))
-	for name := range s.tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(s.tools))
 }
 
 // RegisteredResourcePatterns returns the sorted URI patterns of every
@@ -144,12 +140,7 @@ func (s *Server) RegisteredToolNames() []string {
 func (s *Server) RegisteredResourcePatterns() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	patterns := make([]string, 0, len(s.resources))
-	for p := range s.resources {
-		patterns = append(patterns, p)
-	}
-	sort.Strings(patterns)
-	return patterns
+	return slices.Sorted(maps.Keys(s.resources))
 }
 
 // Serve reads JSON-RPC messages from r, dispatches them, and writes

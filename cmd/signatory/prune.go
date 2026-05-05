@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -166,7 +168,10 @@ type PruneEntityCmd struct {
 }
 
 func (cmd *PruneEntityCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -256,7 +261,10 @@ type PruneVersionedCmd struct {
 }
 
 func (cmd *PruneVersionedCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -286,7 +294,10 @@ type PruneOrphansCmd struct {
 }
 
 func (cmd *PruneOrphansCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -333,7 +344,10 @@ type PruneDuplicatesCmd struct {
 }
 
 func (cmd *PruneDuplicatesCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -432,8 +446,8 @@ func renderConsolidationPlan(plan *store.ConsolidationPlan) {
 	// is already in canonical_uri sort order, but defensive: render
 	// always sorts).
 	ops := append([]store.ConsolidationOp(nil), plan.Ops...)
-	sort.Slice(ops, func(i, j int) bool {
-		return ops[i].Source.CanonicalURI < ops[j].Source.CanonicalURI
+	slices.SortFunc(ops, func(a, b store.ConsolidationOp) int {
+		return cmp.Compare(a.Source.CanonicalURI, b.Source.CanonicalURI)
 	})
 
 	for _, op := range ops {
@@ -442,12 +456,7 @@ func renderConsolidationPlan(plan *store.ConsolidationPlan) {
 			fmt.Printf("  [merge / %s] %s\n", op.Class, op.Source.CanonicalURI)
 			fmt.Printf("      → into %s\n", op.CanonicalURI)
 			// Per-child-table FK retarget counts.
-			keys := make([]string, 0, len(op.ChildCounts))
-			for k := range op.ChildCounts {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
+			for _, k := range slices.Sorted(maps.Keys(op.ChildCounts)) {
 				fmt.Printf("        %s: %d FK(s) retarget\n", k, op.ChildCounts[k])
 			}
 		case store.ConsolidationActionRename:
@@ -466,12 +475,7 @@ func renderConsolidationResult(report *store.ConsolidationReport) {
 	fmt.Printf("  renamed: %d\n", report.RenamedCount)
 	if len(report.RowsByTable) > 0 {
 		fmt.Println("Rows touched:")
-		keys := make([]string, 0, len(report.RowsByTable))
-		for k := range report.RowsByTable {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range slices.Sorted(maps.Keys(report.RowsByTable)) {
 			fmt.Printf("  %-40s %d\n", k, report.RowsByTable[k])
 		}
 	}
@@ -532,21 +536,16 @@ func renderPrunePlan(plan *store.PruneReport, scopeLabel string) {
 	fmt.Println("─────────────────────────────────────")
 
 	// Per-entity listing.
-	sort.Slice(plan.Entities, func(i, j int) bool {
-		return plan.Entities[i].CanonicalURI < plan.Entities[j].CanonicalURI
+	slices.SortFunc(plan.Entities, func(a, b store.EntityPruneDetail) int {
+		return cmp.Compare(a.CanonicalURI, b.CanonicalURI)
 	})
 	for _, e := range plan.Entities {
 		fmt.Printf("  %s  %s\n", shortID(e.ID), e.CanonicalURI)
 		// Child counts — sorted for stable output.
-		keys := make([]string, 0, len(e.ChildCounts))
-		for k := range e.ChildCounts {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range slices.Sorted(maps.Keys(e.ChildCounts)) {
 			fmt.Printf("      %s: %d\n", k, e.ChildCounts[k])
 		}
-		if len(keys) == 0 {
+		if len(e.ChildCounts) == 0 {
 			fmt.Println("      (no child rows)")
 		}
 	}
@@ -554,12 +553,7 @@ func renderPrunePlan(plan *store.PruneReport, scopeLabel string) {
 	// Aggregate totals.
 	fmt.Println("─────────────────────────────────────")
 	fmt.Println("Total rows that would be deleted:")
-	keys := make([]string, 0, len(plan.RowsByTable))
-	for k := range plan.RowsByTable {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(plan.RowsByTable)) {
 		fmt.Printf("  %-30s %d\n", k, plan.RowsByTable[k])
 	}
 }
@@ -570,12 +564,7 @@ func renderPrunePlan(plan *store.PruneReport, scopeLabel string) {
 func renderPruneResult(report *store.PruneReport) {
 	fmt.Println("Prune complete.")
 	fmt.Println("Rows deleted:")
-	keys := make([]string, 0, len(report.RowsByTable))
-	for k := range report.RowsByTable {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(report.RowsByTable)) {
 		fmt.Printf("  %-30s %d\n", k, report.RowsByTable[k])
 	}
 }

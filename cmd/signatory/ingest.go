@@ -56,7 +56,10 @@ func (cmd *IngestCmd) Run(globals *Globals) error {
 		return fmt.Errorf("validate %s:\n%w", cmd.File, err)
 	}
 
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

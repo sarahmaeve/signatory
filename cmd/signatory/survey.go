@@ -1,13 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
@@ -58,7 +59,10 @@ type SurveyCmd struct {
 }
 
 func (cmd *SurveyCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Default the stdio sinks when production callers leave them
 	// nil. Tests inject buffers via cmd.Stdout / cmd.Stderr to
@@ -528,7 +532,7 @@ func filterDirectDeps(deps []survey.DepResult) []survey.DepResult {
 	}
 	// Stable sort by name so multiple runs against the same
 	// manifest produce identical output (helps diffing / CI).
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Dep.Name < out[j].Dep.Name })
+	slices.SortStableFunc(out, func(a, b survey.DepResult) int { return cmp.Compare(a.Dep.Name, b.Dep.Name) })
 	return out
 }
 
@@ -539,7 +543,7 @@ func filterIndirectDeps(deps []survey.DepResult) []survey.DepResult {
 			out = append(out, d)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Dep.Name < out[j].Dep.Name })
+	slices.SortStableFunc(out, func(a, b survey.DepResult) int { return cmp.Compare(a.Dep.Name, b.Dep.Name) })
 	return out
 }
 

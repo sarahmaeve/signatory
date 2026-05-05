@@ -37,7 +37,10 @@ type BurnAddCmd struct {
 }
 
 func (cmd *BurnAddCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Resolve --reason / --reason-file early so a missing/malformed
 	// source fails before we open the store (§3.4).
@@ -144,7 +147,10 @@ type BurnRemoveCmd struct {
 }
 
 func (cmd *BurnRemoveCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	reason, err := readFreeText("reason", cmd.Reason, cmd.ReasonFile)
 	if err != nil {
@@ -202,7 +208,10 @@ func (cmd *BurnRemoveCmd) Run(globals *Globals) error {
 type BurnListCmd struct{}
 
 func (cmd *BurnListCmd) Run(globals *Globals) error {
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

@@ -75,9 +75,13 @@ func NewClientWithBaseURL(repoBase string) *Client {
 }
 
 // checkRedirect enforces HTTPS-only redirects and bounds the chain.
+// repo1.maven.org is HTTPS-only; an HTTP redirect target is either a
+// misconfiguration or a MITM attempting a scheme downgrade to tamper
+// with POM / SCM URL / developer metadata that feeds trust signals.
+// Symmetric with the npm, PyPI, cargo, gem, and gopublish clients.
 func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" && req.URL.Scheme != "http" {
-		return fmt.Errorf("refusing redirect to non-HTTP(S) URL %s", req.URL.Redacted())
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
 	}
 	if len(via) >= 10 {
 		return fmt.Errorf("too many redirects")

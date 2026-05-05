@@ -88,7 +88,10 @@ func (cmd *AnalysisTimingCmd) Run(globals *Globals) error {
 		stdout = os.Stdout
 	}
 
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

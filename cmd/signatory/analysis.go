@@ -75,7 +75,10 @@ type AnalysisBeginCmd struct {
 
 func (cmd *AnalysisBeginCmd) Run(globals *Globals) error {
 	stdout, _ := cmd.resolveWriters()
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	base, version, err := normalizeTargetForPosture(cmd.Target, cmd.Version)
 	if err != nil {
@@ -173,7 +176,10 @@ func (cmd *AnalysisEndCmd) Run(globals *Globals) error {
 		stderr = os.Stderr
 	}
 
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -233,7 +239,10 @@ func (cmd *AnalysisListCmd) Run(globals *Globals) error {
 		stdout = os.Stdout
 	}
 
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err
@@ -307,7 +316,10 @@ func (cmd *AnalysisShowCmd) Run(globals *Globals) error {
 		stdout = os.Stdout
 	}
 
-	ctx := context.Background()
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
 		return err

@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"path"
-	"sort"
+	"slices"
 
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
 )
@@ -256,7 +257,7 @@ func (a *Assembler) applyCrossVersion(ctx context.Context, rows []MatrixRow, aux
 					added = append(added, pkg)
 				}
 			}
-			sort.Strings(added)
+			slices.Sort(added)
 			if added == nil {
 				added = []string{}
 			}
@@ -457,10 +458,5 @@ func sliceToErrSeq(files []golang.SourceFile) iter.Seq2[golang.SourceFile, error
 // Helper for cross-version diffs (commit 13) that want a stable
 // ordering of package-name lists.
 func sortedKeys(s map[string]struct{}) []string {
-	keys := make([]string, 0, len(s))
-	for k := range s {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(s))
 }

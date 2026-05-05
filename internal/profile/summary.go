@@ -5,18 +5,18 @@ import "encoding/json"
 // SignalsSummary is the grouped-and-flattened view of a collection of
 // Signals, organized by the question each group answers. Each group
 // maps signal-type names to the signal's `value` JSON (unmarshaled to
-// map[string]interface{}). This is the shape signatory_analyze's MCP
+// map[string]any). This is the shape signatory_analyze's MCP
 // tool returns, and the same shape the provenance-handoff renderer
 // inlines into the agent's handoff body as pre-collected ground truth.
 //
 // Groups are omitempty so a target with only governance signals
 // doesn't ship empty vitality/criticality/hygiene/publication keys.
 type SignalsSummary struct {
-	Vitality    map[string]interface{} `json:"vitality,omitempty"`
-	Governance  map[string]interface{} `json:"governance,omitempty"`
-	Criticality map[string]interface{} `json:"criticality,omitempty"`
-	Hygiene     map[string]interface{} `json:"hygiene,omitempty"`
-	Publication map[string]interface{} `json:"publication,omitempty"`
+	Vitality    map[string]any `json:"vitality,omitempty"`
+	Governance  map[string]any `json:"governance,omitempty"`
+	Criticality map[string]any `json:"criticality,omitempty"`
+	Hygiene     map[string]any `json:"hygiene,omitempty"`
+	Publication map[string]any `json:"publication,omitempty"`
 }
 
 // Summarize groups signals by SignalGroup and flattens each signal's
@@ -39,35 +39,35 @@ type SignalsSummary struct {
 func Summarize(signals []Signal) SignalsSummary {
 	s := SignalsSummary{}
 	for _, sig := range signals {
-		var val map[string]interface{}
+		var val map[string]any
 		_ = json.Unmarshal(sig.Value, &val) //nolint:errcheck // nil-safe summary on decode failure; raw bytes preserved in store
 		if val == nil {
-			val = map[string]interface{}{}
+			val = map[string]any{}
 		}
 		switch sig.Group {
 		case SignalGroupVitality:
 			if s.Vitality == nil {
-				s.Vitality = map[string]interface{}{}
+				s.Vitality = map[string]any{}
 			}
 			s.Vitality[sig.Type] = val
 		case SignalGroupGovernance:
 			if s.Governance == nil {
-				s.Governance = map[string]interface{}{}
+				s.Governance = map[string]any{}
 			}
 			s.Governance[sig.Type] = val
 		case SignalGroupCriticality:
 			if s.Criticality == nil {
-				s.Criticality = map[string]interface{}{}
+				s.Criticality = map[string]any{}
 			}
 			s.Criticality[sig.Type] = val
 		case SignalGroupHygiene:
 			if s.Hygiene == nil {
-				s.Hygiene = map[string]interface{}{}
+				s.Hygiene = map[string]any{}
 			}
 			s.Hygiene[sig.Type] = val
 		case SignalGroupPublication:
 			if s.Publication == nil {
-				s.Publication = map[string]interface{}{}
+				s.Publication = map[string]any{}
 			}
 			s.Publication[sig.Type] = val
 		}

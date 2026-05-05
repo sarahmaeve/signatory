@@ -37,8 +37,11 @@ type Client struct {
 // NewClient returns a Client pointed at the production rubygems.org.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 15 * time.Second},
-		baseURL:    defaultBaseURL,
+		httpClient: &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: checkRedirect,
+		},
+		baseURL: defaultBaseURL,
 	}
 }
 
@@ -46,9 +49,27 @@ func NewClient() *Client {
 // Primary use: tests with httptest servers.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 15 * time.Second},
-		baseURL:    base,
+		httpClient: &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: checkRedirect,
+		},
+		baseURL: base,
 	}
+}
+
+// checkRedirect enforces HTTPS-only redirects and bounds the chain.
+// Symmetric with the npm, PyPI, cargo, maven, and gopublish clients —
+// see those for the rationale: rubygems.org is HTTPS-only, so any
+// scheme downgrade is either misconfiguration or a MITM attempting to
+// tamper with owner / version metadata that feeds trust signals.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("too many redirects")
+	}
+	return nil
 }
 
 // GetGem fetches metadata for a gem from /api/v1/gems/{name}.json.

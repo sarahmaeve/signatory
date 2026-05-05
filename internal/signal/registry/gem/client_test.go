@@ -5,11 +5,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mustParseURL is a parse-or-fatal helper used by the redirect-policy
+// unit tests below. Mirrors the npm package's helper of the same name.
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err, "parse %q", raw)
+	return u
+}
 
 func TestClient_GetGem(t *testing.T) {
 	t.Parallel()
@@ -214,5 +224,73 @@ func TestClient_ValidateGemName(t *testing.T) {
 	invalid := []string{"", "../etc/passwd", "a/b", "foo\x00bar", " leading"}
 	for _, name := range invalid {
 		assert.Error(t, ValidateGemName(name), "expected invalid: %q", name)
+	}
+}
+
+// ----- redirect policy unit tests -----
+//
+// rubygems.org is HTTPS-only. Any redirect target other than HTTPS is
+// either a misconfiguration or a MITM attempting a scheme downgrade
+// to tamper with owner / version metadata that feeds trust signals.
+// The policy here is symmetric with the npm, PyPI, cargo, and gopublish
+// clients so that a future audit can grep for one shape.
+
+func TestClient_CheckRedirect_RefusesNonHTTPS(t *testing.T) {
+	t.Parallel()
+
+	via := []*http.Request{{URL: mustParseURL(t, "https://rubygems.org/api/v1/gems/rails.json")}}
+
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{"http scheme downgrade", "http://rubygems.org/api/v1/gems/rails.json"},
+		{"attacker-host http redirect", "http://attacker.example/x"},
+		{"file scheme", "file:///etc/passwd"},
+		{"javascript scheme", "javascript:alert(1)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			next := &http.Request{URL: mustParseURL(t, tc.target)}
+			err := checkRedirect(next, via)
+			require.Error(t, err, "must refuse redirect to %q", tc.target)
+		})
+	}
+}
+
+func TestClient_CheckRedirect_AllowsHTTPS(t *testing.T) {
+	t.Parallel()
+
+	via := []*http.Request{{URL: mustParseURL(t, "https://rubygems.org/old-path")}}
+	next := &http.Request{URL: mustParseURL(t, "https://rubygems.org/new-path")}
+	assert.NoError(t, checkRedirect(next, via))
+}
+
+func TestClient_CheckRedirect_BoundsChain(t *testing.T) {
+	t.Parallel()
+
+	via := make([]*http.Request, 10)
+	for i := range via {
+		via[i] = &http.Request{URL: mustParseURL(t, "https://rubygems.org/")}
+	}
+	next := &http.Request{URL: mustParseURL(t, "https://rubygems.org/next")}
+	err := checkRedirect(next, via)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirects")
+}
+
+// TestClient_NewClient_WiresCheckRedirect asserts that the production
+// constructor actually installs the redirect policy on the http.Client.
+// Regression guard against a future refactor that adds a new code path
+// (e.g. NewClientWithToken) and forgets to mirror the CheckRedirect
+// wiring — which is the bug class this whole test cluster exists to
+// catch.
+func TestClient_NewClient_WiresCheckRedirect(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []*Client{NewClient(), NewClientWithBaseURL("https://example.test")} {
+		require.NotNil(t, c.httpClient.CheckRedirect,
+			"NewClient must install CheckRedirect; default policy follows HTTP redirects")
 	}
 }

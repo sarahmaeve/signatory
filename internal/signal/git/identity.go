@@ -2,12 +2,13 @@ package git
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -328,11 +329,12 @@ func topNFromMap(m map[string]int, n int) []topNEntry {
 	for k, v := range m {
 		all = append(all, topNEntry{Key: k, Count: v})
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Count != all[j].Count {
-			return all[i].Count > all[j].Count
+	slices.SortFunc(all, func(a, b topNEntry) int {
+		// Descending by Count first; ascending by Key as tiebreak.
+		if c := cmp.Compare(b.Count, a.Count); c != 0 {
+			return c
 		}
-		return all[i].Key < all[j].Key
+		return cmp.Compare(a.Key, b.Key)
 	})
 	if n > 0 && len(all) > n {
 		all = all[:n]
