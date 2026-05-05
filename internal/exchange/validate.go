@@ -130,7 +130,7 @@ func (s *SynthesisSupplement) validate(path string) []error {
 func (p *ProposedPosture) validate(path string) []error {
 	var errs []error
 	if !ValidProposedPostureTier(p.Tier) {
-		errs = append(errs, fmt.Errorf("%s.tier %q invalid", path, p.Tier))
+		errs = append(errs, fmt.Errorf("%s.tier %q invalid; valid values: vetted-frozen, trusted-for-now, unexamined, unknown-provenance, rejected", path, p.Tier))
 	}
 	if p.RationaleSummary == "" {
 		errs = append(errs, fmt.Errorf("%s.rationale_summary required", path))
@@ -234,11 +234,11 @@ func (f *Conclusion) validate(path string) []error {
 		errs = append(errs, fmt.Errorf("%s: category required", path))
 	}
 	if !f.Severity.Default.Valid() {
-		errs = append(errs, fmt.Errorf("%s: severity.default %q invalid", path, f.Severity.Default))
+		errs = append(errs, fmt.Errorf("%s: severity.default %q invalid; valid values: critical, high, medium, low, informational, positive", path, f.Severity.Default))
 	}
 	for i, bc := range f.Severity.ByContext {
 		if !bc.Value.Valid() {
-			errs = append(errs, fmt.Errorf("%s.severity.by_context[%d]: value %q invalid", path, i, bc.Value))
+			errs = append(errs, fmt.Errorf("%s.severity.by_context[%d]: value %q invalid; valid values: critical, high, medium, low, informational, positive", path, i, bc.Value))
 		}
 	}
 	for i, c := range f.Citations {
@@ -273,7 +273,7 @@ func (c *Citation) validate(path string) []error {
 		}
 	case hasScope:
 		if !ValidScopeKind(c.Scope.Kind) {
-			errs = append(errs, fmt.Errorf("%s.scope: kind %q invalid", path, c.Scope.Kind))
+			errs = append(errs, fmt.Errorf("%s.scope: kind %q invalid; valid values: file, dir, tree, workspace, crate", path, c.Scope.Kind))
 		}
 		if c.Scope.Path == "" {
 			errs = append(errs, fmt.Errorf("%s.scope: path required", path))
@@ -292,7 +292,7 @@ func (pa *PositiveAbsence) validate(path string) []error {
 		errs = append(errs, fmt.Errorf("%s: description required", path))
 	}
 	if !pa.Confidence.Valid() {
-		errs = append(errs, fmt.Errorf("%s: confidence %q invalid", path, pa.Confidence))
+		errs = append(errs, fmt.Errorf("%s: confidence %q invalid; valid values: exhaustive, thoroughly_reviewed, spot_checked", path, pa.Confidence))
 	}
 	for i, c := range pa.Citations {
 		errs = append(errs, c.validate(fmt.Sprintf("%s.citations[%d]", path, i))...)
@@ -357,15 +357,15 @@ func (mp *MethodologyPattern) validate(path string) []error {
 		errs = append(errs, fmt.Errorf("%s: description required", path))
 	}
 	if !mp.CollectorHint.GrepPrecision.Valid() {
-		errs = append(errs, fmt.Errorf("%s.collector_hint.grep_precision %q invalid",
+		errs = append(errs, fmt.Errorf("%s.collector_hint.grep_precision %q invalid; valid values: high, narrows, useless",
 			path, mp.CollectorHint.GrepPrecision))
 	}
 	if !mp.CollectorHint.ReasoningDepth.Valid() {
-		errs = append(errs, fmt.Errorf("%s.collector_hint.reasoning_depth %q invalid",
+		errs = append(errs, fmt.Errorf("%s.collector_hint.reasoning_depth %q invalid; valid values: none, one_hop, multi_hop",
 			path, mp.CollectorHint.ReasoningDepth))
 	}
 	if !mp.CollectorHint.MissMode.Valid() {
-		errs = append(errs, fmt.Errorf("%s.collector_hint.miss_mode %q invalid",
+		errs = append(errs, fmt.Errorf("%s.collector_hint.miss_mode %q invalid; valid values: balanced, false_positive_heavy, false_negative_heavy",
 			path, mp.CollectorHint.MissMode))
 	}
 	// A pattern with no grep and high precision makes no sense.
@@ -381,7 +381,7 @@ func (s *Supersession) validate(path string) []error {
 		errs = append(errs, fmt.Errorf("%s: prior_id required", path))
 	}
 	if !s.Kind.Valid() {
-		errs = append(errs, fmt.Errorf("%s: kind %q invalid", path, s.Kind))
+		errs = append(errs, fmt.Errorf("%s: kind %q invalid; valid values: corrects, refines, deprecates", path, s.Kind))
 	}
 	return errs
 }

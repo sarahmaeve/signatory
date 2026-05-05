@@ -389,6 +389,153 @@ func TestValidate_EnumValues(t *testing.T) {
 	assert.False(t, ValidScopeKind("planet"))
 }
 
+// TestValidate_ErrorMessagesIncludeValidValues asserts that every enum
+// validation error message includes the list of valid values. This is
+// the mechanistic repair for dogfood session 37864a8c: the provenance
+// analyst received "severity.default \"ContextualSeverity\" invalid"
+// without being told WHAT the valid values are, then went spelunking in
+// signatory source (types.go, enums.go, validate.go) to discover them.
+// Including valid values in the error message eliminates the need to
+// read source to self-correct.
+func TestValidate_ErrorMessagesIncludeValidValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*AnalystOutput)
+		wantValues []string // each must appear in the error message
+	}{
+		{
+			name: "severity.default lists valid severity values",
+			mutate: func(o *AnalystOutput) {
+				o.Conclusions[0].Severity.Default = "ContextualSeverity"
+			},
+			wantValues: []string{"critical", "high", "medium", "low", "informational", "positive"},
+		},
+		{
+			name: "severity.by_context lists valid severity values",
+			mutate: func(o *AnalystOutput) {
+				o.Conclusions[0].Severity.ByContext = []ContextualSeverity{
+					{Context: ContextSpec{HostIsolation: HostIsolationCIRunner}, Value: "extreme"},
+				}
+			},
+			wantValues: []string{"critical", "high", "medium", "low", "informational", "positive"},
+		},
+		{
+			name: "confidence lists valid confidence values",
+			mutate: func(o *AnalystOutput) {
+				o.PositiveAbsences = []PositiveAbsence{
+					{PatternChecked: "x", Description: "y", Confidence: "high"},
+				}
+			},
+			wantValues: []string{"exhaustive", "thoroughly_reviewed", "spot_checked"},
+		},
+		{
+			name: "scope.kind lists valid scope kinds",
+			mutate: func(o *AnalystOutput) {
+				o.Conclusions[0].Citations = []Citation{
+					{Scope: &ScopeRef{Kind: "api_response", Path: "/"}},
+				}
+			},
+			wantValues: []string{"file", "dir", "tree", "workspace", "crate"},
+		},
+		{
+			name: "grep_precision lists valid precision values",
+			mutate: func(o *AnalystOutput) {
+				o.MethodologyTrace = &MethodologyCatalog{
+					Source: AgentAttribution{
+						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+					},
+					Patterns: []MethodologyPattern{
+						{
+							ID: "P1", SignalGroup: "s", Description: "d",
+							CollectorHint: CollectorHint{
+								GrepPrecision:  "very_high",
+								ReasoningDepth: ReasoningDepthNone,
+							},
+						},
+					},
+				}
+			},
+			wantValues: []string{"high", "narrows", "useless"},
+		},
+		{
+			name: "reasoning_depth lists valid depth values",
+			mutate: func(o *AnalystOutput) {
+				o.MethodologyTrace = &MethodologyCatalog{
+					Source: AgentAttribution{
+						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+					},
+					Patterns: []MethodologyPattern{
+						{
+							ID: "P1", SignalGroup: "s", Description: "d",
+							CollectorHint: CollectorHint{
+								GrepPrecision:  GrepPrecisionUseless,
+								ReasoningDepth: "deep",
+							},
+						},
+					},
+				}
+			},
+			wantValues: []string{"none", "one_hop", "multi_hop"},
+		},
+		{
+			name: "miss_mode lists valid mode values",
+			mutate: func(o *AnalystOutput) {
+				o.MethodologyTrace = &MethodologyCatalog{
+					Source: AgentAttribution{
+						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+					},
+					Patterns: []MethodologyPattern{
+						{
+							ID: "P1", SignalGroup: "s", Description: "d",
+							CollectorHint: CollectorHint{
+								GrepPrecision:  GrepPrecisionUseless,
+								ReasoningDepth: ReasoningDepthNone,
+								MissMode:       "catastrophic",
+							},
+						},
+					},
+				}
+			},
+			wantValues: []string{"balanced", "false_positive_heavy", "false_negative_heavy"},
+		},
+		{
+			name: "supersession kind lists valid kinds",
+			mutate: func(o *AnalystOutput) {
+				o.Conclusions[0].Supersedes = []Supersession{
+					{PriorID: "F000", Kind: "overrides"},
+				}
+			},
+			wantValues: []string{"corrects", "refines", "deprecates"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := validBase()
+			tt.mutate(o)
+			err := o.Validate()
+			require.Error(t, err)
+			msg := err.Error()
+			for _, v := range tt.wantValues {
+				assert.Contains(t, msg, v,
+					"error message should include valid value %q so the caller can self-correct without reading source", v)
+			}
+		})
+	}
+
+	// Proposed posture tier requires a synthesist base.
+	t.Run("proposed_posture.tier lists valid tier values", func(t *testing.T) {
+		o := validSynthesisBase()
+		o.SynthesisSupplement.ProposedPosture.Tier = "galactically-frozen"
+		err := o.Validate()
+		require.Error(t, err)
+		msg := err.Error()
+		for _, v := range []string{"vetted-frozen", "trusted-for-now", "unexamined", "unknown-provenance", "rejected"} {
+			assert.Contains(t, msg, v,
+				"error message should include valid tier %q so the caller can self-correct without reading source", v)
+		}
+	})
+}
+
 // --- SynthesisSupplement (M6a) ---
 //
 // Synthesist outputs carry a SynthesisSupplement that has no natural

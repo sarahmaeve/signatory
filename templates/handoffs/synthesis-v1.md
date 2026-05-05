@@ -272,8 +272,13 @@ caller-identity indexing from the analyses it's synthesizing, and
 the MCP tool will refuse a `collected_from` that conflicts with
 the target URI on a synthesis row.
 
-If validation fails, the response names the first offending field.
-Fix the JSON and retry in the same turn. Do NOT drop fields or
+If validation fails, the response names the first offending field
+and lists valid values for enum fields. Fix the JSON and retry in
+the same turn. The error message plus the "Schema precision" section
+below contain everything you need to self-correct. Do NOT read
+signatory source files (`internal/exchange/`, `internal/store/`,
+etc.) to discover valid shapes — that information is already in your
+instructions and in the error response. Do NOT drop fields or
 simplify the shape to get past validation — the required fields
 (`proposed_posture.tier`, `proposed_posture.rationale_summary`,
 `reasoning`, `summary`) are load-bearing.

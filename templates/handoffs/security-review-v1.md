@@ -330,9 +330,14 @@ signatory_ingest_analysis:
 ```
 
 The validator runs before the write. On validation failure the
-response names the first offending field — fix the JSON and retry
-in the same turn. Do NOT drop fields to silence the validator;
-every field exists for a reason.
+response names the first offending field and lists the valid values
+for enum fields — fix the JSON and retry in the same turn. The error
+message plus the "Schema precision" section above contain everything
+you need to self-correct. Do NOT read signatory source files
+(`internal/exchange/`, `internal/store/`, etc.) to discover valid
+shapes — that information is already in your instructions and in the
+error response. Do NOT drop fields to silence the validator; every
+field exists for a reason.
 
 Idempotent on content: re-ingesting an identical payload returns
 `idempotent: true` with the existing output_id. Call once per
