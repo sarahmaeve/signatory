@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"strings"
 
@@ -12,10 +13,18 @@ import (
 )
 
 // DispatchPrompt is a single rendered agent dispatch prompt.
+//
+// AnalystID is the canonical signatory-<role>-v<N> string the
+// orchestrator will look for at verify time. Surfaced explicitly
+// (in addition to being inlined into Prompt) so the host adapter
+// can assert / log it without parsing the rendered prompt body,
+// and so dogfood telemetry can compare orchestrator-expected vs
+// actually-ingested values.
 type DispatchPrompt struct {
 	Description  string `json:"description"`
 	Prompt       string `json:"prompt"`
 	AllowedTools string `json:"allowed_tools"`
+	AnalystID    string `json:"analyst_id"`
 }
 
 // DispatchPromptsResult is the JSON contract returned by
@@ -25,26 +34,39 @@ type DispatchPromptsResult struct {
 	Prompts map[string]DispatchPrompt `json:"prompts"`
 }
 
-// dispatchRole maps a role name to its template file and allowed-tools
-// string. The template files live under templates/dispatch/ and are
-// shipped inside the binary via //go:embed all:templates (embedded.go).
+// dispatchRole maps a role name to its template file, allowed-tools
+// string, and canonical analyst_id. The template files live under
+// templates/dispatch/ and are shipped inside the binary via
+// //go:embed all:templates (embedded.go).
+//
+// analystID is the exact signatory-<role>-v<N> string the agent
+// must use in attribution.analyst_id and the orchestrator will
+// look for at verify time. Inlined into the dispatch prompt via
+// the {ANALYST_ID} substitution so the agent reads the right value
+// from the dispatch body directly instead of having to faithfully
+// copy it from the (long) handoff body — the asciify-image
+// (e572ed87) drift fix.
 type dispatchRole struct {
 	templatePath string
 	allowedTools string
+	analystID    string
 }
 
 var dispatchRoles = map[string]dispatchRole{
 	"security": {
 		templatePath: "templates/dispatch/security-dispatch-v1.md",
 		allowedTools: "Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis",
+		analystID:    "signatory-security-v1",
 	},
 	"provenance": {
 		templatePath: "templates/dispatch/provenance-dispatch-v1.md",
 		allowedTools: "Read Glob Grep WebFetch mcp__signatory__signatory_signals mcp__signatory__signatory_summary mcp__signatory__signatory_detail mcp__signatory__signatory_ingest_analysis",
+		analystID:    "signatory-provenance-v1",
 	},
 	"synthesist": {
 		templatePath: "templates/dispatch/synthesist-dispatch-v1.md",
 		allowedTools: "Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis",
+		analystID:    "signatory-synthesis-v1",
 	},
 }
 
@@ -130,12 +152,24 @@ func renderDispatchPromptsFor(
 		if err != nil {
 			return nil, fmt.Errorf("load dispatch template %s: %w", dr.templatePath, err)
 		}
-		rendered, _ := config.RenderTemplate(raw, subs)
+
+		// Per-role substitutions overlay the caller-supplied subs map
+		// without mutating it (the same map may be reused across
+		// multiple role renders). ANALYST_ID is per-role and comes
+		// from dispatchRoles, not from the caller — the orchestrator
+		// is the source of truth for what analyst_id each role is
+		// expected to ingest under, so it must not be caller-supplied.
+		roleSubs := make(map[string]string, len(subs)+1)
+		maps.Copy(roleSubs, subs)
+		roleSubs["ANALYST_ID"] = dr.analystID
+
+		rendered, _ := config.RenderTemplate(raw, roleSubs)
 		body := strings.TrimSpace(string(rendered))
 		out[role] = DispatchPrompt{
 			Description:  descriptionForRole(role, targetName),
 			Prompt:       body,
 			AllowedTools: dr.allowedTools,
+			AnalystID:    dr.analystID,
 		}
 	}
 	return out, nil

@@ -3,6 +3,7 @@ package exchange
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -27,6 +28,44 @@ const SynthesistAnalystIDPrefix = "signatory-synthesis"
 func IsSynthesistRole(analystID string) bool {
 	return strings.HasPrefix(analystID, SynthesistAnalystIDPrefix)
 }
+
+// signatoryNamespacePrefix is the namespace owned by signatory's own
+// analyst pipeline. analyst_ids in this namespace must match the
+// canonical form (canonicalSignatoryAnalystIDRe); arbitrary suffixes
+// or omitted version tags drift the store and break the
+// orchestrator's exact-string verify check.
+//
+// External analysts (different teams, different conventions) use
+// their own namespaces — `external-sec-v1`, `external-prov-v1`, etc.
+// The validator does not gate those.
+const signatoryNamespacePrefix = "signatory-"
+
+// canonicalSignatoryAnalystIDRe matches the only acceptable shapes
+// for analyst_ids inside the signatory- namespace:
+//
+//	^signatory-(security|provenance|synthesis)-v\d+$
+//
+// Examples that pass: signatory-security-v1, signatory-provenance-v2,
+// signatory-synthesis-v10.
+//
+// Examples that fail: signatory-provenance (no -v1 suffix — the
+// dominant drift form, 17 of 30 occurrences in the dogfood store
+// pre-fix), signatory-osv-supplement-v1 (unknown role — stray
+// historical ingest), signatory-security-vbeta (non-numeric version),
+// signatory-security-v1-extra (trailing junk).
+//
+// Why the strictness: the orchestrator's pipeline_run.go declares
+// expected analyst_ids verbatim ("signatory-security-v1" etc.) and
+// the verify step matches by exact string equality. Any drift
+// silently misses the verify check, the row exists in the store
+// but is invisible to ListOutputsForSession's session filter, and
+// the orchestrator loops on missing_analysts. Catching at the
+// validator gives the agent a fast CodeSchemaViolation it can
+// self-correct from per the handoff's "fix and resubmit"
+// instruction — turning a multi-minute re-dispatch loop into a
+// single-turn correction.
+var canonicalSignatoryAnalystIDRe = regexp.MustCompile(
+	`^signatory-(security|provenance|synthesis)-v\d+$`)
 
 // Validate checks structural invariants on an AnalystOutput and
 // returns a joined error describing every problem it finds. Nil means
@@ -212,6 +251,20 @@ func (a *AgentAttribution) validate(path string) []error {
 	var errs []error
 	if a.AnalystID == "" {
 		errs = append(errs, fmt.Errorf("%s: analyst_id required", path))
+	}
+	// Signatory namespace gate: ids that start with `signatory-` must
+	// match the canonical form. Other namespaces are unrestricted.
+	// See canonicalSignatoryAnalystIDRe for rationale.
+	if a.AnalystID != "" &&
+		strings.HasPrefix(a.AnalystID, signatoryNamespacePrefix) &&
+		!canonicalSignatoryAnalystIDRe.MatchString(a.AnalystID) {
+		errs = append(errs, fmt.Errorf(
+			"%s: analyst_id %q is in the signatory- namespace but does not match the "+
+				"canonical form `signatory-(security|provenance|synthesis)-v<N>`. "+
+				"Common drift to avoid: dropping the -v<N> suffix, omitting the "+
+				"signatory- prefix, substituting -analyst for -v<N>. Use the "+
+				"analyst_id given at the top of your dispatch prompt verbatim.",
+			path, a.AnalystID))
 	}
 	if a.Model == "" {
 		errs = append(errs, fmt.Errorf("%s: model required", path))

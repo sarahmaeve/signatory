@@ -284,7 +284,7 @@ func TestAnalysisTiming_HappyPath(t *testing.T) {
 		[]string{"external-sec-v1", "signatory-provenance"})
 
 	ingestAnalystForSession(t, g, "pkg:npm/timing-happy", "external-sec-v1", sessionID)
-	ingestAnalystForSession(t, g, "pkg:npm/timing-happy", "signatory-provenance", sessionID)
+	ingestAnalystForSession(t, g, "pkg:npm/timing-happy", "signatory-provenance-v1", sessionID)
 	synthID := ingestSynthesisForSession(t, g, "pkg:npm/timing-happy", sessionID)
 
 	require.NoError(t, (&AnalysisEndCmd{

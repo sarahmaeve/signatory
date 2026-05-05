@@ -1,6 +1,6 @@
 {
   "attribution": {
-    "analyst_id": "signatory-provenance",
+    "analyst_id": "signatory-provenance-v1",
     "model": "claude-opus-4-6",
     "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
     "invoked_at": "2026-04-14T20:30:00Z",
@@ -173,7 +173,7 @@
   ],
   "methodology_trace": {
     "source": {
-      "analyst_id": "signatory-provenance",
+      "analyst_id": "signatory-provenance-v1",
       "model": "claude-opus-4-6",
       "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
       "invoked_at": "2026-04-14T20:30:00Z",

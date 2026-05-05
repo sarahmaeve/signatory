@@ -76,6 +76,108 @@ func TestValidate_AttributionFields(t *testing.T) {
 	}
 }
 
+// TestValidate_SignatoryAnalystIDMustBeCanonical asserts the
+// validator rejects analyst_id values that fall in the
+// "signatory-" namespace but don't match the canonical
+// ^signatory-(security|provenance|synthesis)-v\d+$ form.
+//
+// Background: dogfood session e572ed87 stalled because the
+// provenance analyst ingested with analyst_id="provenance"
+// (drift form) instead of "signatory-provenance-v1". The store
+// already shows 17 occurrences of "signatory-provenance" (no -v1)
+// vs 11 of the canonical form, plus "provenance-analyst",
+// "security-analyst", and other variants. Catching this at the
+// validator stops the drift permanently for orchestrator-emitted
+// signatory roles; the agent receives CodeSchemaViolation, fixes
+// in the same turn (per handoff's "fix and resubmit" instruction).
+//
+// External (non-signatory-) analyst_ids stay unrestricted because
+// other teams use their own conventions (external-sec-v1,
+// external-prov-v1 in the wild today).
+func TestValidate_SignatoryAnalystIDMustBeCanonical(t *testing.T) {
+	tests := []struct {
+		name      string
+		analystID string
+		wantErr   string // empty → expect Validate to pass
+	}{
+		// Canonical forms (non-synthesis) — must pass.
+		// Synthesis canonical-form coverage lives in
+		// TestValidate_SynthesisSupplementWithCanonicalSynthesisID
+		// because synthesis ids additionally require a
+		// synthesis_supplement (a separate validator gate).
+		{"canonical security v1", "signatory-security-v1", ""},
+		{"canonical provenance v1", "signatory-provenance-v1", ""},
+		{"canonical security v2", "signatory-security-v2", ""},
+		{"canonical provenance v10", "signatory-provenance-v10", ""},
+
+		// Non-signatory namespace — must pass (validator only
+		// gates the signatory- namespace).
+		{"external sec v1", "external-sec-v1", ""},
+		{"external prov v1", "external-prov-v1", ""},
+		{"test analyst", "test-analyst", ""},
+		{"arbitrary", "some-other-analyst", ""},
+
+		// Drift forms inside the signatory namespace — must fail.
+		{"missing -v1 suffix", "signatory-provenance",
+			"signatory-provenance"},
+		{"bare role only", "signatory-security",
+			"signatory-security"},
+		{"missing role function", "signatory-v1",
+			"signatory-v1"},
+		{"unknown role", "signatory-osv-supplement-v1",
+			"signatory-osv-supplement-v1"},
+		{"non-numeric version", "signatory-security-vbeta",
+			"signatory-security-vbeta"},
+		{"empty version", "signatory-security-v",
+			"signatory-security-v"},
+		{"role typo", "signatory-securty-v1",
+			"signatory-securty-v1"},
+		{"trailing junk", "signatory-security-v1-extra",
+			"signatory-security-v1-extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := validBase()
+			o.Attribution.AnalystID = tt.analystID
+			err := o.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err,
+					"analyst_id %q should pass validation", tt.analystID)
+				return
+			}
+			require.Error(t, err,
+				"analyst_id %q should fail validation", tt.analystID)
+			// Error message must include the offending value so the
+			// agent can self-correct in the same turn.
+			assert.Contains(t, err.Error(), tt.wantErr,
+				"error must name the offending analyst_id; got: %s", err)
+			// And must mention "signatory-" so the agent knows the
+			// rule applies to its namespace.
+			assert.Contains(t, err.Error(), "signatory-",
+				"error must explain the namespace rule; got: %s", err)
+		})
+	}
+}
+
+// TestValidate_SynthesisSupplementWithCanonicalSynthesisID is a
+// regression guard: the new analyst_id regex must not interfere
+// with the existing SynthesisSupplement gate, which keys off
+// IsSynthesistRole's HasPrefix logic. A canonical
+// signatory-synthesis-v1 with a synthesis supplement must validate.
+func TestValidate_SynthesisSupplementWithCanonicalSynthesisID(t *testing.T) {
+	o := validBase()
+	o.Attribution.AnalystID = "signatory-synthesis-v1"
+	o.SynthesisSupplement = &SynthesisSupplement{
+		ProposedPosture: ProposedPosture{
+			Tier:             "trusted-for-now",
+			RationaleSummary: "test",
+		},
+		Reasoning: "test reasoning",
+		Summary:   "test summary",
+	}
+	require.NoError(t, o.Validate())
+}
+
 func TestValidate_TargetRequired(t *testing.T) {
 	o := validBase()
 	o.Target = ""

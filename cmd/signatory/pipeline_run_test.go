@@ -95,12 +95,22 @@ func TestPipelineRun_StartPhase(t *testing.T) {
 	assert.ElementsMatch(t, []string{"security", "provenance"}, roles,
 		"start phase dispatches must be security + provenance")
 
-	// Each dispatch carries the three fields the host needs to make
-	// an Agent() / Assistants run / SDK call.
+	// Each dispatch carries the four fields the host needs to make
+	// an Agent() / Assistants run / SDK call. analyst_id is the
+	// canonical signatory-<role>-v1 string the orchestrator's verify
+	// will check for — surfaced explicitly so the host doesn't have
+	// to extract it from the handoff body and so dogfood metrics can
+	// compare orchestrator-expected vs actually-ingested values.
+	expectedAnalystIDs := map[string]string{
+		"security":   "signatory-security-v1",
+		"provenance": "signatory-provenance-v1",
+	}
 	for _, d := range result.Dispatches {
 		assert.NotEmpty(t, d.Description, "%s: description", d.Role)
 		assert.NotEmpty(t, d.Prompt, "%s: prompt", d.Role)
 		assert.NotEmpty(t, d.AllowedTools, "%s: allowed_tools", d.Role)
+		assert.Equal(t, expectedAnalystIDs[d.Role], d.AnalystID,
+			"%s: analyst_id must be the canonical signatory-<role>-v1 string", d.Role)
 
 		// Substitution actually happened — no naked placeholders.
 		assert.NotContains(t, d.Prompt, "{SESSION_ID}",
@@ -109,8 +119,13 @@ func TestPipelineRun_StartPhase(t *testing.T) {
 			"%s: {ANALYSIS_SID} not substituted", d.Role)
 		assert.NotContains(t, d.Prompt, "{TARGET}",
 			"%s: {TARGET} not substituted", d.Role)
+		assert.NotContains(t, d.Prompt, "{ANALYST_ID}",
+			"%s: {ANALYST_ID} not substituted", d.Role)
 		assert.Contains(t, d.Prompt, result.SessionID,
 			"%s: prompt must reference pipeline session ID for handoff WebFetch", d.Role)
+		assert.Contains(t, d.Prompt, d.AnalystID,
+			"%s: prompt body must inline the canonical analyst_id so the agent "+
+				"copies the right value (the dogfood-surfaced drift fix)", d.Role)
 	}
 
 	// Synthesist is NOT in the start phase — it's deferred until
@@ -259,6 +274,10 @@ func TestPipelineRun_ResumePhaseHappyPath(t *testing.T) {
 	assert.Equal(t, "synthesist", result.Dispatches[0].Role)
 	assert.NotEmpty(t, result.Dispatches[0].Prompt)
 	assert.NotEmpty(t, result.Dispatches[0].AllowedTools)
+	assert.Equal(t, "signatory-synthesis-v1", result.Dispatches[0].AnalystID,
+		"synthesist analyst_id must be the canonical signatory-synthesis-v1 string")
+	assert.Contains(t, result.Dispatches[0].Prompt, "signatory-synthesis-v1",
+		"synthesist prompt body must inline the canonical analyst_id")
 
 	// Synthesist prompt was rendered with both session IDs (the cef3c5ab
 	// confusion-bug fix lives in the template; resume must wire both

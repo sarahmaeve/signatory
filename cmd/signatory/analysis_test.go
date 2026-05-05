@@ -504,7 +504,7 @@ func TestAnalysisShow_ExpectedVsLandedDiff(t *testing.T) {
 		[]string{"external-sec-v1", "signatory-provenance"})
 
 	// Ingest output only from signatory-provenance.
-	ingestAnalystForSession(t, g, "pkg:npm/show-diff", "signatory-provenance", sessionID)
+	ingestAnalystForSession(t, g, "pkg:npm/show-diff", "signatory-provenance-v1", sessionID)
 
 	var stdout bytes.Buffer
 	cmd := &AnalysisShowCmd{
@@ -657,7 +657,7 @@ func ingestSynthesisForSession(t *testing.T, g *Globals, target, sessionID strin
 	lineStart := 1
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "signatory-synthesist-v1",
+			AnalystID: "signatory-synthesis-v1",
 			Model:     "test-model",
 			InvokedAt: time.Now().UTC().Format(time.RFC3339),
 		},

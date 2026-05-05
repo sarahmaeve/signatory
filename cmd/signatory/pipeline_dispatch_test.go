@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -167,6 +168,70 @@ func TestPipelineDispatchPrompts_SynthesistWarnsAboutSessionIDs(t *testing.T) {
 		"synthesist prompt must name the pipeline session concept")
 	assert.Contains(t, synthPrompt, "Analysis session",
 		"synthesist prompt must name the analysis session concept")
+}
+
+// TestPipelineDispatchPrompts_AnalystIDInlinedInPrompt verifies the
+// dogfood-surfaced fix: every dispatch template inlines the
+// canonical signatory-<role>-v1 analyst_id literal so the agent
+// reads it from the prompt directly instead of having to fetch it
+// from the (long) handoff body and faithfully copy it.
+//
+// Direct mitigation for the asciify-image session (e572ed87) where
+// the provenance agent ingested with analyst_id="provenance"
+// (drift form) instead of "signatory-provenance-v1", causing the
+// orchestrator's verify to loop on missing_analysts.
+func TestPipelineDispatchPrompts_AnalystIDInlinedInPrompt(t *testing.T) {
+	t.Parallel()
+
+	expected := map[string]string{
+		"security":   "signatory-security-v1",
+		"provenance": "signatory-provenance-v1",
+		"synthesist": "signatory-synthesis-v1",
+	}
+
+	var stdout bytes.Buffer
+	cmd := &PipelineDispatchPromptsCmd{
+		SessionID:         "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		AnalysisSessionID: "11111111-2222-3333-4444-555555555555",
+		Target:            "https://github.com/JedWatson/classnames",
+		TargetName:        "classnames",
+		ClonePath:         "filestore/clones/classnames",
+		TemplateFS:        signatory.EmbeddedTemplates,
+		Stdout:            &stdout,
+	}
+	require.NoError(t, cmd.Run(nil))
+
+	var result DispatchPromptsResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+
+	for role, want := range expected {
+		body := result.Prompts[role].Prompt
+		assert.Contains(t, body, want,
+			"%s prompt must inline the canonical analyst_id literal "+
+				"so the agent copies the right value into "+
+				"attribution.analyst_id (dogfood drift fix)", role)
+		assert.False(t, strings.Contains(body, "{ANALYST_ID}"),
+			"%s: {ANALYST_ID} placeholder must be substituted", role)
+	}
+}
+
+// TestDispatchRoles_AnalystIDIsCanonical asserts every dispatchRole's
+// analystID matches ^signatory-(security|provenance|synthesis)-v\d+$.
+// Catches a typo on the orchestrator side at compile-test time —
+// before the agent inherits the wrong value.
+func TestDispatchRoles_AnalystIDIsCanonical(t *testing.T) {
+	t.Parallel()
+
+	canonical := regexp.MustCompile(`^signatory-(security|provenance|synthesis)-v\d+$`)
+	for role, dr := range dispatchRoles {
+		t.Run(role, func(t *testing.T) {
+			assert.NotEmpty(t, dr.analystID,
+				"dispatch role %q: analystID must be set", role)
+			assert.Regexp(t, canonical, dr.analystID,
+				"dispatch role %q: analystID %q must match canonical "+
+					"signatory-<role>-v<N> form", role, dr.analystID)
+		})
+	}
 }
 
 // TestPipelineDispatchPrompts_TemplateMissing verifies that a

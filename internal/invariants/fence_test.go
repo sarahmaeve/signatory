@@ -190,6 +190,79 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 	}
 }
 
+// TestDispatchRoles_AnalystIDMatchesDefaultExpected enforces the
+// invariant that every dispatchRole.analystID is in
+// defaultExpectedAnalysts() and vice-versa: the orchestrator's
+// dispatched-role analyst_id and the verify-time expected
+// analyst_id are the same set, parsed from the same source.
+//
+// Catches the failure mode where someone updates dispatchRoles
+// but forgets defaultExpectedAnalysts (or vice-versa), letting
+// the orchestrator dispatch one analyst_id but check for another
+// at resume time — exactly the asciify-image dogfood failure
+// shape, but now caused by orchestrator bookkeeping rather than
+// agent drift.
+//
+// Cross-package text-parsing check (no import dependency on the
+// cmd package). Authoritative complement to the same-package
+// TestDispatchRoles_AnalystIDIsCanonical in
+// cmd/signatory/pipeline_dispatch_test.go.
+func TestDispatchRoles_AnalystIDMatchesDefaultExpected(t *testing.T) {
+	root := findModuleRoot(t)
+
+	dispatchPath := filepath.Join(root, "cmd", "signatory", "pipeline_dispatch.go")
+	dispatchData, err := os.ReadFile(dispatchPath) //nolint:gosec // G304: path under module root, build-time fixture
+	require.NoError(t, err, "pipeline_dispatch.go not found")
+
+	runPath := filepath.Join(root, "cmd", "signatory", "pipeline_run.go")
+	runData, err := os.ReadFile(runPath) //nolint:gosec // G304: path under module root, build-time fixture
+	require.NoError(t, err, "pipeline_run.go not found")
+
+	// Extract every analystID literal from dispatchRoles map entries.
+	dispatchAnalystIDRe := regexp.MustCompile(`analystID:\s*"([^"]+)"`)
+	dispatchMatches := dispatchAnalystIDRe.FindAllStringSubmatch(string(dispatchData), -1)
+	require.NotEmpty(t, dispatchMatches,
+		"no analystID literals found in pipeline_dispatch.go — has the field been removed or renamed?")
+	dispatchSet := make(map[string]struct{}, len(dispatchMatches))
+	for _, m := range dispatchMatches {
+		dispatchSet[m[1]] = struct{}{}
+	}
+
+	// Extract the defaultExpectedAnalysts() literal slice contents.
+	defaultBlockRe := regexp.MustCompile(
+		`(?s)func defaultExpectedAnalysts\(\) \[\]string \{[^}]*return \[\]string\{([^}]+)\}`)
+	defaultBlock := defaultBlockRe.FindStringSubmatch(string(runData))
+	require.Len(t, defaultBlock, 2,
+		"could not locate defaultExpectedAnalysts() body in pipeline_run.go")
+	literalRe := regexp.MustCompile(`"([^"]+)"`)
+	literalMatches := literalRe.FindAllStringSubmatch(defaultBlock[1], -1)
+	defaultSet := make(map[string]struct{}, len(literalMatches))
+	for _, m := range literalMatches {
+		defaultSet[m[1]] = struct{}{}
+	}
+
+	// Bi-directional set equality. Surface the offending side
+	// concretely so a reader doesn't have to guess which list
+	// drifted.
+	for id := range dispatchSet {
+		_, ok := defaultSet[id]
+		assert.True(t, ok,
+			"dispatchRoles has analystID %q but it's not in "+
+				"defaultExpectedAnalysts() — orchestrator would dispatch "+
+				"this role but verify wouldn't expect it. Add %q to "+
+				"defaultExpectedAnalysts() in pipeline_run.go.", id, id)
+	}
+	for id := range defaultSet {
+		_, ok := dispatchSet[id]
+		assert.True(t, ok,
+			"defaultExpectedAnalysts() has %q but no dispatchRole "+
+				"declares this analystID — verify would expect this "+
+				"role but the orchestrator never dispatches it. Add a "+
+				"dispatchRole entry with analystID: %q in "+
+				"pipeline_dispatch.go.", id, id)
+	}
+}
+
 // TestSynthesistAgent_AllowedToolsMinimized enforces the synthesist
 // tool fence: Bash, Write, and every signatory_* read MCP tool are
 // forbidden. The synthesist's evidence arrives via WebFetch in the

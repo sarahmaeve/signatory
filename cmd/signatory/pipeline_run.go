@@ -17,11 +17,21 @@ import (
 
 // RunDispatch is one analyst dispatch entry in a RunResult. It
 // carries everything a host LLM needs to spawn an agent: a short
-// description for telemetry, the fully-substituted prompt body, and
-// the allowed-tools string. The host translates allowed_tools into
+// description for telemetry, the fully-substituted prompt body,
+// the allowed-tools string, and the canonical analyst_id the
+// agent must ingest under. The host translates allowed_tools into
 // its native runtime's tool-grant format.
+//
+// AnalystID is the orchestrator's expected value for
+// attribution.analyst_id. It is also inlined into Prompt via the
+// {ANALYST_ID} substitution. Surfaced on the JSON event so:
+//   - host adapters can assert / log without parsing Prompt
+//   - dogfood telemetry can compare expected vs actually-ingested
+//   - re-dispatch flows can re-emphasize the value if the agent
+//     drifted on the first attempt
 type RunDispatch struct {
 	Role         string `json:"role"`
+	AnalystID    string `json:"analyst_id"`
 	Description  string `json:"description"`
 	Prompt       string `json:"prompt"`
 	AllowedTools string `json:"allowed_tools"`
@@ -379,6 +389,7 @@ func (cmd *PipelineRunCmd) resolveWriters() (io.Writer, io.Writer) {
 func dispatchAsRun(role string, p DispatchPrompt) RunDispatch {
 	return RunDispatch{
 		Role:         role,
+		AnalystID:    p.AnalystID,
 		Description:  p.Description,
 		Prompt:       p.Prompt,
 		AllowedTools: p.AllowedTools,

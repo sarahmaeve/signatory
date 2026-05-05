@@ -858,7 +858,7 @@ func TestIngest_ScopedNpmWithPercentEncodedScope_IndexesCanonically(t *testing.T
 	}
 	urlEncoded := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "signatory-provenance",
+			AnalystID: "signatory-provenance-v1",
 			Model:     "claude-test",
 			InvokedAt: "2026-04-21T00:00:00Z",
 		},
