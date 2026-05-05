@@ -274,5 +274,32 @@ func (c *Client) GetAttestation(ctx context.Context, project, version, filename 
 		return nil, fmt.Errorf("decode pypi integrity response for %s/%s/%s: %w",
 			project, version, filename, err)
 	}
+	// Validate publisher identity fields. These are security-load-
+	// bearing: signatory uses Kind+Repository+Workflow to determine
+	// whether a package has trusted CI/CD provenance. Control chars
+	// or invalid UTF-8 in these fields indicate a corrupted or
+	// adversarial response — reject rather than propagate garbage
+	// that might false-match a trust rule.
+	for i, bundle := range attest.Bundles {
+		pub := bundle.Publisher
+		for _, s := range []string{pub.Kind, pub.Repository, pub.Workflow, pub.Environment} {
+			if containsControlChars(s) {
+				return nil, fmt.Errorf("pypi attestation bundle[%d] publisher contains control characters",
+					i)
+			}
+		}
+	}
 	return &attest, nil
+}
+
+// containsControlChars reports whether s includes any ASCII control
+// character (0x00–0x1F) other than horizontal tab (0x09). These never
+// appear in legitimate publisher identities or workflow paths.
+func containsControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\t' {
+			return true
+		}
+	}
+	return false
 }

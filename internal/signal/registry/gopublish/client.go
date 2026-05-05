@@ -363,7 +363,7 @@ func (c *Client) LookupTransparency(ctx context.Context, modulePath, version str
 	// the whole response as malformed.
 	if idx := bytes.IndexByte(body, '\n'); idx > 0 {
 		first := strings.TrimSpace(string(body[:idx]))
-		if n, perr := strconv.ParseInt(first, 10, 64); perr == nil {
+		if n, perr := strconv.ParseInt(first, 10, 64); perr == nil && n >= 0 {
 			rec.LeafID = n
 		}
 	}
