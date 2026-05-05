@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -47,23 +48,41 @@ func (cmd *PipelineVerifyCmd) Run(globals *Globals) error {
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit
 
-	// Load the session — surfaces ErrNotFound as a clear message.
-	sess, err := s.GetAnalysisSession(ctx, cmd.SessionID)
+	result, err := verifyAnalystLanding(ctx, s, cmd.SessionID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, result)
+}
+
+// verifyAnalystLanding computes the landed/missing rollup for an
+// analysis session. Extracted from PipelineVerifyCmd.Run so callers
+// that compose verification with later stages — the orchestrator
+// command in pipeline_run.go — can branch on the structured result
+// instead of parsing the JSON they themselves emitted.
+//
+// Returns a clear "not found" error when the session id is unknown
+// (ErrNotFound is wrapped); other store errors propagate verbatim
+// with context.
+func verifyAnalystLanding(
+	ctx context.Context,
+	s storeReader,
+	sessionID string,
+) (*VerifyResult, error) {
+	sess, err := s.GetAnalysisSession(ctx, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("analysis session %q not found", cmd.SessionID)
+			return nil, fmt.Errorf("analysis session %q not found", sessionID)
 		}
-		return fmt.Errorf("get analysis session: %w", err)
+		return nil, fmt.Errorf("get analysis session: %w", err)
 	}
 
-	// List outputs linked to this session.
-	outputs, err := s.ListOutputsForSession(ctx, cmd.SessionID)
+	outputs, err := s.ListOutputsForSession(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("list outputs for session: %w", err)
+		return nil, fmt.Errorf("list outputs for session: %w", err)
 	}
 
-	// Build the landed set and output_ids map.
-	landedSet := make(map[string]string, len(outputs)) // analyst_id → output_id
+	landedSet := make(map[string]string, len(outputs))
 	for _, o := range outputs {
 		landedSet[o.AnalystID] = o.OutputID
 	}
@@ -88,14 +107,22 @@ func (cmd *PipelineVerifyCmd) Run(globals *Globals) error {
 		status = "missing_analysts"
 	}
 
-	result := &VerifyResult{
+	return &VerifyResult{
 		Status:    status,
 		Expected:  expected,
 		Landed:    landed,
 		Missing:   missing,
 		OutputIDs: outputIDs,
-	}
-	return writeJSON(stdout, result)
+	}, nil
+}
+
+// storeReader is the narrow read surface verifyAnalystLanding needs.
+// Keeping the signature small — instead of taking the full store.Store
+// — documents that this helper is read-only and avoids dragging the
+// write surface into callers' test mocks.
+type storeReader interface {
+	GetAnalysisSession(ctx context.Context, id string) (*profile.AnalysisSession, error)
+	ListOutputsForSession(ctx context.Context, sessionID string) ([]store.AnalystOutputSummary, error)
 }
 
 func (cmd *PipelineVerifyCmd) resolveWriters() (io.Writer, io.Writer) {

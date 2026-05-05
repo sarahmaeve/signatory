@@ -13,20 +13,21 @@ allowed-tools: Bash Read Write Glob Grep Agent WebFetch
 
 # Analyze — signatory trust analysis pipeline
 
-This skill orchestrates signatory's full analysis pipeline:
+This skill is a thin host adapter around `signatory pipeline run`,
+the deterministic orchestrator that lives in Go. The Go state
+machine drives every transition; this skill's job is to read the
+JSON events the orchestrator emits, dispatch the agents it requests
+via `Agent()`, and exec the `next_command` it returns when the
+agents have ingested their output.
 
 ```
-check store → prepare (sessions + handoffs + signals) →
-dispatch analysts → verify landing → synthesist handoff →
-dispatch synthesist → close pipeline
+check store → pipeline run "$TARGET" → dispatch analyst agents →
+pipeline run --resume <sid> → dispatch synthesist →
+pipeline close <sid> → present proposal → pipeline close <sid> --yes
 ```
 
 The target is specified as $ARGUMENTS — a GitHub/GitLab URL, package
 coordinate (Go module, npm, PyPI, crates.io), or owner/repo shorthand.
-
-This skill is NOT a monolithic analyst. It is an **orchestrator** that
-dispatches specialist agents and synthesizes their output. The
-specialists do the collection work; this skill manages the pipeline.
 
 ## Step 0 — Check the signatory store
 
@@ -61,126 +62,89 @@ echo "exit: $?"
   argument, not `--target`), missing `~/.signatory/signatory.db`
   (run `signatory init` first), or a corrupted database file.
 
-## Step 1 — Prepare the pipeline
+## Step 1 — Start the pipeline
 
-A single command replaces the multi-step setup (certs preflight,
-serve start, session create, analysis begin, handoff render + deposit,
-git clone, and Layer-1 signal refresh). It returns a JSON manifest
-with every variable the downstream steps need — the orchestrating
-LLM never threads shell variables or parses stdout.
+Make sure the pipeline service is running, then ask the orchestrator
+to start a new analysis. The Go side composes everything that
+doesn't require LLM judgment — certs preflight, session creation,
+handoff render+deposit, signal refresh, dispatch-prompt rendering —
+and emits one JSON event describing what the host (this skill) needs
+to do next.
 
 ```bash
 signatory serve status >/dev/null 2>&1 || signatory serve start
 
-MANIFEST=$(signatory pipeline prepare "$TARGET" \
-  --expected-analyst signatory-security-v1 \
-  --expected-analyst signatory-provenance-v1 \
-  --expected-analyst signatory-synthesis-v1)
-echo "$MANIFEST"
+START=$(signatory pipeline run "$TARGET")
+echo "$START"
 ```
 
-The `prepare` command:
-1. Preflight checks TLS certs (mkcert CA via NODE_EXTRA_CA_CERTS)
-2. Resolves the target (URL → canonical URI, short name, clone URL)
-3. Creates a pipeline session (transport layer)
-4. Creates an analysis session (audit identity in the store)
-5. Renders + deposits security and provenance handoffs
-6. Clones the target repo
-7. Refreshes Layer-1 signals against the clone
+The result is a JSON object. Parse the `phase` field:
 
-All outputs are in the JSON manifest:
+- **`"analysts_dispatch_required"`** — proceed to Step 2.
+- Anything else (or a non-zero exit) — read the error output, report
+  to the user, stop. The orchestrator's stderr carries step-by-step
+  diagnostics; common causes are TLS misconfiguration (run
+  `signatory certs init --write-profile`) and an unresolvable target.
+
+The relevant fields in the start-phase event:
 
 | Field                 | Use                                          |
 |-----------------------|----------------------------------------------|
-| `session_id`          | Pipeline transport session (for WebFetch URLs)|
-| `analysis_session_id` | Analysis audit identity (for ingest + verify) |
-| `target`              | Original target URI (unresolved)              |
-| `target_name`         | Short name (basename) of the target           |
-| `clone_path`          | Path to the local clone                       |
-| `handoffs_deposited`  | Which roles' handoffs were deposited          |
-| `signals_refreshed`   | Whether Layer-1 signals were refreshed        |
-| `status`              | `"ready"` if everything succeeded             |
-
-If `prepare` fails, its stderr carries step-by-step diagnostics.
-**Do not proceed if status is not `"ready"`.**
-
-Extract the variables you need from the manifest. Every `$VARIABLE`
-reference in subsequent steps comes from this JSON — no manual
-derivation, no `basename`, no second Bash call to parse output.
+| `phase`               | Always `"analysts_dispatch_required"` here    |
+| `analysis_session_id` | Threaded into `next_command` for resume       |
+| `dispatches[]`        | Two entries: `security` and `provenance`      |
+| `next_command`        | Argv to run after both analysts have ingested |
+| `instructions`        | Human-readable guidance (echo to user if useful) |
 
 ## Step 2 — Dispatch analyst agents IN PARALLEL
 
-Render the dispatch prompts deterministically:
+Each entry in `dispatches[]` carries the three fields `Agent()`
+needs. Iterate the array and dispatch all entries in **one message**
+so they run concurrently:
+
+For each `d` in `dispatches[]`, call `Agent()` with:
+- `description`: `d.description`
+- `prompt`: `d.prompt` (already fully substituted by the orchestrator)
+- `subagent_type`: `general-purpose`
+- `allowed_tools`: split `d.allowed_tools` on whitespace
+
+Wait for ALL agents in this batch to complete before proceeding.
+
+## Step 3 — Resume the pipeline
+
+Run the orchestrator's `next_command` from Step 1. It verifies
+analyst landing, renders + deposits the synthesis handoff, and
+emits the synthesist dispatch prompt — all deterministically.
 
 ```bash
-DISPATCH=$(signatory pipeline dispatch-prompts \
-  --session-id "$SESSION_ID" \
-  --analysis-session-id "$ANALYSIS_SID" \
-  --target "$TARGET" \
-  --target-name "$TARGET_NAME" \
-  --clone-path "$CLONE_PATH")
-echo "$DISPATCH"
+RESUME=$(signatory pipeline run --resume "$ANALYSIS_SID")
+echo "$RESUME"
 ```
 
-The result is a JSON object with a `prompts` map. Each entry
-(`security`, `provenance`, `synthesist`) contains:
-- `description`: one-line agent description
-- `prompt`: the fully-rendered prompt body (all placeholders substituted)
-- `allowed_tools`: space-separated tool names for the agent
+Parse the `phase` field:
 
-Dispatch the `security` and `provenance` agents in ONE message so
-they run concurrently. For each, call Agent() with the `description`,
-`prompt`, and `allowed_tools` from the JSON.
+- **`"missing_analysts"`** — one or more analysts didn't ingest. The
+  `missing` array names which roles. Re-dispatch the named role(s)
+  with explicit guidance to call `signatory_ingest_analysis` (with
+  `source`, `collected_from`, and `analysis_session_id` all set),
+  then re-run `signatory pipeline run --resume "$ANALYSIS_SID"`.
 
-**Save the `synthesist` entry for Step 4.** Do not dispatch it yet —
-the synthesist's handoff (which it retrieves via WebFetch) can only
-be generated after both analysts have landed their output.
+- **`"synthesist_dispatch_required"`** — both analysts landed; the
+  synthesis handoff has been deposited. Proceed to Step 4. The
+  `dispatches[]` array contains a single entry for the synthesist;
+  `next_command` points at `pipeline close`.
 
-Wait for BOTH agents to complete before proceeding.
+## Step 4 — Dispatch the synthesist
 
-## Step 3 — Verify both analysts landed their output
-
-```bash
-VERIFY=$(signatory pipeline verify "$ANALYSIS_SID")
-echo "$VERIFY"
-```
-
-Parse the JSON result:
-
-- `status: "ready_for_synthesis"` — both analysts landed. Proceed to
-  Step 4.
-- `status: "missing_analysts"` — the `missing` array names which
-  analyst(s) didn't land output. Re-dispatch the missing role with
-  explicit guidance to call signatory_ingest_analysis with `source`,
-  `collected_from`, and `analysis_session_id` all set.
-
-The `output_ids` map provides the output UUID for each landed analyst,
-useful for diagnostics if needed.
-
-## Step 4 — Synthesist handoff + dispatch
-
-Generate the synthesis handoff and deposit it. The handoff body
-carries the full structured evidence — every analyst conclusion,
-positive absence, and observation — so the synthesist's entire input
-arrives via WebFetch.
-
-```bash
-signatory handoff synthesist "$TARGET" \
-  --analysis-session-id "$ANALYSIS_SID" \
-  --deposit-to "$SESSION_ID"
-```
-
-If the handoff fails with "no entity matches" or "no non-synthesis
-analyses to synthesize," the analysts from Step 2 didn't land output
-in the store. Check Step 3's verify result.
-
-Dispatch the synthesist using the `synthesist` entry from Step 2's
-dispatch-prompts JSON. Same Agent() pattern: use the `description`,
-`prompt`, and `allowed_tools` from the JSON.
+Same pattern as Step 2, but with the single synthesist entry from
+`dispatches[]`. Wait for it to complete (it calls
+`signatory_ingest_analysis` to land its synthesis output) before
+proceeding.
 
 ## Step 5 — Close the pipeline
 
-First, retrieve the synthesis proposal (dry run):
+Run the orchestrator's `next_command` from Step 3 to retrieve the
+synthesis proposal:
 
 ```bash
 CLOSE=$(signatory pipeline close "$ANALYSIS_SID")
@@ -192,7 +156,7 @@ Parse the JSON:
 - `status: "proposal"` — synthesis landed. Present the `proposed_tier`
   to the user and ask for confirmation.
 - Error — no synthesis output found in the session. The synthesist
-  either failed silently or didn't call signatory_ingest_analysis.
+  either failed silently or didn't call `signatory_ingest_analysis`.
 
 When the user approves:
 
@@ -224,29 +188,31 @@ non-dependency targets. Use `signatory analysis end "$ANALYSIS_SID"
   Re-collecting signals from GitHub's API is slow, rate-limited, and
   redundant if the data exists.
 
-- **Do not merge the two analysts into one agent.** The dual-analyst
-  pattern exists because security and provenance require different
-  focus areas, different methodologies, and different blind spots.
-  Merging them produces a generalist that's weaker at both.
+- **Do not invent your own orchestration.** `signatory pipeline run`
+  is the orchestrator. This skill's job is to dispatch agents and
+  exec the `next_command` the orchestrator returns. If you find
+  yourself reaching for `signatory handoff`, `signatory pipeline
+  prepare`, `signatory pipeline dispatch-prompts`, or `signatory
+  pipeline verify` directly, stop — those are the building blocks
+  `pipeline run` already composes.
 
-- **Trust the ingest-tool validator.** signatory_ingest_analysis
+- **The dispatches array IS the agent parameters.** Don't hardcode
+  prompts, descriptions, or allowed-tools. Read them from the JSON
+  event verbatim. Drift between this skill and the templates is
+  exactly what the orchestrator is designed to prevent.
+
+- **Do not merge the two analysts into one agent.** The orchestrator
+  emits two dispatches because security and provenance require
+  different focus areas, methodologies, and blind spots. Merging
+  them produces a generalist that's weaker at both.
+
+- **Trust the ingest-tool validator.** `signatory_ingest_analysis`
   runs the v1 schema validator before writing; an invalid payload
-  returns CodeSchemaViolation naming the offending field. Agents
+  returns `CodeSchemaViolation` naming the offending field. Agents
   should fix the JSON and retry in the same turn rather than
   dropping fields or writing markdown to a file.
 
 - **Do not skip synthesis.** Raw conclusions without synthesis are
-  data without interpretation. The synthesis is what makes the
+  data without interpretation. The synthesist is what makes the
   pipeline useful — it's the step where an LLM adds the value that
   a database query cannot.
-
-- **The handoff IS the instructions.** Do not invent your own
-  analyst instructions. `signatory handoff` generates role-specific
-  prompts from templates that encode signatory's trust model. Those
-  templates are the single source of truth for what each analyst
-  should do.
-
-- **The dispatch prompts ARE the agent parameters.** Do not hardcode
-  agent prompts, descriptions, or allowed-tools in this skill.
-  `signatory pipeline dispatch-prompts` renders them from versioned
-  templates. Use the JSON output verbatim.

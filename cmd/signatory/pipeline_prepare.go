@@ -68,7 +68,25 @@ type PipelinePrepareCmd struct {
 }
 
 func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
-	stdout, stderr := cmd.resolveWriters()
+	stdout, _ := cmd.resolveWriters()
+	manifest, err := cmd.prepare(globals)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, manifest)
+}
+
+// prepare runs the full preparation pipeline (certs preflight,
+// session creation, handoff render+deposit, signal refresh) and
+// returns the resulting manifest. Extracted from Run so callers
+// that compose this stage with later stages — pipeline_run.go's
+// PipelineRunCmd — can consume the manifest as a struct without
+// parsing JSON they themselves emitted.
+//
+// Stdout is reserved for Run's JSON write; this helper only
+// touches stderr (informational lines).
+func (cmd *PipelinePrepareCmd) prepare(globals *Globals) (*PrepareManifest, error) {
+	_, stderr := cmd.resolveWriters()
 	ctx := globals.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -82,16 +100,16 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 	cr := checker()
 	if !cr.OK {
 		if cr.Fix != "" {
-			return fmt.Errorf("certs preflight: %s\nfix: %s", cr.Message, cr.Fix)
+			return nil, fmt.Errorf("certs preflight: %s\nfix: %s", cr.Message, cr.Fix)
 		}
-		return fmt.Errorf("certs preflight: %s", cr.Message)
+		return nil, fmt.Errorf("certs preflight: %s", cr.Message)
 	}
 	fmt.Fprintln(stderr, "# certs: OK")
 
 	// ── Step 2: Resolve target ──────────────────────────────────
 	resolved, err := profile.ResolveTarget(cmd.Target)
 	if err != nil {
-		return fmt.Errorf("resolve target %q: %w", cmd.Target, err)
+		return nil, fmt.Errorf("resolve target %q: %w", cmd.Target, err)
 	}
 	targetName := resolved.ShortName
 	targetURL := resolved.CloneURL
@@ -102,11 +120,11 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 	// ── Step 3: Create pipeline session ─────────────────────────
 	pipelineClient, err := pipeline.NewClient(cmd.PipelineURL)
 	if err != nil {
-		return fmt.Errorf("open pipeline client: %w", err)
+		return nil, fmt.Errorf("open pipeline client: %w", err)
 	}
 	sess, err := pipelineClient.CreateSession(ctx, cmd.Target, "")
 	if err != nil {
-		return fmt.Errorf("pipeline session create: %w", err)
+		return nil, fmt.Errorf("pipeline session create: %w", err)
 	}
 	sessionID := sess.ID
 	fmt.Fprintf(stderr, "# pipeline session: %s\n", sessionID)
@@ -114,18 +132,18 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 	// ── Step 4: Create analysis session ─────────────────────────
 	s, err := globals.OpenStore(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit
 
 	entity, err := ensureEntity(ctx, s, cmd.Target)
 	if err != nil {
-		return fmt.Errorf("resolve target entity %q: %w", cmd.Target, err)
+		return nil, fmt.Errorf("resolve target entity %q: %w", cmd.Target, err)
 	}
 
 	actor, err := identity.Current()
 	if err != nil {
-		return fmt.Errorf("resolve team identity: %w", err)
+		return nil, fmt.Errorf("resolve team identity: %w", err)
 	}
 
 	analysisSess := &profile.AnalysisSession{
@@ -139,7 +157,7 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 		Status:            profile.AnalysisSessionInProgress,
 	}
 	if err := s.CreateAnalysisSession(ctx, analysisSess); err != nil {
-		return fmt.Errorf("create analysis session: %w", err)
+		return nil, fmt.Errorf("create analysis session: %w", err)
 	}
 	analysisSessionID := analysisSess.ID
 	fmt.Fprintf(stderr, "# analysis session: %s\n", analysisSessionID)
@@ -159,7 +177,7 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 		EcosystemRegistry: cmd.EcosystemRegistry,
 	}
 	if err := securityHandoff.Run(globals); err != nil {
-		return fmt.Errorf("security handoff: %w", err)
+		return nil, fmt.Errorf("security handoff: %w", err)
 	}
 	clonePath := securityHandoff.Path
 	fmt.Fprintf(stderr, "# security handoff: deposited, clone at %s\n", clonePath)
@@ -178,7 +196,7 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 		EcosystemRegistry: cmd.EcosystemRegistry,
 	}
 	if err := provenanceHandoff.Run(globals); err != nil {
-		return fmt.Errorf("provenance handoff: %w", err)
+		return nil, fmt.Errorf("provenance handoff: %w", err)
 	}
 	fmt.Fprintln(stderr, "# provenance handoff: deposited")
 
@@ -193,14 +211,14 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 			Stderr:  stderr,
 		}
 		if err := analyzeCmd.Run(globals); err != nil {
-			return fmt.Errorf("signal refresh: %w", err)
+			return nil, fmt.Errorf("signal refresh: %w", err)
 		}
 		signalsRefreshed = true
 		fmt.Fprintln(stderr, "# signals: refreshed")
 	}
 
-	// ── Step 8: Return JSON manifest ────────────────────────────
-	manifest := &PrepareManifest{
+	// ── Step 8: Build the manifest ──────────────────────────────
+	return &PrepareManifest{
 		SessionID:         sessionID,
 		AnalysisSessionID: analysisSessionID,
 		Target:            cmd.Target,
@@ -210,8 +228,7 @@ func (cmd *PipelinePrepareCmd) Run(globals *Globals) error {
 		HandoffsDeposited: []string{"security", "provenance"},
 		SignalsRefreshed:  signalsRefreshed,
 		Status:            "ready",
-	}
-	return writeJSON(stdout, manifest)
+	}, nil
 }
 
 func (cmd *PipelinePrepareCmd) resolveWriters() (io.Writer, io.Writer) {

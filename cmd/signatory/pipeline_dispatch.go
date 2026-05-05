@@ -88,24 +88,57 @@ func (cmd *PipelineDispatchPromptsCmd) Run(_ *Globals) error {
 		"CLONE_PATH":   cmd.ClonePath,
 	}
 
-	prompts := make(map[string]DispatchPrompt, len(dispatchRoles))
-	for role, dr := range dispatchRoles {
+	roles := make([]string, 0, len(dispatchRoles))
+	for role := range dispatchRoles {
+		roles = append(roles, role)
+	}
+
+	prompts, err := renderDispatchPromptsFor(roles, cmd.TargetName, subs, templateFS)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, &DispatchPromptsResult{Prompts: prompts})
+}
+
+// renderDispatchPromptsFor loads the dispatch templates for the
+// requested roles, substitutes placeholders, and returns the
+// rendered prompt map. Callers that compose this stage (the
+// orchestrator command in pipeline_run.go) request only the
+// roles they need at the current pipeline phase: security +
+// provenance during start, synthesist during resume.
+//
+// templateFS defaults to signatory.EmbeddedTemplates at the call
+// site; this helper takes whatever the caller passed so tests can
+// inject fstest.MapFS.
+//
+// Returns a clear "unknown role" error if a caller asks for a
+// role that isn't in dispatchRoles — guards against typos in the
+// roles slice surfacing as a confusing template-not-found error.
+func renderDispatchPromptsFor(
+	roles []string,
+	targetName string,
+	subs map[string]string,
+	templateFS fs.FS,
+) (map[string]DispatchPrompt, error) {
+	out := make(map[string]DispatchPrompt, len(roles))
+	for _, role := range roles {
+		dr, ok := dispatchRoles[role]
+		if !ok {
+			return nil, fmt.Errorf("unknown dispatch role %q", role)
+		}
 		raw, err := fs.ReadFile(templateFS, dr.templatePath)
 		if err != nil {
-			return fmt.Errorf("load dispatch template %s: %w", dr.templatePath, err)
+			return nil, fmt.Errorf("load dispatch template %s: %w", dr.templatePath, err)
 		}
-
 		rendered, _ := config.RenderTemplate(raw, subs)
 		body := strings.TrimSpace(string(rendered))
-
-		prompts[role] = DispatchPrompt{
-			Description:  descriptionForRole(role, cmd.TargetName),
+		out[role] = DispatchPrompt{
+			Description:  descriptionForRole(role, targetName),
 			Prompt:       body,
 			AllowedTools: dr.allowedTools,
 		}
 	}
-
-	return writeJSON(stdout, &DispatchPromptsResult{Prompts: prompts})
+	return out, nil
 }
 
 func (cmd *PipelineDispatchPromptsCmd) resolveWriter() io.Writer {
