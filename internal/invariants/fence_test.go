@@ -64,9 +64,19 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 }
 
 // analystAgentRoles enumerates the reasoning-agent roles that must
-// be denied Bash, Write, and MCP judgment-read tools in
-// .claude/skills/analyze/SKILL.md.
+// be denied Bash, Write, and MCP judgment-read tools.
 var analystAgentRoles = []string{"signatory-security", "signatory-provenance"}
+
+// dispatchRoleMap maps fence agent-role IDs (signatory-<function>)
+// to dispatch role names in pipeline_dispatch.go. After the
+// deterministic-orchestration rewrite, pipeline_dispatch.go is the
+// single source of truth for allowed tools — SKILL.md no longer
+// carries inline Agent() blocks.
+var dispatchRoleMap = map[string]string{
+	"signatory-security":   "security",
+	"signatory-provenance": "provenance",
+	"signatory-synthesis":  "synthesist",
+}
 
 // provenanceAllowedCacheTools are read-side MCP tools the provenance
 // analyst IS allowed to call. These return cached Layer-1 mechanical
@@ -130,28 +140,34 @@ var forbiddenAnalystTools = []string{
 }
 
 // TestAnalystAgents_AllowedToolsMinimized reads
-// .claude/skills/analyze/SKILL.md and asserts every analyst Agent
-// block's allowed-tools line excludes the forbidden set. Makes the
+// cmd/signatory/pipeline_dispatch.go and asserts every dispatch
+// role's allowedTools string excludes the forbidden set. Makes the
 // independence rule enforceable by CI rather than by prose
 // compliance alone.
 //
-// The regex captures everything from the Agent(<role>) declaration
-// to its first subsequent allowed-tools: line — non-greedy so
-// multi-agent blocks don't smear into each other.
+// After the deterministic-orchestration rewrite, the dispatch roles
+// map in pipeline_dispatch.go is the single source of truth for
+// agent tool grants. The authoritative same-package fence lives in
+// cmd/signatory/pipeline_dispatch_test.go (TestDispatchRoles_-
+// AllowedToolsFence); this test is the independent cross-package
+// check that catches drift even if someone bypasses the cmd tests.
 func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 	root := findModuleRoot(t)
-	skillPath := filepath.Join(root, ".claude", "skills", "analyze", "SKILL.md")
-	data, err := os.ReadFile(skillPath) //nolint:gosec // G304: path is under module root, build-time fixture
-	require.NoError(t, err, "SKILL.md not found at %s", skillPath)
+	dispatchPath := filepath.Join(root, "cmd", "signatory", "pipeline_dispatch.go")
+	data, err := os.ReadFile(dispatchPath) //nolint:gosec // G304: path is under module root, build-time fixture
+	require.NoError(t, err, "pipeline_dispatch.go not found at %s", dispatchPath)
 	text := string(data)
 
 	for _, role := range analystAgentRoles {
 		t.Run(role, func(t *testing.T) {
+			dname, ok := dispatchRoleMap[role]
+			require.True(t, ok, "no dispatch mapping for role %q", role)
+
 			re := regexp.MustCompile(
-				`(?s)Agent\(` + regexp.QuoteMeta(role) + `\).*?allowed-tools:\s*([^\n]+)`)
+				`(?s)"` + regexp.QuoteMeta(dname) + `":\s*\{[^}]*allowedTools:\s*"([^"]+)"`)
 			matches := re.FindAllStringSubmatch(text, -1)
 			require.NotEmpty(t, matches,
-				"no Agent(%s) block with allowed-tools: found in SKILL.md", role)
+				"no dispatch role %q with allowedTools found in pipeline_dispatch.go", dname)
 
 			for i, match := range matches {
 				toolsLine := match[1]
@@ -163,15 +179,11 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 					if role == "signatory-provenance" && isAllowedCacheTool(forbidden) {
 						continue
 					}
-					// Word-boundary guard: "Write" must not match as a
-					// substring of "WriteToolName" if such a thing
-					// existed. Build the pattern fresh per forbidden
-					// token so edge cases are obvious.
 					b := regexp.MustCompile(`\b` + regexp.QuoteMeta(forbidden) + `\b`)
 					assert.False(t, b.MatchString(toolsLine),
-						"Agent(%s) block #%d: allowed-tools must not grant %q "+
+						"dispatch role %q block #%d: allowedTools must not grant %q "+
 							"(independence rule / data minimization). "+
-							"Line: %s", role, i, forbidden, toolsLine)
+							"Line: %s", dname, i, forbidden, toolsLine)
 				}
 			}
 		})
@@ -188,25 +200,28 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 // than tool capability. See design/open-architecture-question.md.
 func TestSynthesistAgent_AllowedToolsMinimized(t *testing.T) {
 	root := findModuleRoot(t)
-	skillPath := filepath.Join(root, ".claude", "skills", "analyze", "SKILL.md")
-	data, err := os.ReadFile(skillPath) //nolint:gosec // G304: path is under module root, build-time fixture
-	require.NoError(t, err, "SKILL.md not found at %s", skillPath)
+	dispatchPath := filepath.Join(root, "cmd", "signatory", "pipeline_dispatch.go")
+	data, err := os.ReadFile(dispatchPath) //nolint:gosec // G304: path is under module root, build-time fixture
+	require.NoError(t, err, "pipeline_dispatch.go not found at %s", dispatchPath)
 	text := string(data)
 
+	dname, ok := dispatchRoleMap[synthesistAgentRole]
+	require.True(t, ok, "no dispatch mapping for role %q", synthesistAgentRole)
+
 	re := regexp.MustCompile(
-		`(?s)Agent\(` + regexp.QuoteMeta(synthesistAgentRole) + `\).*?allowed-tools:\s*([^\n]+)`)
+		`(?s)"` + regexp.QuoteMeta(dname) + `":\s*\{[^}]*allowedTools:\s*"([^"]+)"`)
 	matches := re.FindAllStringSubmatch(text, -1)
 	require.NotEmpty(t, matches,
-		"no Agent(%s) block with allowed-tools: found in SKILL.md", synthesistAgentRole)
+		"no dispatch role %q with allowedTools found in pipeline_dispatch.go", dname)
 
 	for i, match := range matches {
 		toolsLine := match[1]
 		for _, forbidden := range forbiddenSynthesistTools {
 			b := regexp.MustCompile(`\b` + regexp.QuoteMeta(forbidden) + `\b`)
 			assert.False(t, b.MatchString(toolsLine),
-				"Agent(synthesist) block #%d: allowed-tools must not grant %q "+
+				"dispatch role %q block #%d: allowedTools must not grant %q "+
 					"(synthesist fence / inputs-are-the-handoff-body). "+
-					"Line: %s", i, forbidden, toolsLine)
+					"Line: %s", dname, i, forbidden, toolsLine)
 		}
 	}
 }

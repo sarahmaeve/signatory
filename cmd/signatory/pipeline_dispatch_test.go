@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -234,6 +235,53 @@ func TestPipelineDispatchPrompts_CustomTemplate(t *testing.T) {
 		result.Prompts["provenance"].Prompt)
 	assert.Equal(t, "Custom synthesist prompt with 11111111-2222-3333-4444-555555555555",
 		result.Prompts["synthesist"].Prompt)
+}
+
+// TestDispatchRoles_AllowedToolsFence enforces the independence rule
+// directly against the dispatchRoles Go map — the single source of
+// truth for agent tool grants after the deterministic-orchestration
+// rewrite. This is the authoritative fence; the invariants package
+// provides a secondary text-parsing check from outside the package.
+//
+// Forbidden tools: Bash, Write, and every signatory_* MCP read tool.
+// Exception: provenance may use cache-read tools (signals, summary,
+// detail) because they return cached Layer-1 mechanical data, not
+// prior analyst judgment.
+func TestDispatchRoles_AllowedToolsFence(t *testing.T) {
+	t.Parallel()
+
+	forbiddenTools := []string{
+		"Bash",
+		"Write",
+		"mcp__signatory__signatory_analyze",
+		"mcp__signatory__signatory_detail",
+		"mcp__signatory__signatory_show_analyses",
+		"mcp__signatory__signatory_show_conclusions",
+		"mcp__signatory__signatory_show_methodology",
+		"mcp__signatory__signatory_signals",
+		"mcp__signatory__signatory_summary",
+		"mcp__signatory__signatory_survey",
+	}
+
+	provenanceAllowedCache := []string{
+		"mcp__signatory__signatory_signals",
+		"mcp__signatory__signatory_summary",
+		"mcp__signatory__signatory_detail",
+	}
+
+	for role, dr := range dispatchRoles {
+		t.Run(role, func(t *testing.T) {
+			tools := strings.Fields(dr.allowedTools)
+			for _, forbidden := range forbiddenTools {
+				if role == "provenance" && slices.Contains(provenanceAllowedCache, forbidden) {
+					continue
+				}
+				assert.NotContains(t, tools, forbidden,
+					"dispatch role %q: must not grant %q "+
+						"(independence rule / data minimization)", role, forbidden)
+			}
+		})
+	}
 }
 
 // TestPipelineDispatchPrompts_EmbeddedFSHasAllTemplates is a
