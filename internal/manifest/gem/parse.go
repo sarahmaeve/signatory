@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -329,10 +330,14 @@ func parseLockfileEdges(content string) []manifest.Edge {
 			depName := parseDepNameFromConstraint(strings.TrimSpace(line[6:]))
 			if depName != "" {
 				childURI := profile.CanonicalPackageURI("gem", depName)
-				edges = append(edges, manifest.Edge{
-					Parent: currentParent,
-					Child:  childURI,
-				})
+				// Skip self-edges: a gem depending on itself is
+				// nonsensical and indicates a malformed lockfile.
+				if childURI != currentParent {
+					edges = append(edges, manifest.Edge{
+						Parent: currentParent,
+						Child:  childURI,
+					})
+				}
 			}
 		}
 	}
@@ -344,6 +349,9 @@ func parseLockfileEdges(content string) []manifest.Edge {
 // "actionpack (7.1.3)" and returns the name and version.
 func parseSpecLine(s string) (name, version string) {
 	s = strings.TrimSpace(s)
+	if !utf8.ValidString(s) {
+		return "", ""
+	}
 	before, after, ok := strings.Cut(s, "(")
 	if !ok {
 		// No version — just a name (unusual but handle gracefully).
@@ -359,6 +367,9 @@ func parseSpecLine(s string) (name, version string) {
 // parseDependencyLine extracts the gem name from a DEPENDENCIES line.
 // Lines look like: "rails (~> 7.1)" or "devise!" or "mongoid (~> 9.0)!"
 func parseDependencyLine(s string) string {
+	if !utf8.ValidString(s) {
+		return ""
+	}
 	// Strip trailing ! (marks non-gem source).
 	s = strings.TrimSuffix(s, "!")
 
@@ -373,6 +384,9 @@ func parseDependencyLine(s string) string {
 // parseDepNameFromConstraint extracts just the gem name from a
 // sub-dependency line like "actionpack (= 7.1.3)" or "nio4r (~> 2.0)".
 func parseDepNameFromConstraint(s string) string {
+	if !utf8.ValidString(s) {
+		return ""
+	}
 	if idx := strings.IndexByte(s, '('); idx > 0 {
 		return strings.TrimSpace(s[:idx])
 	}

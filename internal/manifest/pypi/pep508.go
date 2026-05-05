@@ -3,6 +3,7 @@ package pypi
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sarahmaeve/signatory/internal/manifest"
 )
@@ -54,6 +55,14 @@ import (
 //   - pip-flavored URL/VCS prefix: "git+https://...",
 //     "https://example.com/foo-1.0.whl", "file:///tmp/local-pkg"
 func parsePEP508Requirement(spec string) (manifest.Dep, bool) {
+	// Reject invalid UTF-8 early. Requirements come from files on
+	// disk that could be binary garbage or maliciously encoded.
+	// Passing invalid bytes through would stamp bad URIs into the
+	// store.
+	if !utf8.ValidString(spec) {
+		return manifest.Dep{}, false
+	}
+
 	// Strip env marker: everything from the first ';' onward.
 	// Markers can contain spaces and quoted values that confuse
 	// the whitespace tokenization below; remove first.
@@ -93,6 +102,12 @@ func parsePEP508Requirement(spec string) (manifest.Dep, bool) {
 	// Standard form: <name>[<extras>][<version_specifiers>]
 	name, version := splitNameAndVersion(first)
 	canonicalName := stripExtras(name)
+
+	// An empty canonical name means the spec was something like "!"
+	// or "==" — operator chars with no actual package name. Reject.
+	if canonicalName == "" {
+		return manifest.Dep{}, false
+	}
 
 	dep := manifest.Dep{
 		Name:      name,
@@ -155,6 +170,9 @@ func stripExtras(name string) string {
 // name comparisons. Both call sites need the same transform —
 // PEP 735 explicitly cites the same rule.
 func pep503Normalize(name string) string {
+	if !utf8.ValidString(name) {
+		return ""
+	}
 	name = strings.ToLower(name)
 	var sb strings.Builder
 	sb.Grow(len(name))
