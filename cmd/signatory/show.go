@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
@@ -18,10 +19,19 @@ import (
 //
 // Use case: "have we seen this target before?" — pass the target
 // URL or canonical URI and see what's been ingested.
+// ShowAnalysesResult is the JSON contract for `signatory show-analyses --json`.
+type ShowAnalysesResult struct {
+	Status   string                       `json:"status"`
+	Analyses []store.AnalystOutputSummary `json:"analyses"`
+}
+
 type ShowAnalysesCmd struct {
 	Target  string `arg:"" optional:"" help:"Optional target URI (canonical or URL form). When set, lists only outputs for that entity."`
 	Analyst string `help:"Filter by analyst_id (e.g. signatory-security-v1, signatory-provenance-v1, signatory-synthesis-v1)."`
 	Limit   int    `help:"Maximum number of rows to return. 0 = no limit." default:"0"`
+	JSON    bool   `help:"Emit structured JSON instead of prose."`
+
+	Stdout io.Writer `kong:"-"`
 }
 
 func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
@@ -79,11 +89,16 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		AnalystID: cmd.Analyst,
 		Limit:     cmd.Limit,
 	}
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
 	rows, err := s.ListAnalystOutputs(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
-		// Target didn't resolve to any known entity — distinct from
-		// "entity exists but has no outputs." Callers benefit from
-		// seeing the distinction; the store now signals it explicitly.
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowAnalysesResult{Status: "no_entity"})
+		}
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil
 	}
@@ -91,6 +106,9 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		return err
 	}
 	if len(rows) == 0 {
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowAnalysesResult{Status: "empty"})
+		}
 		if cmd.Target != "" {
 			fmt.Printf("No analyses for %s\n", cmd.Target)
 		} else {
@@ -98,6 +116,14 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		}
 		return nil
 	}
+
+	if cmd.JSON {
+		return writeJSON(stdout, &ShowAnalysesResult{
+			Status:   "ok",
+			Analyses: rows,
+		})
+	}
+
 	for _, r := range rows {
 		fmt.Printf("%s  %s  round=%d  ingested=%s\n",
 			r.OutputID[:8], r.AnalystID, r.Round, r.IngestedAt)
@@ -135,6 +161,12 @@ func renderShowAnalysesBurnBanner(burn *profile.Burn, ctx *store.EffectiveBurnCo
 	}))
 }
 
+// ShowConclusionsResult is the JSON contract for `signatory show-conclusions --json`.
+type ShowConclusionsResult struct {
+	Status      string                    `json:"status"`
+	Conclusions []store.ConclusionSummary `json:"conclusions"`
+}
+
 // ShowConclusionsCmd queries the conclusions table across analyst outputs.
 // Filtering by severity, signal_type, target, analyst is supported;
 // rationale is omitted from the listing output to keep it scannable.
@@ -145,6 +177,9 @@ type ShowConclusionsCmd struct {
 	Severity     []string `help:"Filter by one or more severity values: critical, high, medium, low, informational, positive."`
 	DesignIntent bool     `help:"Limit to conclusions flagged design_intent: true."`
 	Limit        int      `help:"Maximum number of rows to return. 0 = no limit." default:"0"`
+	JSON         bool     `help:"Emit structured JSON instead of prose."`
+
+	Stdout io.Writer `kong:"-"`
 }
 
 func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
@@ -170,8 +205,16 @@ func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
 		DesignIntentOnly: cmd.DesignIntent,
 		Limit:            cmd.Limit,
 	}
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
 	rows, err := s.ListConclusions(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowConclusionsResult{Status: "no_entity"})
+		}
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil
 	}
@@ -179,9 +222,20 @@ func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
 		return err
 	}
 	if len(rows) == 0 {
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowConclusionsResult{Status: "empty"})
+		}
 		fmt.Println("No conclusions match the filter")
 		return nil
 	}
+
+	if cmd.JSON {
+		return writeJSON(stdout, &ShowConclusionsResult{
+			Status:      "ok",
+			Conclusions: rows,
+		})
+	}
+
 	for _, f := range rows {
 		flags := ""
 		if f.DesignIntent {

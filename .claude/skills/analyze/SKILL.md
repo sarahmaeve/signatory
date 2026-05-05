@@ -289,7 +289,7 @@ Agent(signatory-security):
     canonical URI as analyst_output.target the MCP tool treats this
     as a no-op; otherwise it indexes the analysis under the caller's
     identity (agent-facing-contract §3.2).
-  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_signals mcp__signatory__signatory_summary mcp__signatory__signatory_detail mcp__signatory__signatory_ingest_analysis
+  allowed-tools: Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis
 
 Agent(signatory-provenance):
   prompt: |

@@ -282,15 +282,37 @@ func (cmd *ServeStopCmd) Run(_ *Globals) error {
 // test harness as every other subcommand — pre-fix, mid-function
 // os.Exit calls killed the test binary before assertions could
 // run.
+// ServeStatusResult is the JSON contract for `signatory serve status --json`.
+type ServeStatusResult struct {
+	Running     bool   `json:"running"`
+	PID         int    `json:"pid,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	PortHealthy bool   `json:"port_healthy,omitempty"`
+	Message     string `json:"message"`
+}
+
 type ServeStatusCmd struct {
 	PidPath string `help:"Path to the pidfile." default:"~/.signatory/serve.pid" type:"path"`
 	Port    int    `help:"Port to probe for listen-readiness." default:"21517"`
+	JSON    bool   `help:"Emit structured JSON instead of prose."`
+
+	Stdout io.Writer `kong:"-"`
 }
 
 func (cmd *ServeStatusCmd) Run(_ *Globals) error {
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
 	pid, err := readPidFile(cmd.PidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Println("signatory serve: not running (no pidfile)")
+		msg := "signatory serve: not running (no pidfile)"
+		if cmd.JSON {
+			_ = writeJSON(stdout, &ServeStatusResult{Message: msg})
+		} else {
+			fmt.Fprintln(stdout, msg)
+		}
 		return errStatusNotRunning
 	}
 	if err != nil {
@@ -299,7 +321,12 @@ func (cmd *ServeStatusCmd) Run(_ *Globals) error {
 	// Same recycling defense as Stop: a live PID owned by a
 	// stranger is "not running" from signatory's perspective.
 	if !isOurServiceAlive(pid) {
-		fmt.Printf("signatory serve: not running (stale pidfile at %s named PID %d)\n", cmd.PidPath, pid)
+		msg := fmt.Sprintf("signatory serve: not running (stale pidfile at %s named PID %d)", cmd.PidPath, pid)
+		if cmd.JSON {
+			_ = writeJSON(stdout, &ServeStatusResult{Message: msg})
+		} else {
+			fmt.Fprintln(stdout, msg)
+		}
 		return errStatusNotRunning
 	}
 
@@ -307,11 +334,26 @@ func (cmd *ServeStatusCmd) Run(_ *Globals) error {
 	// "running and healthy" from "running but port-bind failed"
 	// (the Start escape hatch).
 	portHealthy := probePort(cmd.Port, 500*time.Millisecond)
+
+	if cmd.JSON {
+		healthStr := "listening"
+		if !portHealthy {
+			healthStr = "NOT listening"
+		}
+		return writeJSON(stdout, &ServeStatusResult{
+			Running:     true,
+			PID:         pid,
+			Port:        cmd.Port,
+			PortHealthy: portHealthy,
+			Message:     fmt.Sprintf("signatory serve: running, PID %d, port %d %s", pid, cmd.Port, healthStr),
+		})
+	}
+
 	healthStr := "listening"
 	if !portHealthy {
 		healthStr = "NOT listening (service alive but port-bind failed?)"
 	}
-	fmt.Printf("signatory serve: running, PID %d, port %d %s\n", pid, cmd.Port, healthStr)
+	fmt.Fprintf(stdout, "signatory serve: running, PID %d, port %d %s\n", pid, cmd.Port, healthStr)
 	return nil
 }
 
