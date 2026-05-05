@@ -155,6 +155,56 @@ func TestListSessions_HeaderFormat(t *testing.T) {
 	}
 }
 
+// fixtureTracesSpanLevelSessionID is the current Claude Code OTEL
+// shape: session.id is a SPAN attribute, not a resource attribute.
+// The resource has no session.id at all. This is the shape that
+// broke list-sessions when report.go was fixed (c62b835) but
+// list_sessions.go wasn't updated to match.
+const fixtureTracesSpanLevelSessionID = `{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[{"name":"claude_code.tool","spanId":"10","traceId":"c","startTimeUnixNano":"1714222800000000000","endTimeUnixNano":"1714222860000000000","attributes":[{"key":"session.id","value":{"stringValue":"sess-SPAN"}}]},{"name":"claude_code.llm_request","spanId":"11","traceId":"c","startTimeUnixNano":"1714222920000000000","endTimeUnixNano":"1714222980000000000","attributes":[{"key":"session.id","value":{"stringValue":"sess-SPAN"}}]}]}]}]}`
+
+// TestListSessions_SpanLevelSessionID — when session.id lives on
+// the span (current Claude Code shape) rather than the resource,
+// scanTraceFile must still discover the session and count the
+// spans. This is the regression test for the gap where report.go
+// was realigned (c62b835) but list_sessions.go wasn't.
+func TestListSessions_SpanLevelSessionID(t *testing.T) {
+	t.Parallel()
+	dir := writeRawFiles(t, map[string]string{
+		"traces.jsonl": fixtureTracesSpanLevelSessionID,
+	})
+
+	var buf bytes.Buffer
+	require.NoError(t, runListSessions(dir, &buf))
+	out := buf.String()
+
+	assert.Contains(t, out, "sess-SPAN",
+		"session discovered via span-level session.id must appear in listing")
+	assert.Regexp(t, `sess-SPAN\s+.*\s+0\s+2`, out,
+		"sess-SPAN should show HOOKS=0, SPANS=2")
+}
+
+// TestListSessions_SpanLevelSessionID_MergesWithHooks — a session
+// discovered via span-level session.id merges correctly with hook
+// events for the same session id.
+func TestListSessions_SpanLevelSessionID_MergesWithHooks(t *testing.T) {
+	t.Parallel()
+	hookData := `{"ts":"2026-04-27T16:00:00Z","event":"PreToolUse","session_id":"sess-SPAN","tool_name":"Bash","classification":"local_other","detail":"ls"}`
+	dir := writeRawFiles(t, map[string]string{
+		"traces.jsonl":          fixtureTracesSpanLevelSessionID,
+		"hooks-sess-SPAN.jsonl": hookData,
+	})
+
+	var buf bytes.Buffer
+	require.NoError(t, runListSessions(dir, &buf))
+	out := buf.String()
+
+	assert.Regexp(t, `sess-SPAN\s+.*\s+1\s+2`, out,
+		"merged session should show HOOKS=1 SPANS=2")
+	count := strings.Count(out, "sess-SPAN")
+	assert.Equal(t, 1, count,
+		"sess-SPAN appeared %d times; should be exactly once", count)
+}
+
 // TestListSessions_FirstAndLastSeen — first/last timestamps
 // reflect the actual data range, not just the first event seen.
 func TestListSessions_FirstAndLastSeen(t *testing.T) {

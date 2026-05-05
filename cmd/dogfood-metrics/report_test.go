@@ -849,6 +849,130 @@ func TestReport_AgentEconomics_FallsBackPerDispatchWhenHookCountMismatch(t *test
 		"second dispatch falls back to subagent_type when hook events run out")
 }
 
+// fixtureAgentNoSubagentType is the current Claude Code OTEL shape:
+// dispatch spans carry tool_name="Agent" but have NO subagent_type
+// attribute. Same economic structure as fixtureAgentEconomics so the
+// conservation invariant holds. The only difference is the dispatch
+// spans (D1, D2) lack the subagent_type attribute — dispatch
+// detection must fall back to tool_name.
+//
+// Span tree:
+//
+//	L1 (orchestrator, 1000+500)
+//	D1 (Agent, no subagent_type)
+//	  └─ L2 (100+50)
+//	D2 (Agent, no subagent_type)
+//	  └─ T1 (Read tool)
+//	       └─ L3 (200+100)
+const fixtureAgentNoSubagentType = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},"scopeSpans":[{"spans":[` +
+	// L1 — orchestrator-direct llm_request, no parent.
+	`{"name":"claude_code.llm_request","spanId":"L1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"1000"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"500"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"3000"}}` +
+	`]},` +
+	// D1 — dispatch span. tool_name=Agent but NO subagent_type.
+	`{"name":"claude_code.tool","spanId":"D1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Agent"}}` +
+	`]},` +
+	// L2 — direct child of D1.
+	`{"name":"claude_code.llm_request","spanId":"L2","parentSpanId":"D1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"100"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"50"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"500"}}` +
+	`]},` +
+	// D2 — second dispatch span. tool_name=Agent, no subagent_type.
+	`{"name":"claude_code.tool","spanId":"D2","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Agent"}}` +
+	`]},` +
+	// T1 — tool span (Read), child of D2.
+	`{"name":"claude_code.tool","spanId":"T1","parentSpanId":"D2","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"tool_name","value":{"stringValue":"Read"}}` +
+	`]},` +
+	// L3 — child of T1, transitively descended from D2.
+	`{"name":"claude_code.llm_request","spanId":"L3","parentSpanId":"T1","attributes":[` +
+	`{"key":"session.id","value":{"stringValue":"agent-sess"}},` +
+	`{"key":"gen_ai.request.model","value":{"stringValue":"claude-opus-4-7"}},` +
+	`{"key":"input_tokens","value":{"stringValue":"200"}},` +
+	`{"key":"output_tokens","value":{"stringValue":"100"}},` +
+	`{"key":"duration_ms","value":{"stringValue":"800"}}` +
+	`]}` +
+	`]}]}]}`
+
+// fixtureAgentNoSubagentTypeHooks pairs with fixtureAgentNoSubagentType.
+const fixtureAgentNoSubagentTypeHooks = `{"ts":"2026-04-27T15:00:00Z","event":"PreToolUse","session_id":"agent-sess","tool_use_id":"tu-D1","tool_name":"Agent","classification":"subagent_dispatch","detail":"Provenance review","tool_input_keys":["description","prompt"]}
+{"ts":"2026-04-27T15:00:01Z","event":"PreToolUse","session_id":"agent-sess","tool_use_id":"tu-D2","tool_name":"Agent","classification":"subagent_dispatch","detail":"Security audit (Go)","tool_input_keys":["description","prompt"]}`
+
+// TestReport_AgentEconomics_NoSubagentType_UsesToolName: when
+// dispatch spans lack subagent_type (current Claude Code OTEL
+// shape) but carry tool_name=Agent, the report must still detect
+// them as dispatches and attribute child llm_requests correctly.
+// Hook descriptions provide the bucket labels.
+func TestReport_AgentEconomics_NoSubagentType_UsesToolName(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDirAgent(t, fixtureAgentNoSubagentType, fixtureAgentNoSubagentTypeHooks)
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	agentSection := extractSection(report, "## LLM economics — by agent", "##")
+
+	// Hook-derived descriptions must appear as bucket labels.
+	assert.Contains(t, agentSection, "Provenance review",
+		"dispatch detected by tool_name must use hook description as bucket key")
+	assert.Contains(t, agentSection, "Security audit (Go)",
+		"second dispatch detected by tool_name must use hook description")
+
+	// Orchestrator row still appears with its own tokens.
+	assert.Regexp(t, `\(orchestrator\).*1000.*500`, report,
+		"orchestrator tokens must not be absorbed into agent buckets")
+}
+
+// TestReport_AgentEconomics_NoSubagentType_Conservation: the
+// TOTAL row must equal the session total even when dispatches are
+// detected via tool_name fallback rather than subagent_type.
+func TestReport_AgentEconomics_NoSubagentType_Conservation(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDirAgent(t, fixtureAgentNoSubagentType, fixtureAgentNoSubagentTypeHooks)
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	// orchestrator(1000+500) + provenance(100+50) + security(200+100) = 1300+650
+	assert.Regexp(t, `\*\*TOTAL\*\*.*1300.*650`, report,
+		"conservation: agent TOTAL must equal sum of all buckets")
+}
+
+// TestReport_AgentEconomics_NoSubagentType_NoHooks: when dispatch
+// spans lack subagent_type AND no hooks file exists, the report
+// must still detect dispatches by tool_name and bucket by the
+// tool_name value as a last resort.
+func TestReport_AgentEconomics_NoSubagentType_NoHooks(t *testing.T) {
+	t.Parallel()
+	rawDir := writeRawDirAgent(t, fixtureAgentNoSubagentType, "") // no hooks
+	outDir := t.TempDir()
+	require.NoError(t, runReport("agent-sess", rawDir, outDir))
+
+	report := readReport(t, outDir, "agent-sess")
+	agentSection := extractSection(report, "## LLM economics — by agent", "##")
+
+	// Without hooks AND without subagent_type, the best the report
+	// can do is bucket by tool_name ("Agent"). Both dispatches
+	// collapse into one bucket, which is suboptimal but at least
+	// separates agent work from orchestrator work.
+	assert.Contains(t, agentSection, "Agent",
+		"no-subagent_type + no-hooks must fall back to tool_name as bucket key")
+	assert.NotContains(t, agentSection, "(orchestrator)  |  3",
+		"child llm_requests must NOT all collapse into orchestrator")
+}
+
 // readReport reads the rendered report.md from the out-dir
 // session-id subdir.
 func readReport(t *testing.T, outDir, sessionID string) string {
