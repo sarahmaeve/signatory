@@ -98,9 +98,15 @@ The relevant fields in the start-phase event:
 
 ## Step 2 — Dispatch analyst agents IN PARALLEL
 
-Each entry in `dispatches[]` carries the three fields `Agent()`
-needs. Iterate the array and dispatch all entries in **one message**
-so they run concurrently:
+Each entry in `dispatches[]` carries five fields: `role`,
+`analyst_id`, `description`, `prompt`, and `allowed_tools`. The
+`prompt` already has `{ANALYST_ID}` substituted to the canonical
+value (e.g. `signatory-provenance-v1`), so the agent reads it
+directly in its dispatch body. The `analyst_id` field is surfaced
+separately for host logging and re-dispatch (Step 3 missing path).
+
+Iterate the array and dispatch all entries in **one message** so
+they run concurrently:
 
 For each `d` in `dispatches[]`, call `Agent()` with:
 - `description`: `d.description`
@@ -125,9 +131,14 @@ Parse the `phase` field:
 
 - **`"missing_analysts"`** — one or more analysts didn't ingest. The
   `missing` array names which roles. Re-dispatch the named role(s)
-  with explicit guidance to call `signatory_ingest_analysis` (with
-  `source`, `collected_from`, and `analysis_session_id` all set),
-  then re-run `signatory pipeline run --resume "$ANALYSIS_SID"`.
+  using the original `dispatches[]` entry from Step 1 — the `prompt`
+  already has the canonical `analyst_id` inlined, and the `analyst_id`
+  field on the dispatch gives you the exact string the orchestrator
+  expects. Supplement the prompt with explicit guidance to call
+  `signatory_ingest_analysis` (with `source`, `collected_from`, and
+  `analysis_session_id` all set), emphasizing the `analyst_id` value:
+  *"Your analyst_id MUST be exactly: `<d.analyst_id>`"*. Then re-run
+  `signatory pipeline run --resume "$ANALYSIS_SID"`.
 
 - **`"synthesist_dispatch_required"`** — both analysts landed; the
   synthesis handoff has been deposited. Proceed to Step 4. The
