@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	signatory "github.com/sarahmaeve/signatory"
+	"github.com/sarahmaeve/signatory/internal/exchange"
 )
 
 // TestPipelineDispatchPrompts_AllRolesRendered verifies that
@@ -231,6 +232,69 @@ func TestDispatchRoles_AnalystIDIsCanonical(t *testing.T) {
 				"dispatch role %q: analystID %q must match canonical "+
 					"signatory-<role>-v<N> form", role, dr.analystID)
 		})
+	}
+}
+
+// TestCollectionRoles_DerivedFromDispatchRoles asserts that
+// collectionRoles() returns exactly the non-synthesist keys from
+// dispatchRoles, and that no role is silently omitted. Guards
+// against the failure mode where a new non-synthesist role is
+// added to dispatchRoles but runStart never dispatches it —
+// causing the resume phase to loop on missing_analysts forever.
+func TestCollectionRoles_DerivedFromDispatchRoles(t *testing.T) {
+	t.Parallel()
+
+	roles := collectionRoles()
+	require.NotEmpty(t, roles, "collectionRoles must return at least one role")
+
+	// Every returned role must exist in dispatchRoles.
+	for _, r := range roles {
+		_, ok := dispatchRoles[r]
+		assert.True(t, ok,
+			"collectionRoles() returned %q but it's not in dispatchRoles", r)
+	}
+
+	// Every non-synthesist dispatchRole must appear in the result.
+	for role, dr := range dispatchRoles {
+		if exchange.IsSynthesistRole(dr.analystID) {
+			assert.NotContains(t, roles, role,
+				"synthesist role %q must not appear in collectionRoles()", role)
+			continue
+		}
+		assert.Contains(t, roles, role,
+			"dispatchRoles has non-synthesist role %q but collectionRoles() omits it — "+
+				"runStart would never dispatch this role", role)
+	}
+}
+
+// TestDefaultExpectedAnalysts_DerivedFromDispatchRoles asserts that
+// defaultExpectedAnalysts() returns the analystID for every entry
+// in dispatchRoles, not a manually-maintained copy. Guards against
+// drift between the role registry and the verify-time expected set.
+func TestDefaultExpectedAnalysts_DerivedFromDispatchRoles(t *testing.T) {
+	t.Parallel()
+
+	expected := defaultExpectedAnalysts()
+	require.NotEmpty(t, expected)
+
+	// Build the set of all analystIDs in dispatchRoles.
+	want := make(map[string]struct{}, len(dispatchRoles))
+	for _, dr := range dispatchRoles {
+		want[dr.analystID] = struct{}{}
+	}
+
+	got := make(map[string]struct{}, len(expected))
+	for _, id := range expected {
+		got[id] = struct{}{}
+	}
+
+	for id := range want {
+		assert.Contains(t, got, id,
+			"dispatchRoles has analystID %q but defaultExpectedAnalysts() omits it", id)
+	}
+	for id := range got {
+		assert.Contains(t, want, id,
+			"defaultExpectedAnalysts() has %q but no dispatchRole declares it", id)
 	}
 }
 

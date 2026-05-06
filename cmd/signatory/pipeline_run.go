@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sort"
 
 	signatory "github.com/sarahmaeve/signatory"
 	"github.com/sarahmaeve/signatory/internal/certs"
@@ -177,21 +178,21 @@ func (cmd *PipelineRunCmd) runStart(globals *Globals) error {
 	if templateFS == nil {
 		templateFS = signatory.EmbeddedTemplates
 	}
+	roles := collectionRoles()
 	prompts, err := renderDispatchPromptsFor(
-		[]string{"security", "provenance"},
+		roles,
 		manifest.TargetName, subs, templateFS,
 	)
 	if err != nil {
 		return fmt.Errorf("render dispatch prompts: %w", err)
 	}
 
-	// Order matters for the host's iteration: alphabetical (provenance,
-	// security) feels arbitrary, security-first matches the reading
-	// order most operators use mentally ("security then provenance"
-	// is how the SKILL.md and README describe the dual-analyst pair).
-	dispatches := []RunDispatch{
-		dispatchAsRun("security", prompts["security"]),
-		dispatchAsRun("provenance", prompts["provenance"]),
+	// collectionRoles() returns a sorted slice, so the dispatch order
+	// is deterministic (provenance, security). The host iterates the
+	// array in order; sorted-by-name is the simplest stable rule.
+	dispatches := make([]RunDispatch, 0, len(roles))
+	for _, role := range roles {
+		dispatches = append(dispatches, dispatchAsRun(role, prompts[role]))
 	}
 
 	result := &RunResult{
@@ -396,14 +397,19 @@ func dispatchAsRun(role string, p DispatchPrompt) RunDispatch {
 	}
 }
 
-// defaultExpectedAnalysts is the standard analyst-id triple
+// defaultExpectedAnalysts returns the analyst IDs for every role
+// in dispatchRoles, sorted lexicographically. This is the set
 // pipeline run records on the analysis session when the caller
-// doesn't pass --expected-analyst. Mirrors the SKILL.md default
-// from before the deterministic-orchestration rewrite.
+// doesn't pass --expected-analyst.
+//
+// Derived from dispatchRoles at call time so adding a new role to
+// the map automatically updates the expected set — no second
+// hardcoded list to keep in sync.
 func defaultExpectedAnalysts() []string {
-	return []string{
-		"signatory-security-v1",
-		"signatory-provenance-v1",
-		"signatory-synthesis-v1",
+	ids := make([]string, 0, len(dispatchRoles))
+	for _, dr := range dispatchRoles {
+		ids = append(ids, dr.analystID)
 	}
+	sort.Strings(ids)
+	return ids
 }

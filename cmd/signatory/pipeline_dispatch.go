@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	signatory "github.com/sarahmaeve/signatory"
 	"github.com/sarahmaeve/signatory/internal/config"
+	"github.com/sarahmaeve/signatory/internal/exchange"
 )
 
 // DispatchPrompt is a single rendered agent dispatch prompt.
@@ -68,6 +70,27 @@ var dispatchRoles = map[string]dispatchRole{
 		allowedTools: "Read Glob Grep WebFetch mcp__signatory__signatory_ingest_analysis",
 		analystID:    "signatory-synthesis-v1",
 	},
+}
+
+// collectionRoles returns the dispatch role keys for the collection
+// phase (start) — every role in dispatchRoles whose analystID is
+// NOT a synthesist. The synthesist dispatches during the resume
+// phase after the collection analysts have landed.
+//
+// Derived from the dispatchRoles map at call time so a new
+// non-synthesist role added to dispatchRoles is automatically
+// dispatched by runStart without a second hardcoded list to update.
+// Sorted lexicographically for deterministic iteration order.
+func collectionRoles() []string {
+	var roles []string
+	for role, dr := range dispatchRoles {
+		if exchange.IsSynthesistRole(dr.analystID) {
+			continue
+		}
+		roles = append(roles, role)
+	}
+	slices.Sort(roles)
+	return roles
 }
 
 // PipelineDispatchPromptsCmd renders the Agent() dispatch prompts

@@ -118,14 +118,10 @@ Wait for ALL agents in this batch to complete before proceeding.
 
 ## Step 3 — Resume the pipeline
 
-Run the orchestrator's `next_command` from Step 1. It verifies
-analyst landing, renders + deposits the synthesis handoff, and
-emits the synthesist dispatch prompt — all deterministically.
-
-```bash
-RESUME=$(signatory pipeline run --resume "$ANALYSIS_SID")
-echo "$RESUME"
-```
+Exec the `next_command` array from the Step 1 event — join it into
+a shell command and capture the JSON output. The orchestrator
+verifies analyst landing, renders + deposits the synthesis handoff,
+and emits the synthesist dispatch prompt — all deterministically.
 
 Parse the `phase` field:
 
@@ -137,8 +133,8 @@ Parse the `phase` field:
   expects. Supplement the prompt with explicit guidance to call
   `signatory_ingest_analysis` (with `source`, `collected_from`, and
   `analysis_session_id` all set), emphasizing the `analyst_id` value:
-  *"Your analyst_id MUST be exactly: `<d.analyst_id>`"*. Then re-run
-  `signatory pipeline run --resume "$ANALYSIS_SID"`.
+  *"Your analyst_id MUST be exactly: `<d.analyst_id>`"*. Then re-exec
+  `next_command` from Step 1.
 
 - **`"synthesist_dispatch_required"`** — both analysts landed; the
   synthesis handoff has been deposited. Proceed to Step 4. The
@@ -154,13 +150,9 @@ proceeding.
 
 ## Step 5 — Close the pipeline
 
-Run the orchestrator's `next_command` from Step 3 to retrieve the
-synthesis proposal:
-
-```bash
-CLOSE=$(signatory pipeline close "$ANALYSIS_SID")
-echo "$CLOSE"
-```
+Exec the `next_command` array from the Step 3 event to retrieve the
+synthesis proposal (join it into a shell command and capture the
+JSON output).
 
 Parse the JSON:
 
@@ -169,29 +161,21 @@ Parse the JSON:
 - Error — no synthesis output found in the session. The synthesist
   either failed silently or didn't call `signatory_ingest_analysis`.
 
-When the user approves:
+When the user approves, re-exec `next_command` from Step 3 with
+`--yes` appended. Returns `status: "closed"` and
+`posture_accepted: true`. This accepts the proposed posture and
+closes the analysis session atomically.
 
-```bash
-signatory pipeline close "$ANALYSIS_SID" --yes
-```
+Alternative terminal statuses when things went sideways (append to
+`next_command` from Step 3 instead of `--yes`):
 
-Returns `status: "closed"` and `posture_accepted: true`. This
-accepts the proposed posture and closes the analysis session
-atomically.
-
-Alternative terminal statuses when things went sideways:
-
-```bash
-# Analyst never ingested and couldn't be re-dispatched
-signatory pipeline close "$ANALYSIS_SID" --status failed --yes
-
-# Partial result accepted by user
-signatory pipeline close "$ANALYSIS_SID" --status partial --yes
-```
+- Analyst never landed and couldn't be re-dispatched: `--status failed --yes`
+- Partial result accepted by the user: `--status partial --yes`
 
 "Analysis only — no posture recorded" is a valid terminal state for
-non-dependency targets. Use `signatory analysis end "$ANALYSIS_SID"
---status completed` to close without posture.
+non-dependency targets. Run `signatory analysis end` with the
+`analysis_session_id` from the pipeline events and
+`--status completed` to close without posture.
 
 ## Important constraints
 

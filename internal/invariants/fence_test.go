@@ -190,77 +190,52 @@ func TestAnalystAgents_AllowedToolsMinimized(t *testing.T) {
 	}
 }
 
-// TestDispatchRoles_AnalystIDMatchesDefaultExpected enforces the
-// invariant that every dispatchRole.analystID is in
-// defaultExpectedAnalysts() and vice-versa: the orchestrator's
-// dispatched-role analyst_id and the verify-time expected
-// analyst_id are the same set, parsed from the same source.
+// TestDefaultExpectedAnalysts_DerivedFromDispatchRoles is a
+// structural fence: defaultExpectedAnalysts() must derive its
+// return value from the dispatchRoles map (iterating it at call
+// time) rather than maintaining a hardcoded literal slice that
+// can drift. The earlier version of this test did bidirectional
+// set equality between two hardcoded lists; this version enforces
+// the stronger invariant that the derivation itself is structural.
 //
-// Catches the failure mode where someone updates dispatchRoles
-// but forgets defaultExpectedAnalysts (or vice-versa), letting
-// the orchestrator dispatch one analyst_id but check for another
-// at resume time — exactly the asciify-image dogfood failure
-// shape, but now caused by orchestrator bookkeeping rather than
-// agent drift.
+// Catches a regression where someone replaces the derivation with
+// a literal `return []string{...}` — reintroducing the drift
+// failure mode the derivation was designed to eliminate.
 //
 // Cross-package text-parsing check (no import dependency on the
 // cmd package). Authoritative complement to the same-package
-// TestDispatchRoles_AnalystIDIsCanonical in
-// cmd/signatory/pipeline_dispatch_test.go.
-func TestDispatchRoles_AnalystIDMatchesDefaultExpected(t *testing.T) {
+// TestDefaultExpectedAnalysts_DerivedFromDispatchRoles and
+// TestCollectionRoles_DerivedFromDispatchRoles in
+// cmd/signatory/pipeline_dispatch_test.go, which test runtime
+// behavior; this test guards the source-level structure.
+func TestDefaultExpectedAnalysts_DerivedFromDispatchRoles(t *testing.T) {
 	root := findModuleRoot(t)
-
-	dispatchPath := filepath.Join(root, "cmd", "signatory", "pipeline_dispatch.go")
-	dispatchData, err := os.ReadFile(dispatchPath) //nolint:gosec // G304: path under module root, build-time fixture
-	require.NoError(t, err, "pipeline_dispatch.go not found")
 
 	runPath := filepath.Join(root, "cmd", "signatory", "pipeline_run.go")
 	runData, err := os.ReadFile(runPath) //nolint:gosec // G304: path under module root, build-time fixture
 	require.NoError(t, err, "pipeline_run.go not found")
 
-	// Extract every analystID literal from dispatchRoles map entries.
-	dispatchAnalystIDRe := regexp.MustCompile(`analystID:\s*"([^"]+)"`)
-	dispatchMatches := dispatchAnalystIDRe.FindAllStringSubmatch(string(dispatchData), -1)
-	require.NotEmpty(t, dispatchMatches,
-		"no analystID literals found in pipeline_dispatch.go — has the field been removed or renamed?")
-	dispatchSet := make(map[string]struct{}, len(dispatchMatches))
-	for _, m := range dispatchMatches {
-		dispatchSet[m[1]] = struct{}{}
-	}
+	src := string(runData)
 
-	// Extract the defaultExpectedAnalysts() literal slice contents.
-	defaultBlockRe := regexp.MustCompile(
-		`(?s)func defaultExpectedAnalysts\(\) \[\]string \{[^}]*return \[\]string\{([^}]+)\}`)
-	defaultBlock := defaultBlockRe.FindStringSubmatch(string(runData))
-	require.Len(t, defaultBlock, 2,
+	// Locate the function body.
+	funcRe := regexp.MustCompile(
+		`(?s)func defaultExpectedAnalysts\(\) \[\]string \{(.+?)\n\}`)
+	match := funcRe.FindStringSubmatch(src)
+	require.Len(t, match, 2,
 		"could not locate defaultExpectedAnalysts() body in pipeline_run.go")
-	literalRe := regexp.MustCompile(`"([^"]+)"`)
-	literalMatches := literalRe.FindAllStringSubmatch(defaultBlock[1], -1)
-	defaultSet := make(map[string]struct{}, len(literalMatches))
-	for _, m := range literalMatches {
-		defaultSet[m[1]] = struct{}{}
-	}
+	body := match[1]
 
-	// Bi-directional set equality. Surface the offending side
-	// concretely so a reader doesn't have to guess which list
-	// drifted.
-	for id := range dispatchSet {
-		_, ok := defaultSet[id]
-		assert.True(t, ok,
-			"dispatchRoles has analystID %q but it's not in "+
-				"defaultExpectedAnalysts() — orchestrator would dispatch "+
-				"this role but verify wouldn't expect it. Add %q to "+
-				"defaultExpectedAnalysts() in pipeline_run.go.", id, id)
-	}
-	for id := range defaultSet {
-		_, ok := dispatchSet[id]
-		assert.True(t, ok,
-			"defaultExpectedAnalysts() has %q but no dispatchRole "+
-				"declares this analystID — verify would expect this "+
-				"role but the orchestrator never dispatches it. Add a "+
-				"dispatchRole entry with analystID: %q in "+
-				"pipeline_dispatch.go.", id, id)
-	}
+	// The function must reference dispatchRoles — proof it derives
+	// from the single source of truth rather than maintaining a copy.
+	assert.Contains(t, body, "dispatchRoles",
+		"defaultExpectedAnalysts() must derive from dispatchRoles, "+
+			"not maintain a hardcoded literal slice")
+
+	// It must NOT contain a literal string slice — that's the drift
+	// pattern this fence exists to prevent.
+	assert.NotContains(t, body, `return []string{`,
+		"defaultExpectedAnalysts() must not use a literal return []string{...}; "+
+			"derive from dispatchRoles instead")
 }
 
 // TestSynthesistAgent_AllowedToolsMinimized enforces the synthesist
