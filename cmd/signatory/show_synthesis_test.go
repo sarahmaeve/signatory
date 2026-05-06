@@ -21,8 +21,7 @@ func TestShowSynthesis_HappyPath_RendersAllSections(t *testing.T) {
 	outputID := ingestSynthesisForAccept(t, g, &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T15:30:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/show-synthesis-example",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -155,8 +154,7 @@ func TestShowSynthesis_NonSynthesisOutput_Errors(t *testing.T) {
 	analyst := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T15:30:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/non-synthesis",
 		Conclusions: []exchange.Conclusion{

@@ -27,8 +27,9 @@ func minimalValidAnalystOutputJSON(t *testing.T) []byte {
 	out := exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "test-analyst",
-			Model:     "test-model",
-			InvokedAt: "2026-04-17T12:00:00Z",
+			// Model and InvokedAt are server-stamped at ingest;
+			// caller-supplied values are rejected by the validator.
+			// See exchange.AgentAttribution.validate.
 		},
 		Target:      "pkg:test/widget",
 		Conclusions: nil, // empty is valid
@@ -133,8 +134,7 @@ func TestIngestAnalysisTool_ValidationFailure_NamesField(t *testing.T) {
 	payload, err := json.Marshal(exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "x",
-			Model:     "y",
-			InvokedAt: "2026-04-17T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		// Target deliberately omitted.
 	})
@@ -197,8 +197,7 @@ func TestIngestAnalysisTool_Counts_MatchPayload(t *testing.T) {
 	out := exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "test",
-			Model:     "test",
-			InvokedAt: "2026-04-17T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:test/widget",
 		Conclusions: []exchange.Conclusion{
@@ -410,8 +409,7 @@ func TestIngestAnalysisTool_SynthesisWithoutSession_SchemaViolation(t *testing.T
 	synth := exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "test-model",
-			InvokedAt: "2026-04-26T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:test/widget",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -440,4 +438,158 @@ func TestIngestAnalysisTool_SynthesisWithoutSession_SchemaViolation(t *testing.T
 		"synthesis-requires-session must surface as schema violation, not internal error, so the agent retries")
 	assert.Contains(t, resp.Error.Message, "analysis_session_id",
 		"error message must name the missing field so the agent knows what to add")
+}
+
+// TestIngestAnalysisTool_RejectsClientSuppliedModel asserts that an
+// ingest payload carrying attribution.model is rejected with a clear
+// CodeSchemaViolation pointing at the field. Background:
+// agents have no reliable way to know what model they are running
+// on, and recent dogfood evidence shows synthesists hallucinating
+// model identity (e.g. "claude-3.5-sonnet" stamped on a 2026-05-06
+// row). The fix is to make the field server-stamped (NULL/empty
+// until OTEL backfill writes the real value) and reject any
+// caller-supplied value at the schema validator.
+func TestIngestAnalysisTool_RejectsClientSuppliedModel(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+
+	out := exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "test-analyst",
+			Model:     "claude-sonnet-4-7", // forbidden — server-stamped
+		},
+		Target: "pkg:test/widget",
+	}
+	payload, err := json.Marshal(out)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), wrapIngestPayload(t, payload, ""))
+	require.Equal(t, "error", resp.Status)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "attribution.model",
+		"error must name the offending field so the agent can self-correct")
+	assert.Contains(t, resp.Error.Message, "server-stamped",
+		"error must explain WHY the field is rejected (so the agent doesn't just guess at the right value)")
+}
+
+// TestIngestAnalysisTool_RejectsClientSuppliedInvokedAt — same shape
+// as the model test, for the invoked_at field. Agents don't have
+// access to a reliable wall clock either; the timestamp must be
+// stamped server-side at INSERT.
+func TestIngestAnalysisTool_RejectsClientSuppliedInvokedAt(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+
+	out := exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "test-analyst",
+			InvokedAt: "2026-05-06T10:30:00Z", // forbidden — server-stamped
+		},
+		Target: "pkg:test/widget",
+	}
+	payload, err := json.Marshal(out)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), wrapIngestPayload(t, payload, ""))
+	require.Equal(t, "error", resp.Status)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "attribution.invoked_at",
+		"error must name the offending field")
+	assert.Contains(t, resp.Error.Message, "server-stamped",
+		"error must explain why the field is rejected")
+}
+
+// TestIngestAnalysisTool_StampsInvokedAtFromServerClock asserts that
+// when the agent submits a payload WITHOUT attribution.invoked_at
+// (the new contract), the ingest tool stamps it from time.Now()
+// before persisting. The stored value must be a parseable RFC3339
+// timestamp within tolerance of the test's call site clock.
+func TestIngestAnalysisTool_StampsInvokedAtFromServerClock(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+
+	out := exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "test-analyst",
+			// Model and InvokedAt deliberately empty — server-stamped contract.
+		},
+		Target: "pkg:test/widget",
+	}
+	payload, err := json.Marshal(out)
+	require.NoError(t, err)
+
+	before := time.Now().UTC()
+	resp := tool.Handle(context.Background(), wrapIngestPayload(t, payload, ""))
+	after := time.Now().UTC()
+
+	require.Equal(t, "ok", resp.Status, "expected ok, got %+v", resp.Error)
+	data := resp.Data.(ingestAnalysisData)
+
+	filter := store.AnalystOutputFilter{EntityID: data.EntityID}
+	summaries, err := s.ListAnalystOutputs(context.Background(), filter)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+
+	stored, err := time.Parse(time.RFC3339, summaries[0].InvokedAt)
+	require.NoError(t, err,
+		"stored invoked_at must be a parseable RFC3339 timestamp; got %q",
+		summaries[0].InvokedAt)
+
+	// Tolerance: stored time should be in [before, after]. We allow
+	// a generous 2s slop on each end to accommodate clock granularity
+	// and slow CI runners. Failures here mean the timestamp wasn't
+	// stamped from time.Now() at all.
+	assert.False(t, stored.Before(before.Add(-2*time.Second)),
+		"stored invoked_at %s is BEFORE the test's pre-call clock %s — "+
+			"server-stamping is broken or stamping a stale value",
+		stored, before)
+	assert.False(t, stored.After(after.Add(2*time.Second)),
+		"stored invoked_at %s is AFTER the test's post-call clock %s — "+
+			"server-stamping is generating a future timestamp",
+		stored, after)
+}
+
+// TestIngestAnalysisTool_StoresEmptyModelForBackfill asserts that
+// when the agent submits a payload without attribution.model, the
+// ingest tool persists an empty string for model. The empty value
+// is a sentinel meaning "model identity pending OTEL correlation"
+// — half 2 of this fix will UPDATE these rows with the real model
+// name from Claude Code's OTEL spans (joined by analysis_session_id).
+//
+// We test for "" rather than NULL because the migrate.go schema
+// declares analyst_outputs.model as TEXT NOT NULL. Lifting that
+// constraint to allow NULL is a separate migration; for now the
+// renderer at cmd/signatory/show_synthesis.go already treats "" as
+// "elide the (model) suffix", which is the correct UX.
+func TestIngestAnalysisTool_StoresEmptyModelForBackfill(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &IngestAnalysisTool{Store: s}
+
+	out := exchange.AnalystOutput{
+		Attribution: exchange.AgentAttribution{
+			AnalystID: "test-analyst",
+			// Model deliberately empty — server-stamped contract.
+		},
+		Target: "pkg:test/widget",
+	}
+	payload, err := json.Marshal(out)
+	require.NoError(t, err)
+
+	resp := tool.Handle(context.Background(), wrapIngestPayload(t, payload, ""))
+	require.Equal(t, "ok", resp.Status, "expected ok, got %+v", resp.Error)
+	data := resp.Data.(ingestAnalysisData)
+
+	filter := store.AnalystOutputFilter{EntityID: data.EntityID}
+	summaries, err := s.ListAnalystOutputs(context.Background(), filter)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "", summaries[0].Model,
+		"stored model must be empty until OTEL backfill writes the real value; "+
+			"a non-empty value here means the agent or the validator allowed model through")
 }

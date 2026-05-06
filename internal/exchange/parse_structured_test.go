@@ -54,9 +54,17 @@ func TestParseStructuredOutput_HappyPath(t *testing.T) {
 	out, err := exchange.ParseStructuredOutput(r, "pkg:test/target")
 	require.NoError(t, err)
 
-	// Attribution.
+	// Attribution. Model and InvokedAt headers in the markdown are
+	// silently dropped by the parser — they're server-stamped at
+	// ingest time and the v1 schema validator rejects caller-supplied
+	// values. The parser still tolerates the header lines (so old
+	// markdown doesn't fail to parse) but does not propagate them.
 	assert.Equal(t, "test-analyst", out.Attribution.AnalystID)
-	assert.Equal(t, "claude-test", out.Attribution.Model)
+	assert.Empty(t, out.Attribution.Model,
+		"model header in markdown must NOT propagate into the struct; "+
+			"server-stamped at ingest")
+	assert.Empty(t, out.Attribution.InvokedAt,
+		"invoked_at must NOT be set by the parser; server-stamped at ingest")
 	assert.Equal(t, 1, out.Attribution.Round)
 	assert.Equal(t, "abc123", out.TargetCommit)
 	assert.Equal(t, "pkg:test/target", out.Target)

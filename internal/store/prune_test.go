@@ -26,8 +26,7 @@ func pruneOutputFor(target string) *exchange.AnalystOutput {
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "test-model",
-			InvokedAt: "2026-04-23T10:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{
@@ -205,9 +204,13 @@ func TestListVersionedEntities_SkipScopedNpm(t *testing.T) {
 	require.NoError(t, err)
 
 	// Also ingest a real versioned package so we have a positive
-	// case in the same test.
+	// case in the same test. The two outputs differ on Target
+	// ("@types/node" vs "lodash@4.17.21") which is part of the
+	// content hash, so no additional hash differentiator is needed
+	// — the previous version of this test mutated InvokedAt for
+	// that purpose, which is now both unnecessary and rejected
+	// (invoked_at is server-stamped).
 	out := pruneOutputFor("pkg:npm/lodash@4.17.21")
-	out.Attribution.InvokedAt = "2026-04-23T11:00:00Z" // distinct hash
 	_, err = s.IngestAnalystOutput(ctx, out, "test")
 	require.NoError(t, err)
 	// Under v10 canonicalization the lodash ingest creates an

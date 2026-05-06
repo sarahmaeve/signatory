@@ -130,7 +130,9 @@ func scanHookFile(path, sessionID string, sessions map[string]*sessionSummary) e
 }
 
 // scanTraceFile reads the OTLP-JSON traces stream and groups
-// spans by session.id resource attribute. Span timestamps
+// spans by session.id. Checks the resource attribute first; if
+// absent, falls back to per-span session.id — matching the shape
+// report.go's loadTraces uses (c62b835). Span timestamps
 // (startTimeUnixNano / endTimeUnixNano) extend the
 // FirstSeen/LastSeen window where present.
 //
@@ -154,17 +156,23 @@ func scanTraceFile(path string, sessions map[string]*sessionSummary) error {
 			continue
 		}
 		for _, rs := range batch.ResourceSpans {
-			sessionID := stringAttr(rs.Resource.Attributes, "session.id")
-			if sessionID == "" {
-				continue
-			}
-			s, ok := sessions[sessionID]
-			if !ok {
-				s = &sessionSummary{SessionID: sessionID}
-				sessions[sessionID] = s
-			}
+			resSessionID := stringAttr(rs.Resource.Attributes, "session.id")
 			for _, ss := range rs.ScopeSpans {
 				for _, sp := range ss.Spans {
+					// Match by either resource or span attribute —
+					// same dual-check as report.go's loadTraces.
+					sessionID := resSessionID
+					if sessionID == "" {
+						sessionID = stringAttr(sp.Attributes, "session.id")
+					}
+					if sessionID == "" {
+						continue
+					}
+					s, ok := sessions[sessionID]
+					if !ok {
+						s = &sessionSummary{SessionID: sessionID}
+						sessions[sessionID] = s
+					}
 					s.SpanCount++
 					if ts := nanoStringToTime(sp.StartTimeUnixNano); !ts.IsZero() {
 						if s.FirstSeen.IsZero() || ts.Before(s.FirstSeen) {

@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ParseStructuredOutput reads structured markdown from r and produces
@@ -42,8 +41,13 @@ func ParseStructuredOutput(r io.Reader, target string) (*AnalystOutput, error) {
 		target:      target,
 		sectionType: "header", // Start in header mode so pre-H1 fields are captured.
 		out: &AnalystOutput{
-			Target:      target,
-			Attribution: AgentAttribution{InvokedAt: time.Now().UTC().Format(time.RFC3339)},
+			Target: target,
+			// Attribution.InvokedAt is NOT pre-stamped here — the store
+			// layer fills it from time.Now() at ingest. Pre-stamping
+			// would set a non-empty value, which the v1 schema validator
+			// now rejects (model and invoked_at are server-stamped; see
+			// AgentAttribution.validate).
+			Attribution: AgentAttribution{},
 		},
 	}
 	scanner := bufio.NewScanner(r)
@@ -172,8 +176,15 @@ func (p *structuredParser) accumulateLine(trimmed, raw string) error {
 				}
 			case "analyst", "analyst-id", "analyst_id":
 				p.out.Attribution.AnalystID = val
-			case "model":
-				p.out.Attribution.Model = val
+			case "model", "invoked-at", "invoked_at":
+				// Silently dropped: model and invoked_at are
+				// server-stamped (by OTEL backfill / store ingest
+				// respectively) and the v1 schema validator rejects
+				// caller-supplied values. We still recognize the
+				// header keys here for forward-compat with
+				// agent-emitted markdown that hasn't been updated to
+				// drop them — accepting and discarding is friendlier
+				// than failing the parse on what's now decorative.
 			case "prompt-version", "prompt_version":
 				p.out.Attribution.PromptVersion = val
 			case "round":
@@ -182,8 +193,6 @@ func (p *structuredParser) accumulateLine(trimmed, raw string) error {
 				}
 			case "target-commit", "target_commit":
 				p.out.TargetCommit = val
-			case "invoked-at", "invoked_at":
-				p.out.Attribution.InvokedAt = val
 			}
 		}
 

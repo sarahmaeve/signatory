@@ -417,8 +417,7 @@ func synthesisTestInput() *exchange.AnalystOutput {
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/example",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -481,8 +480,7 @@ func TestIngest_SynthesisSupplement_FullShapeRoundTrip(t *testing.T) {
 	input := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/full-shape-example",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -666,8 +664,7 @@ func TestGetSynthesisProposal_HappyPath(t *testing.T) {
 	input := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/accept-target",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -841,8 +838,7 @@ func TestIngest_ScopedNpmWithPercentEncodedScope_IndexesCanonically(t *testing.T
 	canonical := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/@stripe/stripe-react-native",
 		Conclusions: []exchange.Conclusion{
@@ -858,9 +854,8 @@ func TestIngest_ScopedNpmWithPercentEncodedScope_IndexesCanonically(t *testing.T
 	}
 	urlEncoded := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "signatory-provenance",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			AnalystID: "signatory-provenance-v1",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/%40stripe/stripe-react-native",
 		Conclusions: []exchange.Conclusion{

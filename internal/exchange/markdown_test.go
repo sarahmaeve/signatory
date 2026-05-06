@@ -83,7 +83,9 @@ func TestMarkdown_NoRoundNotes_OmitsBody(t *testing.T) {
 	// should be absent.
 	o := &AnalystOutput{
 		Attribution: AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-01-01T00:00:00Z",
+			AnalystID: "x",
+			// Model and InvokedAt server-stamped at ingest; see
+			// AgentAttribution.validate.
 		},
 		Target:      "pkg:test/x",
 		Conclusions: []Conclusion{},
@@ -120,7 +122,9 @@ A trailing paragraph.`
 
 	o := &AnalystOutput{
 		Attribution: AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-01-01T00:00:00Z",
+			AnalystID: "x",
+			// Model and InvokedAt server-stamped at ingest; see
+			// AgentAttribution.validate.
 		},
 		Target:      "pkg:test/x",
 		Conclusions: []Conclusion{},

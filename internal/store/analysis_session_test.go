@@ -483,8 +483,7 @@ func newTestAnalystOutput(target, analystID string) *exchange.AnalystOutput {
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: analystID,
-			Model:     "test",
-			InvokedAt: time.Now().UTC().Format(time.RFC3339),
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{{
@@ -506,7 +505,7 @@ func newTestAnalystOutput(target, analystID string) *exchange.AnalystOutput {
 // _ = analystID keeps the param for future per-test customization
 // without bikeshedding the signature.
 func newSynthOutput(target, _ string) *exchange.AnalystOutput {
-	out := newTestAnalystOutput(target, "signatory-synthesist-v1")
+	out := newTestAnalystOutput(target, "signatory-synthesis-v1")
 	out.SynthesisSupplement = &exchange.SynthesisSupplement{
 		ProposedPosture: exchange.ProposedPosture{
 			Tier:             "trusted-for-now",

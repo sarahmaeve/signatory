@@ -98,10 +98,9 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 						)
 					}
 
-					// Match by either resource OR span attribute. The
-					// report's filter today only checks resource;
-					// inspect surfaces both paths so the operator sees
-					// what's there even when the report would drop it.
+					// Match by either resource OR span attribute —
+					// same dual-check as report.go's loadTraces and
+					// list_sessions.go's scanTraceFile.
 					matchedResource := resSessionID == sessionID
 					matchedSpan := !matchedResource && stringAttr(sp.Attributes, "session.id") == sessionID
 					if !matchedResource && !matchedSpan {
@@ -312,8 +311,7 @@ func renderInspect(w io.Writer, agg *inspectAggregated) error {
 	fmt.Fprintf(&b, "- query_source attribute present: %d\n", agg.querySourcePresent)
 	if agg.sessionIDOnSpan > 0 {
 		fmt.Fprintf(&b, "- session.id appears as a SPAN attribute (resource lacks it): %d\n", agg.sessionIDOnSpan)
-		b.WriteString("  (note: report.go filters by RESOURCE-level session.id; ")
-		b.WriteString("this is shape drift the report doesn't currently follow.)\n")
+		b.WriteString("  (report.go, list_sessions.go, and inspect.go all check both levels.)\n")
 	}
 	b.WriteString("\n")
 

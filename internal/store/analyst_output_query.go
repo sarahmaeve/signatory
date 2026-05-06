@@ -17,37 +17,37 @@ import (
 // of reconstructing the full AnalystOutput document tree. Callers
 // who need the full document use GetAnalystOutput.
 type AnalystOutputSummary struct {
-	OutputID string
-	EntityID string
+	OutputID string `json:"output_id"`
+	EntityID string `json:"entity_id"`
 	// EntityURI is the canonical_uri of the entity the analysis is
 	// indexed under — the caller's identity in the M2 model
 	// (pkg:npm/X), or the analyst's own target when no resolution
 	// hop happened.
-	EntityURI string
+	EntityURI string `json:"entity_uri"`
 	// CollectedFromEntityID is the UUID of the entity the analysis
 	// was actually performed against, when it differs from EntityID.
 	// Empty when there was no resolution hop (pre-M2 rows, or rows
 	// where primary_target == out.Target at ingest).
-	CollectedFromEntityID string
+	CollectedFromEntityID string `json:"collected_from_entity_id,omitempty"`
 	// CollectedFromURI is the canonical_uri of the collected-from
 	// entity, joined for display. Empty when CollectedFromEntityID
 	// is empty. Agent-facing-contract §3.2 transparent-with-citation:
 	// every response where a resolution hop happened cites both
 	// URIs so duplicates are hard to create and the hop is visible.
-	CollectedFromURI     string
-	AnalystID            string
-	Model                string
-	PromptVersion        string
-	InvokedAt            string // RFC3339 strings preserved verbatim
-	IngestedAt           string
-	Round                int
-	TargetCommit         string
-	SourcePath           string
-	ContentHash          string
-	ConclusionsCount     int
-	PositiveAbsenceCount int
-	ObservationCount     int
-	PatternCount         int
+	CollectedFromURI     string `json:"collected_from_uri,omitempty"`
+	AnalystID            string `json:"analyst_id"`
+	Model                string `json:"model"`
+	PromptVersion        string `json:"prompt_version,omitempty"`
+	InvokedAt            string `json:"invoked_at"` // RFC3339 strings preserved verbatim
+	IngestedAt           string `json:"ingested_at"`
+	Round                int    `json:"round"`
+	TargetCommit         string `json:"target_commit,omitempty"`
+	SourcePath           string `json:"source_path,omitempty"`
+	ContentHash          string `json:"content_hash"`
+	ConclusionsCount     int    `json:"conclusions_count"`
+	PositiveAbsenceCount int    `json:"positive_absence_count"`
+	ObservationCount     int    `json:"observation_count"`
+	PatternCount         int    `json:"pattern_count"`
 }
 
 // AnalystOutputFilter narrows ListAnalystOutputs results.
@@ -187,21 +187,21 @@ func (s *SQLite) ListAnalystOutputs(ctx context.Context, filter AnalystOutputFil
 // a conclusion when a human is scanning a list; rationale stays out
 // (per the same logic as format-check --summary).
 type ConclusionSummary struct {
-	OutputID          string
-	EntityID          string
-	EntityURI         string
-	AnalystID         string
-	IngestedAt        string
-	ConclusionID      string // UUID
-	ConclusionLocalID string // "F001"
-	Verdict           string
-	SeverityDefault   string
-	DesignIntent      bool
-	Category          string
-	SignalType        string // "" if absent
-	CitationCount     int
-	HasSupersedes     bool
-	BySupersedesIDs   []string // populated only when filter.IncludeSupersedes is true
+	OutputID          string   `json:"output_id"`
+	EntityID          string   `json:"entity_id"`
+	EntityURI         string   `json:"entity_uri"`
+	AnalystID         string   `json:"analyst_id"`
+	IngestedAt        string   `json:"ingested_at"`
+	ConclusionID      string   `json:"conclusion_id"`       // UUID
+	ConclusionLocalID string   `json:"conclusion_local_id"` // "F001"
+	Verdict           string   `json:"verdict"`
+	SeverityDefault   string   `json:"severity_default"`
+	DesignIntent      bool     `json:"design_intent"`
+	Category          string   `json:"category"`
+	SignalType        string   `json:"signal_type,omitempty"` // "" if absent
+	CitationCount     int      `json:"citation_count"`
+	HasSupersedes     bool     `json:"has_supersedes"`
+	BySupersedesIDs   []string `json:"by_supersedes_ids,omitempty"` // populated only when filter.IncludeSupersedes is true
 }
 
 // ConclusionFilter narrows ListConclusions results.

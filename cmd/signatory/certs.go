@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -35,29 +36,64 @@ type CertsCmd struct {
 
 // --- check -----------------------------------------------------------------
 
+// CertsCheckResult is the JSON contract for `signatory certs check --json`.
+type CertsCheckResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Fix     string `json:"fix,omitempty"`
+}
+
 // CertsCheckCmd is the preflight. Designed for shell pipelines:
 //
 //	signatory certs check || signatory certs init --write-profile
 //
-// No flags by design — if you need more surface, use `doctor` (which
-// can grow options without complicating the scriptable path). Minimum
-// surface area here keeps the check cheap and predictable.
-type CertsCheckCmd struct{}
+// --json emits structured output for programmatic consumers.
+type CertsCheckCmd struct {
+	JSON bool `help:"Emit structured JSON instead of prose." json:"-"`
+
+	// Test injection seams.
+	Checker func() certs.CheckResult `kong:"-"`
+	Stdout  io.Writer                `kong:"-"`
+}
 
 func (cmd *CertsCheckCmd) Run(_ *Globals) error {
-	r := certs.Check()
-	if r.OK {
-		// One-line "everything's fine" confirmation on stdout. Quiet
-		// callers can redirect stdout to /dev/null; error output is
-		// suppressed because there is no error.
-		fmt.Println(r.Message)
+	checker := cmd.Checker
+	if checker == nil {
+		checker = certs.Check
+	}
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	r := checker()
+
+	if cmd.JSON {
+		status := "ok"
+		if !r.OK {
+			status = "error"
+		}
+		result := &CertsCheckResult{
+			Status:  status,
+			Message: r.Message,
+			Fix:     r.Fix,
+		}
+		// Write JSON before returning the error so callers can
+		// parse stdout even on non-zero exit.
+		if err := writeJSON(stdout, result); err != nil {
+			return err
+		}
+		if !r.OK {
+			return errSilentFailure
+		}
 		return nil
 	}
-	// Build a compact two-line error: the failure message on one
-	// line, the fix hint on the next (prefixed so the user's eye
-	// lands on the remediation). main.go prints the returned error
-	// to stderr and exits with exitCodeFor — no extra stderr work
-	// needed here.
+
+	// Prose path (original behavior).
+	if r.OK {
+		fmt.Fprintln(stdout, r.Message)
+		return nil
+	}
 	if r.Fix != "" {
 		return fmt.Errorf("%s\nfix: %s", r.Message, r.Fix)
 	}

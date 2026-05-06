@@ -228,9 +228,7 @@ substantive output invisible to the rollup query. Copy the full
   ```json
   "methodology_trace": {
     "source": {
-      "analyst_id": "signatory-security-v1",
-      "model": "<your model>",
-      "invoked_at": "<RFC3339 timestamp>"
+      "analyst_id": "signatory-security-v1"
     },
     "notes": "optional analyst commentary about the catalog",
     "patterns": [
@@ -276,8 +274,6 @@ v1 JSON envelope. Shape:
 {
   "attribution": {
     "analyst_id": "signatory-security-v1",
-    "model": "<your model>",
-    "invoked_at": "<RFC3339 timestamp>",
     "round": 1
   },
   "target": "<canonical URI or URL from the handoff>",

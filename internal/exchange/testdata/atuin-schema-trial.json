@@ -1,9 +1,7 @@
 {
   "attribution": {
     "analyst_id": "external-sec-v1",
-    "model": "claude-opus-4-6",
     "prompt_version": "security-review/v2",
-    "invoked_at": "2026-04-14T10:00:00Z",
     "round": 2
   },
   "target": "pkg:cargo/atuin",
@@ -107,9 +105,7 @@
   "methodology_trace": {
     "source": {
       "analyst_id": "external-sec-v1",
-      "model": "claude-opus-4-6",
       "prompt_version": "security-review/v2",
-      "invoked_at": "2026-04-14T10:00:00Z",
       "round": 2
     },
     "notes": "Twelve patterns spanning the collector-hint spectrum, drawn from the round-2 §B catalog. Some are one-hop greps (MP-IPC-02, MP-FILE-01); some require multi-hop tracing through transport → parsing → dispatch (MP-CAP-01); some narrow a universe but need human or LLM triage (MP-NET-02, MP-ENV-01). The `hit_on_target` field marks which patterns actually produced a finding in this engagement, so the catalog doubles as validation data for future collector implementations.",

@@ -29,7 +29,12 @@ import (
 // `analysis begin --pipeline-session-id`. See design/tls-trust.md
 // for the trust architecture these verbs participate in.
 type PipelineCmd struct {
-	Session PipelineSessionCmd `cmd:"" help:"Pipeline session operations (create, list, delete)."`
+	Session         PipelineSessionCmd         `cmd:"" help:"Pipeline session operations (create, list, delete)."`
+	Prepare         PipelinePrepareCmd         `cmd:"" help:"Prepare the full analysis pipeline: create sessions, render handoffs, refresh signals, return a JSON manifest."`
+	DispatchPrompts PipelineDispatchPromptsCmd `cmd:"dispatch-prompts" help:"Render the agent dispatch prompts with all placeholders substituted."`
+	Verify          PipelineVerifyCmd          `cmd:"" help:"Check whether all expected analysts have landed output for an analysis session."`
+	Close           PipelineCloseCmd           `cmd:"" help:"Find synthesis output, accept posture, and close the analysis session."`
+	Run             PipelineRunCmd             `cmd:"" help:"Drive the orchestrator state machine: emit a structured 'dispatch this prompt' event for the host LLM, exit, and resume on next invocation. Composes prepare + dispatch-prompts (start) and verify + synthesis-handoff + dispatch-prompts (--resume) so SKILL.md becomes a thin host adapter rather than the orchestrator itself."`
 }
 
 // PipelineSessionCmd groups the session-scoped verbs. v0.1 only

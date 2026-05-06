@@ -1,9 +1,7 @@
 {
   "attribution": {
     "analyst_id": "external-sec-v1",
-    "model": "claude-opus-4-6",
     "prompt_version": "signatory-v1",
-    "invoked_at": "2026-04-14T12:50:00Z",
     "round": 1
   },
   "target": "https://github.com/nvbn/thefuck",
@@ -262,9 +260,7 @@
   "methodology_trace": {
     "source": {
       "analyst_id": "external-sec-v1",
-      "model": "claude-opus-4-6",
       "prompt_version": "signatory-v1",
-      "invoked_at": "2026-04-14T12:50:00Z",
       "round": 1
     },
     "notes": "Python CLI with shell-integration surface. Prioritized patterns that pay off for 'developer runs this on their workstation' rather than 'exposed service'. Field `hit_on_target` (renamed from `hit_on_atuin` post-engagement per signatory schema cleanup).",

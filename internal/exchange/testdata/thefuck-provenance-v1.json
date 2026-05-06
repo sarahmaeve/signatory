@@ -1,9 +1,7 @@
 {
   "attribution": {
-    "analyst_id": "signatory-provenance",
-    "model": "claude-opus-4-6",
+    "analyst_id": "signatory-provenance-v1",
     "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
-    "invoked_at": "2026-04-14T20:30:00Z",
     "round": 1
   },
   "target": "https://github.com/nvbn/thefuck",
@@ -173,10 +171,8 @@
   ],
   "methodology_trace": {
     "source": {
-      "analyst_id": "signatory-provenance",
-      "model": "claude-opus-4-6",
+      "analyst_id": "signatory-provenance-v1",
       "prompt_version": "vet-dependency/v2-skill-emitting-v1-json",
-      "invoked_at": "2026-04-14T20:30:00Z",
       "round": 1
     },
     "notes": "Provenance methodology patterns for Python CLI / library targets. Many overlap with the Rust patterns from the atuin engagement (commit signing, tag signing, identity graph) — the differences are mostly ecosystem-specific (PyPI vs crates.io publish, setup.py vs Cargo.toml dependency declarations, requirements.txt vs Cargo.lock for transitive composition). The catalog's dual purpose: feed signatory's Layer 1 deterministic-collector backlog AND validate that the methodology generalizes across ecosystems.",

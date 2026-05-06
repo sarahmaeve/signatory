@@ -424,20 +424,23 @@ func loadTraces(path, sessionID string, agg *aggregated) error {
 						aggregateEconomics(agg, sp)
 					case "claude_code.tool":
 						agg.ToolCallCount++
-						if name := stringAttr(sp.Attributes, "tool_name"); name != "" {
-							agg.ToolNameCounts[name]++
+						toolName := stringAttr(sp.Attributes, "tool_name")
+						if toolName != "" {
+							agg.ToolNameCounts[toolName]++
 						}
-						if st := stringAttr(sp.Attributes, "subagent_type"); st != "" {
+						// Dispatch detection: prefer the explicit
+						// subagent_type attribute (old OTEL shape).
+						// Fall back to tool_name being "Agent" or
+						// "Task" (current shape where subagent_type
+						// was dropped). The hook-event pairing in
+						// pairDispatchLabels replaces the bucket key
+						// with the richer description when available.
+						st := stringAttr(sp.Attributes, "subagent_type")
+						if st == "" && (toolName == "Agent" || toolName == "Task") {
+							st = toolName
+						}
+						if st != "" {
 							agg.SubagentDispatchTypes[st]++
-							// Record the dispatch in the per-agent
-							// lookup so the parent-walk can stop
-							// at it. Empty SpanID would silently
-							// drop the dispatch from attribution
-							// — defended by the indexing guard
-							// above. Also append to the ordered
-							// list so the post-load pairing
-							// against hook events can find this
-							// dispatch's chronological position.
 							if sp.SpanID != "" {
 								agg.DispatchSubagentByID[sp.SpanID] = st
 								agg.OrderedDispatchSpanIDs = append(agg.OrderedDispatchSpanIDs, sp.SpanID)

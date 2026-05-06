@@ -207,9 +207,7 @@ Example minimal output shape:
 ```json
 {
   "attribution": {
-    "analyst_id": "signatory-synthesis-v1",
-    "model": "<your model>",
-    "invoked_at": "<RFC3339 timestamp>"
+    "analyst_id": "signatory-synthesis-v1"
   },
   "target": "{TARGET_URL}",
   "synthesis_supplement": {

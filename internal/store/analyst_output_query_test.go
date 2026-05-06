@@ -115,11 +115,11 @@ func TestListAnalystOutputs_FilterByAnalystID(t *testing.T) {
 	ctx := context.Background()
 
 	provList, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
-		AnalystID: "signatory-provenance",
+		AnalystID: "signatory-provenance-v1",
 	})
 	require.NoError(t, err)
 	require.Len(t, provList, 1)
-	assert.Equal(t, "signatory-provenance", provList[0].AnalystID)
+	assert.Equal(t, "signatory-provenance-v1", provList[0].AnalystID)
 
 	secList, err := s.ListAnalystOutputs(ctx, AnalystOutputFilter{
 		AnalystID: "external-sec-v1",
@@ -440,8 +440,7 @@ func TestGetLatestSynthesisForEntity_EntityWithoutSynthesis(t *testing.T) {
 	nonSynth := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-security-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/no-synthesis-here",
 		Conclusions: []exchange.Conclusion{
