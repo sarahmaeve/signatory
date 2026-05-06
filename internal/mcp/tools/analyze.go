@@ -3,8 +3,7 @@
 // Each tool is a small struct with a Store field (dependency-injected at
 // construction). Each file contains: the struct, the mcp.Tool method set,
 // a typed input struct (decoded with DisallowUnknownFields for strict-reject),
-// and the per-tool output shape. Input/output schemas match
-// design/mcp-protocol-envelopes.md exactly.
+// and the per-tool output shape.
 //
 // Convention: all Handle implementations return mcp.Err on decode failure,
 // required-field absence, or unrecognised enum values; mcp.OK wraps the

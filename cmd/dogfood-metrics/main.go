@@ -1,12 +1,8 @@
 // Command dogfood-metrics is signatory's local OTLP/HTTP/JSON
 // receiver for /analyze dogfood telemetry. It listens for OTEL
 // traces and logs from Claude Code, writes them to disk in
-// OTLP-JSON format, and (in slice 3, planned) generates per-session
-// reports correlating the OTEL stream with PreToolUse hook events.
-//
-// See design/agent-otel.md for the architecture, the verification
-// rounds that informed it, and the rationale for writing this
-// ourselves rather than adopting otelcol-contrib.
+// OTLP-JSON format, and generates per-session reports correlating
+// the OTEL stream with PreToolUse hook events.
 //
 // Subcommands:
 //
@@ -72,8 +68,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics list-sessions [-in-dir dogfood-metrics/raw]")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics report        [-in-dir dogfood-metrics/raw] [-out-dir dogfood-metrics/sessions] <session-id>")
 	fmt.Fprintln(os.Stderr, "  dogfood-metrics inspect       [-in-dir dogfood-metrics/raw] <session-id>")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "See design/agent-otel.md for architecture.")
 }
 
 func runServe(args []string) {

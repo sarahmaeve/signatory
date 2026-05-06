@@ -15,7 +15,7 @@ import (
 // for an entity. The source-evolution collector consumes this to
 // anchor matrix rows to commit SHAs without touching proxy.golang.org
 // directly — gopublish owns proxy access; source-evolution reads the
-// signal gopublish emitted (design/coll7.md D3, Architecture B).
+// signal gopublish emitted.
 type VersionPinSource interface {
 	VersionPinTable(ctx context.Context, entity *profile.Entity) (PinTable, error)
 }

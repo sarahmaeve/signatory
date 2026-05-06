@@ -92,7 +92,7 @@ func Run(ctx context.Context, s store.Store, manifestPath string) (Result, error
 // shape. Returns manifest.ErrGraphUnavailable for ecosystems
 // without graph extraction implemented (npm and PyPI in v0.1 —
 // PyPI graph extraction will come from poetry.lock / uv.lock
-// parsing per design/potential-pypi.md Layer 3).
+// parsing).
 func parseGraph(ctx context.Context, path string) (manifest.Graph, error) {
 	if path == "" {
 		return manifest.Graph{}, fmt.Errorf("%w: manifest path is required",

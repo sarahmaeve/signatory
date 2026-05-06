@@ -9,9 +9,6 @@
 // design/analysis/atuin-schema-trial-response.json and
 // design/analysis/atuin-schema-trial-feedback.md); the v1 shape
 // incorporates every analyst-flagged gap from that trial.
-//
-// See design/mcp-dual-analyst-architecture.md for the architectural
-// motivation and the list of revisions the trial drove.
 package exchange
 
 // AnalystOutput is the top-level document emitted by an analyst role.
@@ -24,8 +21,7 @@ package exchange
 // a proposed posture) that has no natural home in the conclusion /
 // observation / absence model. Gated by attribution.analyst_id:
 // outputs whose analyst_id starts with "signatory-synthesis" must
-// carry a supplement; other roles must not. See
-// design/m6-synthesis-contract.md.
+// carry a supplement; other roles must not.
 type AnalystOutput struct {
 	Attribution         AgentAttribution     `json:"attribution" yaml:"attribution"`
 	Target              string               `json:"target" yaml:"target"`
@@ -44,8 +40,7 @@ type AnalystOutput struct {
 // narrative that justifies the proposed tier, the cross-analyst
 // agreement/contradiction analysis, the weighted conclusion
 // references that make the synthesis auditable back to specific
-// analyst findings, and the proposed posture itself. See
-// design/m6-synthesis-contract.md §3 for the target shape.
+// analyst findings, and the proposed posture itself.
 type SynthesisSupplement struct {
 	// ProposedPosture is the synthesist's tier recommendation.
 	// Required when the supplement is present; `signatory posture
@@ -161,7 +156,7 @@ type ProposedPosture struct {
 // AgentAttribution identifies which agent produced an output, on which
 // model, with which system-prompt version, and when. Run-level
 // telemetry (token cost, duration) lives at the MCP response envelope
-// layer per design/mcp-dual-analyst-architecture.md — not here.
+// layer — not here.
 type AgentAttribution struct {
 	AnalystID     string `json:"analyst_id" yaml:"analyst_id"`
 	Model         string `json:"model" yaml:"model"`

@@ -14,12 +14,10 @@ import (
 )
 
 // ShowSynthesisCmd renders a synthesis output as markdown matching
-// the layout of design/dogfood/*-synthesis.md (pre-M6) and
-// ~/signatory-output/*-synthesis.md (M6-era). The rendered
+// the layout of ~/signatory-output/*-synthesis.md. The rendered
 // document IS the human-readable view; the canonical store record
-// is the analyst_output row with its synthesis_supplement JSON.
-// See design/m6-synthesis-contract.md D3 (store-first; markdown
-// is a view).
+// is the analyst_output row with its synthesis_supplement JSON
+// (store-first; markdown is a view).
 //
 // Refuses non-synthesis outputs: analyst outputs have a different
 // render shape (full conclusion bodies with rationale + citations)

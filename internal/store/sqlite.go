@@ -2,8 +2,8 @@
 // entity, signal, posture, burn, dependency, audit, and team identity
 // data. The primary implementation uses SQLite via modernc.org/sqlite.
 //
-// The SQLite implementation here follows the schema defined in
-// design/entity-model-v2.md. Key invariants:
+// The SQLite implementation here follows the canonical entity-model
+// schema. Key invariants:
 //
 //   - Signals, dependency observations, audit entries, and signal
 //     resolutions are APPEND-ONLY. Their Append* methods never update
@@ -378,8 +378,7 @@ func (s *SQLite) GetSignals(ctx context.Context, entityID string) ([]profile.Sig
 //     production code paths, but the query's correctness should not depend
 //     on the collector's ID-generation scheme.
 //   - Different sources coexist — if github and peer:acme both report a
-//     signal of the same type, both are returned with their source tag,
-//     per design/entity-model-v2.md §Signal Conflict Resolution
+//     signal of the same type, both are returned with their source tag.
 //
 // This is the query that powers `signatory analyze` and the display
 // layer. Historical views should use GetSignals instead.

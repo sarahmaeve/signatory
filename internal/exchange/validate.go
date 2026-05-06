@@ -12,8 +12,7 @@ import (
 // may carry a supplement (and must carry one). Deliberately generous
 // — matches "signatory-synthesis-v1", "signatory-synthesis-v2",
 // "signatory-synthesis-experimental" etc. without the validator
-// having to know the current active version. See
-// design/m6-synthesis-contract.md §4.
+// having to know the current active version.
 //
 // Exported because the M6b evidence assembler uses it to filter prior
 // synthesis outputs out of the evidence rollup — single source of
@@ -21,10 +20,9 @@ import (
 const SynthesistAnalystIDPrefix = "signatory-synthesis"
 
 // IsSynthesistRole returns true when analystID identifies a synthesist
-// role by prefix. Used by the validator's trust-boundary gate (Option C
-// of m6-synthesis-contract) and by downstream consumers that need to
-// distinguish synthesis outputs from analyst outputs without parsing
-// the analyst_id themselves.
+// role by prefix. Used by the validator's trust-boundary gate and by
+// downstream consumers that need to distinguish synthesis outputs from
+// analyst outputs without parsing the analyst_id themselves.
 func IsSynthesistRole(analystID string) bool {
 	return strings.HasPrefix(analystID, SynthesistAnalystIDPrefix)
 }
@@ -131,8 +129,7 @@ func (o *AnalystOutput) Validate() error {
 	// the synthesist role in both directions. Non-synthesist roles
 	// may not carry a supplement (that would be Layer-2 proposing a
 	// Layer-3 decision); synthesist roles must carry one (a synthesis
-	// without a supplement is an empty row). See
-	// design/m6-synthesis-contract.md §4.
+	// without a supplement is an empty row).
 	switch {
 	case o.SynthesisSupplement != nil && !IsSynthesistRole(o.Attribution.AnalystID):
 		errs = append(errs, fmt.Errorf(

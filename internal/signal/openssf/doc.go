@@ -13,8 +13,7 @@
 // time, with no persistence — the score informed the analyst's
 // conclusion but evaporated when the session ended. Surfaced by
 // dogfood-metrics' "External calls (cache-miss candidates)"
-// section across multiple captured sessions (see
-// design/agent-otel.md and the dogfood report archive).
+// section across multiple captured sessions.
 //
 // Public surface:
 //

@@ -710,13 +710,13 @@ func TestValidate_ErrorMessagesIncludeValidValues(t *testing.T) {
 	})
 }
 
-// --- SynthesisSupplement (M6a) ---
+// --- SynthesisSupplement ---
 //
 // Synthesist outputs carry a SynthesisSupplement that has no natural
 // home in the conclusion/observation/absence model. The supplement is
 // gated by attribution.analyst_id: outputs whose analyst_id starts
 // with "signatory-synthesis" must carry a supplement; outputs from
-// any other role must not. See design/m6-synthesis-contract.md §4.
+// any other role must not.
 
 // validSynthesisBase returns a minimally-valid synthesist output.
 // Tests mutate it to introduce specific invariant violations and

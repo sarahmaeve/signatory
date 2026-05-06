@@ -8,8 +8,7 @@
 //
 // Pattern catalogs (sensitive paths, network-egress call sites, exec
 // call sites) live in patterns.go and are package-level vars to keep
-// changes auditable through PR review. See design/coll7.md for the
-// full design.
+// changes auditable through PR review.
 //
 // Why AST instead of regex: the questions the matrix asks are
 // structural ("is this a top-level init? is this a net/http.Get
@@ -291,8 +290,9 @@ func foldFilepathJoin(args []ast.Expr, imports map[string]string) (string, bool)
 // buildImportMap returns local-name -> import-path for all imports
 // in the file. Default name is the last segment of the path; named
 // imports use the explicit name. Blank imports (`_`) and dot imports
-// (`.`) are skipped — see Q4 in design/coll7.md for the v0.1 dot-
-// import gap.
+// (`.`) are skipped — v0.1 accepts the dot-import gap; resolving
+// dot-imported names requires either type-checked symbol resolution
+// or a much heavier import-aware walker.
 func buildImportMap(f *ast.File) map[string]string {
 	imports := make(map[string]string, len(f.Imports))
 	for _, imp := range f.Imports {

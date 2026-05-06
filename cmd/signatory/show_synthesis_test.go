@@ -14,8 +14,7 @@ import (
 // string non-empty. The rendered markdown should include the
 // posture tier, reasoning, summary, a concordance entry, a
 // contradiction entry, ranked key conclusions, gaps, action items,
-// and notes. This is the "mod-synthesis.md layout" target from
-// design/m6-synthesis-contract.md §6 M6e.
+// and notes.
 func TestShowSynthesis_HappyPath_RendersAllSections(t *testing.T) {
 	g := newTestGlobals(t)
 	outputID := ingestSynthesisForAccept(t, g, &exchange.AnalystOutput{

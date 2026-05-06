@@ -145,7 +145,7 @@ func parsePyProject(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	// Three independent table-handlers run regardless of who else
 	// found data; deps from all three contribute to the union with
 	// no cross-handler deduplication. Architecture confirmed by
-	// the v3 dogfood verification — see design/parsedeep.md §"Commit 6".
+	// the v3 dogfood verification.
 	if hasProject {
 		info.Name = f.Project.Name
 		info.EcoVersion = f.Project.RequiresPython

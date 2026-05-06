@@ -11,20 +11,14 @@ Cross-references:
 - [`ROADMAP.md`](ROADMAP.md) — brew is **not** listed in the v0.2
   lane (GitLab + federation + visualization); inserting brew would
   be a roadmap addition, not a continuation
-- [`rust.md`](rust.md), [`ruby.md`](ruby.md),
-  [`potential-pypi.md`](potential-pypi.md) — structural templates
-  for "add an ecosystem provider" plans; this document deliberately
-  diverges from that template because brew is structurally a
-  redistribution layer, not a registry
 - `internal/signal/registry/gopublish/` — the closest existing
   precedent: an ecosystem where the "registry" mines provenance
   over an upstream repo rather than acting as the publication
   surface. The graceful-degradation pattern there
   (registry-only signals when source resolution fails) transfers
   directly to brew.
-- [`signal-type-registry.md`](signal-type-registry.md) — every
-  emitted signal must be pre-registered; new brew-specific signals
-  would land here
+- `internal/signal/types.go` — every emitted signal must be
+  pre-registered; new brew-specific signals would land here
 - [`trust-model.md`](trust-model.md), `feedback_threat_economics.md`
   in user memory — the forgery-resistance lens used below to
   discriminate which brew signals are worth collecting
@@ -229,8 +223,7 @@ read more cleanly.)
 
 ## Architectural fit (mechanical)
 
-Following the existing pattern, in line with `rust.md`/`ruby.md`
-plans:
+Following the existing ecosystem-provider pattern:
 
 1. Register brew-specific signal types in
    `internal/signal/types.go`. The cross-ecosystem signals already
@@ -272,7 +265,7 @@ real plan, not just a feasibility note.
    conclusions about jq the upstream project, users will
    conflate the two; if it doesn't, the analysis is too thin to
    be useful. Probably needs a "linked upstream entity" concept
-   in the analysis output. See `entity-model-v2.md`.
+   in the analysis output.
 2. **Do casks merit a separate ecosystem slug** (`"brew-cask"`)
    or a qualifier on `"brew"`? The dispatch decision in
    `collectorsFor()` is easier with separate slugs; the purl
@@ -333,9 +326,9 @@ forward:
    `kubectl`, `jq`, `ollama`, `uv`, `claude`, `signatory`
    itself once it ships a formula.
 3. **Resolution of the two-entity (distribution-vs-upstream)
-   model in `entity-model-v2.md`** — once that lands, brew
-   becomes the natural first ecosystem to exercise it
-   end-to-end, since the model is least ambiguous there.
+   entity model** — once that lands, brew becomes the natural
+   first ecosystem to exercise it end-to-end, since the model
+   is least ambiguous there.
 4. **A user request via the MCP surface** for `pkg:brew/X` that
    cleanly soft-fails (the same way `signatory_analyze` now
    soft-fails on missing PyPI Layer 1). Volume here is the

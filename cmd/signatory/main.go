@@ -159,10 +159,10 @@ type Globals struct {
 	AuditFilePath string
 
 	// NpmRegistryURL overrides the base URL for npm registry calls
-	// made during analyze-orchestration repo resolution (A.5 in
-	// design/npm-plan.txt). Empty means the production registry
-	// (https://registry.npmjs.org). Tests point this at an httptest
-	// server so analyze runs don't hit the live npm registry.
+	// made during analyze-orchestration repo resolution. Empty means
+	// the production registry (https://registry.npmjs.org). Tests
+	// point this at an httptest server so analyze runs don't hit the
+	// live npm registry.
 	NpmRegistryURL string
 
 	// PypiRegistryURL overrides the base URL for PyPI registry

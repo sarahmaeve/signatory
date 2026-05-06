@@ -29,8 +29,6 @@ type CloseResult struct {
 // skill: it finds the synthesis output in the session, extracts
 // the proposed posture, and (with --yes) accepts it + closes the
 // session atomically.
-//
-// See design/deterministic-orchestration.md Proposal #4.
 type PipelineCloseCmd struct {
 	SessionID string `arg:"" help:"Analysis session ID to close."`
 	Status    string `name:"status" help:"Terminal status (completed, failed, partial)." default:"completed"`

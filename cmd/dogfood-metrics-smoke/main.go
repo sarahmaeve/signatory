@@ -194,8 +194,7 @@ func run() error {
 			rep.fail("read report.md: " + err.Error())
 		} else {
 			report := string(reportContents)
-			// Section headers — stable contract per
-			// design/agent-otel.md slice 3 plan.
+			// Section headers — stable report contract.
 			rep.assertTrue("report: top-level header",
 				strings.Contains(report, "# Dogfood report — session smoke-sess"))
 			rep.assertTrue("report: Subagent activity section",

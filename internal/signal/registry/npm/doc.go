@@ -11,7 +11,7 @@
 //     entities with CanonicalURI prefix pkg:npm/. Emits flat metadata
 //     signals; non-npm entities receive an empty result.
 //
-// See design/npm-plan.txt for the phase structure. This package is
-// invariant-path-bound: design/v0.1-invariants.md §Invariant 2 binds
-// npm-registry signals to internal/signal/registry/npm/.
+// This package is invariant-path-bound: design/v0.1-invariants.md
+// §Invariant 2 binds npm-registry signals to
+// internal/signal/registry/npm/.
 package npm

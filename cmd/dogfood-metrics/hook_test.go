@@ -158,7 +158,7 @@ func TestHook_ClassifiesReadAgainstSignatorySource(t *testing.T) {
 		{"internal/", cwd + "/internal/profile/uri.go", "signatory_source"},
 		{"cmd/", cwd + "/cmd/signatory/main.go", "signatory_source"},
 		{"templates/handoffs/", cwd + "/templates/handoffs/security-review-v1.md", "signatory_source"},
-		{"design/ is not source", cwd + "/design/agent-otel.md", "local_other"},
+		{"design/ is not source", cwd + "/design/vision.md", "local_other"},
 		{"README at root is not source", cwd + "/README.md", "local_other"},
 		{"outside cwd entirely", "/tmp/something.go", "local_other"},
 	}

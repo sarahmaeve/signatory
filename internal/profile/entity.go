@@ -153,7 +153,7 @@ func ClassifyEra(t time.Time) TemporalEra {
 //
 // Description is a one-line context string ("Go CLI argument parser"),
 // separate from ShortName, populated from API data or user-edited project
-// notes. See design/entity-model-v2.md for the full model.
+// notes.
 type Entity struct {
 	ID           string     `json:"id"`            // UUID, internal primary key
 	CanonicalURI string     `json:"canonical_uri"` // purl or signatory URI scheme

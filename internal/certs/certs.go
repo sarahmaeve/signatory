@@ -13,8 +13,7 @@
 // from a shell profile, it vanishes across terminal restarts, GUI
 // launches, and any subagent that inherits a clean env. Synthesist
 // dispatches would succeed one run and fail the next with
-// "unable to verify the first certificate." See
-// design/open-architecture-question.md for the diagnosis trail.
+// "unable to verify the first certificate."
 //
 // The package offers three operations:
 //

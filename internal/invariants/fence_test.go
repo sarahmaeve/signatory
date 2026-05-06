@@ -14,10 +14,9 @@ import (
 
 // fenceMarker is the distinctive opening sentence of the independence
 // rule that must appear in every analyst and synthesist handoff
-// template. D9 of the agent-facing contract (and
-// design/m6-synthesis-contract.md §4) requires this fence in every
-// template that dispatches a reasoning agent. Catching its absence
-// deterministically here is cheaper than catching the drift later.
+// template. The fence is required in every template that dispatches
+// a reasoning agent. Catching its absence deterministically here is
+// cheaper than catching the drift later.
 //
 // The marker text is the FIRST sentence of the fence — if it's
 // missing, the whole fence probably is. We don't check the
@@ -53,8 +52,7 @@ func TestIndependenceFence_PresentInAllHandoffs(t *testing.T) {
 				t.Fatalf(
 					"template %s is missing the independence rule "+
 						"(marker: %q). Every handoff template must carry "+
-						"the cross-pollination prohibition; see "+
-						"design/m6-synthesis-contract.md §4 and §7. "+
+						"the cross-pollination prohibition. "+
 						"Restore the fence — do not silence this test.",
 					rel, fenceMarker,
 				)
@@ -101,10 +99,9 @@ var provenanceAllowedCacheTools = []string{
 // fs.readFileSync(NODE_EXTRA_CA_CERTS) on every HTTPS handshake,
 // and a subagent without file-read capability cannot satisfy that
 // syscall — producing the "unable to verify the first certificate"
-// failure class seen during M6 dogfood (3 of 4 runs). See
-// design/open-architecture-question.md for the hypothesis test
-// that drove this relaxation and for Option A (MCP fetch_handoff)
-// which would re-tighten this fence mechanically if invoked.
+// failure class seen during M6 dogfood (3 of 4 runs). A future
+// MCP fetch_handoff option could re-tighten this fence mechanically
+// if invoked.
 var synthesistAgentRole = "signatory-synthesis"
 
 // forbiddenSynthesistTools is currently identical to
@@ -244,8 +241,8 @@ func TestDefaultExpectedAnalysts_DerivedFromDispatchRoles(t *testing.T) {
 // handoff body, and its output lands via signatory_ingest_analysis.
 // Read/Glob/Grep are permitted as of 2026-04-22 only so Claude
 // Code's HTTPS client can load NODE_EXTRA_CA_CERTS at TLS handshake
-// — the D9 independence rule is enforced by the prompt body rather
-// than tool capability. See design/open-architecture-question.md.
+// — the independence rule is enforced by the prompt body rather
+// than tool capability.
 func TestSynthesistAgent_AllowedToolsMinimized(t *testing.T) {
 	root := findModuleRoot(t)
 	dispatchPath := filepath.Join(root, "cmd", "signatory", "pipeline_dispatch.go")

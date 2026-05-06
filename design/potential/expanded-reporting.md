@@ -386,14 +386,14 @@ unit tests' job. It asserts on the *shape* of what was produced.
 
 ## 11. See also
 
-- [`m6-synthesis-contract.md`](m6-synthesis-contract.md) — the
-  synthesis contract the rendering reads from.
-- [`agent-facing-contract.md`](agent-facing-contract.md) §5 M7 — the
+- `internal/exchange/types.go` — the `SynthesisSupplement` shape
+  this rendering reads from.
+- `cmd/signatory/show_synthesis.go` — the existing markdown renderer
+- `cmd/signatory/summary.go` (and `internal/summary/`) — the
   `signatory summary` verb that addresses the *current-state* read
   flow this proposal complements.
-- [`v0.1-invariants.md`](v0.1-invariants.md) — Invariant 3
+- [`v0.1-invariants.md`](../v0.1-invariants.md) — Invariant 3
   (SQLite-canonical, files-are-views) is what makes "snapshot of the
   store" a sound design center.
-- `cmd/signatory/show_synthesis.go` — the existing markdown renderer
   whose pure-function shape (`renderSynthesisMarkdown`) this proposal
   mirrors for the HTML side.

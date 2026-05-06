@@ -167,7 +167,7 @@ func writeEvent(path string, ev hookEvent) error {
 
 // classify maps (cwd, toolName, toolInput) to a (classification,
 // detail) pair. The classification taxonomy is the dogfood-relevant
-// "where did this call's data come from" axis, per design/agent-otel.md:
+// "where did this call's data come from" axis:
 //
 //   - local_db: signatory MCP server (data we already have)
 //   - local_signatory_cli: invoking our own CLI/code locally

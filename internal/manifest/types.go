@@ -74,10 +74,9 @@ type Dep struct {
 	//   - Go paths elsewhere        → "pkg:golang/<verbatim-path>"
 	//
 	// The pkg:golang/ scheme matches the [purl spec](https://github.com/package-url/purl-spec)
-	// type identifier for Go modules and design/entity-model-v2.md
-	// "Standard purl" — preserves the go.mod-declared path literally
-	// so vanity paths (modernc.org/sqlite, gopkg.in/...) stay
-	// queryable under the same form the user would pass to
+	// type identifier for Go modules — preserves the go.mod-declared
+	// path literally so vanity paths (modernc.org/sqlite, gopkg.in/...)
+	// stay queryable under the same form the user would pass to
 	// signatory analyze.
 	CanonicalURI string
 

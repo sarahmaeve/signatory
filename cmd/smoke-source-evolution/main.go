@@ -3,9 +3,9 @@
 // verifying that the THREE source-evolution signals land with their
 // expected schemas:
 //
-//   - version_pin_table       (gopublish-emitted; design/coll7.md D3)
-//   - source_evolution_matrix (source-collector-emitted; D2)
-//   - source_evolution_anomaly (source-collector-emitted; D9)
+//   - version_pin_table       (gopublish-emitted)
+//   - source_evolution_matrix (source-collector-emitted)
+//   - source_evolution_anomaly (source-collector-emitted)
 //
 // What it proves (in order):
 //

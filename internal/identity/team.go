@@ -6,11 +6,10 @@
 // back to the specific team that made it.
 //
 // Team identity format is `team:<human>+<llm>` — e.g.,
-// `team:sarah+claude-opus-4.6`. This matches the design in
-// design/entity-model-v2.md §Actor Identity. The v0.1 implementation
-// stores team identity as a plain string without cryptographic
-// backing; PGP/GPG-backed signing will arrive with the attestation
-// utility layer in a later milestone.
+// `team:sarah+claude-opus-4.6`. The v0.1 implementation stores team
+// identity as a plain string without cryptographic backing; PGP/GPG-
+// backed signing will arrive with the attestation utility layer in a
+// later milestone.
 package identity
 
 import (
@@ -30,10 +29,9 @@ const MaxTeamIdentityLength = 133
 
 // validIdentityBody restricts the post-"team:" portion of an identity
 // to a printable, ASCII-only character set: alphanumerics plus the
-// separators "._+-" used by the human+llm format from
-// design/entity-model-v2.md §Actor Identity. Underscore is included
-// because Unix usernames can contain it (the fallback uses $USER
-// directly).
+// separators "._+-" used by the human+llm format. Underscore is
+// included because Unix usernames can contain it (the fallback uses
+// $USER directly).
 //
 // ASCII-only is the deliberate v0.1 choice — same reasoning as #78's
 // ValidateCanonicalURI: lookalike fragmentation via Cyrillic/Greek

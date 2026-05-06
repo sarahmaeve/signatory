@@ -154,11 +154,10 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 // repo:github/ lens for github-hosted modules (the survey/CLI
 // repo-identity workflow) but the pkg:golang/ lens for non-github
 // vanity paths. pkg:golang/ matches the [purl spec](https://github.com/package-url/purl-spec)
-// type identifier for Go modules — see design/entity-model-v2.md
-// "Standard purl." Earlier versions of this parser emitted "pkg:go/"
-// (commit bfe5df8, 2026-04-20); that was an oversight against the
-// design-doc target and got corrected once the dogfood walk surfaced
-// it. Pre-existing pkg:go/ rows in the store are reachable via
+// type identifier for Go modules. Earlier versions of this parser
+// emitted "pkg:go/" (commit bfe5df8, 2026-04-20); that was an
+// oversight that got corrected once the dogfood walk surfaced it.
+// Pre-existing pkg:go/ rows in the store are reachable via
 // profile.AlternateURIs as a backwards-compat alternate.
 //
 // Empty input returns empty output; the caller decides how to

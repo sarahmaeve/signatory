@@ -45,7 +45,7 @@ These are nice-to-have and may slip to v0.1.1 if the contract milestones take lo
 ## Future
 
 - **Signed attestation for vetted-frozen tier** (deferred 2026-04-14 from V0.2 — heavyweight: key management, envelope schema, signing tool integration, embedded analysis records. Until v0.3 ships, vetted & frozen is internally-produced only — see [open-questions.md](open-questions.md) §"Vetted & frozen scope in early versions" and §"LLM-as-named-tool in attestation envelopes")
-- **Content-hash pinning** (BLAKE3 or similar) as a first-class version form — revisit if pressure grows; per D7 in [`agent-facing-contract.md`](agent-facing-contract.md) burns at per-version granularity cover the current need
+- **Content-hash pinning** (BLAKE3 or similar) as a first-class version form — revisit if pressure grows; burns at per-version granularity cover the current need
 - Multiple signal source plugins
 - Kind/Kubernetes deployment
 - Cloud deployment (public/private)

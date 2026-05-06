@@ -157,8 +157,7 @@ DROP TABLE IF EXISTS entities;
 // migrationV2Up evolves the schema for entity model v2.
 // Key changes:
 //   - Entities: drop v1 `name`, add canonical_uri, short_name, description.
-//     Per design/entity-model-v2.md, short_name + description replace the
-//     old single-purpose name column.
+//     short_name + description replace the old single-purpose name column.
 //   - Signals: append-only (no upsert), keep existing data.
 //   - Postures: versioned PK (entity_id, version).
 //   - New tables: dependency_observations, signal_resolutions, audit_log,
@@ -260,13 +259,13 @@ CREATE TABLE IF NOT EXISTS team_identities (
 
 // migrationV2Down rolls back migration v2 to a readable v1 state.
 //
-// Rollback semantics per design/entity-model-v2.md:246 — rollback is a
-// recovery mechanism, not a feature. Data only present in v2 (audit log,
-// dependency observations, signal resolutions, team identities, posture
-// version history) is lost on rollback. The v1 `entities` and `signals`
-// tables are fully restored, and `postures` collapses to one row per
-// entity by keeping whichever row SQLite returns last (order-insensitive
-// rollback — the user gets a working v1 schema, not a time machine).
+// Rollback is a recovery mechanism, not a feature. Data only present
+// in v2 (audit log, dependency observations, signal resolutions, team
+// identities, posture version history) is lost on rollback. The v1
+// `entities` and `signals` tables are fully restored, and `postures`
+// collapses to one row per entity by keeping whichever row SQLite
+// returns last (order-insensitive rollback — the user gets a working
+// v1 schema, not a time machine).
 //
 // Order matters here too. To restore the v1 `name` column we must:
 //  1. Drop the v2 indexes that reference canonical_uri / type
@@ -374,13 +373,11 @@ DROP TRIGGER IF EXISTS signals_no_update;
 `
 
 // migrationV4Up adds the analyst-output stream — the tables that
-// hold structured `exchange.AnalystOutput` documents per
-// design/ingestion-plan.md — and the proposed signals.details
-// JSON column + signal_evidence table from
-// design/signal-storage-evolution.md. Lands together because they
-// constitute one logical schema update (richer storage for both
-// streams: signals get JSON details + raw evidence; AnalystOutput
-// gets a parallel structured stream).
+// hold structured `exchange.AnalystOutput` documents — and the
+// signals.details JSON column + signal_evidence table. Lands
+// together because they constitute one logical schema update
+// (richer storage for both streams: signals get JSON details + raw
+// evidence; AnalystOutput gets a parallel structured stream).
 //
 // All new tables are append-only (triggers below). They use
 // foreign keys into the existing entities table; identity entities

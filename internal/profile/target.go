@@ -1022,8 +1022,7 @@ func parsePkgGoDevURL(input string) (importPath, version string, ok bool) {
 }
 
 // canonicalGoModuleURI returns the pkg:golang/<canonical-path> form
-// for a Go import path, matching design/entity-model-v2.md's
-// "Standard purl" alignment with the [purl spec](https://github.com/package-url/purl-spec).
+// for a Go import path, aligned with the [purl spec](https://github.com/package-url/purl-spec).
 //
 // Two cases:
 //
@@ -1046,8 +1045,7 @@ func parsePkgGoDevURL(input string) (importPath, version string, ok bool) {
 // pkg.go.dev URL parser so the two write paths stay in sync. The
 // gomod parser doesn't use this helper — it deliberately uses the
 // repo:github/ lens for github-hosted modules to support survey/CLI
-// repo-identity workflows. See the lens distinction in
-// design/entity-model-v2.md.
+// repo-identity workflows.
 func canonicalGoModuleURI(importPath string) string {
 	if importPath == "" {
 		return ""

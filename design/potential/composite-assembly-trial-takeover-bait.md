@@ -2,10 +2,10 @@
 
 **Date:** 2026-04-21
 **Trigger:** After the 2026-04-21 Vercel / Context.ai threat-landscape
-entry and the accompanying `takeover-bait` composite spec landed in
-`signals-v01.md`, the open question was whether the composite could be
-mechanically assembled from conclusions already in the store, without
-new collection or code changes.
+entry and the accompanying `takeover-bait` composite spec landed, the
+open question was whether the composite could be mechanically assembled
+from conclusions already in the store, without new collection or code
+changes.
 
 **Method:** Read-only `show-conclusions --target <...>` against the
 three most recent npm-ecosystem analyses in the store, inspect whether
@@ -74,10 +74,9 @@ Every analysis contains the raw download figure ("~26M / ~75M /
 1.25M weekly downloads"), but only inside the rationale text of
 another conclusion (typically `vitality_unmaintained`). There is no
 structured observation with a threshold-comparable number and no
-discrete code naming the criticality/blast-radius shape. This was
-already anticipated in `signals-v01.md` §"How much depends on this
-working?" and in the threat-landscape entry; this trial confirms it
-empirically.
+discrete code naming the criticality/blast-radius shape. The
+threat-landscape entry already anticipated this; this trial
+confirms it empirically.
 
 ### Blocker C — Canonical URI shape is not uniform for npm targets
 
@@ -102,9 +101,9 @@ in-flight work to resolve, not as a new blocker.*
 
 ## What this means for the composite spec
 
-The `takeover-bait` composite as written in `signals-v01.md` is
-accurate. The blockers are upstream of the composite — in the signal
-and URI layers it reads from, not in the composite's own logic.
+The `takeover-bait` composite as written is accurate. The blockers
+are upstream of the composite — in the signal and URI layers it
+reads from, not in the composite's own logic.
 
 Two prerequisite workstreams enable a mechanical composite:
 
@@ -155,8 +154,8 @@ migrated) keeps the stopgap from becoming permanent.
 ## What this trial does *not* do
 
 - Does not re-analyze any of the three packages.
-- Does not modify the composite spec in `signals-v01.md`. The spec is
-  correct; the store is what is inadequate.
+- Does not modify the composite spec. The spec is correct; the
+  store is what is inadequate.
 - Does not propose a URI canonicalization scheme — that work is in
   flight elsewhere.
 - Does not promote any of the code aliases to canonical status; the
@@ -165,17 +164,11 @@ migrated) keeps the stopgap from becoming permanent.
 
 ## Cross-references
 
-- [`../signals-v01.md`](../signals-v01.md) §"Composite Signals (View
-  Layer)" — the `takeover-bait` spec this trial exercises
 - [`../threat-landscape/2026-04-21-vercel-contextai-incident.md`](../threat-landscape/2026-04-21-vercel-contextai-incident.md)
   — the incident that motivated naming the composite in the first
   place
-- [`../agent-output-contract.md`](../agent-output-contract.md) — the
-  document that would carry the canonical vocabulary pinning
-- [`../signal-type-registry.md`](../signal-type-registry.md) —
-  adjacent; may be the right home for the code-string registry
-- [`../entity-model-v2.md`](../entity-model-v2.md) — URI
-  canonicalization context
+- `internal/signal/types.go` — the registered signal-type catalogue;
+  adjacent to where a conclusion-code vocabulary would live
 - `filestore/analysis/invariant-2.2.4-synthesis.md`,
   `escape-html-synthesis.md`, `msgpack-lite-synthesis.md` — the
   narrative syntheses this trial's matrix is derived from

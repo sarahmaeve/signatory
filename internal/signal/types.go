@@ -9,7 +9,7 @@
 //
 // The registry resolves both by making Group and ForgeryResistance
 // data-driven. Collectors pass a type string; the registry supplies
-// the rest. See design/signal-type-registry.md for the design note.
+// the rest.
 //
 // Per the v0.1 decision log, this pass intentionally excludes:
 //   - Realm (deferred to enterprise work)

@@ -78,7 +78,7 @@ func (cmd *InitCmd) Run(globals *Globals) error {
 			fmt.Fprintf(os.Stderr, "mcp:       %s (Claude Code will auto-discover signatory MCP server)\n", mcpPath)
 		} else {
 			fmt.Fprintf(os.Stderr, "mcp:       no .mcp.json found — Claude Code MCP integration not configured\n")
-			fmt.Fprintf(os.Stderr, "           create .mcp.json at project root to enable (see design/mcp-server-architecture.md)\n")
+			fmt.Fprintf(os.Stderr, "           create .mcp.json at project root to enable\n")
 		}
 	}
 	return nil

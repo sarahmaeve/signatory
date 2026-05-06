@@ -19,12 +19,12 @@ import (
 // etc.) — empty string is the correct "not resolvable" signal,
 // distinct from "couldn't reach the registry."
 //
-// Per decision (a) in design/npm-plan.txt, repo resolution lives
-// in analyze.go's orchestration, not inside the signal collector.
-// This method is the provider-side answer the orchestrator calls;
-// the orchestrator stamps the result on the entity; downstream
-// collectors (github, git-local-clone) operate against the
-// resolved entity without needing to know about npm.
+// By design, repo resolution lives in analyze.go's orchestration,
+// not inside the signal collector. This method is the provider-side
+// answer the orchestrator calls; the orchestrator stamps the result
+// on the entity; downstream collectors (github, git-local-clone)
+// operate against the resolved entity without needing to know about
+// npm.
 func (c *Client) ResolveRepoURL(ctx context.Context, name string) (string, error) {
 	pkg, err := c.GetPackage(ctx, name)
 	if err != nil {

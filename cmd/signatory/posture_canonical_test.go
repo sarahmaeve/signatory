@@ -18,10 +18,10 @@ import (
 // two URI forms (pkg:npm/X@V and pkg:npm/X with --version V)
 // resolve to the same storage row.
 //
-// See design/m6-synthesis-contract.md and the 2026-04-21 dogfood
-// session where a version-suffix `posture get` missed a posture the
-// `posture accept` had just written. The scenarios below each
-// encode one user-visible behavior the canonicalization guarantees.
+// Surfaced by the 2026-04-21 dogfood session, where a version-suffix
+// `posture get` missed a posture the `posture accept` had just
+// written. The scenarios below each encode one user-visible behavior
+// the canonicalization guarantees.
 
 // writeUnversionedPostureWithVersionCol is the fixture setup:
 // write a posture to the unversioned entity with version column

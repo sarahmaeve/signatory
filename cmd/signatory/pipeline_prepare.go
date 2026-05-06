@@ -38,8 +38,6 @@ type PrepareManifest struct {
 // returns a JSON manifest with every downstream variable pre-
 // computed, so the orchestrating LLM never threads shell variables
 // or parses stdout.
-//
-// See design/deterministic-orchestration.md for the motivation.
 type PipelinePrepareCmd struct {
 	Target           string   `arg:"" help:"Target URI (GitHub URL, pkg URI, owner/repo shorthand)."`
 	ExpectedAnalysts []string `name:"expected-analyst" help:"Analyst role ID the pipeline plans to dispatch (repeatable)." optional:""`

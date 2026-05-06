@@ -67,8 +67,9 @@ type CollectOpts struct {
 	// BlobStreamer fetch-on-missing-SHA path (--allow-fetch CLI
 	// flag). Default false: missing SHAs surface as
 	// tag_sha_local_status="missing_from_clone" in the matrix
-	// row rather than triggering a remote fetch. See
-	// design/coll7.md D11 for the network-surface rationale.
+	// row rather than triggering a remote fetch — preserving the
+	// missing-SHA observation as a forgery-resistant signal rather
+	// than expanding the network surface to fetch and overwrite it.
 	AllowFetch bool
 
 	// InRunResult is a pointer to the orchestrator's accumulated
@@ -257,10 +258,10 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			exfilwatchcollector.NewCollector(clonePath),
 		)
 
-		// Source-evolution: per-version AST feature matrix
-		// (design/coll7.md). Requires clonePath AND a Go ecosystem
-		// classification — depends on gopublish's version_pin_table
-		// emission via opts.InRunResult / opts.Store.
+		// Source-evolution: per-version AST feature matrix.
+		// Requires clonePath AND a Go ecosystem classification —
+		// depends on gopublish's version_pin_table emission via
+		// opts.InRunResult / opts.Store.
 		//
 		// Appended LAST in the dispatch order so by the time it
 		// runs, the orchestrator's in-run accumulator already

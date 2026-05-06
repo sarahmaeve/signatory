@@ -47,7 +47,7 @@ type toolsCallParams struct {
 
 // toolsCallResult is the result body of a tools/call response.
 // content[].text carries the JSON-serialized Response envelope per
-// the MCP 2025-11-25 spec and design/mcp-protocol-envelopes.md.
+// the MCP 2025-11-25 spec.
 type toolsCallResult struct {
 	Content []contentItem `json:"content"`
 	IsError bool          `json:"isError"`

@@ -175,9 +175,8 @@ func (cmd *PostureSetCmd) Run(globals *Globals) error {
 	// Strip any @V suffix from the target before entity lookup so
 	// the write routes to the canonical unversioned entity. Merges
 	// with --version flag; the two must agree or this is a usage
-	// error. See design/m6-synthesis-contract.md and the 2026-04-21
-	// dogfood where version-suffix queries missed postures stored at
-	// the unversioned form.
+	// error. (Surfaced by the 2026-04-21 dogfood, where version-suffix
+	// queries missed postures stored at the unversioned form.)
 	base, version, err := normalizeTargetForPosture(cmd.Target, cmd.Version)
 	if err != nil {
 		return NewUsageError(err)
@@ -531,8 +530,6 @@ func firstLine(s string) string {
 //     errors rather than silently blocking on stdin.
 //   - --dry-run prints the resolved proposal + deviations without
 //     touching the store or audit log. Use before the real accept.
-//
-// See design/m6-synthesis-contract.md §6 (M6d).
 type PostureAcceptCmd struct {
 	OutputID string `arg:"" help:"Synthesis output UUID to accept. Find it in signatory show-analyses or /analyze pipeline output."`
 

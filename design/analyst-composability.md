@@ -19,12 +19,9 @@ Cross-references:
   market reasoning: for a lot of npm micropackages, full analysis
   is economically irrational; provenance-only is often the right
   shape.
-- [`m6-synthesis-contract.md`](m6-synthesis-contract.md) — the
-  storage shape this sketch extends. `synthesis_supplement.scope`
-  is the field introduced here.
-- [`agent-facing-contract.md`](agent-facing-contract.md) §3.5-3.6
-  for the synthesist-input and synthesist-output contract the
-  scope tag layers onto.
+- `internal/exchange/types.go` — the synthesis supplement storage
+  shape this sketch would extend (`synthesis_supplement.scope` is
+  the field introduced here).
 
 ## 1. Motivation
 
@@ -199,7 +196,7 @@ but only covers 1/N of the actual trust surface — that's the wrong
 question, not an expensive-but-correct one. The honest output
 shape is `provenance` on the root, paired with mechanistic
 composition signals (`direct_dep_count` now, `transitive_dep_count`
-later; see `npm-plan.txt` Phase B for the group definition).
+later).
 
 **Signatory's contract for composition signals is to surface the
 shape — count, OIDC attestation distribution across the resolved

@@ -174,10 +174,9 @@ func TestRegistry_GoPublishCollectorTypesHaveExpectedShape(t *testing.T) {
 // coupling contract as the sibling tests: registry drift and
 // emitter intent stay aligned, caught in a single place.
 //
-// The source-evolution collector is built in stages (see
-// design/coll7.md commit breakdown); the registry entries are
-// landed first so subsequent emission code can reference them
-// without panicking on unregistered types. Until the emission
+// The source-evolution collector is built in stages; the registry
+// entries are landed first so subsequent emission code can reference
+// them without panicking on unregistered types. Until the emission
 // commits land, this test only validates registration shape.
 func TestRegistry_SourceEvolutionTypesHaveExpectedShape(t *testing.T) {
 	t.Parallel()

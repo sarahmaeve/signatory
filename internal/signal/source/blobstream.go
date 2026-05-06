@@ -96,9 +96,9 @@ type BlobStreamerOption func(*BlobStreamer)
 // re-fetching (a second fetch wouldn't change the outcome).
 //
 // Default is false (no fetch). With --no-fetch as the operator
-// default (see design/coll7.md D11), allowFetch is opt-in for the
-// case where the operator knows the clone may be stale relative to
-// the proxy and prefers completeness over the missing-SHA signal.
+// default, allowFetch is opt-in for the case where the operator
+// knows the clone may be stale relative to the proxy and prefers
+// completeness over the missing-SHA signal.
 func WithAllowFetch(allow bool) BlobStreamerOption {
 	return func(b *BlobStreamer) {
 		b.allowFetch = allow
@@ -135,9 +135,9 @@ type TreeBlob struct {
 
 // DiffStat captures the file- and line-count delta between two
 // commit SHAs. Populates the matrix row's `diff_from_previous`
-// block (design/coll7.md D2). Counts are non-negative; "file
-// added" and "file removed" are mutually exclusive per file (a
-// rename counts as one Changed entry, not Added+Removed).
+// block. Counts are non-negative; "file added" and "file removed"
+// are mutually exclusive per file (a rename counts as one Changed
+// entry, not Added+Removed).
 //
 // Binary files contribute to FilesChanged/Added/Removed but not
 // to LinesAdded/LinesRemoved — git's --numstat marks binaries

@@ -6,8 +6,8 @@ import "github.com/sarahmaeve/signatory/internal/signal/source/golang"
 // source_evolution_anomaly signal. Boolean+pointer summary derived
 // from the matrix rows: AnomalyPresent indicates whether some pair
 // of consecutive selected versions exhibits the multi-feature joint
-// spike pattern (design/coll7.md D9), and the optional fields name
-// where it happened and which features spiked.
+// spike pattern, and the optional fields name where it happened and
+// which features spiked.
 //
 // Empty (zero) value means "no anomaly" — omitempty on the
 // optional fields keeps the JSON terse for the common case where

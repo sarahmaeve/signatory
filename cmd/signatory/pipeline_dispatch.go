@@ -101,8 +101,6 @@ func collectionRoles() []string {
 // Templates live in templates/dispatch/*.md alongside the handoff
 // templates. They use the same {PLACEHOLDER} convention and are
 // processed by config.RenderTemplate.
-//
-// See design/deterministic-orchestration.md Proposals #2 and #6.
 type PipelineDispatchPromptsCmd struct {
 	SessionID         string `name:"session-id" help:"Pipeline session ID." required:""`
 	AnalysisSessionID string `name:"analysis-session-id" help:"Analysis session ID." required:""`

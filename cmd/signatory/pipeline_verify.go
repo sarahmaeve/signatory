@@ -26,8 +26,6 @@ type VerifyResult struct {
 // PipelineVerifyCmd checks whether all expected analysts have
 // ingested output for an analysis session. Returns structured JSON
 // so the orchestrator never parses prose.
-//
-// See design/deterministic-orchestration.md Proposal #3.
 type PipelineVerifyCmd struct {
 	SessionID string `arg:"" help:"Analysis session ID to verify."`
 

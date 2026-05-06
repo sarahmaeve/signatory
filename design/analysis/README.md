@@ -15,8 +15,8 @@ muddies the audit trail.
 
 Analyses here:
 
-- Apply the same trust model (see `design/trust-model.md` and
-  `design/signals-v01.md`) as dogfood evaluations.
+- Apply the same trust model (see `design/trust-model.md`) as
+  dogfood evaluations.
 - Are **not required** to end in a recorded posture. "Analysis only —
   no posture recorded" is a valid terminal state. (Posture is a
   statement about a specific consuming organization's relationship to
@@ -44,7 +44,7 @@ Analyses here:
 | [atuin-security-review-external.md](atuin-security-review-external.md) | External security review, round 1, verbatim | Produced by a separate Claude Opus 4.6 agent with a security-focused system prompt; integrated into atuin.md §"2026-04-14 Extended (2)" |
 | [atuin-security-review-external-round2.md](atuin-security-review-external-round2.md) | External security review, round 2, verbatim | Response to signatory's follow-up handoff document; includes a material self-correction of round 1, a new medium-severity sync-censorship finding, and methodology artifacts (grep catalog + positive-absence list). Integrated into atuin.md §"2026-04-14 Extended (3)" |
 | [atuin-schema-trial-response.json](atuin-schema-trial-response.json) | Schema-validation trial emission, JSON (partially migrated toward v1) | First real test of the `internal/exchange/` schema. Security analyst emitted three conclusions, 12-pattern methodology catalog, and two positive absences against the proposed schema. The pre-revision original is preserved alongside as [atuin-schema-trial-response-preschema.json](atuin-schema-trial-response-preschema.json); the fully-migrated v1 form used by Go round-trip tests lives at `internal/exchange/testdata/atuin-schema-trial.json`. |
-| [atuin-schema-trial-feedback.md](atuin-schema-trial-feedback.md) | Schema-validation trial feedback, verbatim | Security analyst's meta-feedback on the schema: which fields were absent/unused, whether the verdict-rationale split works, whether structured emission is worth the overhead. Drove schema revisions in `../mcp-dual-analyst-architecture.md` §"Schema revisions post-trial." |
+| [atuin-schema-trial-feedback.md](atuin-schema-trial-feedback.md) | Schema-validation trial feedback, verbatim | Security analyst's meta-feedback on the schema: which fields were absent/unused, whether the verdict-rationale split works, whether structured emission is worth the overhead. Drove the v1 schema revisions captured in `internal/exchange/types.go`. |
 | [thefuck-security-v1.json](../../internal/exchange/testdata/thefuck-security-v1.json) | Security analyst output (v1 schema, structured), verbatim modulo a documented field rename | Fresh-agent run with the security-review handoff at `/tmp/security-review-handoff.md`. 10 conclusions, 5 positive absences, 14 methodology patterns. Passes `signatory format-check`. Integrated into `thefuck.md`. Now lives at `internal/exchange/testdata/` where it doubles as the reference fixture for ingest round-trip tests. |
 | [thefuck-provenance-v1.json](../../internal/exchange/testdata/thefuck-provenance-v1.json) | Provenance analyst output (v1 schema, structured), verbatim modulo a documented field rename | Signatory provenance methodology emitting v1 JSON in parallel to the security run. 6 conclusions, 4 positive absences, 2 observations, 14 methodology patterns. Passes `signatory format-check`. Integrated into `thefuck.md`. Now lives at `internal/exchange/testdata/` where it doubles as the reference fixture for ingest round-trip tests. |
 | [signatory-security-v1.json](signatory-security-v1.json) | Security analyst output from signatory's dogfood engagement (v1 schema, structured) | Output of the security-review handoff run against signatory itself on 2026-04-14. Historical record; not currently referenced by tests. |

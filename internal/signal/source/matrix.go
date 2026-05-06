@@ -16,9 +16,9 @@ import (
 // source_evolution_matrix signal. One per Go-ecosystem entity per
 // analysis; rows are sorted semver-descending (most-recent first).
 //
-// Schema mirrors design/coll7.md D2. Compound shape (one row per
-// selected version) is by design — see D2 for why a single record
-// beats per-version-pair records.
+// Compound shape (one row per selected version) is by design: a
+// single record beats per-version-pair records because it gives
+// the analyst all rows in one query, with no cross-row stitching.
 type MatrixValue struct {
 	ModulePath string      `json:"module_path"`
 	Ecosystem  string      `json:"ecosystem"`
@@ -68,7 +68,7 @@ const (
 
 	// TagSHALocalMissingFromClone: proxy.golang.org pinned this
 	// SHA but `--clone --refresh` did not fetch it. Itself a
-	// forgery-resistance HIGH signal — see design/coll7.md D11.
+	// forgery-resistance HIGH signal.
 	TagSHALocalMissingFromClone = "missing_from_clone"
 
 	// TagSHALocalMissingOrigin: gopublish couldn't get an Origin
@@ -94,8 +94,8 @@ const (
 	// analyst reading the matrix can tell "we never had the SHA"
 	// from "we had it, the analyzer tripped on it" — those have
 	// different remediation paths and different forgery-resistance
-	// implications. See design/coll7.md and the 2026-05-02
-	// adversarial-review punch list (Tier 1 #1.4).
+	// implications. (Surfaced by the 2026-05-02 adversarial-review
+	// punch list, Tier 1 #1.4.)
 	TagSHALocalAnalyzeFailed = "analyze_failed"
 )
 

@@ -73,8 +73,7 @@ func (a *Assembler) Assemble(ctx context.Context, targetURI string) (*Summary, e
 	// URI so the posture-version match below picks the row whose
 	// version column matches the @V suffix instead of "latest across
 	// versions." Matches the posture set/get/unset/accept command
-	// normalization. See design/m6-synthesis-contract.md and
-	// 2026-04-21 dogfood.
+	// normalization. (Surfaced by the 2026-04-21 dogfood.)
 	baseURI, queryVersion := profile.SplitURIVersion(targetURI)
 
 	// LookupEntity walks the canonical-URI alternates (cross-scheme

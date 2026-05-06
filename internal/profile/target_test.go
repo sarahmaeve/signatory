@@ -776,10 +776,10 @@ func TestResolveTarget_PatchURI(t *testing.T) {
 // <url>` should not have to know about purl syntax.
 //
 // Output is the same canonical form (pkg:golang/<import-path>) the
-// gomod parser produces and the design at design/entity-model-v2.md
-// names as "Standard purl." For github-hosted modules the
-// owner/repo segments are case-folded to align with
-// CanonicalRepoURI's lowercase invariant — github is case-insensitive
+// gomod parser produces, aligned with the standard purl spec.
+// For github-hosted modules the owner/repo segments are case-folded
+// to align with CanonicalRepoURI's lowercase invariant — github is
+// case-insensitive
 // at the host layer, so two case-different URLs must collapse to one
 // canonical entity URI.
 //
@@ -887,9 +887,8 @@ func TestResolveTarget_PkgGoDevURLs_RejectsLookalikes(t *testing.T) {
 
 // TestResolveTarget_VanityGoPaths pins the contract for non-github
 // Go module paths: ResolveTarget must produce the pkg:golang/<path>
-// canonical URI per the [purl spec](https://github.com/package-url/purl-spec)
-// and design/entity-model-v2.md "Standard purl," not misclassify the
-// import-path's first segment as a github owner.
+// canonical URI per the [purl spec](https://github.com/package-url/purl-spec),
+// not misclassify the import-path's first segment as a github owner.
 //
 // Surfaced by dogfood entry 1: signatory_summary sent
 // "modernc.org/sqlite" through ResolveTarget and got

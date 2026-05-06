@@ -2,8 +2,6 @@
 // collector machinery: version-budget selection, blob streaming
 // from git, matrix assembly, and anomaly detection. Language-
 // specific AST analysis lives in subpackages (golang/).
-//
-// See design/coll7.md for the full design.
 package source
 
 import (
@@ -48,8 +46,7 @@ func (b BudgetOpts) defaults() BudgetOpts {
 
 // Selection is the result of a budget pass: which versions were
 // chosen, which were skipped, and the knob values in effect. The
-// shape mirrors the matrix value's "budget" block in JSON output
-// (design/coll7.md D2).
+// shape mirrors the matrix value's "budget" block in JSON output.
 type Selection struct {
 	SelectedVersions  []string `json:"selected_versions"`
 	SkippedVersions   []string `json:"skipped_versions"`

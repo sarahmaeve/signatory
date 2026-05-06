@@ -95,9 +95,7 @@ of reading the CA file (`Read`, `Glob`, or `Grep`) so Node's
 `WebFetch` fails with `unable to verify the first certificate` because the
 TLS stack can't complete the chain. The synthesist agent role carries
 `Read Glob Grep` for this reason even though its prompt forbids using those
-tools for evidence browsing. See
-[`open-architecture-question.md`](open-architecture-question.md) for the
-full mechanism write-up and the hypothesis-test trail.
+tools for evidence browsing.
 
 ### Go CLI clients
 
@@ -211,7 +209,5 @@ Tracked here so every piece of architectural debt is visible in one place:
 - `internal/certs/certs.go:12-30` — rationale for a signatory-owned CA
   path over `$(mkcert -CAROOT)` substitution.
 - `cmd/signatory/serve.go:40-56` — why the server requires TLS.
-- [`open-architecture-question.md`](open-architecture-question.md) — why
-  WebFetch subagents need a file-reading tool in their allowed-tools set.
 - [`.claude/skills/analyze/SKILL.md` §"Step 0a"](../.claude/skills/analyze/SKILL.md) —
   user-facing preflight ritual operators perform before dispatching agents.

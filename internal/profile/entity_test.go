@@ -29,10 +29,10 @@ func TestEntityTypeConstants(t *testing.T) {
 // a single source of truth so callers (analyze, posture, analyst-output
 // ingest, future EnsureEntityByCanonicalURI) cannot drift out of sync.
 //
-// The mapping mirrors design/entity-model-v2.md and the URI scheme
-// constants in uri.go. Unknown schemes fall back to EntityPackage —
-// the least-surprising default, matching the contract previously held
-// by cmd/signatory/posture.go's package-private entityTypeForScheme.
+// The mapping mirrors the URI scheme constants in uri.go. Unknown
+// schemes fall back to EntityPackage — the least-surprising default,
+// matching the contract previously held by cmd/signatory/posture.go's
+// package-private entityTypeForScheme.
 func TestEntityTypeForScheme(t *testing.T) {
 	t.Parallel()
 

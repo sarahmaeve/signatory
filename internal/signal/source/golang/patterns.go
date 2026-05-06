@@ -14,8 +14,7 @@ package golang
 // payload variants in the public corpus reach for package-level
 // functions (http.Get, http.Post, http.NewRequest), and method
 // detection requires either type resolution or a separate
-// selector-chain walker. See design/coll7.md Q4 and the package
-// caveats.
+// selector-chain walker. See the package caveats.
 type CallSite struct {
 	Pkg string
 	Fn  string

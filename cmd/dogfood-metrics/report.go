@@ -1114,14 +1114,15 @@ func pluralS(n int) string {
 }
 
 // renderSourceReads is the underspecification-candidate section.
-// Per design/agent-otel.md: the analyst should never need to
-// read signatory's own source.
+// The analyst should never need to read signatory's own source —
+// each source-read is evidence that a handoff, MCP description, or
+// schema doc didn't surface what the analyst needed.
 func renderSourceReads(b *strings.Builder, agg *aggregated) {
 	b.WriteString("## Source reads (underspecification candidates)\n\n")
-	b.WriteString("Per design/agent-otel.md: the analyst should never need to read\n")
-	b.WriteString("signatory's own source. Each entry below is evidence that a\n")
-	b.WriteString("handoff template, MCP description, or schema doc didn't surface\n")
-	b.WriteString("what the analyst needed.\n\n")
+	b.WriteString("The analyst should never need to read signatory's own source.\n")
+	b.WriteString("Each entry below is evidence that a handoff template, MCP\n")
+	b.WriteString("description, or schema doc didn't surface what the analyst\n")
+	b.WriteString("needed.\n\n")
 	if len(agg.SourceReads) == 0 {
 		b.WriteString("no source-tree reads in this session\n\n")
 		return

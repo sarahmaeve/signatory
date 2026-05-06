@@ -50,11 +50,10 @@ import (
 // a posture via `signatory posture accept <output-id>`.
 //
 // The scope mismatch between this verb's name and its v0.1 behavior
-// is tracked: the original design (design/mcp-dual-analyst-
-// architecture.md) envisioned `signatory analyze --depth=full`
-// running the LLM-backed pipeline in-process. v0.1 Invariant 1
-// ("forbid LLM-client deps and API hostnames" in the binary)
-// forced the LLM work out of the CLI and into the Claude-skill
+// is tracked: an earlier design envisioned `signatory analyze
+// --depth=full` running the LLM-backed pipeline in-process. v0.1
+// Invariant 1 ("forbid LLM-client deps and API hostnames" in the
+// binary) forced the LLM work out of the CLI and into the Claude-skill
 // harness. This command is today's `--depth=signals` equivalent;
 // the other depths remain aspirational until v0.2 reopens the
 // question of in-process LLM invocation.
@@ -93,10 +92,9 @@ type AnalyzeCmd struct {
 	// collector's BlobStreamer fetch-on-missing-SHA retry path.
 	// Default false (no fetch): a missing SHA in the local clone
 	// surfaces as tag_sha_local_status="missing_from_clone" in
-	// the matrix row, itself a forgery-resistance HIGH signal —
-	// see design/coll7.md D11. Operators who know their clone
-	// may be stale relative to the proxy can opt in to the
-	// targeted retry.
+	// the matrix row, itself a forgery-resistance HIGH signal.
+	// Operators who know their clone may be stale relative to the
+	// proxy can opt in to the targeted retry.
 	AllowFetch bool `name:"allow-fetch" help:"Allow the source-evolution collector to retry missing-SHA reads via 'git fetch origin' once. Default off — a missing SHA after --refresh is preserved as a signal rather than fetched." default:"false"`
 
 	// --ignore-burn overrides the pre-collection burn gate. By
@@ -502,10 +500,10 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	}
 
 	// Resolve the entity's upstream repo URL when it's an npm
-	// package that hasn't been resolved yet (A.5 in design/npm-plan.
-	// txt). The registry tells us where the package's source lives;
-	// the orchestrator stamps it on the entity so downstream
-	// collectors (github, git-local-clone) pick it up via entity.URL.
+	// package that hasn't been resolved yet. The registry tells us
+	// where the package's source lives; the orchestrator stamps it
+	// on the entity so downstream collectors (github, git-local-clone)
+	// pick it up via entity.URL.
 	//
 	// Failure is always recorded as an absence:repo_declaration signal
 	// with retryable=true so the stored profile carries a machine-
@@ -784,9 +782,9 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	// later collectors can read earlier collectors' emissions in the
 	// same run. Currently only the source-evolution collector consumes
 	// this — it reads gopublish's version_pin_table to anchor matrix
-	// rows to commit SHAs (design/coll7.md D3, Architecture B). The
-	// pointer is captured at construction time so subsequent mutations
-	// inside this loop are visible to source-evolution's Collect.
+	// rows to commit SHAs. The pointer is captured at construction
+	// time so subsequent mutations inside this loop are visible to
+	// source-evolution's Collect.
 	inRunResult := &signal.CollectionResult{}
 
 	collectors := globals.Collectors
@@ -1298,12 +1296,12 @@ func (s *stickyWriter) Err() error {
 // stamps the result on the entity. Persists the entity update so
 // subsequent reads see the resolved URL.
 //
-// Lives in analyze.go rather than inside the npm collector per
-// decision (a) in design/npm-plan.txt: the provider answers the
-// "where is this package's source?" question, the orchestrator
-// records it, and downstream collectors work against the resolved
-// entity. Keeping the provider out of the collector prevents the
-// collector's tight loop (1 call per signal it emits) from bleeding
+// Lives in analyze.go rather than inside the npm collector by
+// design: the provider answers the "where is this package's
+// source?" question, the orchestrator records it, and downstream
+// collectors work against the resolved entity. Keeping the
+// provider out of the collector prevents the collector's tight
+// loop (1 call per signal it emits) from bleeding
 // into orchestration (1 call per analyze invocation).
 func resolveNpmRepo(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error {
 	packageName := strings.TrimPrefix(entity.CanonicalURI, "pkg:npm/")

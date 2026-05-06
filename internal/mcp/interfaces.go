@@ -9,7 +9,6 @@
 //
 // Protocol target: MCP spec 2025-11-25
 // (https://modelcontextprotocol.io/specification/2025-11-25).
-// Envelope shapes are canonicalized in design/mcp-protocol-envelopes.md.
 // Every handler returns the same Response shape so the protocol layer
 // can emit a uniform tools/call or resources/read response with no
 // handler-specific serialization.
@@ -73,8 +72,7 @@ type Resource interface {
 
 // Response is the uniform tool/resource response envelope. Every
 // tool and resource returns this shape; the protocol layer
-// serializes it as content[].text in the MCP response. Defined in
-// design/mcp-protocol-envelopes.md §"Tool-response envelope".
+// serializes it as content[].text in the MCP response.
 type Response struct {
 	Status   string           `json:"status"`
 	Data     any              `json:"data,omitempty"`
@@ -136,7 +134,7 @@ func (r *Response) WithRequiresConfirm(v bool) *Response {
 	return r
 }
 
-// Error codes per design/mcp-protocol-envelopes.md §"Error codes".
+// Error codes used in Response.Error.Code when Status is "error".
 // Named Code* rather than Err* to avoid collision with Go's error-value
 // naming convention (compare mcp.CodeNotFound vs. store.ErrNotFound).
 const (

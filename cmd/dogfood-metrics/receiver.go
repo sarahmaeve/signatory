@@ -24,11 +24,9 @@ const maxBodyBytes = 16 * 1024 * 1024
 // logs.jsonl in OutDir. Returns 202 Accepted on success per the
 // OTLP/HTTP spec.
 //
-// Why we wrote this instead of adopting otelcol-contrib: see
-// design/agent-otel.md "Architectural decision: write our own
-// collector." Short version — vetting the upstream collector +
-// dep tree is out of proportion to what we need (a small HTTP
-// server that records OTLP-JSON to disk).
+// Why we wrote this instead of adopting otelcol-contrib: vetting
+// the upstream collector + dep tree is out of proportion to what
+// we need (a small HTTP server that records OTLP-JSON to disk).
 //
 // Concurrency: a single Receiver may be shared across many
 // goroutines (the http.Server dispatches each request in its own

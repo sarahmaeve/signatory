@@ -87,8 +87,7 @@ type RunResult struct {
 //
 // This shape lets the orchestration logic live in Go while
 // preserving Invariant 1 (no LLM client in the binary): the dispatch
-// itself stays in the host. See design/deterministic-orchestration.md
-// for the broader rationale.
+// itself stays in the host.
 type PipelineRunCmd struct {
 	Target string `arg:"" optional:"" help:"Target URI (GitHub URL, pkg URI, owner/repo). Required for the start phase; must be omitted with --resume."`
 

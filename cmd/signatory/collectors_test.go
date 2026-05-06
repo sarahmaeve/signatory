@@ -457,9 +457,9 @@ func TestCollectorsFor_GoModuleEntity_IncludesGoPublishAndSourceEvolution(t *tes
 		names[c.Name()] = true
 	}
 	assert.True(t, names["go-publish"],
-		"gopublish collector must dispatch for Ecosystem=\"golang\" — emits version_pin_table consumed by source-evolution per design/coll7.md D3")
+		"gopublish collector must dispatch for Ecosystem=\"golang\" — emits version_pin_table consumed by source-evolution")
 	assert.True(t, names["source-evolution"],
-		"source-evolution collector must dispatch for Ecosystem=\"golang\" — emits source_evolution_matrix + source_evolution_anomaly per design/coll7.md commit 15")
+		"source-evolution collector must dispatch for Ecosystem=\"golang\" — emits source_evolution_matrix + source_evolution_anomaly")
 	assert.True(t, names["github"], "github collector should also dispatch for resolved Go entity")
 	assert.True(t, names["git"], "git collector should also dispatch for resolved Go entity")
 	assert.True(t, names["repofiles"], "repofiles collector should also dispatch for resolved Go entity")

@@ -13,7 +13,7 @@ import (
 //
 // The logic mirrors pypi.NormalizeDeclaredRepoURL (and npm's equivalent
 // via resolve.go) — the three copies are a candidate for extraction
-// into a shared utility (see design/rust.md open question #1).
+// into a shared utility.
 //
 // Accepted shapes:
 //

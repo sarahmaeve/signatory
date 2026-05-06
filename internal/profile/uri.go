@@ -14,7 +14,7 @@ import (
 // canonical URIs, or posture decisions and signals will fragment across
 // duplicate entities (#53).
 //
-// This file defines the URI schemes from design/entity-model-v2.md:
+// This file defines the canonical URI schemes:
 //
 //	pkg:<ecosystem>/<name>         — packages (purl-compatible prefix)
 //	repo:<platform>/<owner>/<name> — source repositories

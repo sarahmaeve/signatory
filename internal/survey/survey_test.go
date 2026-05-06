@@ -927,10 +927,10 @@ func TestRun_PyProjectTOML_Poetry_Hybrid_SmokeFixture(t *testing.T) {
 
 // TestParseGraph_PyPIReturnsGraphUnavailable covers parseGraph's
 // dispatch for the three PyPI filenames. Graph extraction isn't
-// implemented for any PyPI manifest yet (lockfile parsing is the
-// path; see design/potential-pypi.md Layer 3 §"Graph extraction").
-// All three should land on ErrGraphUnavailable with the
-// pypi-specific message rather than the "unrecognized" default.
+// implemented for any PyPI manifest yet (lockfile parsing —
+// poetry.lock / uv.lock — is the path). All three should land on
+// ErrGraphUnavailable with the pypi-specific message rather than
+// the "unrecognized" default.
 func TestParseGraph_PyPIReturnsGraphUnavailable(t *testing.T) {
 	t.Parallel()
 	for _, base := range []string{"requirements.txt", "pyproject.toml", "setup.py"} {
