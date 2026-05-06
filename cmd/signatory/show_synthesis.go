@@ -8,8 +8,11 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/exchange"
+	"github.com/sarahmaeve/signatory/internal/htmlreport"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -27,6 +30,20 @@ import (
 // `signatory show-conclusions` for per-conclusion drill-in.
 type ShowSynthesisCmd struct {
 	OutputID string `arg:"" help:"Synthesis output UUID. Find it with 'signatory show-analyses' (rows whose analyst_id starts with signatory-synthesis)."`
+
+	// HTMLDir, when set, switches the command from "render markdown
+	// to stdout" to "write a static HTML report directory under
+	// HTMLDir and print the absolute path to the generated
+	// index.html". The HTML site cross-links the synthesis to its
+	// referenced conclusions and per-analyst pages so the operator
+	// doesn't need to chain show-conclusions / show-analyses calls
+	// to read the supporting findings.
+	//
+	// HTMLDir must already exist; the command auto-creates a
+	// subdirectory <short>-<output-id-short> inside it. v0.1 has no
+	// --force / overwrite — choose a different parent or remove the
+	// existing subdir to recover from a collision.
+	HTMLDir string `name:"html" type:"existingdir" help:"Write a static HTML site under DIR/<auto-named subdir>/ instead of markdown to stdout. Prints the absolute path to the generated index.html on success." placeholder:"DIR"`
 }
 
 func (cmd *ShowSynthesisCmd) Run(globals *Globals) error {
@@ -64,8 +81,143 @@ func (cmd *ShowSynthesisCmd) Run(globals *Globals) error {
 		shortName = entity.ShortName
 	}
 
+	// HTML mode is purely additive: when --html is unset the existing
+	// markdown-to-stdout path runs unchanged.
+	if cmd.HTMLDir != "" {
+		return cmd.runHTML(ctx, s, out, shortName)
+	}
+
 	renderSynthesisMarkdown(os.Stdout, out, shortName)
 	return nil
+}
+
+// runHTML loads every analyst output the synthesis cites in
+// KeyConclusionRefs and hands the bundle to htmlreport.WriteReportTree.
+// On success, the absolute path to the generated index.html is the
+// only thing written to stdout — the operator can pipe it to `open`.
+//
+// Also resolves the target's external registry URL and the entity's
+// currently-recorded posture from the store, so the index can show
+// "Recommended posture (synthesist)" alongside "Current recorded
+// posture (signatory db)" and link the target URI to its registry
+// page.
+func (cmd *ShowSynthesisCmd) runHTML(ctx context.Context, s store.Store, out *exchange.AnalystOutput, shortName string) error {
+	loaded, err := loadReferencedAnalystOutputs(ctx, s, out)
+	if err != nil {
+		return err
+	}
+
+	recordedPosture, err := lookupRecordedPosture(ctx, s, out.Target)
+	if err != nil {
+		// Posture lookup is decorative; failure shouldn't block the
+		// report. Treat any error as "no recorded posture" and move
+		// on. (FindEntityByURI returning ErrNotFound is the common
+		// case — the entity isn't tracked in this store.)
+		recordedPosture = nil
+	}
+
+	indexPath, err := htmlreport.WriteReportTree(htmlreport.WriteReportTreeInput{
+		ParentDir:         cmd.HTMLDir,
+		Synth:             out,
+		SynthesisOutputID: cmd.OutputID,
+		ShortName:         shortName,
+		Loaded:            loaded,
+		TargetURL:         htmlreport.PURLToRegistryURL(out.Target),
+		RecordedPosture:   recordedPosture,
+		GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
+		Version:           buildVersionStamp(),
+	})
+	if err != nil {
+		return fmt.Errorf("write HTML report: %w", err)
+	}
+	fmt.Fprintln(os.Stdout, indexPath)
+	return nil
+}
+
+// lookupRecordedPosture returns the most recent active posture for
+// the entity at target, translated into the htmlreport package's
+// local RecordedPosture shape. Returns nil (without error) when no
+// posture exists for the entity. Returns an error only on a real
+// store failure that the caller should report; the calling code
+// degrades gracefully on any error by treating it as "no recorded
+// posture."
+func lookupRecordedPosture(ctx context.Context, s store.Store, targetURI string) (*htmlreport.RecordedPosture, error) {
+	entityURI, _ := profile.SplitURIVersion(targetURI)
+	entity, err := s.FindEntityByURI(ctx, entityURI)
+	if err != nil {
+		return nil, err
+	}
+	postures, err := s.GetPostures(ctx, entity.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(postures) == 0 {
+		return nil, nil
+	}
+	// GetPostures returns active (non-withdrawn) postures. v0.1 takes
+	// the first one — multiple active postures across different
+	// version scopes is rare in current dogfood usage; if it becomes
+	// common, this is the seam to add per-version-scope rendering.
+	p := postures[0]
+	return &htmlreport.RecordedPosture{
+		Tier:      string(p.Tier),
+		Version:   p.Version,
+		SetBy:     p.SetBy,
+		SetAt:     p.SetAt.UTC().Format(time.RFC3339),
+		Rationale: p.Rationale,
+	}, nil
+}
+
+// loadReferencedAnalystOutputs walks the synthesis supplement's
+// KeyConclusionRefs, collects the distinct OutputIDs, and loads each
+// from the store. A miss on any individual id is NOT fatal — the
+// resulting map is sparse, and BuildLinkPlan converts the absent
+// entry into a DanglingRef that drives a stub page. That keeps the
+// "snapshot of the store" contract: data corruption surfaces as a
+// banner, not a hard fail.
+func loadReferencedAnalystOutputs(ctx context.Context, s store.Store, synth *exchange.AnalystOutput) (map[string]*exchange.AnalystOutput, error) {
+	loaded := map[string]*exchange.AnalystOutput{}
+	if synth.SynthesisSupplement == nil {
+		return loaded, nil
+	}
+	seen := map[string]struct{}{}
+	for _, ref := range synth.SynthesisSupplement.KeyConclusionRefs {
+		if ref.OutputID == "" {
+			continue
+		}
+		if _, ok := seen[ref.OutputID]; ok {
+			continue
+		}
+		seen[ref.OutputID] = struct{}{}
+		ao, err := s.GetAnalystOutput(ctx, ref.OutputID)
+		if errors.Is(err, store.ErrNotFound) {
+			// Leave it absent in the loaded map; the link planner
+			// produces a DanglingRef that drives a stub page.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load referenced analyst output %s: %w", ref.OutputID, err)
+		}
+		loaded[ref.OutputID] = ao
+	}
+	return loaded, nil
+}
+
+// buildVersionStamp returns the version string written to every
+// page footer. Reads the build-time package vars threaded into the
+// binary by main.go's ldflags. Pairs version with commit when both
+// are stamped (real release builds); collapses to just version
+// when commit is the placeholder.
+func buildVersionStamp() string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		v = "dev"
+	}
+	c := strings.TrimSpace(commit)
+	if c != "" && c != "none" {
+		return v + "+" + c
+	}
+	return v
 }
 
 // renderSynthesisMarkdown writes a synthesis output's markdown
