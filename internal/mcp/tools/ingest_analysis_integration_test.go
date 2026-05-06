@@ -95,8 +95,8 @@ func TestIngestAnalysisTool_StdioRoundTrip(t *testing.T) {
 	analystOutput := map[string]any{
 		"attribution": map[string]any{
 			"analyst_id": "stdio-integration",
-			"model":      "stdio-integration-model",
-			"invoked_at": "2026-04-17T12:00:00Z",
+			// model and invoked_at server-stamped at ingest;
+			// caller-supplied values are rejected by the validator.
 		},
 		"target":      "pkg:test/stdio-widget",
 		"conclusions": []any{}, // empty conclusions is valid
@@ -233,7 +233,8 @@ func TestIngestAnalysisTool_StdioSchemaViolation(t *testing.T) {
 			"arguments": map[string]any{
 				"analyst_output": map[string]any{
 					"attribution": map[string]any{
-						"analyst_id": "x", "model": "y", "invoked_at": "2026-04-17T12:00:00Z",
+						"analyst_id": "x",
+						// model and invoked_at server-stamped at ingest.
 					},
 					// target omitted on purpose.
 				},

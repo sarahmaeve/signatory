@@ -21,8 +21,7 @@ func synthesisForAccept() *exchange.AnalystOutput {
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/accept-example",
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -302,8 +301,7 @@ func TestPostureAccept_NonSynthesisOutput_Errors(t *testing.T) {
 	analyst := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/security-only",
 		Conclusions: []exchange.Conclusion{

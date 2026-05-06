@@ -46,7 +46,7 @@ type IngestAnalysisTool struct {
 func (t *IngestAnalysisTool) Name() string { return "signatory_ingest_analysis" }
 
 func (t *IngestAnalysisTool) Description() string {
-	return "USE THIS when you have produced a v1-schema AnalystOutput as a specialist analyst (security, provenance, synthesist) and need to land your conclusions in the store. The output becomes queryable by signatory_show_analyses, signatory_show_conclusions, and signatory_analyze. Idempotent on content — re-ingesting identical payload returns the existing row's IDs with idempotent=true. If validation fails, the response names the first offending field so you can fix the payload and retry rather than dropping fields. Required payload shape: analyst_output carrying attribution{analyst_id, model, invoked_at}, a non-empty target, and any conclusions/observations/positive_absences/methodology_trace your analysis produced. See design/mcp-dual-analyst-architecture.md for the schema."
+	return "USE THIS when you have produced a v1-schema AnalystOutput as a specialist analyst (security, provenance, synthesist) and need to land your conclusions in the store. The output becomes queryable by signatory_show_analyses, signatory_show_conclusions, and signatory_analyze. Idempotent on content — re-ingesting identical payload returns the existing row's IDs with idempotent=true. If validation fails, the response names the first offending field so you can fix the payload and retry rather than dropping fields. Required payload shape: analyst_output carrying attribution{analyst_id}, a non-empty target, and any conclusions/observations/positive_absences/methodology_trace your analysis produced. attribution.model and attribution.invoked_at are server-stamped — DO NOT include them; the validator rejects caller-supplied values to prevent agents from hallucinating model identity or wall-clock timestamps. See design/mcp-dual-analyst-architecture.md for the schema."
 }
 
 func (t *IngestAnalysisTool) InputSchema() json.RawMessage {
@@ -55,7 +55,7 @@ func (t *IngestAnalysisTool) InputSchema() json.RawMessage {
 		"properties": {
 			"analyst_output": {
 				"type": "object",
-				"description": "v1-schema AnalystOutput payload. Required nested fields: attribution (with analyst_id, model, invoked_at), target (canonical URI or URL). Optional: conclusions, positive_absences, observations, methodology_trace, supersedes, round_notes."
+				"description": "v1-schema AnalystOutput payload. Required nested fields: attribution (with analyst_id), target (canonical URI or URL). Optional: conclusions, positive_absences, observations, methodology_trace, supersedes, round_notes. DO NOT include attribution.model or attribution.invoked_at: those are server-stamped (model from OTEL backfill, invoked_at from time.Now() at ingest); the validator rejects caller-supplied values."
 			},
 			"source": {
 				"type": "string",
@@ -144,6 +144,11 @@ func (t *IngestAnalysisTool) Handle(ctx context.Context, raw json.RawMessage) *m
 	// structural shape issues that json.Unmarshal accepts but the
 	// store's ingest would reject — missing attribution fields,
 	// empty target, conclusions without verdict/rationale, etc.
+	// The validator also rejects caller-supplied attribution.model
+	// and attribution.invoked_at: those are server-stamped inside
+	// the store layer (see analyst_output.go IngestAnalystOutput
+	// for where invoked_at is filled in from time.Now() after the
+	// content hash is computed).
 	if err := out.Validate(); err != nil {
 		return mcp.Err(mcp.CodeSchemaViolation,
 			"analyst_output failed v1 schema validation: "+err.Error(),

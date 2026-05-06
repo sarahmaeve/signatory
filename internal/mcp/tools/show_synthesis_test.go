@@ -52,8 +52,7 @@ func seedSynthesis(t *testing.T, s *store.SQLite, target, summary string) (outpu
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-28T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		SynthesisSupplement: &exchange.SynthesisSupplement{
@@ -78,8 +77,7 @@ func seedAnalystOutput(t *testing.T, s *store.SQLite, target string) string {
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-security-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-28T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{

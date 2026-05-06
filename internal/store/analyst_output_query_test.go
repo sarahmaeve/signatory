@@ -440,8 +440,7 @@ func TestGetLatestSynthesisForEntity_EntityWithoutSynthesis(t *testing.T) {
 	nonSynth := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-security-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/no-synthesis-here",
 		Conclusions: []exchange.Conclusion{

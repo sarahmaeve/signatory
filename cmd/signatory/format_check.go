@@ -113,7 +113,15 @@ func printSummary(w io.Writer, path, format string, out *exchange.AnalystOutput)
 	}
 
 	p("%s (%s)\n", path, format)
-	p("  attribution: %s / %s", out.Attribution.AnalystID, out.Attribution.Model)
+	// Model is server-stamped (filled in by OTEL backfill — see
+	// AgentAttribution.validate); elide the " / model" suffix when
+	// it's empty rather than rendering "analyst / " with a dangling
+	// slash. Mirrors show-synthesis's handling of an empty model.
+	if out.Attribution.Model != "" {
+		p("  attribution: %s / %s", out.Attribution.AnalystID, out.Attribution.Model)
+	} else {
+		p("  attribution: %s", out.Attribution.AnalystID)
+	}
 	if out.Attribution.Round > 0 {
 		p(" (round %d)", out.Attribution.Round)
 	}

@@ -208,13 +208,41 @@ func (s *SQLite) IngestAnalystOutput(
 	outputID := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// Server-stamp invoked_at from the wall clock. The validator
+	// rejects caller-supplied attribution.invoked_at (see
+	// AgentAttribution.validate for rationale: agents have no
+	// reliable wall-clock API and routinely hallucinate timestamps),
+	// so by this point out.Attribution.InvokedAt is empty and we're
+	// filling in fresh ground rather than overwriting a guess.
+	//
+	// We pass `now` explicitly to insertAnalystOutputRow rather than
+	// mutating out.Attribution.InvokedAt because the caller's *out
+	// pointer is shared across calls — mutating it would mean a
+	// second ingest of the same out (e.g. an idempotency test, or a
+	// retry path) would arrive at the validator with a non-empty
+	// InvokedAt and be rejected. Pass-through preserves the
+	// caller's view of their own struct.
+	//
+	// Order matters: this `now` is captured AFTER
+	// analystOutputContentHash (computed above) so the hash is
+	// taken from the caller's exact payload. Two ingests of the
+	// same payload at different times still hash identically and
+	// trigger the idempotency short-circuit; if we hashed AFTER
+	// stamping, identical payloads at different times would
+	// re-ingest as fresh rows.
+	//
+	// model is left empty for now — half 2 will backfill it by
+	// joining to OTEL gen_ai.request.model spans via
+	// analysis_session_id. Until then, the show-synthesis renderer
+	// elides the "(model)" suffix when empty.
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback-after-commit is a no-op
 
-	if err = insertAnalystOutputRow(ctx, tx, outputID, rowResolution, collectedFromEntityID, options.analysisSessionID, out, sourcePath, hash, now); err != nil {
+	if err = insertAnalystOutputRow(ctx, tx, outputID, rowResolution, collectedFromEntityID, options.analysisSessionID, out, sourcePath, hash, now, now); err != nil {
 		return nil, err
 	}
 	if err = insertConclusions(ctx, tx, outputID, out.Conclusions); err != nil {
@@ -547,7 +575,7 @@ func insertAnalystOutputRow(
 	collectedFromEntityID string,
 	analysisSessionID string,
 	out *exchange.AnalystOutput,
-	sourcePath, contentHash, ingestedAt string,
+	sourcePath, contentHash, invokedAt, ingestedAt string,
 ) error {
 	// Normalize empty FK-optional strings to SQL NULL so the FK
 	// constraints don't try to resolve "".
@@ -581,7 +609,7 @@ func insertAnalystOutputRow(
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		outputID, resolution.EntityID,
 		out.Attribution.AnalystID, out.Attribution.Model,
-		out.Attribution.PromptVersion, out.Attribution.InvokedAt,
+		out.Attribution.PromptVersion, invokedAt,
 		ingestedAt, out.Attribution.Round,
 		out.TargetCommit, out.RoundNotes, sourcePath, contentHash,
 		collectedFrom,

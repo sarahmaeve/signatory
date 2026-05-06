@@ -233,10 +233,14 @@ At the top of your file, include these key: value lines:
 
 ```
 Analyst: signatory-provenance-v1
-Model: (your model name)
 Round: 1
 Target-commit: (the HEAD SHA you analyzed)
 ```
+
+(Model and Invoked-At are deliberately absent: the v1 schema validator
+rejects caller-supplied values for both — they're server-stamped at
+ingest. Markdown headers carrying them are silently dropped by the
+parser for backward compatibility.)
 
 ### Conclusions
 
@@ -355,9 +359,7 @@ output invisible to the rollup query. Copy the full
   ```json
   "methodology_trace": {
     "source": {
-      "analyst_id": "signatory-provenance-v1",
-      "model": "<your model>",
-      "invoked_at": "<RFC3339 timestamp>"
+      "analyst_id": "signatory-provenance-v1"
     },
     "notes": "optional analyst commentary about the catalog",
     "patterns": [
@@ -403,8 +405,6 @@ v1 JSON envelope. Shape:
 {
   "attribution": {
     "analyst_id": "signatory-provenance-v1",
-    "model": "<your model>",
-    "invoked_at": "<RFC3339 timestamp>",
     "round": 1
   },
   "target": "<canonical URI or URL from the handoff>",

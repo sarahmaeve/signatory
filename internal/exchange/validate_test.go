@@ -18,8 +18,10 @@ func validBase() *AnalystOutput {
 	return &AnalystOutput{
 		Attribution: AgentAttribution{
 			AnalystID: "test-analyst",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-14T00:00:00Z",
+			// Model and InvokedAt are server-stamped (filled in at
+			// ingest time by the store layer / OTEL backfill); the
+			// validator rejects caller-supplied values. See
+			// AgentAttribution.validate for rationale.
 		},
 		Target: "pkg:test/example",
 		Conclusions: []Conclusion{
@@ -54,16 +56,12 @@ func TestValidate_AttributionFields(t *testing.T) {
 			mutate:  func(o *AnalystOutput) { o.Attribution.AnalystID = "" },
 			wantErr: "attribution: analyst_id required",
 		},
-		{
-			name:    "missing model",
-			mutate:  func(o *AnalystOutput) { o.Attribution.Model = "" },
-			wantErr: "attribution: model required",
-		},
-		{
-			name:    "missing invoked_at",
-			mutate:  func(o *AnalystOutput) { o.Attribution.InvokedAt = "" },
-			wantErr: "attribution: invoked_at required",
-		},
+		// Note: cases for "missing model" / "missing invoked_at" used
+		// to live here. They asserted that EMPTY values were rejected
+		// — the inverse of today's contract, where empty IS the
+		// required state and any caller-supplied value is rejected.
+		// See TestValidate_ServerStampedFieldsMustBeEmpty for the
+		// new contract's coverage.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,6 +153,80 @@ func TestValidate_SignatoryAnalystIDMustBeCanonical(t *testing.T) {
 			// rule applies to its namespace.
 			assert.Contains(t, err.Error(), "signatory-",
 				"error must explain the namespace rule; got: %s", err)
+		})
+	}
+}
+
+// TestValidate_ServerStampedFieldsMustBeEmpty asserts that
+// attribution.model and attribution.invoked_at are server-stamped
+// (filled in at MCP ingest time from time.Now() and OTEL backfill
+// respectively) and MUST NOT be supplied by the caller. Agents
+// have no reliable way to know either value; recent dogfood
+// evidence shows synthesists hallucinating model identity (e.g.
+// "claude-3.5-sonnet" stamped on a 2026-05-06 row) and invoked_at
+// timestamps (round numbers like 2026-05-06T10:30:00Z that don't
+// match the actual ingest time). The fix is to reject these
+// fields at the v1 schema validator and stamp them server-side.
+//
+// See feedback_analysis_serialization_split: tokens for judgment,
+// code for structure. model and invoked_at are pure run metadata
+// (structure), not analyst judgment, so they belong on the server
+// side of the boundary.
+//
+// This test deliberately does NOT use validBase() — the helper
+// itself is part of the contract change. Using a self-contained
+// fixture isolates the assertion from fixture drift.
+func TestValidate_ServerStampedFieldsMustBeEmpty(t *testing.T) {
+	base := func() *AnalystOutput {
+		verdict := "test verdict, one sentence"
+		rationale := "test rationale, multi-paragraph allowed"
+		lineStart := 10
+		return &AnalystOutput{
+			Attribution: AgentAttribution{AnalystID: "test-analyst"},
+			Target:      "pkg:test/example",
+			Conclusions: []Conclusion{
+				{
+					ID:        "F001",
+					Verdict:   verdict,
+					Rationale: rationale,
+					Severity:  Severity{Default: SeverityMedium},
+					Category:  "test",
+					Citations: []Citation{
+						{Path: "src/main.rs", LineStart: &lineStart},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*AnalystOutput)
+		wantErr string
+	}{
+		{
+			name:    "model set",
+			mutate:  func(o *AnalystOutput) { o.Attribution.Model = "claude-sonnet-4-7" },
+			wantErr: "attribution.model is server-stamped",
+		},
+		{
+			name:    "invoked_at set",
+			mutate:  func(o *AnalystOutput) { o.Attribution.InvokedAt = "2026-05-06T10:30:00Z" },
+			wantErr: "attribution.invoked_at is server-stamped",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := base()
+			require.NoError(t, o.Validate(),
+				"base fixture (Model+InvokedAt empty) must validate; "+
+					"if this fails, the test premise is wrong")
+			tt.mutate(o)
+			err := o.Validate()
+			require.Error(t, err,
+				"validator must reject caller-supplied %s", tt.name)
+			assert.Contains(t, err.Error(), tt.wantErr,
+				"error must explain that the field is server-stamped; got: %s", err)
 		})
 	}
 }
@@ -367,7 +439,7 @@ func TestValidate_MethodologyPatternFields(t *testing.T) {
 	}
 	o.MethodologyTrace = &MethodologyCatalog{
 		Source: AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Patterns: []MethodologyPattern{
 			{
@@ -389,7 +461,7 @@ func TestValidate_MethodologyPatternComposesWithUnknown(t *testing.T) {
 	o := validBase()
 	o.MethodologyTrace = &MethodologyCatalog{
 		Source: AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Patterns: []MethodologyPattern{
 			{
@@ -416,7 +488,7 @@ func TestValidate_MethodologyPatternHighPrecisionWithoutPattern(t *testing.T) {
 	o := validBase()
 	o.MethodologyTrace = &MethodologyCatalog{
 		Source: AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Patterns: []MethodologyPattern{
 			{
@@ -544,7 +616,7 @@ func TestValidate_ErrorMessagesIncludeValidValues(t *testing.T) {
 			mutate: func(o *AnalystOutput) {
 				o.MethodologyTrace = &MethodologyCatalog{
 					Source: AgentAttribution{
-						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+						AnalystID: "x",
 					},
 					Patterns: []MethodologyPattern{
 						{
@@ -564,7 +636,7 @@ func TestValidate_ErrorMessagesIncludeValidValues(t *testing.T) {
 			mutate: func(o *AnalystOutput) {
 				o.MethodologyTrace = &MethodologyCatalog{
 					Source: AgentAttribution{
-						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+						AnalystID: "x",
 					},
 					Patterns: []MethodologyPattern{
 						{
@@ -584,7 +656,7 @@ func TestValidate_ErrorMessagesIncludeValidValues(t *testing.T) {
 			mutate: func(o *AnalystOutput) {
 				o.MethodologyTrace = &MethodologyCatalog{
 					Source: AgentAttribution{
-						AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+						AnalystID: "x",
 					},
 					Patterns: []MethodologyPattern{
 						{
@@ -653,8 +725,7 @@ func validSynthesisBase() *AnalystOutput {
 	return &AnalystOutput{
 		Attribution: AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped; see validBase.
 		},
 		Target: "pkg:test/example",
 		SynthesisSupplement: &SynthesisSupplement{

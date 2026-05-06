@@ -162,9 +162,8 @@ func ingestTestOutput(
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: analystID,
-			Model:     "test-model",
-			InvokedAt: time.Now().UTC().Format(time.RFC3339),
-			Round:     1,
+			// Model and InvokedAt server-stamped at ingest.
+			Round: 1,
 		},
 		Target: "https://github.com/JedWatson/classnames",
 		Conclusions: []exchange.Conclusion{{

@@ -18,11 +18,12 @@ import (
 // Kept small so the test stays readable; the full fixture lives in
 // internal/exchange/testdata/ and is exercised by that package's
 // tests. Here we just check the CLI command end-to-end.
+// model and invoked_at deliberately omitted: the v1 schema validator
+// rejects caller-supplied values for both — they're server-stamped at
+// ingest. See exchange.AgentAttribution.validate.
 const minimalValidJSON = `{
   "attribution": {
-    "analyst_id": "test",
-    "model": "test-model",
-    "invoked_at": "2026-04-14T00:00:00Z"
+    "analyst_id": "test"
   },
   "target": "pkg:test/example",
   "conclusions": [
@@ -61,7 +62,7 @@ func TestFormatCheck_ValidMarkdown_Passes(t *testing.T) {
 	lineStart := 1
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "test", Model: "test-model", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "test",
 		},
 		Target: "pkg:test/example",
 		Conclusions: []exchange.Conclusion{
@@ -135,7 +136,7 @@ func TestFormatCheck_ExplicitFormatOverridesAutoDetect(t *testing.T) {
 	// --format=markdown should pick markdown despite the extension.
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Target:      "pkg:test/x",
 		Conclusions: []exchange.Conclusion{},
@@ -252,9 +253,8 @@ func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "test-analyst",
-			Model:     "test-model",
-			InvokedAt: "2026-04-14T00:00:00Z",
-			Round:     2,
+			// Model and InvokedAt server-stamped at ingest.
+			Round: 2,
 		},
 		Target:       "pkg:test/example",
 		TargetCommit: "abc123",
@@ -301,7 +301,9 @@ func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
 	assert.Contains(t, got, "[design_intent]", "design_intent flag")
 	assert.Contains(t, got, "[supersedes 1]", "supersedes count")
 	assert.Contains(t, got, "cite/prereq/fix: 2/1/3", "structured counts")
-	assert.Contains(t, got, "test-analyst / test-model (round 2)", "attribution line")
+	// Model is server-stamped — empty in caller payload — so the
+	// renderer elides the " / model" suffix.
+	assert.Contains(t, got, "test-analyst (round 2)", "attribution line")
 	assert.Contains(t, got, "target: pkg:test/example", "target")
 	assert.Contains(t, got, "target_commit: abc123", "target_commit when present")
 	assert.Contains(t, got, "supersedes 1 prior", "top-level supersedes")
@@ -313,7 +315,7 @@ func TestPrintSummary_StructuralFields_NoProse(t *testing.T) {
 func TestPrintSummary_PositiveAbsences_ConfidenceAndPattern(t *testing.T) {
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Target:      "pkg:test/x",
 		Conclusions: []exchange.Conclusion{},
@@ -344,13 +346,13 @@ func TestPrintSummary_MethodologyGroupsAndCounts(t *testing.T) {
 	hit := true
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Target:      "pkg:test/x",
 		Conclusions: []exchange.Conclusion{},
 		MethodologyTrace: &exchange.MethodologyCatalog{
 			Source: exchange.AgentAttribution{
-				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+				AnalystID: "x",
 			},
 			Notes: "NOTES_PROSE_SHOULD_NOT_APPEAR",
 			Patterns: []exchange.MethodologyPattern{
@@ -400,7 +402,7 @@ func TestPrintSummary_OmitsAbsentSections(t *testing.T) {
 	lineStart := 1
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Target: "pkg:test/x",
 		Conclusions: []exchange.Conclusion{
@@ -428,7 +430,7 @@ func TestPrintSummary_ConditionalSeverity(t *testing.T) {
 	lineStart := 1
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
-			AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+			AnalystID: "x",
 		},
 		Target: "pkg:test/x",
 		Conclusions: []exchange.Conclusion{
@@ -462,13 +464,13 @@ func TestPrintSummary_SortedDeterminism(t *testing.T) {
 	makeOut := func(patterns []exchange.MethodologyPattern) *exchange.AnalystOutput {
 		return &exchange.AnalystOutput{
 			Attribution: exchange.AgentAttribution{
-				AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+				AnalystID: "x",
 			},
 			Target:      "pkg:test/x",
 			Conclusions: []exchange.Conclusion{},
 			MethodologyTrace: &exchange.MethodologyCatalog{
 				Source: exchange.AgentAttribution{
-					AnalystID: "x", Model: "y", InvokedAt: "2026-04-14T00:00:00Z",
+					AnalystID: "x",
 				},
 				Patterns: patterns,
 			},

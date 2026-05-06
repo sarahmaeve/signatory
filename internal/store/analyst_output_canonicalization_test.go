@@ -37,8 +37,7 @@ func minimalAnalystOutput(target string) *exchange.AnalystOutput {
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "test-model",
-			InvokedAt: "2026-04-22T12:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{
@@ -210,9 +209,12 @@ func TestIngest_MultipleVersions_SameEntity(t *testing.T) {
 	require.NoError(t, err)
 
 	out2 := minimalAnalystOutput("pkg:npm/multi-version@2.0.0")
-	// Different content-hash via a distinct invoked_at so the
-	// idempotency short-circuit doesn't mask the test.
-	out2.Attribution.InvokedAt = "2026-04-22T13:00:00Z"
+	// out1 and out2 differ on Target ("@1.0.0" vs "@2.0.0"), which
+	// is part of the marshaled JSON and therefore the content hash.
+	// No additional differentiation needed — the previous version of
+	// this test mutated InvokedAt to force a hash divergence, which
+	// is now both unnecessary (the targets already diverge) and
+	// rejected by the validator (invoked_at is server-stamped).
 	r2, err := s.IngestAnalystOutput(ctx, out2, "second")
 	require.NoError(t, err)
 

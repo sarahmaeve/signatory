@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,9 +192,8 @@ func ingestTestSynthesis(
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "test-model",
-			InvokedAt: time.Now().UTC().Format(time.RFC3339),
-			Round:     1,
+			// Model and InvokedAt server-stamped at ingest.
+			Round: 1,
 		},
 		Target: "https://github.com/JedWatson/classnames",
 		Conclusions: []exchange.Conclusion{{

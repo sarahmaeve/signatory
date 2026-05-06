@@ -92,15 +92,13 @@ func FuzzAnalystOutputValidate(f *testing.F) {
 
 		// --- The document passed validation. Verify invariants. ---
 
-		// Invariant 1: Attribution required fields are non-empty.
+		// Invariant 1: Attribution.AnalystID is non-empty.
+		// Model and InvokedAt are server-stamped (filled in at
+		// ingest time), so they're EXPECTED to be empty here even
+		// on validation success — the validator rejects any
+		// caller-supplied value for those fields.
 		if out.Attribution.AnalystID == "" {
 			t.Error("passed validation but Attribution.AnalystID is empty")
-		}
-		if out.Attribution.Model == "" {
-			t.Error("passed validation but Attribution.Model is empty")
-		}
-		if out.Attribution.InvokedAt == "" {
-			t.Error("passed validation but Attribution.InvokedAt is empty")
 		}
 
 		// Invariant 2: Target is non-empty.
@@ -238,8 +236,8 @@ func FuzzAnalystOutputValidate_SynthesisBoundary(f *testing.F) {
 		out := &AnalystOutput{
 			Attribution: AgentAttribution{
 				AnalystID: analystID,
-				Model:     "test-model",
-				InvokedAt: "2026-01-01T00:00:00Z",
+				// Model and InvokedAt server-stamped at ingest; see
+				// AgentAttribution.validate.
 			},
 			Target: "pkg:test/x",
 		}

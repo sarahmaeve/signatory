@@ -39,8 +39,7 @@ func TestAssemble_WithRealStore(t *testing.T) {
 	analyst := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/integration-example",
 		Conclusions: []exchange.Conclusion{
@@ -62,8 +61,7 @@ func TestAssemble_WithRealStore(t *testing.T) {
 	synth := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:05:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: "pkg:npm/integration-example",
 		SynthesisSupplement: &exchange.SynthesisSupplement{

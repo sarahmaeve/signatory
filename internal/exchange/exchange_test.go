@@ -268,10 +268,12 @@ func TestEmptyOutput_FailsValidation(t *testing.T) {
 	err := out.Validate()
 	require.Error(t, err)
 	// The error should mention every required field that's missing.
+	// Note: model and invoked_at are server-stamped, not
+	// caller-required — empty values are correct, not errors. See
+	// TestValidate_ServerStampedFieldsMustBeEmpty for the inverse
+	// (caller-supplied values are rejected).
 	msg := err.Error()
 	assert.Contains(t, msg, "analyst_id")
-	assert.Contains(t, msg, "model")
-	assert.Contains(t, msg, "invoked_at")
 	assert.Contains(t, msg, "target")
 }
 

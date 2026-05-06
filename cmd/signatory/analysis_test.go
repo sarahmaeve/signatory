@@ -625,8 +625,7 @@ func ingestAnalystForSession(t *testing.T, g *Globals, target, analystID, sessio
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: analystID,
-			Model:     "test-model",
-			InvokedAt: time.Now().UTC().Format(time.RFC3339),
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{{
@@ -658,8 +657,7 @@ func ingestSynthesisForSession(t *testing.T, g *Globals, target, sessionID strin
 	out := &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "test-model",
-			InvokedAt: time.Now().UTC().Format(time.RFC3339),
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{{

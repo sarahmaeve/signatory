@@ -171,13 +171,19 @@ func TestPromptConfirmation(t *testing.T) {
 // pruneAnalystOutput builds a minimally-valid analyst output for
 // prune test fixtures. Distinct from ingestSynthesisForAccept's
 // helper so the prune tests don't share state with posture accept.
-func pruneAnalystOutput(target, analystID, invokedAt string) *exchange.AnalystOutput {
+//
+// The invokedAt parameter was previously used to differentiate
+// content hashes across calls. With the new server-stamped contract
+// (validator rejects caller-supplied invoked_at), it's ignored:
+// callers should differentiate via the target argument or via other
+// fields that participate in the content hash. The parameter is
+// kept in the signature so existing call sites compile unchanged.
+func pruneAnalystOutput(target, analystID, _ string) *exchange.AnalystOutput {
 	lineStart := 1
 	return &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: analystID,
-			Model:     "test-model",
-			InvokedAt: invokedAt,
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: target,
 		Conclusions: []exchange.Conclusion{

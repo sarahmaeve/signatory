@@ -2297,8 +2297,7 @@ func synthesisFixtureTarget(t *testing.T, canonicalURI string) *Globals {
 	_, err = s.IngestAnalystOutput(t.Context(), &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "external-sec-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T00:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: canonicalURI,
 		Conclusions: []exchange.Conclusion{
@@ -2476,8 +2475,7 @@ func TestHandoff_Synthesist_ExcludesPriorSyntheses(t *testing.T) {
 	_, err = s.IngestAnalystOutput(t.Context(), &exchange.AnalystOutput{
 		Attribution: exchange.AgentAttribution{
 			AnalystID: "signatory-synthesis-v1",
-			Model:     "claude-test",
-			InvokedAt: "2026-04-21T01:00:00Z",
+			// Model and InvokedAt server-stamped at ingest.
 		},
 		Target: canonicalURI,
 		SynthesisSupplement: &exchange.SynthesisSupplement{

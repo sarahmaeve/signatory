@@ -266,11 +266,40 @@ func (a *AgentAttribution) validate(path string) []error {
 				"analyst_id given at the top of your dispatch prompt verbatim.",
 			path, a.AnalystID))
 	}
-	if a.Model == "" {
-		errs = append(errs, fmt.Errorf("%s: model required", path))
+	// model and invoked_at are server-stamped, not caller-supplied.
+	// Agents have no reliable way to know either value: model
+	// identity is private to the harness, and there's no wall-clock
+	// API exposed to a tool-using LLM. Recent dogfood evidence
+	// (analyst_outputs ingested 2026-04 through 2026-05) shows
+	// synthesists hallucinating both — model values like
+	// "claude-3.5-sonnet" stamped on rows months after Sonnet 3.5
+	// was retired, and invoked_at timestamps that round to the
+	// nearest 10 minutes and don't match the actual ingest time.
+	//
+	// The contract: model is filled in by OTEL backfill (joining
+	// analyst_outputs to gen_ai.request.model spans by session id);
+	// invoked_at is stamped from time.Now() at ingest. Agents that
+	// supply either field are rejected here with an actionable error
+	// so they fix the payload and retry in the same turn rather than
+	// drifting silently through the validator.
+	//
+	// See feedback_analysis_serialization_split: tokens for judgment,
+	// code for structure. Both fields are pure run metadata.
+	if a.Model != "" {
+		errs = append(errs, fmt.Errorf(
+			"%s.model is server-stamped (filled in by OTEL backfill from "+
+				"gen_ai.request.model); remove from payload. Agents have no "+
+				"reliable way to know their own model identity — guesses get "+
+				"stored as facts and pollute the trust record.",
+			path))
 	}
-	if a.InvokedAt == "" {
-		errs = append(errs, fmt.Errorf("%s: invoked_at required", path))
+	if a.InvokedAt != "" {
+		errs = append(errs, fmt.Errorf(
+			"%s.invoked_at is server-stamped (set to time.Now() at ingest); "+
+				"remove from payload. Agents have no reliable wall-clock API; "+
+				"guessed timestamps round to suspicious values and obscure the "+
+				"actual ingest time.",
+			path))
 	}
 	return errs
 }
