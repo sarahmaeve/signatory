@@ -506,7 +506,7 @@ func runPrune(ctx context.Context, s store.Store, entityIDs []string, destructiv
 		return fmt.Errorf("plan prune: %w", err)
 	}
 
-	renderPrunePlan(plan, scopeLabel)
+	renderPrunePlan(os.Stdout, plan, scopeLabel)
 
 	if !destructive {
 		fmt.Println()
@@ -525,47 +525,69 @@ func runPrune(ctx context.Context, s store.Store, entityIDs []string, destructiv
 	if err != nil {
 		return fmt.Errorf("apply prune: %w", err)
 	}
-	renderPruneResult(report)
+	renderPruneResult(os.Stdout, report)
 	return nil
 }
 
-// renderPrunePlan prints a human-readable preview. Sorts entity
-// rows by canonical URI so the output is stable across runs.
-func renderPrunePlan(plan *store.PruneReport, scopeLabel string) {
-	fmt.Printf("Prune plan: %s\n", scopeLabel)
-	fmt.Println("─────────────────────────────────────")
+// renderPrunePlan prints a human-readable preview to out. Sorts
+// entity rows by canonical URI so the output is stable across runs.
+//
+// The Collateral section appears only when plan.Collateral is non-
+// empty — it names entities NOT in the prune scope whose data will
+// be touched as a side-effect (typically because an analyst_output's
+// collected_from_entity_id points at a pruned entity while the row's
+// entity_id points at one that wasn't requested). Surfacing this is
+// the operator-safety counterpart to the per-entity listing: dry-run
+// must reveal collateral, not just the targeted set.
+func renderPrunePlan(out io.Writer, plan *store.PruneReport, scopeLabel string) {
+	fmt.Fprintf(out, "Prune plan: %s\n", scopeLabel)
+	fmt.Fprintln(out, "─────────────────────────────────────")
 
 	// Per-entity listing.
 	slices.SortFunc(plan.Entities, func(a, b store.EntityPruneDetail) int {
 		return cmp.Compare(a.CanonicalURI, b.CanonicalURI)
 	})
 	for _, e := range plan.Entities {
-		fmt.Printf("  %s  %s\n", shortID(e.ID), e.CanonicalURI)
+		fmt.Fprintf(out, "  %s  %s\n", shortID(e.ID), e.CanonicalURI)
 		// Child counts — sorted for stable output.
 		for _, k := range slices.Sorted(maps.Keys(e.ChildCounts)) {
-			fmt.Printf("      %s: %d\n", k, e.ChildCounts[k])
+			fmt.Fprintf(out, "      %s: %d\n", k, e.ChildCounts[k])
 		}
 		if len(e.ChildCounts) == 0 {
-			fmt.Println("      (no child rows)")
+			fmt.Fprintln(out, "      (no child rows)")
+		}
+	}
+
+	// Collateral section: untargeted entities whose data will be
+	// touched as a side-effect. Skipped entirely when there's no
+	// collateral so the common-case output stays tight.
+	if len(plan.Collateral) > 0 {
+		fmt.Fprintln(out, "─────────────────────────────────────")
+		fmt.Fprintln(out, "Collateral entities affected (not in the prune scope):")
+		for _, c := range plan.Collateral {
+			fmt.Fprintf(out, "  %s  %s\n", shortID(c.ID), c.CanonicalURI)
+			for _, k := range slices.Sorted(maps.Keys(c.AffectedRows)) {
+				fmt.Fprintf(out, "      %s: %d\n", k, c.AffectedRows[k])
+			}
 		}
 	}
 
 	// Aggregate totals.
-	fmt.Println("─────────────────────────────────────")
-	fmt.Println("Total rows that would be deleted:")
+	fmt.Fprintln(out, "─────────────────────────────────────")
+	fmt.Fprintln(out, "Total rows that would be deleted:")
 	for _, k := range slices.Sorted(maps.Keys(plan.RowsByTable)) {
-		fmt.Printf("  %-30s %d\n", k, plan.RowsByTable[k])
+		fmt.Fprintf(out, "  %-30s %d\n", k, plan.RowsByTable[k])
 	}
 }
 
-// renderPruneResult prints the actual deletion outcome after the
-// apply. Mirrors the plan format so the user can eyeball "plan
+// renderPruneResult prints the actual deletion outcome to out after
+// the apply. Mirrors the plan format so the user can eyeball "plan
 // said N, DB reported N" alignment.
-func renderPruneResult(report *store.PruneReport) {
-	fmt.Println("Prune complete.")
-	fmt.Println("Rows deleted:")
+func renderPruneResult(out io.Writer, report *store.PruneReport) {
+	fmt.Fprintln(out, "Prune complete.")
+	fmt.Fprintln(out, "Rows deleted:")
 	for _, k := range slices.Sorted(maps.Keys(report.RowsByTable)) {
-		fmt.Printf("  %-30s %d\n", k, report.RowsByTable[k])
+		fmt.Fprintf(out, "  %-30s %d\n", k, report.RowsByTable[k])
 	}
 }
 

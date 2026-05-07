@@ -13,6 +13,71 @@ import (
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
+// TestRenderPrunePlan_SurfacesCollateral pins the CLI half of B9: a
+// plan whose store-level Collateral list is non-empty must render a
+// section that names the affected entity URIs. Without this the
+// operator sees only the targeted entity in the dry-run output and
+// has no warning that other entities will lose data.
+//
+// Render is tested in isolation against a fabricated plan — no DB
+// needed — because the property under test is purely "what
+// renderPrunePlan does with the Collateral field."
+func TestRenderPrunePlan_SurfacesCollateral(t *testing.T) {
+	t.Parallel()
+
+	plan := &store.PruneReport{
+		Entities: []store.EntityPruneDetail{
+			{
+				ID:           "target-id",
+				CanonicalURI: "repo:github/owner/collected-from",
+				ShortName:    "collected-from",
+				ChildCounts:  map[string]int{"analyst_outputs (collected_from)": 1},
+			},
+		},
+		RowsByTable: map[string]int{"entities": 1, "analyst_outputs": 1},
+		Collateral: []store.CollateralEntity{
+			{
+				ID:           "primary-id",
+				CanonicalURI: "pkg:npm/primary-target",
+				ShortName:    "primary-target",
+				AffectedRows: map[string]int{"analyst_outputs": 1},
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	renderPrunePlan(&out, plan, "repo:github/owner/collected-from")
+	rendered := out.String()
+
+	assert.Contains(t, rendered, "pkg:npm/primary-target",
+		"plan render must surface the collateral entity URI so the operator sees what their prune will silently touch")
+	assert.Contains(t, rendered, "Collateral",
+		"plan render must label the collateral section explicitly so it's distinguishable from the targeted entity listing")
+}
+
+// TestRenderPrunePlan_NoCollateralSectionWhenEmpty: plans with no
+// collateral must NOT print an empty "Collateral entities" header.
+// Avoids cluttering the common-case dry-run output with a section
+// that has nothing in it.
+func TestRenderPrunePlan_NoCollateralSectionWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	plan := &store.PruneReport{
+		Entities: []store.EntityPruneDetail{
+			{ID: "id", CanonicalURI: "pkg:npm/x", ShortName: "x", ChildCounts: map[string]int{}},
+		},
+		RowsByTable: map[string]int{"entities": 1},
+		// Collateral deliberately nil.
+	}
+
+	var out bytes.Buffer
+	renderPrunePlan(&out, plan, "pkg:npm/x")
+	rendered := out.String()
+
+	assert.NotContains(t, rendered, "Collateral",
+		"plan render must omit the Collateral section entirely when there's no collateral — empty headers are noise")
+}
+
 // setConfirmPrompt swaps the package-level confirmPrompt with the
 // supplied stub for the duration of the test. Restores the original
 // in t.Cleanup so other tests in the package don't see the override.

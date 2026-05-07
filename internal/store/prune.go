@@ -13,12 +13,45 @@ import (
 // PruneReport summarizes what a prune operation touched (or would
 // touch, for dry-run). Counts are per-table so the human-facing CLI
 // can render a useful "this is what will happen" preview.
+//
+// Counts are typed `int` (not `int64`) deliberately. RowsAffected on
+// modernc.org/sqlite returns int64; we cast to int at the boundary.
+// On every platform signatory ships to (darwin/linux amd64/arm64)
+// `int` is 64-bit so the cast is identity. A 32-bit build deleting
+// >2B rows would overflow, but signatory doesn't target 32-bit and
+// a single-user trust store with billions of rows is implausible.
+// If 32-bit support ever ships, switch these maps to map[string]int64
+// and propagate.
 type PruneReport struct {
 	// Entities names each entity that matched the prune scope.
 	Entities []EntityPruneDetail
 	// RowsByTable is the aggregate row count across all selected
 	// entities, keyed by child table. Includes entities itself.
 	RowsByTable map[string]int
+	// Collateral names entities NOT in the prune scope whose data
+	// will be touched as a side-effect — typically because an
+	// analyst_output references them via collected_from_entity_id
+	// while its entity_id points at a pruned entity, or vice versa.
+	// Pruning entity B deletes such rows even though their entity_id
+	// points at A; A is then "collateral" because A's analysis count
+	// shrinks without the operator targeting A.
+	//
+	// Empty in the common case (single-entity prune with no
+	// collected_from cross-references).
+	Collateral []CollateralEntity
+}
+
+// CollateralEntity describes one untargeted entity whose data will
+// be touched as a side-effect of pruning the requested set. ID and
+// CanonicalURI are populated for CLI display; AffectedRows is keyed
+// by table name (matching RowsByTable's vocabulary) and reports how
+// many rows will be removed from THIS entity's perspective — not
+// the global prune total.
+type CollateralEntity struct {
+	ID           string
+	CanonicalURI string
+	ShortName    string
+	AffectedRows map[string]int
 }
 
 // EntityPruneDetail is the per-entity breakdown. Short_name and
@@ -57,6 +90,9 @@ func (s *SQLite) PlanPruneEntities(ctx context.Context, entityIDs []string) (*Pr
 	if len(entityIDs) == 0 {
 		return &PruneReport{RowsByTable: map[string]int{}}, nil
 	}
+	if len(entityIDs) > maxPruneEntityIDs {
+		return nil, fmt.Errorf("plan of %d entities exceeds the v0.1 single-batch cap (%d); chunked execution is not yet implemented — split into smaller batches and re-invoke", len(entityIDs), maxPruneEntityIDs)
+	}
 
 	report := &PruneReport{
 		RowsByTable: map[string]int{},
@@ -84,7 +120,83 @@ func (s *SQLite) PlanPruneEntities(ctx context.Context, entityIDs []string) (*Pr
 		return nil, fmt.Errorf("aggregate plan counts: %w", err)
 	}
 	report.RowsByTable = aggregate
+
+	// Cross-entity collateral: rows in the cascade reference entities
+	// not in entityIDs. The CLI render needs these so the operator
+	// knows their prune will silently touch entities they didn't
+	// target.
+	collateral, err := s.findCollateralEntities(ctx, entityIDs)
+	if err != nil {
+		return nil, fmt.Errorf("find collateral entities: %w", err)
+	}
+	report.Collateral = collateral
 	return report, nil
+}
+
+// findCollateralEntities returns the entities NOT in entityIDs whose
+// analyst_outputs get deleted as a side-effect of this prune.
+//
+// Cascade shape: every analyst_output deleted satisfies entity_id IN
+// entityIDs OR collected_from_entity_id IN entityIDs. The OTHER column
+// (when not in entityIDs and not NULL) names a collateral entity —
+// one whose data shrinks even though the operator didn't target it.
+//
+// Query strategy: a single round-trip with a UNION-ALL over the two
+// directions (X.entity_id collateral-via-collected_from sweep, and
+// X.collected_from collateral-via-entity_id sweep), joined through
+// entities for human-readable display fields. Sorted by canonical_uri
+// for stable test/CLI output.
+func (s *SQLite) findCollateralEntities(ctx context.Context, entityIDs []string) ([]CollateralEntity, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := inPlaceholders(len(entityIDs))
+
+	// Each branch of the UNION uses entityIDs twice (one IN, one
+	// NOT IN); two branches → four copies total.
+	q := fmt.Sprintf(`
+		SELECT e.id, e.canonical_uri, e.short_name, COUNT(*) AS n
+		  FROM (
+		      SELECT entity_id AS collat_id
+		        FROM analyst_outputs
+		       WHERE collected_from_entity_id IN %[1]s
+		         AND entity_id NOT IN %[1]s
+		      UNION ALL
+		      SELECT collected_from_entity_id AS collat_id
+		        FROM analyst_outputs
+		       WHERE entity_id IN %[1]s
+		         AND collected_from_entity_id IS NOT NULL
+		         AND collected_from_entity_id NOT IN %[1]s
+		  ) c
+		  JOIN entities e ON e.id = c.collat_id
+		 GROUP BY e.id, e.canonical_uri, e.short_name
+		 ORDER BY e.canonical_uri`, placeholders) //nolint:gosec // G201: placeholders is generated from an integer count, not user input; values bind via QueryContext args below
+
+	args := make([]any, 0, 4*len(entityIDs))
+	for range 4 {
+		args = append(args, toAnyArgs(entityIDs)...)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query collateral entities: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
+
+	var out []CollateralEntity
+	for rows.Next() {
+		var c CollateralEntity
+		var n int
+		if err := rows.Scan(&c.ID, &c.CanonicalURI, &c.ShortName, &n); err != nil {
+			return nil, fmt.Errorf("scan collateral row: %w", err)
+		}
+		c.AffectedRows = map[string]int{"analyst_outputs": n}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // aggregatePruneCounts mirrors executePruneDeletes' walk in count
@@ -393,7 +505,7 @@ func (s *SQLite) planOneEntity(ctx context.Context, entityID string) (*EntityPru
 	if err != nil {
 		return nil, fmt.Errorf("list output ids: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below // read-only, close errors aren't actionable
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -487,6 +599,15 @@ func (s *SQLite) PruneEntities(ctx context.Context, entityIDs []string) (*PruneR
 	if len(entityIDs) == 0 {
 		return &PruneReport{RowsByTable: map[string]int{}}, nil
 	}
+	if len(entityIDs) > maxPruneEntityIDs {
+		return nil, fmt.Errorf("prune of %d entities exceeds the v0.1 single-batch cap (%d); chunked execution is not yet implemented — split into smaller batches and re-invoke", len(entityIDs), maxPruneEntityIDs)
+	}
+
+	// Guard the trigger-drop window: see requireSingleConnection's
+	// docstring for why this is load-bearing and not just defensive.
+	if err := s.requireSingleConnection(); err != nil {
+		return nil, err
+	}
 
 	// Capture the per-entity detail BEFORE the delete so the report
 	// carries meaningful canonical_uri / short_name fields. The plan
@@ -543,6 +664,47 @@ func (s *SQLite) PruneEntities(ctx context.Context, entityIDs []string) (*PruneR
 }
 
 // --- internal helpers ------------------------------------------------------
+
+// maxPruneEntityIDs caps the entityIDs slice each PruneEntities (and
+// PlanPruneEntities, ApplyConsolidation) call accepts. The cap exists
+// because several queries in the cascade — particularly the OR-on-
+// both-columns sieves in aggregatePruneCounts/executePruneDeletes
+// (×2) and the UNION in findCollateralEntities (×4) — expand
+// entityIDs into multiple bind-variable copies. SQLite's
+// SQLITE_MAX_VARIABLE_NUMBER caps total bind variables per statement;
+// modernc.org/sqlite's effective limit is currently large (~32k) but
+// the SQLite default is 999, so we cap conservatively to keep
+// signatory portable across SQLite builds.
+//
+// 250 entities × 4 (worst case) = 1000 bind variables. Comfortably
+// under both the SQLite default and modernc's compiled limit.
+//
+// v0.2 should replace this cap with proper chunked execution
+// (batched IN-lists across multiple statements, all inside one tx
+// to preserve all-or-nothing semantics). The current cap forces an
+// honest error rather than a cryptic "too many SQL variables" from
+// deep inside executePruneDeletes — but it forces operators to chunk
+// manually, which is friction.
+const maxPruneEntityIDs = 250
+
+// requireSingleConnection guards trigger-drop windows: PruneEntities
+// and ApplyConsolidation both temporarily drop append-only triggers
+// inside their tx. The invariant the triggers enforce (analyst_outputs
+// is append-only, conclusions is append-only, etc.) is suspended
+// during that window. With a multi-connection pool, a writer on a
+// parallel connection could land an INSERT/UPDATE that bypasses the
+// suspended trigger and silently corrupt the invariant.
+//
+// OpenSQLite sets the pool to size 1 (sqlite.go around line 126).
+// This guard re-checks at function entry so a future change that
+// loosens the pool surfaces here as a clear error rather than as
+// downstream data corruption.
+func (s *SQLite) requireSingleConnection() error {
+	if max := s.db.Stats().MaxOpenConnections; max != 1 {
+		return fmt.Errorf("destructive prune requires single-connection pool (MaxOpenConnections=%d); see SetMaxOpenConns in OpenSQLite — the trigger-drop window is data-integrity-safe only when no concurrent writers can bypass the suspended append-only triggers", max)
+	}
+	return nil
+}
 
 // appendOnlyTrigger captures the name + SQL of a trigger so we can
 // drop it and reinstall it later. The SQL comes straight from
@@ -835,12 +997,16 @@ func collectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]s
 }
 
 // inPlaceholders returns "(?, ?, ..., ?)" for the given count.
-// Callers pass this straight into WHERE ... IN clauses. n must be
-// > 0 or the produced SQL would be a syntax error — the callers
-// here all check len(ids) before calling.
+// Callers pass this straight into WHERE ... IN clauses.
+//
+// Panics on n <= 0. SQL `IN ()` is invalid and silently producing it
+// would mask a missing len-guard at the call site, surfacing later as
+// a cryptic SQLite syntax error instead of a clear caller-bug. Every
+// caller in this package guards len(ids) > 0 before calling; the panic
+// is the trip-wire if a future caller forgets.
 func inPlaceholders(n int) string {
-	if n == 0 {
-		return "()"
+	if n <= 0 {
+		panic(fmt.Sprintf("inPlaceholders requires n > 0, got %d; the caller must guard len(ids) > 0 before invoking (SQL `IN ()` is invalid)", n))
 	}
 	return "(" + strings.Repeat("?,", n-1) + "?)"
 }

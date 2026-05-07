@@ -141,6 +141,13 @@ func (s *SQLite) ListDuplicateFragmentations(ctx context.Context) (*Consolidatio
 		}
 		entities = append(entities, r)
 	}
+	// Explicit close (not deferred) is load-bearing: the per-entity
+	// FindEntityByURI / countChildFKs calls below must run on a
+	// connection that is no longer holding this rows reader open.
+	// See the two-phase note in the function docstring for the
+	// modernc-driver deadlock this avoids. A future contributor
+	// "harmonising" this to `defer rows.Close()` would reintroduce
+	// the deadlock — leave the explicit close in place.
 	if closeErr := rows.Close(); closeErr != nil {
 		return nil, closeErr
 	}
@@ -273,6 +280,12 @@ func (s *SQLite) ApplyConsolidation(ctx context.Context, plan *ConsolidationPlan
 	report := &ConsolidationReport{RowsByTable: map[string]int{}}
 	if plan == nil || len(plan.Ops) == 0 {
 		return report, nil
+	}
+
+	// Guard the trigger-drop window: same load-bearing requirement as
+	// PruneEntities — see requireSingleConnection's docstring in prune.go.
+	if err := s.requireSingleConnection(); err != nil {
+		return nil, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

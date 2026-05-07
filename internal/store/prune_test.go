@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -308,6 +309,165 @@ func TestPruneEntities_TriggersReinstalled(t *testing.T) {
 		Scan(&after))
 	assert.Equal(t, before, after,
 		"prune must restore all append-only triggers (before=%d, after=%d)", before, after)
+}
+
+// TestPruneEntities_GuardsAgainstMultipleConnections pins B5: the
+// trigger-drop window in PruneEntities is data-integrity-safe only
+// when the connection pool is size 1 (OpenSQLite sets that, but
+// nothing checks at the call site). With a multi-connection pool a
+// concurrent writer could land an INSERT/UPDATE that bypasses the
+// temporarily-suspended append-only triggers, silently corrupting
+// the invariants the triggers exist to enforce.
+//
+// This test deliberately breaks the pool-size invariant after store
+// open and asserts that PruneEntities refuses to run rather than
+// silently entering the unsafe window.
+func TestPruneEntities_GuardsAgainstMultipleConnections(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	result, err := s.IngestAnalystOutput(ctx, pruneOutputFor("pkg:npm/guard-test"), "test")
+	require.NoError(t, err)
+
+	// Override the single-connection invariant set by OpenSQLite.
+	// Production code never does this; the test does it to confirm
+	// the guard fires.
+	s.DB().SetMaxOpenConns(2)
+
+	_, err = s.PruneEntities(ctx, []string{result.EntityID})
+	require.Error(t, err,
+		"PruneEntities must refuse to run when MaxOpenConnections != 1; the trigger-drop window is unsafe under multiple connections")
+	assert.Contains(t, err.Error(), "single-connection",
+		"error must name the violated invariant so callers know what to fix")
+}
+
+// TestApplyConsolidation_GuardsAgainstMultipleConnections is the
+// duplicates.go counterpart to the prune-side guard test. Same
+// trigger-drop window, same invariant requirement, same test shape.
+func TestApplyConsolidation_GuardsAgainstMultipleConnections(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// A minimal plan: one rename op (no children, no merge complexity).
+	require.NoError(t, s.PutEntity(ctx, &profile.Entity{
+		ID: "stub", CanonicalURI: "repo:github/MixedCase/Repo",
+		Type: profile.EntityProject, ShortName: "Repo",
+	}))
+	plan, err := s.ListDuplicateFragmentations(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Ops, "fixture: at least one consolidation op needed")
+
+	s.DB().SetMaxOpenConns(2)
+
+	_, err = s.ApplyConsolidation(ctx, plan)
+	require.Error(t, err,
+		"ApplyConsolidation must refuse to run when MaxOpenConnections != 1; same trigger-drop window as PruneEntities")
+	assert.Contains(t, err.Error(), "single-connection")
+}
+
+// TestPruneEntities_RefusesOversizedBatch pins B8: PruneEntities
+// has a v0.1 single-batch limit driven by SQLITE_MAX_VARIABLE_NUMBER
+// (the OR-clause sieves and findCollateralEntities expand entityIDs
+// up to 4×, so the safe cap is far below the raw SQLite variable
+// limit). Beyond that cap the right answer is a clear error naming
+// the limit, not a cryptic SQLite "too many SQL variables" failure
+// from the depths of executePruneDeletes.
+//
+// Real chunking with batched-tx semantics is deferred to v0.2 (see
+// the cap declaration's docstring). For now: refuse, document, send
+// the operator to do per-batch invocation.
+func TestPruneEntities_RefusesOversizedBatch(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// 251 IDs — cap is 250. They don't need to refer to real entities;
+	// the cap check fires before any DB work.
+	ids := make([]string, maxPruneEntityIDs+1)
+	for i := range ids {
+		ids[i] = "00000000-0000-0000-0000-" + fmt.Sprintf("%012d", i)
+	}
+	_, err := s.PruneEntities(ctx, ids)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "single-batch",
+		"error must name the v0.1 single-batch limitation so the operator knows the right way to handle large prunes")
+}
+
+// TestPlanPruneEntities_SurfacesCrossEntityCollateral pins B9: when
+// pruning entity B causes deletion of an analyst_output X whose
+// entity_id points at a different (un-targeted) entity A, the plan
+// must surface A as collateral so the operator sees that A's analysis
+// count will shrink without A being targeted.
+//
+// Setup mirrors TestPruneEntity_WithCollectedFrom (ingest with a
+// primary-target override): X.entity_id=primary, X.collected_from=collected.
+// Pruning collected deletes X — primary loses an analyst_output it
+// didn't ask to lose. Without collateral surfacing, the CLI plan
+// shows only collected's children; primary is invisible.
+func TestPlanPruneEntities_SurfacesCrossEntityCollateral(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	out := pruneOutputFor("repo:github/owner/collected-from")
+	_, err := s.IngestAnalystOutput(ctx, out, "test",
+		WithPrimaryTarget("pkg:npm/primary-target"))
+	require.NoError(t, err)
+
+	primaryEntity, err := s.FindEntityByURI(ctx, "pkg:npm/primary-target")
+	require.NoError(t, err)
+	collectedEntity, err := s.FindEntityByURI(ctx, "repo:github/owner/collected-from")
+	require.NoError(t, err)
+
+	plan, err := s.PlanPruneEntities(ctx, []string{collectedEntity.ID})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, plan.Collateral,
+		"plan must list other entities whose data will be touched as collateral")
+
+	var found *CollateralEntity
+	for i := range plan.Collateral {
+		if plan.Collateral[i].ID == primaryEntity.ID {
+			found = &plan.Collateral[i]
+			break
+		}
+	}
+	require.NotNil(t, found,
+		"primary entity (%s, %s) must appear in collateral when its collected_from sibling is pruned",
+		primaryEntity.ID, primaryEntity.CanonicalURI)
+	assert.Equal(t, primaryEntity.CanonicalURI, found.CanonicalURI,
+		"collateral must carry the entity's URI for CLI display")
+	assert.Equal(t, 1, found.AffectedRows["analyst_outputs"],
+		"collateral must report per-entity affected row counts so the operator sees the magnitude per entity")
+}
+
+// TestPlanPruneEntities_NoCollateralOnSelfContainedPrune: when every
+// affected analyst_output is owned (entity_id) by an entity in the
+// prune scope, there's no collateral. Empty list, not nil. Pins the
+// "common case" baseline so a future bug that flags every prune as
+// collateral-having gets caught.
+func TestPlanPruneEntities_NoCollateralOnSelfContainedPrune(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	result, err := s.IngestAnalystOutput(ctx, pruneOutputFor("pkg:npm/self-contained"), "test")
+	require.NoError(t, err)
+
+	plan, err := s.PlanPruneEntities(ctx, []string{result.EntityID})
+	require.NoError(t, err)
+	assert.Empty(t, plan.Collateral,
+		"a single-entity prune with no cross-references must report no collateral")
+}
+
+// TestInPlaceholders_PanicOnZero pins the fail-loud-on-empty contract.
+// SQL `IN ()` is invalid; silently producing it is a footgun for any
+// future caller that doesn't guard len(ids) > 0. The function is
+// internal-only and every current caller does guard, but the panic
+// is the trip-wire that catches a forgotten guard the moment it's
+// added rather than at the next bulk-prune in production.
+func TestInPlaceholders_PanicOnZero(t *testing.T) {
+	t.Parallel()
+	assert.Panics(t, func() {
+		inPlaceholders(0)
+	}, "inPlaceholders(0) must panic; SQL `IN ()` is invalid and silently producing it would mask a missing len-guard at the call site")
 }
 
 // urisForIDs is a test helper that turns entity-id list into
