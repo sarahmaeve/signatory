@@ -105,200 +105,49 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return nil, fmt.Errorf("empty target")
 	}
 
-	// Already-canonical case: the input starts with one of our
-	// known schemes. Validate the whole URI and extract the
-	// per-scheme metadata.
+	// Already-canonical case: input starts with one of our known
+	// schemes. Validate the whole URI and extract per-scheme metadata.
 	for _, prefix := range validURISchemes {
 		if strings.HasPrefix(s, prefix) {
 			return resolveCanonicalURI(s)
 		}
 	}
 
-	// npmjs.com package URLs: convenience form for the
-	// copy-paste-from-browser workflow. A user hitting
-	// https://www.npmjs.com/package/<name> and running
-	// `signatory analyze <url>` should not have to know about
-	// purl syntax. Recognize the npmjs.com form explicitly and
-	// convert to pkg:npm/<name>.
-	if npmName, npmVersion, ok := parseNpmjsURL(s); ok {
-		uri := "pkg:npm/" + npmName
-		if npmVersion != "" {
-			uri += "@" + npmVersion
-		}
+	// Copy-paste-from-browser registry URLs (npmjs.com, pypi.org,
+	// crates.io, rubygems.org, Maven Central, pkg.go.dev). Each is
+	// host-anchored against lookalike attacks before being
+	// converted to its pkg: canonical form.
+	if uri, ok := tryRegistryURLs(s); ok {
 		return resolveCanonicalURI(uri)
 	}
 
-	// pypi.org project URLs: same copy-paste-from-browser workflow
-	// for Python packages. Names are PEP 503-normalized inside
-	// parsePyPIURL before URI construction, so `/project/Requests/`
-	// and `/project/requests/` both produce `pkg:pypi/requests`.
-	// Unlike npm, which preserves case because the npm registry is
-	// case-sensitive, PyPI's registry canonicalizes on lookup and
-	// our canonical URI must match.
-	if pypiName, pypiVersion, ok := parsePyPIURL(s); ok {
-		uri := "pkg:pypi/" + pypiName
-		if pypiVersion != "" {
-			uri += "@" + pypiVersion
-		}
-		return resolveCanonicalURI(uri)
-	}
-
-	// crates.io crate URLs: copy-paste-from-browser for Rust crates.
-	// https://crates.io/crates/serde → pkg:cargo/serde
-	// https://crates.io/crates/serde/1.0.219 → pkg:cargo/serde@1.0.219
-	if crateName, crateVersion, ok := parseCratesIOURL(s); ok {
-		uri := "pkg:cargo/" + crateName
-		if crateVersion != "" {
-			uri += "@" + crateVersion
-		}
-		return resolveCanonicalURI(uri)
-	}
-
-	// rubygems.org gem URLs: copy-paste-from-browser for Ruby gems.
-	// https://rubygems.org/gems/rails → pkg:gem/rails
-	// https://rubygems.org/gems/rails/versions/7.1.3 → pkg:gem/rails@7.1.3
-	if gemName, gemVersion, ok := parseRubyGemsURL(s); ok {
-		uri := "pkg:gem/" + gemName
-		if gemVersion != "" {
-			uri += "@" + gemVersion
-		}
-		return resolveCanonicalURI(uri)
-	}
-
-	// Maven Central URLs: copy-paste-from-browser for Maven packages.
-	// Three hosts share the same /artifact/<groupId>/<artifactId> path
-	// structure: central.sonatype.com (current portal),
-	// search.maven.org (legacy search), and mvnrepository.com (popular
-	// third-party index).
-	// https://central.sonatype.com/artifact/com.google.guava/guava
-	//   → pkg:maven/com.google.guava/guava
-	if mvnGroup, mvnArtifact, mvnVersion, ok := parseMavenCentralURL(s); ok {
-		uri := "pkg:maven/" + mvnGroup + "/" + mvnArtifact
-		if mvnVersion != "" {
-			uri += "@" + mvnVersion
-		}
-		return resolveCanonicalURI(uri)
-	}
-
-	// pkg.go.dev module/package URLs: copy-paste-from-browser
-	// convenience for Go modules. Output is the pkg:golang/<import-path>
-	// canonical form per the purl spec — the same form an analyst
-	// referencing the module by purl would produce, and the same form
-	// the gomod parser emits for non-github paths. Github-hosted
-	// modules get owner/repo case-folded and any subpackage segments
-	// stripped via canonicalGoModuleURI.
-	if importPath, goVersion, ok := parsePkgGoDevURL(s); ok {
-		uri := canonicalGoModuleURI(importPath)
-		if goVersion != "" {
-			uri += "@" + goVersion
-		}
-		return resolveCanonicalURI(uri)
-	}
-
-	// Guard against non-github URLs sneaking through
-	// NormalizeGitHubRepoInput's prefix-strip pipeline.
-	//
-	// NormalizeGitHubRepoInput trims `https://`/`http://`
-	// unconditionally and only recognizes `github.com/` as a host
-	// strip; `https://gitlab.com/foo/bar` would otherwise split to
-	// owner=`gitlab.com`, name=`foo` and produce the misleading
-	// canonical URI `repo:github/gitlab.com/foo`. Reject URL-scheme
-	// inputs that aren't github (or a known-ecosystem host handled
-	// above) so callers with gitlab / bitbucket / self-hosted URLs
-	// get a clear "not yet supported" error instead of a silently-
-	// wrong canonical form.
-	if strings.Contains(s, "://") && !isGitHubURL(s) {
-		return nil, fmt.Errorf(
-			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, rubygems.org, or Maven Central URL; other hosting platforms are not yet supported by signatory",
-			raw)
-	}
-	// SCP-form (git@host:owner/repo.git) — NormalizeGitHubRepoInput
-	// strips `git@` unconditionally, which would misclassify
-	// `git@gitlab.com:foo/bar.git`. Gate the same way.
-	if strings.HasPrefix(s, "git@") && !strings.HasPrefix(s, "git@github.com:") {
-		return nil, fmt.Errorf(
-			"target %q is an SCP-form URL but not a github.com host; other hosting platforms are not yet supported by signatory",
-			raw)
+	// Reject non-github URLs and non-github SCP-form inputs before
+	// falling through to GitHub-shorthand parsing — without this
+	// gate, NormalizeGitHubRepoInput's prefix-strip would silently
+	// produce misleading repo:github/ URIs for gitlab/bitbucket/
+	// self-hosted inputs.
+	if err := rejectNonGitHubURL(s, raw); err != nil {
+		return nil, err
 	}
 
 	// Pre-strip @<version> from github shorthand inputs before
 	// delegating to NormalizeGitHubRepoInput. Without this,
 	// NormalizeGitHubRepoInput's path-segment validator rejects
 	// `Y@v1.0.0` because `@` isn't in its allowed character set.
-	// Doing the split here keeps NormalizeGitHubRepoInput strict
-	// on the bare name while extending the user-facing grammar.
-	//
-	// The canonical URI we synthesize on the way out preserves the
-	// @V suffix — mirrors the pkg: shape and lets storage code
-	// route both through SplitURIVersion uniformly.
-	bareInput := s
-	requestedVersion := ""
-	if at := strings.LastIndexByte(s, '@'); at >= 0 {
-		// Skip the SCP-form `git@github.com:...` case — the @ there
-		// is part of the SSH user-host syntax, not a version
-		// separator. SCP-form was already gated above; here we re-
-		// guard so we don't misread that @ as a version split.
-		if !strings.HasPrefix(s, "git@") {
-			candidate := s[at+1:]
-			before := s[:at]
-			// The version separator @ must come AFTER any /
-			// — otherwise it's part of the host portion of a URL
-			// (theoretical; URLs at this point have https:// stripped
-			// upstream of NormalizeGitHubRepoInput, so a / before @
-			// is the path-vs-version boundary).
-			if strings.ContainsRune(before, '/') {
-				if candidate == "" {
-					return nil, fmt.Errorf("target %q: empty version after '@'", raw)
-				}
-				// Reject nested @: the path portion (everything
-				// before the version separator) must not itself
-				// contain another @. Catches inputs like
-				// "owner/repo@v1.0@extra" where LastIndexByte
-				// would otherwise accept "extra" as the version
-				// and silently drop the middle @.
-				if strings.ContainsRune(before, '@') {
-					return nil, fmt.Errorf("target %q: nested separators not allowed (multiple '@' in input)", raw)
-				}
-				bareInput = before
-				requestedVersion = candidate
-			}
-		}
+	bareInput, requestedVersion, err := extractVersionSuffix(s, raw)
+	if err != nil {
+		return nil, err
 	}
 
-	// Discriminate Go vanity paths from github shorthand BEFORE falling
-	// through to NormalizeGitHubRepoInput. validPathSegment accepts dots
-	// in owner names, so without this branch "modernc.org/sqlite" would
-	// satisfy NormalizeGitHubRepoInput as owner=modernc.org, name=sqlite
-	// and produce repo:github/modernc.org/sqlite — the misclassification
-	// dogfood entry 1 surfaced.
-	//
-	// Discriminator: first path segment contains a `.`. GitHub
-	// usernames/orgs cannot contain `.` (per github.com's name rules —
-	// alphanumeric and hyphens only), so a dot in the first segment is
-	// unambiguous evidence of a vanity host. The "github.com/" prefix
-	// case is intentionally NOT excluded here — NormalizeGitHubRepoInput
-	// strips that prefix above any segment scanning, so by the time we
-	// reach this branch any github.com/ prefix has already been removed,
-	// leaving owner/repo where owner is bare.
-	//
-	// Output mirrors what the gomod parser produces for the same import
-	// path (pkg:go/<full-path>), keeping ResolveTarget and the parser in
-	// agreement on canonical form. Vanity-resolution to a github form
-	// (e.g. golang.org/x/Y → repo:github/golang/Y) is a lookup-side
-	// alternate handled elsewhere — see LookupEntity / AlternateURIs.
-	if firstSeg, _, ok := strings.Cut(bareInput, "/"); ok && firstSeg != "" &&
-		!strings.HasPrefix(bareInput, "github.com/") &&
-		!strings.HasPrefix(bareInput, "git@") &&
-		strings.ContainsRune(firstSeg, '.') {
-		canonicalURI := canonicalGoModuleURI(bareInput)
-		if requestedVersion != "" {
-			canonicalURI += "@" + requestedVersion
-		}
-		// Delegate to resolveCanonicalURI so the ShortName / Ecosystem /
-		// Version fields are set the same way they are for direct
-		// pkg:golang/ inputs. Drift between the two paths is the bug class
-		// this consolidation prevents.
-		return resolveCanonicalURI(canonicalURI)
+	// Discriminate Go vanity paths from github shorthand BEFORE
+	// falling through to NormalizeGitHubRepoInput. validPathSegment
+	// accepts dots in owner names, so without this branch
+	// "modernc.org/sqlite" would satisfy NormalizeGitHubRepoInput as
+	// owner=modernc.org, name=sqlite and produce
+	// repo:github/modernc.org/sqlite — the misclassification dogfood
+	// entry 1 surfaced.
+	if r, ok, err := resolveVanityImportPath(bareInput, requestedVersion); ok {
+		return r, err
 	}
 
 	// Fall through to GitHub-shorthand parsing. Any form
@@ -310,11 +159,8 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 			"target %q is not a canonical URI (repo:/pkg:/identity:/org:/patch:) and does not parse as a github repo reference: %w",
 			raw, err)
 	}
-	if requestedVersion != "" {
-		canonicalURI += "@" + requestedVersion
-	}
 	return &ResolvedTarget{
-		CanonicalURI: canonicalURI,
+		CanonicalURI: appendVersion(canonicalURI, requestedVersion),
 		ShortName:    name,
 		Scheme:       "repo",
 		Platform:     PlatformGitHub,
@@ -322,6 +168,166 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		CloneURL:     "https://github.com/" + owner + "/" + name,
 		Version:      requestedVersion,
 	}, nil
+}
+
+// tryRegistryURLs recognizes copy-paste-from-browser package
+// registry URLs and converts them to the equivalent pkg: canonical
+// URI. Returns ("", false) for inputs that aren't a known registry
+// URL form — the caller falls through to URL-rejection / version-
+// extraction / vanity / GitHub-shorthand parsing.
+//
+// Recognized hosts:
+//
+//   - npmjs.com:    pkg:npm/<name>[@<version>] (case-preserving)
+//   - pypi.org:     pkg:pypi/<name>[@<version>] (PEP 503-normalized
+//     inside parsePyPIURL — so /project/Requests/ and
+//     /project/requests/ both produce pkg:pypi/requests; the npm
+//     registry is case-sensitive and we preserve case there)
+//   - crates.io:    pkg:cargo/<name>[@<version>]
+//   - rubygems.org: pkg:gem/<name>[@<version>]
+//   - Maven Central (central.sonatype.com / search.maven.org /
+//     mvnrepository.com): pkg:maven/<group>/<artifact>[@<version>]
+//   - pkg.go.dev:   pkg:golang/<import-path>[@<version>] —
+//     canonicalGoModuleURI strips subpackages and case-folds
+//     github-hosted modules, matching the gomod parser.
+//
+// Each parser is host-anchored: the host prefix must match exactly
+// after scheme/www strip, so lookalikes like
+// `npmjs.com.attacker.example/...` fall through.
+func tryRegistryURLs(s string) (canonicalURI string, ok bool) {
+	if name, version, ok := parseNpmjsURL(s); ok {
+		return appendVersion("pkg:npm/"+name, version), true
+	}
+	if name, version, ok := parsePyPIURL(s); ok {
+		return appendVersion("pkg:pypi/"+name, version), true
+	}
+	if name, version, ok := parseCratesIOURL(s); ok {
+		return appendVersion("pkg:cargo/"+name, version), true
+	}
+	if name, version, ok := parseRubyGemsURL(s); ok {
+		return appendVersion("pkg:gem/"+name, version), true
+	}
+	if group, artifact, version, ok := parseMavenCentralURL(s); ok {
+		return appendVersion("pkg:maven/"+group+"/"+artifact, version), true
+	}
+	if importPath, version, ok := parsePkgGoDevURL(s); ok {
+		return appendVersion(canonicalGoModuleURI(importPath), version), true
+	}
+	return "", false
+}
+
+// rejectNonGitHubURL fails inputs that look like URLs or SCP-form
+// references but don't target github.com. Without this gate
+// NormalizeGitHubRepoInput's prefix-strip would silently produce a
+// misleading repo:github/ URI for gitlab/bitbucket/self-hosted
+// inputs (e.g. https://gitlab.com/foo/bar would become
+// repo:github/gitlab.com/foo). Registry URLs (npmjs.com, pypi.org,
+// crates.io, ...) are recognized earlier in ResolveTarget via
+// tryRegistryURLs and never reach this gate.
+//
+// SCP-form (git@host:owner/repo.git) is gated separately because
+// NormalizeGitHubRepoInput strips `git@` unconditionally and would
+// misclassify `git@gitlab.com:foo/bar.git`.
+func rejectNonGitHubURL(s, raw string) error {
+	if strings.Contains(s, "://") && !isGitHubURL(s) {
+		return fmt.Errorf(
+			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, rubygems.org, or Maven Central URL; other hosting platforms are not yet supported by signatory",
+			raw)
+	}
+	if strings.HasPrefix(s, "git@") && !strings.HasPrefix(s, "git@github.com:") {
+		return fmt.Errorf(
+			"target %q is an SCP-form URL but not a github.com host; other hosting platforms are not yet supported by signatory",
+			raw)
+	}
+	return nil
+}
+
+// extractVersionSuffix peels an optional @<version> suffix off a
+// github-shorthand input (owner/repo@vX.Y.Z), returning the bare
+// input and the version. Returns (input, "", nil) when no version
+// is present.
+//
+// Three guards:
+//
+//   - SCP-form (git@github.com:...) is skipped — the @ there is
+//     part of the SSH user-host syntax, not a version separator.
+//     SCP-form was already gated by rejectNonGitHubURL; here we
+//     re-guard so we don't misread that @ as a version split.
+//   - The version separator @ must come AFTER any / — otherwise
+//     it's part of the host portion of a URL (URLs at this point
+//     have https:// stripped, so a / before @ is the
+//     path-vs-version boundary).
+//   - Nested @ in the path portion is rejected. Catches inputs like
+//     "owner/repo@v1.0@extra" where LastIndexByte would otherwise
+//     accept "extra" as the version and silently drop the middle @.
+//
+// The canonical URI ResolveTarget synthesizes on the way out
+// preserves the @V suffix — mirrors the pkg: shape and lets
+// storage code route both through SplitURIVersion uniformly.
+func extractVersionSuffix(s, raw string) (bare, version string, err error) {
+	at := strings.LastIndexByte(s, '@')
+	if at < 0 {
+		return s, "", nil
+	}
+	if strings.HasPrefix(s, "git@") {
+		return s, "", nil
+	}
+	candidate := s[at+1:]
+	before := s[:at]
+	if !strings.ContainsRune(before, '/') {
+		return s, "", nil
+	}
+	if candidate == "" {
+		return "", "", fmt.Errorf("target %q: empty version after '@'", raw)
+	}
+	if strings.ContainsRune(before, '@') {
+		return "", "", fmt.Errorf("target %q: nested separators not allowed (multiple '@' in input)", raw)
+	}
+	return before, candidate, nil
+}
+
+// resolveVanityImportPath detects Go vanity import paths
+// (modernc.org/sqlite, gopkg.in/yaml.v3, k8s.io/client-go) by
+// looking for a dot in the first path segment — GitHub
+// usernames/orgs cannot contain dots (per github.com's name rules:
+// alphanumeric and hyphens only), so a dot in the first segment is
+// unambiguous evidence of a vanity host.
+//
+// Returns (resolved, true, err) on a match (err comes from
+// resolveCanonicalURI's parsing of the synthesized pkg:go/<path>
+// URI; ok stays true even when err is non-nil so the caller doesn't
+// fall through to GitHub-shorthand). Returns (nil, false, nil)
+// when the input doesn't look like a vanity path; the caller falls
+// through to GitHub-shorthand parsing.
+//
+// "github.com/" prefix is intentionally NOT excluded here — by the
+// time we reach this branch any github.com/ prefix has already been
+// removed by upstream parsing, leaving owner/repo where owner is
+// bare.
+//
+// Output mirrors what the gomod parser produces for the same
+// import path (pkg:go/<full-path>), keeping ResolveTarget and the
+// parser in agreement on canonical form. Vanity-resolution to a
+// github form (e.g. golang.org/x/Y → repo:github/golang/Y) is a
+// lookup-side alternate handled elsewhere — see LookupEntity /
+// AlternateURIs.
+func resolveVanityImportPath(bareInput, requestedVersion string) (*ResolvedTarget, bool, error) {
+	firstSeg, _, ok := strings.Cut(bareInput, "/")
+	if !ok || firstSeg == "" {
+		return nil, false, nil
+	}
+	if strings.HasPrefix(bareInput, "github.com/") {
+		return nil, false, nil
+	}
+	if strings.HasPrefix(bareInput, "git@") {
+		return nil, false, nil
+	}
+	if !strings.ContainsRune(firstSeg, '.') {
+		return nil, false, nil
+	}
+	canonicalURI := appendVersion(canonicalGoModuleURI(bareInput), requestedVersion)
+	r, err := resolveCanonicalURI(canonicalURI)
+	return r, true, err
 }
 
 // parseNpmjsURL recognizes npmjs.com package URLs and extracts the
@@ -351,69 +357,93 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 // and, downstream, the npm client's ValidatePackageName (for
 // HTTP-URL safety).
 func parseNpmjsURL(input string) (name, version string, ok bool) {
+	rest, ok := stripNpmjsHostPrefix(input)
+	if !ok {
+		return "", "", false
+	}
+	rest = stripURLFragmentAndQuery(rest)
+	return splitNpmjsNameAndVersion(rest)
+}
+
+// stripNpmjsHostPrefix strips the optional scheme/www and the
+// "npmjs.com/package/" prefix from input, returning the remainder
+// of the path. Returns ("", false) when the input doesn't have an
+// npmjs.com/package/<rest> shape after prefix-stripping, including
+// when <rest> is empty.
+//
+// Host anchoring: rejects lookalike hosts like
+// "npmjs.com.attacker.example/package/x" by requiring an exact
+// match on "npmjs.com/" after the optional www./scheme strip.
+func stripNpmjsHostPrefix(input string) (rest string, ok bool) {
 	s := strings.TrimPrefix(input, "https://")
 	s = strings.TrimPrefix(s, "http://")
 	s = strings.TrimPrefix(s, "www.")
-
-	// Host anchoring: must be EXACTLY "npmjs.com/" at this point.
-	rest, hostOK := strings.CutPrefix(s, "npmjs.com/")
+	s, hostOK := strings.CutPrefix(s, "npmjs.com/")
 	if !hostOK {
-		return "", "", false
+		return "", false
 	}
+	s, pathOK := strings.CutPrefix(s, "package/")
+	if !pathOK || s == "" {
+		return "", false
+	}
+	return s, true
+}
 
-	// Path must start with "package/".
-	rest, pathOK := strings.CutPrefix(rest, "package/")
-	if !pathOK || rest == "" {
-		return "", "", false
+// stripURLFragmentAndQuery removes any trailing #fragment or ?query
+// portion from a URL path. The npmjs.com UI appends these for tabs,
+// version pickers, etc., and they're not part of the package
+// identifier.
+func stripURLFragmentAndQuery(s string) string {
+	if before, _, hadHash := strings.Cut(s, "#"); hadHash {
+		s = before
 	}
+	if before, _, hadQuery := strings.Cut(s, "?"); hadQuery {
+		s = before
+	}
+	return s
+}
 
-	// Drop fragment and query — the npmjs.com UI adds these for
-	// tabs, version pickers, etc., and they're not part of the
-	// package identifier.
-	if before, _, hadHash := strings.Cut(rest, "#"); hadHash {
-		rest = before
-	}
-	if before, _, hadQuery := strings.Cut(rest, "?"); hadQuery {
-		rest = before
-	}
-
-	// Scoped packages: "@scope/name" takes TWO path segments; any
-	// subsequent /v/<version> is version-page, everything else is
-	// noise we ignore.
+// splitNpmjsNameAndVersion splits the path after npmjs.com/package/
+// into (name, version). Handles both shapes:
+//
+//   - scoped:   @scope/name[/v/<version>][/...]   (name is two segments)
+//   - unscoped: name[/v/<version>][/...]          (name is one segment)
+//
+// Optional /v/<version> at the trailing position yields the
+// version; anything else (subpaths, trailing /README) is ignored.
+// Version extraction is delegated to extractNpmjsVPathVersion so
+// both branches share the same logic.
+func splitNpmjsNameAndVersion(rest string) (name, version string, ok bool) {
 	if strings.HasPrefix(rest, "@") {
 		parts := strings.SplitN(rest, "/", 4)
 		if len(parts) < 2 || parts[0] == "@" || parts[1] == "" {
 			return "", "", false
 		}
-		scopedName := parts[0] + "/" + parts[1]
-		// /v/<version> at parts[2]/parts[3]
-		if len(parts) >= 4 && parts[2] == "v" && parts[3] != "" {
-			// parts[3] may itself contain further path segments
-			// (/v/1.0/README.md etc.); take only up to the next slash.
-			ver := parts[3]
-			if idx := strings.IndexByte(ver, '/'); idx >= 0 {
-				ver = ver[:idx]
-			}
-			return scopedName, ver, true
-		}
-		return scopedName, "", true
+		return parts[0] + "/" + parts[1], extractNpmjsVPathVersion(parts[2:]), true
 	}
-
-	// Unscoped: first path segment is the name; optional /v/<version>
-	// follows; anything else (/README, trailing slash) is stripped.
 	segs := strings.SplitN(rest, "/", 4)
 	if segs[0] == "" {
 		return "", "", false
 	}
-	nameOut := segs[0]
-	if len(segs) >= 3 && segs[1] == "v" && segs[2] != "" {
-		ver := segs[2]
-		if idx := strings.IndexByte(ver, '/'); idx >= 0 {
-			ver = ver[:idx]
-		}
-		return nameOut, ver, true
+	return segs[0], extractNpmjsVPathVersion(segs[1:]), true
+}
+
+// extractNpmjsVPathVersion returns the version string when segs
+// starts with "v" / "<version>" (the npmjs.com /v/<version> page
+// convention); otherwise returns "". Trims any subpath off the
+// version when present — defensive against the scoped split landing
+// subpaths in segs[1] for inputs like "@scope/name/v/1.0/README.md"
+// (SplitN limit-4 keeps "1.0/README.md" as a single trailing
+// segment).
+func extractNpmjsVPathVersion(segs []string) string {
+	if len(segs) < 2 || segs[0] != "v" || segs[1] == "" {
+		return ""
 	}
-	return nameOut, "", true
+	ver := segs[1]
+	if idx := strings.IndexByte(ver, '/'); idx >= 0 {
+		ver = ver[:idx]
+	}
+	return ver
 }
 
 // parsePyPIURL recognizes pypi.org project URLs and extracts the
@@ -735,7 +765,9 @@ func isGitHubURL(input string) bool {
 // resolveCanonicalURI handles an input already in canonical form
 // (matched by one of the known scheme prefixes). Validates,
 // decomposes into per-scheme fields, and populates CloneURL for
-// supported repo: platforms.
+// supported repo: platforms. Per-scheme parsing lives in
+// parseRepoBody / parsePkgBody / parseIdentityOrOrgBody /
+// parsePatchBody so each can read top-down without nesting.
 func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 	if err := ValidateCanonicalURI(uri); err != nil {
 		return nil, err
@@ -754,203 +786,15 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		return nil, fmt.Errorf("canonical URI %q has empty body after scheme", uri)
 	}
 
-	out := &ResolvedTarget{
-		CanonicalURI: uri,
-		Scheme:       scheme,
-	}
-
 	switch scheme {
 	case "repo":
-		// repo:<platform>/<owner>/<name>[@<version>]
-		// Optional @<version> suffix on the LAST path segment names
-		// a git ref (tag, branch, commit). Used by signatory
-		// handoff to clone the named ref. Storage strips the suffix
-		// (entity is at the unversioned URI; version goes on the
-		// posture row) — see SplitURIVersion.
-		if len(parts) < 3 {
-			return nil, fmt.Errorf("repo URI %q: expected platform/owner/name, got %d segment(s)", uri, len(parts))
-		}
-		out.Platform = parts[0]
-		out.Owner = parts[1]
-		// Extract optional @<version> from the last segment using
-		// the same shape as the pkg: case. Two `@` are not
-		// permitted (nested separators are ambiguous).
-		lastSeg := parts[len(parts)-1]
-		if name, version, ok := strings.Cut(lastSeg, "@"); ok {
-			if name == "" {
-				return nil, fmt.Errorf("repo URI %q: empty name before '@version'", uri)
-			}
-			if version == "" {
-				return nil, fmt.Errorf("repo URI %q: empty version after '@'", uri)
-			}
-			if strings.ContainsRune(version, '@') {
-				return nil, fmt.Errorf("repo URI %q: version contains '@' (nested separators not allowed)", uri)
-			}
-			out.ShortName = name
-			out.Version = version
-		} else {
-			out.ShortName = lastSeg
-		}
-		// Case fold platform/owner/name to the canonical form
-		// CanonicalRepoURI produces. Without this, a caller passing
-		// `repo:github/BurntSushi/toml` (already-canonical-shaped but
-		// not yet case-folded) would survive validation unchanged
-		// and then fragment against entities the constructor created
-		// at the lowercased URI. The fold also normalizes
-		// `repo:GITHUB/...` → `repo:github/...` so the PlatformGitHub
-		// equality check below catches uppercase-platform inputs.
-		out.Platform = strings.ToLower(out.Platform)
-		out.Owner = strings.ToLower(out.Owner)
-		out.ShortName = strings.ToLower(out.ShortName)
-		out.CanonicalURI = CanonicalRepoURI(out.Platform, out.Owner, out.ShortName)
-		if out.Version != "" {
-			out.CanonicalURI += "@" + out.Version
-		}
-		if out.Platform == PlatformGitHub {
-			out.CloneURL = "https://github.com/" + out.Owner + "/" + out.ShortName
-		}
-		// Other platforms (gitlab, bitbucket) intentionally leave
-		// CloneURL empty until each is first-classed. Callers that
-		// check for non-empty CloneURL before clone-dir actions
-		// won't silently invoke `git clone` against a URL shape
-		// the CLI hasn't validated.
-
+		return parseRepoBody(parts, uri)
 	case "pkg":
-		// pkg:<ecosystem>/<name...>[@<version>] where name may contain
-		// further slashes (npm scoped packages: pkg:npm/@types/node)
-		// and an optional `@<version>` suffix on the LAST segment
-		// (pkg:npm/X@1.2.3, pkg:npm/@types/node@20.0.0).
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("pkg URI %q: expected ecosystem/name, got %d segment(s)", uri, len(parts))
-		}
-		out.Ecosystem = parts[0]
-
-		// Extract the optional @<version> suffix from the last
-		// segment. The scope prefix on scoped npm names (@types) lives
-		// in its OWN segment and never collides with the version @.
-		lastIdx := len(parts) - 1
-		lastSeg := parts[lastIdx]
-		if name, version, ok := strings.Cut(lastSeg, "@"); ok {
-			if name == "" {
-				return nil, fmt.Errorf("pkg URI %q: empty name before '@version'", uri)
-			}
-			if version == "" {
-				return nil, fmt.Errorf("pkg URI %q: empty version after '@'", uri)
-			}
-			if strings.ContainsRune(version, '@') {
-				return nil, fmt.Errorf("pkg URI %q: version contains '@' (nested separators not allowed)", uri)
-			}
-			out.ShortName = name
-			out.Version = version
-		} else {
-			out.ShortName = lastSeg
-		}
-
-		// PEP 503 name normalization for PyPI. Unlike npm (case-
-		// sensitive) and Go (path-preserving), PyPI's registry
-		// canonicalizes names on lookup — `Requests`, `requests`,
-		// and `python_dotenv` all map to the same identity. The
-		// canonical URI must match, or storage fragments across
-		// identities the registry considers the same. See pypi.go
-		// for the normalization spec. No-op when the extracted name
-		// is already in canonical form.
-		if out.Ecosystem == "pypi" {
-			normalized := NormalizePyPIName(out.ShortName)
-			if normalized != out.ShortName {
-				out.ShortName = normalized
-				out.CanonicalURI = "pkg:pypi/" + normalized
-				if out.Version != "" {
-					out.CanonicalURI += "@" + out.Version
-				}
-			}
-		}
-
-		// Cargo name normalization: crates.io treats hyphens and
-		// underscores as equivalent for lookups — both `serde_json`
-		// and `serde-json` resolve to the same crate. We normalize
-		// to the hyphen form to prevent storage fragmentation, since
-		// Cargo.toml dep keys conventionally use hyphens and
-		// `cargo add` prefers them.
-		//
-		// Unlike PyPI (where the registry enforces a single canonical
-		// form), crates.io stores the owner-published spelling. We
-		// pick hyphen-canonical because: (1) Cargo.toml dep keys
-		// use it by convention, (2) purl spec examples use it, (3)
-		// the API accepts both for lookups, so fragmentation is the
-		// only real risk.
-		if out.Ecosystem == "cargo" {
-			normalized := NormalizeCrateName(out.ShortName)
-			if normalized != out.ShortName {
-				out.ShortName = normalized
-				out.CanonicalURI = "pkg:cargo/" + normalized
-				if out.Version != "" {
-					out.CanonicalURI += "@" + out.Version
-				}
-			}
-		}
-
-		// Go modules: derive a github CloneURL when the import path
-		// has an algorithmic mapping. Pure string transformation
-		// driven by the same equivalences alternates.go encodes; no
-		// network. Vanity hosts without an algorithmic mapping
-		// (gopkg.in, modernc.org, k8s.io, …) keep CloneURL empty —
-		// proxy.golang.org Origin lookups are a v2 concern.
-		//
-		// Closes the v0.1 dispatch-gate gap surfaced when running
-		// `signatory analyze --clone --refresh pkg:golang/...`:
-		// without CloneURL stamped here, isGitHostedEntity returns
-		// false in collectorsFor and the github + git + repofiles
-		// + openssf collectors silently skip.
-		if out.Ecosystem == "golang" || out.Ecosystem == "go" {
-			// Reconstruct the import path from parts after the
-			// ecosystem prefix, replacing the last segment's @V
-			// with the bare name (out.Version is already extracted
-			// by the lastSeg parsing above).
-			importParts := make([]string, len(parts)-1)
-			copy(importParts, parts[1:])
-			if out.Version != "" {
-				importParts[len(importParts)-1] = out.ShortName
-			}
-			out.CloneURL = derivedGoCloneURL(strings.Join(importParts, "/"))
-		}
-
+		return parsePkgBody(parts, uri)
 	case "identity", "org":
-		// identity:<platform>/<user> or org:<platform>/<org>
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("%s URI %q: expected platform/name, got %d segment(s)", scheme, uri, len(parts))
-		}
-		out.Platform = strings.ToLower(parts[0])
-		out.ShortName = strings.ToLower(parts[len(parts)-1])
-		// Rebuild CanonicalURI from the case-folded components so
-		// already-canonical-shaped inputs match what
-		// CanonicalIdentityURI / CanonicalOrgURI produce. See the
-		// repo case above for the full rationale.
-		if scheme == "identity" {
-			out.CanonicalURI = CanonicalIdentityURI(out.Platform, out.ShortName)
-		} else {
-			out.CanonicalURI = CanonicalOrgURI(out.Platform, out.ShortName)
-		}
-
+		return parseIdentityOrOrgBody(scheme, parts, uri)
 	case "patch":
-		// patch:<platform>/<owner>/<repo>/<id>
-		if len(parts) < 4 {
-			return nil, fmt.Errorf("patch URI %q: expected platform/owner/repo/id, got %d segment(s)", uri, len(parts))
-		}
-		// Case fold platform/owner/repo to match CanonicalPatchURI.
-		// The patch id (parts[3]) is preserved verbatim — patch ids
-		// are opaque tokens (PR/issue numbers on github, MR numbers
-		// on gitlab, etc.) and CanonicalPatchURI does not lowercase
-		// them.
-		out.Platform = strings.ToLower(parts[0])
-		out.Owner = strings.ToLower(parts[1])
-		repo := strings.ToLower(parts[2])
-		id := parts[3]
-		// ShortName renders as "repo#id" for human display —
-		// preserves both the repo and the patch number in one
-		// token without requiring callers to hand-compose.
-		out.ShortName = repo + "#" + id
-		out.CanonicalURI = CanonicalPatchURI(out.Platform, out.Owner, repo, id)
-
+		return parsePatchBody(parts, uri)
 	default:
 		// Scheme is in validURISchemes but this switch doesn't
 		// know it. That means validURISchemes grew without a
@@ -958,8 +802,220 @@ func resolveCanonicalURI(uri string) (*ResolvedTarget, error) {
 		// silent degradation to a default ShortName.
 		return nil, fmt.Errorf("canonical URI %q uses scheme %q which ResolveTarget does not yet handle", uri, scheme)
 	}
+}
 
+// appendVersion returns uri unchanged when version is empty,
+// otherwise uri + "@" + version. Used by every place that
+// reconstructs a canonical URI from its parts (registry-URL
+// converters, scheme-specific normalizers, the GitHub-shorthand
+// fall-through path) so the "version-suffix shape" rule lives in
+// one spot.
+func appendVersion(uri, version string) string {
+	if version == "" {
+		return uri
+	}
+	return uri + "@" + version
+}
+
+// parseLastSegmentAtVersion splits a possible "name@version" suffix
+// from a URI's last path segment. Used by both the repo and pkg
+// scheme handlers to extract the optional version with consistent
+// validation: empty name, empty version, and nested '@' are all
+// rejected with scheme-labeled error messages.
+//
+// On a clean segment with no '@', returns (segment, "", nil).
+// On a "name@version" pair, returns (name, version, nil).
+func parseLastSegmentAtVersion(lastSeg, schemeLabel, uri string) (name, version string, err error) {
+	n, v, ok := strings.Cut(lastSeg, "@")
+	if !ok {
+		return lastSeg, "", nil
+	}
+	if n == "" {
+		return "", "", fmt.Errorf("%s URI %q: empty name before '@version'", schemeLabel, uri)
+	}
+	if v == "" {
+		return "", "", fmt.Errorf("%s URI %q: empty version after '@'", schemeLabel, uri)
+	}
+	if strings.ContainsRune(v, '@') {
+		return "", "", fmt.Errorf("%s URI %q: version contains '@' (nested separators not allowed)", schemeLabel, uri)
+	}
+	return n, v, nil
+}
+
+// parseRepoBody extracts the platform/owner/name (+ optional
+// version) from a repo:<platform>/<owner>/<name>[@<version>] URI.
+// The optional @<version> suffix on the last segment names a git
+// ref (tag, branch, commit) — used by signatory handoff to clone
+// the named ref. Storage strips the suffix before keying the entity
+// row (see SplitURIVersion).
+//
+// Case-folds platform/owner/name to the form CanonicalRepoURI
+// produces. Without this, a caller passing
+// `repo:github/BurntSushi/toml` (already-canonical-shaped but not
+// yet case-folded) would survive ValidateCanonicalURI unchanged and
+// then fragment against entities the constructor created at the
+// lowercased URI.
+//
+// CloneURL is populated for github platform only; other platforms
+// (gitlab, bitbucket) intentionally leave it empty until each is
+// first-classed, so callers that check for non-empty CloneURL
+// before clone-dir actions don't silently invoke `git clone`
+// against a URL shape the CLI hasn't validated.
+func parseRepoBody(parts []string, uri string) (*ResolvedTarget, error) {
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("repo URI %q: expected platform/owner/name, got %d segment(s)", uri, len(parts))
+	}
+	name, version, err := parseLastSegmentAtVersion(parts[len(parts)-1], "repo", uri)
+	if err != nil {
+		return nil, err
+	}
+	platform := strings.ToLower(parts[0])
+	owner := strings.ToLower(parts[1])
+	short := strings.ToLower(name)
+	out := &ResolvedTarget{
+		CanonicalURI: appendVersion(CanonicalRepoURI(platform, owner, short), version),
+		Scheme:       "repo",
+		Platform:     platform,
+		Owner:        owner,
+		ShortName:    short,
+		Version:      version,
+	}
+	if platform == PlatformGitHub {
+		out.CloneURL = "https://github.com/" + owner + "/" + short
+	}
 	return out, nil
+}
+
+// parsePkgBody extracts the ecosystem/name (+ optional version)
+// from a pkg:<ecosystem>/<name...>[@<version>] URI. Name may contain
+// further slashes (npm scoped packages: pkg:npm/@types/node); the
+// scope prefix on scoped names lives in its own segment and never
+// collides with the version @.
+//
+// Delegates ecosystem-specific normalization (PyPI PEP 503,
+// Cargo hyphen-canonical, Go module clone-URL derivation) to
+// applyPkgEcosystemNormalization so the dispatch table stays in
+// one place.
+func parsePkgBody(parts []string, uri string) (*ResolvedTarget, error) {
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("pkg URI %q: expected ecosystem/name, got %d segment(s)", uri, len(parts))
+	}
+	name, version, err := parseLastSegmentAtVersion(parts[len(parts)-1], "pkg", uri)
+	if err != nil {
+		return nil, err
+	}
+	out := &ResolvedTarget{
+		CanonicalURI: uri,
+		Scheme:       "pkg",
+		Ecosystem:    parts[0],
+		ShortName:    name,
+		Version:      version,
+	}
+	applyPkgEcosystemNormalization(out, parts)
+	return out, nil
+}
+
+// applyPkgEcosystemNormalization mutates out in place to apply
+// per-ecosystem canonical-form rules:
+//
+//   - pypi: PEP 503 name normalization. Unlike npm (case-sensitive)
+//     and Go (path-preserving), PyPI's registry canonicalizes
+//     names on lookup — `Requests`, `requests`, and `python_dotenv`
+//     all map to the same identity. The canonical URI must match,
+//     or storage fragments across identities the registry considers
+//     the same. See pypi.go for the normalization spec.
+//   - cargo: hyphen-canonical name. crates.io treats hyphens and
+//     underscores as equivalent for lookups — both `serde_json` and
+//     `serde-json` resolve to the same crate. Hyphen-canonical
+//     because (1) Cargo.toml dep keys use it by convention, (2)
+//     purl spec examples use it, (3) the API accepts both for
+//     lookups so fragmentation is the only real risk.
+//   - golang/go: derive a github CloneURL when the import path has
+//     an algorithmic mapping. Pure string transformation driven by
+//     the same equivalences alternates.go encodes; no network.
+//     Vanity hosts without an algorithmic mapping (gopkg.in,
+//     modernc.org, k8s.io, …) keep CloneURL empty — proxy.golang.org
+//     Origin lookups are a v2 concern. Closes the v0.1 dispatch-gate
+//     gap surfaced when running `signatory analyze --clone --refresh
+//     pkg:golang/...` (without CloneURL stamped here,
+//     isGitHostedEntity returns false in collectorsFor and the
+//     git-side collectors silently skip).
+func applyPkgEcosystemNormalization(out *ResolvedTarget, parts []string) {
+	switch out.Ecosystem {
+	case "pypi":
+		if normalized := NormalizePyPIName(out.ShortName); normalized != out.ShortName {
+			out.ShortName = normalized
+			out.CanonicalURI = appendVersion("pkg:pypi/"+normalized, out.Version)
+		}
+	case "cargo":
+		if normalized := NormalizeCrateName(out.ShortName); normalized != out.ShortName {
+			out.ShortName = normalized
+			out.CanonicalURI = appendVersion("pkg:cargo/"+normalized, out.Version)
+		}
+	case "golang", "go":
+		// Reconstruct the import path from parts after the
+		// ecosystem prefix, replacing the last segment's @V
+		// with the bare name (out.Version is already extracted
+		// upstream).
+		importParts := make([]string, len(parts)-1)
+		copy(importParts, parts[1:])
+		if out.Version != "" {
+			importParts[len(importParts)-1] = out.ShortName
+		}
+		out.CloneURL = derivedGoCloneURL(strings.Join(importParts, "/"))
+	}
+}
+
+// parseIdentityOrOrgBody extracts the platform/name from
+// identity:<platform>/<user> or org:<platform>/<org> URIs.
+// Case-folds platform and name and rebuilds CanonicalURI from the
+// case-folded components so already-canonical-shaped inputs match
+// what CanonicalIdentityURI / CanonicalOrgURI produce. See the
+// godoc on parseRepoBody for the case-folding rationale.
+func parseIdentityOrOrgBody(scheme string, parts []string, uri string) (*ResolvedTarget, error) {
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("%s URI %q: expected platform/name, got %d segment(s)", scheme, uri, len(parts))
+	}
+	platform := strings.ToLower(parts[0])
+	name := strings.ToLower(parts[len(parts)-1])
+	out := &ResolvedTarget{
+		Scheme:    scheme,
+		Platform:  platform,
+		ShortName: name,
+	}
+	if scheme == "identity" {
+		out.CanonicalURI = CanonicalIdentityURI(platform, name)
+	} else {
+		out.CanonicalURI = CanonicalOrgURI(platform, name)
+	}
+	return out, nil
+}
+
+// parsePatchBody extracts the platform/owner/repo/id from a
+// patch:<platform>/<owner>/<repo>/<id> URI. Case-folds
+// platform/owner/repo to match CanonicalPatchURI; the patch id is
+// preserved verbatim — patch ids are opaque tokens (PR/issue
+// numbers on github, MR numbers on gitlab, etc.) and
+// CanonicalPatchURI does not lowercase them.
+//
+// ShortName renders as "repo#id" for human display so callers can
+// surface both the repo and the patch number in one token without
+// hand-composing.
+func parsePatchBody(parts []string, uri string) (*ResolvedTarget, error) {
+	if len(parts) < 4 {
+		return nil, fmt.Errorf("patch URI %q: expected platform/owner/repo/id, got %d segment(s)", uri, len(parts))
+	}
+	platform := strings.ToLower(parts[0])
+	owner := strings.ToLower(parts[1])
+	repo := strings.ToLower(parts[2])
+	id := parts[3]
+	return &ResolvedTarget{
+		CanonicalURI: CanonicalPatchURI(platform, owner, repo, id),
+		Scheme:       "patch",
+		Platform:     platform,
+		Owner:        owner,
+		ShortName:    repo + "#" + id,
+	}, nil
 }
 
 // parsePkgGoDevURL recognizes pkg.go.dev module/package URLs and
