@@ -3,6 +3,7 @@ package npm
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -64,7 +65,7 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 	// time-install states) — we emit direct deps only in that case.
 	lockfilePath := filepath.Join(filepath.Dir(path), "package-lock.json")
 	resolvedVersions, lockfileErr := parseLockfile(lockfilePath)
-	if lockfileErr != nil && !os.IsNotExist(lockfileErr) {
+	if lockfileErr != nil && !errors.Is(lockfileErr, os.ErrNotExist) {
 		return manifest.ProjectInfo{}, nil, fmt.Errorf("parse lockfile %q: %w", lockfilePath, lockfileErr)
 	}
 

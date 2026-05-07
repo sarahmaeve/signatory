@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -64,7 +65,7 @@ func (cmd *BuildOutputCmd) Run(globals *Globals) error {
 	}
 	w, err := os.OpenFile(cmd.Output, flag, 0o644) //nolint:gosec // G302: user-facing v1-schema analyst output, not secrets; 0o600 would block scripted ingest tooling running as non-owner in the same project
 	if err != nil {
-		if os.IsExist(err) {
+		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("%s already exists; pass --force to overwrite", cmd.Output)
 		}
 		return fmt.Errorf("create output: %w", err)

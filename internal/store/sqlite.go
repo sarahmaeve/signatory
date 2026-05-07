@@ -489,7 +489,7 @@ func autoSupersedeConflicts(ctx context.Context, tx *sql.Tx, signals []profile.S
 	if err != nil {
 		return err
 	}
-	defer findPrior.Close() //nolint:errcheck
+	defer findPrior.Close() //nolint:errcheck // prepared statement; close errors not actionable after the queries above
 
 	resolveStmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO signal_resolutions
@@ -498,7 +498,7 @@ func autoSupersedeConflicts(ctx context.Context, tx *sql.Tx, signals []profile.S
 	if err != nil {
 		return err
 	}
-	defer resolveStmt.Close() //nolint:errcheck
+	defer resolveStmt.Close() //nolint:errcheck // prepared statement; close errors not actionable after the inserts above
 
 	now := time.Now().UTC()
 	for _, sig := range signals {
@@ -810,7 +810,7 @@ func (s *SQLite) AppendDependencyObservations(ctx context.Context, obs []profile
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // rollback after a successful commit is a no-op; rollback error is meaningless after commit
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO dependency_observations (id, project_id, entity_id, version, direct, observed_at, survey_id)

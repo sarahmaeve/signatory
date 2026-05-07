@@ -136,7 +136,7 @@ func (s *SQLite) ListDuplicateFragmentations(ctx context.Context) (*Consolidatio
 	for rows.Next() {
 		var r entityRow
 		if scanErr := rows.Scan(&r.id, &r.uri); scanErr != nil {
-			rows.Close() //nolint:errcheck
+			rows.Close() //nolint:errcheck // already returning the scan error; close error would mask the real failure
 			return nil, fmt.Errorf("scan entity row: %w", scanErr)
 		}
 		entities = append(entities, r)

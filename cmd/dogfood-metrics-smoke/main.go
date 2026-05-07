@@ -351,7 +351,7 @@ func getRequest(port int, path string) int {
 	if err != nil {
 		return -1
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // body drained below; close errors not actionable
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }

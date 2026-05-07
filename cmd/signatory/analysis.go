@@ -89,7 +89,7 @@ func (cmd *AnalysisBeginCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+	defer s.Close() //nolint:errcheck // store close errors not actionable at CLI exit // store close on command exit; error is not actionable
 
 	entity, err := ensureEntity(ctx, s, base)
 	if err != nil {
@@ -184,7 +184,7 @@ func (cmd *AnalysisEndCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck // store close errors not actionable at CLI exit
 
 	status := profile.AnalysisSessionStatus(cmd.Status)
 	params := profile.AnalysisSessionCloseParams{
@@ -247,7 +247,7 @@ func (cmd *AnalysisListCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck // store close errors not actionable at CLI exit
 
 	entityID, err := resolveEntityFilter(ctx, s, cmd.Entity)
 	if err != nil {
@@ -324,7 +324,7 @@ func (cmd *AnalysisShowCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck // store close errors not actionable at CLI exit
 
 	sess, err := s.GetAnalysisSession(ctx, cmd.SessionID)
 	if errors.Is(err, store.ErrNotFound) {

@@ -122,7 +122,7 @@ func (s *SQLite) planOneEntity(ctx context.Context, entityID string) (*EntityPru
 	if err != nil {
 		return nil, fmt.Errorf("list output ids: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // read-only, close errors aren't actionable
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below // read-only, close errors aren't actionable
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -291,7 +291,7 @@ func captureAppendOnlyTriggers(ctx context.Context, tx *sql.Tx) ([]appendOnlyTri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 	var triggers []appendOnlyTrigger
 	for rows.Next() {
 		var t appendOnlyTrigger
@@ -542,7 +542,7 @@ func collectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -606,7 +606,7 @@ func (s *SQLite) ListVersionedEntities(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 	var ids []string
 	for rows.Next() {
 		var id, uri string
@@ -660,7 +660,7 @@ func (s *SQLite) ListOrphanEntities(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() //nolint:errcheck
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 	var ids []string
 	for rows.Next() {
 		var id string

@@ -35,7 +35,7 @@ func runInspect(sessionID, inDir string, w io.Writer) error {
 		}
 		return err
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // read-only file; close errors not actionable after read
 
 	agg := &inspectAggregated{
 		sessionID:                sessionID,

@@ -148,7 +148,7 @@ func updateProfileContent(existing, newBlock string, fileExisted bool) (string, 
 func readIfExists(path string) (content string, existed bool, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: profile path is either default (~/.zshrc) or user-supplied via --shell-profile-path; scope is their own shell config
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return "", false, nil
 		}
 		return "", false, err

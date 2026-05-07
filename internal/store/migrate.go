@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1495,7 +1496,7 @@ func backupDatabase(ctx context.Context, db *sql.DB, dbPath string, fromVersion 
 	// OpenSQLite opened); backing it up IS the function's job.
 	src, err := os.Open(dbPath) //nolint:gosec // G304: caller-supplied DB path; backing it up is this function's purpose
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil // Nothing to back up for a new database.
 		}
 		return err

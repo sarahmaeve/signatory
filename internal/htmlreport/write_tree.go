@@ -1,6 +1,7 @@
 package htmlreport
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -89,7 +90,7 @@ func WriteReportTree(in WriteReportTreeInput) (string, error) {
 	// EEXIST, but the wrapped message is less specific.
 	if _, err := os.Stat(subdir); err == nil {
 		return "", fmt.Errorf("report subdirectory %q already exists; remove it or choose a different parent", subdirName)
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("stat subdir %q: %w", subdir, err)
 	}
 

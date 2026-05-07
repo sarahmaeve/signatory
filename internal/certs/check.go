@@ -2,6 +2,7 @@ package certs
 
 import (
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,7 +56,7 @@ func CheckWithEnv(getenv func(string) string) CheckResult {
 
 	info, err := os.Stat(path)
 	switch {
-	case os.IsNotExist(err):
+	case errors.Is(err, os.ErrNotExist):
 		return CheckResult{
 			Env:     raw,
 			CAPath:  path,

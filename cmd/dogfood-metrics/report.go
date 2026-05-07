@@ -686,7 +686,7 @@ func loadHooks(path string, agg *aggregated) error {
 		}
 		return err
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // read-only file; close errors not actionable after read
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 4*1024), 1*1024*1024) // hook events are tiny; 1 MiB cap is generous

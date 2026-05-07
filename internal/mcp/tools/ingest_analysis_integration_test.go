@@ -49,14 +49,12 @@ func TestIngestAnalysisTool_StdioRoundTrip(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- srv.Serve(ctx, stdinR, stdoutW)
-		//nolint:errcheck // best-effort close; Serve already returned
-		stdoutW.Close()
+		stdoutW.Close() //nolint:errcheck // best-effort close; Serve already returned
 	}()
 
 	stopServer := func() {
 		cancel()
-		//nolint:errcheck // best-effort close; pipe errors irrelevant to test outcome
-		stdinW.Close()
+		stdinW.Close() //nolint:errcheck // best-effort close; pipe errors irrelevant to test outcome
 		select {
 		case <-serveDone:
 		case <-time.After(5 * time.Second):
@@ -193,13 +191,11 @@ func TestIngestAnalysisTool_StdioSchemaViolation(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- srv.Serve(ctx, stdinR, stdoutW)
-		//nolint:errcheck // best-effort close; Serve already returned
-		stdoutW.Close()
+		stdoutW.Close() //nolint:errcheck // best-effort close; Serve already returned
 	}()
 	t.Cleanup(func() {
 		cancel()
-		//nolint:errcheck // best-effort close
-		stdinW.Close()
+		stdinW.Close() //nolint:errcheck // best-effort close
 		select {
 		case <-serveDone:
 		case <-time.After(5 * time.Second):

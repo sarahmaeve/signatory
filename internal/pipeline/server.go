@@ -94,7 +94,7 @@ func (s *Server) ListenAndServe(ctx context.Context, port int, certFile, keyFile
 	// the shutdown context from it would produce an immediately-dead
 	// context and abort the graceful drain before any in-flight
 	// request could finish. Background + a 5s timeout is correct.
-	go func() { //nolint:gosec // G118: Background is deliberate; see comment above — parent ctx is already cancelled at the point of WithTimeout
+	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

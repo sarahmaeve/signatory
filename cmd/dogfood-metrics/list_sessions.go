@@ -146,7 +146,7 @@ func scanTraceFile(path string, sessions map[string]*sessionSummary) error {
 		}
 		return err
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // read-only file; close errors not actionable after read
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)

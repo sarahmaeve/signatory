@@ -236,7 +236,7 @@ func (s *SQLite) ListOutputsForSession(ctx context.Context, sessionID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("list outputs for session: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck
+	defer rows.Close() //nolint:errcheck // rows iteration complete; rows.Err() captures read-side errors below
 
 	var out []AnalystOutputSummary
 	for rows.Next() {

@@ -1294,7 +1294,7 @@ func writeHandoff(output string, force bool, rendered []byte) error {
 	// as different uids; 0o644 is the right default.
 	f, err := os.OpenFile(output, flag, 0o644) //nolint:gosec // G304,G302: caller-supplied path, user-facing content, not secrets
 	if err != nil {
-		if os.IsExist(err) {
+		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("%s already exists; pass --force to overwrite", output)
 		}
 		return fmt.Errorf("open %s: %w", output, err)

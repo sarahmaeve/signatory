@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -175,7 +176,7 @@ func InitProject(opts InitOptions) (*InitResult, error) {
 		if opts.Out != nil {
 			_, _ = fmt.Fprintf(opts.Out, "wrote %s\n", cfgPath) //nolint:errcheck // best-effort CLI output
 		}
-	case os.IsExist(err):
+	case errors.Is(err, os.ErrExist):
 		// O_EXCL fired — file already there and --force was not passed.
 		// This is the documented "skip-on-exists" path.
 		if opts.Out != nil {
@@ -233,7 +234,7 @@ func copyEmbeddedTree(embedFS fs.FS, prefix, dst string, force bool, out io.Writ
 		// are user-editable template files, not secrets.
 		f, openErr := os.OpenFile(target, flag, 0o644) //nolint:gosec // G302: user-facing template file, no secrets (same rationale as the config scaffold write above)
 		if openErr != nil {
-			if os.IsExist(openErr) {
+			if errors.Is(openErr, os.ErrExist) {
 				// O_EXCL fired — file already present without --force.
 				skipped++
 				if out != nil {
