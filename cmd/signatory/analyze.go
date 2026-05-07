@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/audit"
 	"github.com/sarahmaeve/signatory/internal/identity"
 	"github.com/sarahmaeve/signatory/internal/manifest/gomod"
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -178,32 +179,76 @@ func burnRemoveTargetForGate(canonicalURI string, ctx *store.EffectiveBurnContex
 	return canonicalURI
 }
 
-// resolvableEcosystems is the set of pkg:<ecosystem>/ values for
-// which signatory has wired a source-URL resolver in this
-// AnalyzeCmd.Run (resolveNpmRepo, resolvePyPIRepo, resolveGoRepo).
+// ecosystemResolverEntry binds an entity's Ecosystem field to the
+// strategy that asks the corresponding registry "where is this
+// package's source?" and stamps the answer on the entity. Match
+// holds the ecosystem strings this entry handles (a list, not a
+// single value, so synonym ecosystems like "cargo"/"crates" or
+// "golang"/"go" share one entry without duplicating scaffolding).
 //
-// Used by the unsupported-ecosystem hint just before collector
-// dispatch — entities whose ecosystem ISN'T in this set get a
-// stderr note explaining that github + git + repofiles + openssf
-// collectors won't fire (no URL → isGitHostedEntity false →
-// silent skip otherwise).
+// Label is the human-readable name used in stderr warnings and the
+// %w-wrapped --refresh error. AbsenceSource is the source field of
+// the absence:repo_declaration signal recorded on resolver failure.
 //
-// Keep in sync with the resolver branches in Run(): adding a new
-// resolver means adding its ecosystem here, removing one
-// (unlikely) means removing the entry. A resolver missing from
-// this set produces noisy notes on supported targets; an entry
-// here without a resolver suppresses helpful notes on unsupported
-// targets. Either drift is a UX bug, not a correctness one.
-var resolvableEcosystems = map[string]bool{
-	"npm":    true,
-	"pypi":   true,
-	"golang": true,
-	"go":     true,
-	"cargo":  true,
-	"crates": true,
-	"gem":    true,
-	"maven":  true,
+// Resolve has the same signature for every ecosystem so the
+// dispatch loop in (*AnalyzeCmd).Run is a single line: the per-
+// ecosystem "ask the registry, parse the response, persist the URL"
+// logic lives in resolveNpmRepo / resolvePyPIRepo / etc. below.
+type ecosystemResolverEntry struct {
+	Match         []string
+	Label         string
+	AbsenceSource string
+	Resolve       func(ctx context.Context, s store.Store, entity *profile.Entity, globals *Globals) error
 }
+
+// ecosystemResolvers is the dispatch table for source-of-record
+// resolution. (*AnalyzeCmd).Run iterates it once per analyze
+// invocation, matching entity.Ecosystem against each entry's Match
+// list and calling performEcosystemResolution on the first hit.
+//
+// Each Match list is disjoint from the others, so order doesn't
+// affect behavior — it's chosen for readability (registry order
+// roughly matches the order new ecosystems were wired in).
+//
+// Gates on Ecosystem rather than Type by design: pre-PR0 entities
+// in users' dogfood stores carry Type=EntityProject from an
+// analyst-output ingest path that hardcoded the type before
+// profile.EntityTypeForURI was hoisted out. The Ecosystem field is
+// the load-bearing one — already stamped by the defensive backfill
+// in (*AnalyzeCmd).Run — so gating on it lets resolvers fire on
+// legacy mistyped rows without requiring a data migration.
+//
+// Adding a new ecosystem: append an entry here. resolvableEcosystems
+// (used by the unsupported-ecosystem hint) is derived from this
+// table, so the two cannot drift.
+var ecosystemResolvers = []ecosystemResolverEntry{
+	{Match: []string{"npm"}, Label: "npm", AbsenceSource: "npm-registry", Resolve: resolveNpmRepo},
+	{Match: []string{"pypi"}, Label: "pypi", AbsenceSource: "pypi-registry", Resolve: resolvePyPIRepo},
+	{Match: []string{"cargo", "crates"}, Label: "cargo", AbsenceSource: "cargo-registry", Resolve: resolveCargoRepo},
+	{Match: []string{"gem"}, Label: "gem", AbsenceSource: "gem-registry", Resolve: resolveGemRepo},
+	{Match: []string{"maven"}, Label: "maven", AbsenceSource: "maven-registry", Resolve: resolveMavenRepo},
+	{Match: []string{"golang", "go"}, Label: "go-module", AbsenceSource: "goproxy", Resolve: resolveGoRepo},
+}
+
+// resolvableEcosystems is the set of pkg:<ecosystem>/ values for
+// which signatory has wired a source-URL resolver. Used by the
+// unsupported-ecosystem hint just before collector dispatch —
+// entities whose ecosystem ISN'T in this set get a stderr note
+// explaining that github + git + repofiles + openssf collectors
+// won't fire (no URL → isGitHostedEntity false → silent skip
+// otherwise).
+//
+// Derived from ecosystemResolvers so the two cannot drift; adding
+// a resolver to the table automatically updates this set.
+var resolvableEcosystems = func() map[string]bool {
+	out := make(map[string]bool, len(ecosystemResolvers)*2)
+	for _, entry := range ecosystemResolvers {
+		for _, eco := range entry.Match {
+			out[eco] = true
+		}
+	}
+	return out
+}()
 
 // AnalysisDisplay wraps the runtime profile with any ingested
 // analyst outputs (Layer 2 data) so a single render or JSON dump
@@ -234,26 +279,7 @@ type BurnViaContext struct {
 }
 
 func (cmd *AnalyzeCmd) Run(globals *Globals) error {
-	// Writer defaults: tests inject cmd.Stdout / cmd.Stderr; prod
-	// paths fall through to os.Stdout / os.Stderr.
-	stdout := cmd.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := cmd.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-
-	// Root context. globals.Context, when set, carries the SIGINT-
-	// cancellation wiring from main(); Ctrl-C at the CLI propagates
-	// through the HTTP client and cancels in-flight network work.
-	// Tests or library callers that don't set it get a fresh
-	// background context.
-	ctx := globals.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, stdout, stderr := cmd.applyIODefaults(globals)
 
 	// --clone is plumbing for the --refresh path: it tells the collector
 	// dispatch to ensure a current local clone before signal collection.
@@ -279,135 +305,248 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		return fmt.Errorf("resolve team identity: %w", err)
 	}
 
-	// Normalize user input to a canonical URI via the single
-	// CLI-wide target parser. This is the one place where free-form
-	// input crosses into stable internal identifiers — everything
-	// downstream uses resolved.CanonicalURI as the lookup key.
-	resolved, err := profile.ResolveTarget(cmd.Target)
+	resolved, entity, err := cmd.resolveTargetAndEntity(ctx, s)
 	if err != nil {
-		return fmt.Errorf("parse target %q: %w", cmd.Target, err)
-	}
-
-	// Scheme guard: analyze is for repo: and pkg: targets — those
-	// are the schemes whose collectors know how to fetch Layer-1
-	// signals (github API, git log, npm/pypi/golang registries).
-	// identity:, org:, and patch: URIs identify entities the system
-	// stores and burns against, but no Layer-1 collection path
-	// exists for them today: every collector in collectorsFor gates
-	// itself out (no Ecosystem match, isGitHostedEntity false), so
-	// the analyze flow either errored on the create-path or
-	// silently exited 0 with zero signals on the load-path.
-	//
-	// Lifting the guard to the top of Run unifies both shapes: a
-	// fresh-DB ingest and an already-minted entity both fail loudly
-	// with the same message. The error names `signatory summary`
-	// as the right verb for viewing cached state on these entities
-	// (postures, burns, ingested analyst outputs all surface there)
-	// so users don't have to guess the next step.
-	//
-	// The per-scheme switch in the create-block below keeps its
-	// `default:` branch as defense-in-depth — if a future change
-	// removes or weakens this guard, the create-path still rejects
-	// unsupported schemes rather than minting a malformed entity.
-	if resolved.Scheme != "repo" && resolved.Scheme != "pkg" {
-		return fmt.Errorf("analyze does not yet support %q-scheme targets (got %q); "+
-			"use `signatory summary %s` to view cached state",
-			resolved.Scheme, resolved.CanonicalURI, resolved.CanonicalURI)
-	}
-
-	// Default --path when --clone is set without --path: a stable filestore
-	// location keyed by the resolved short-name. Matches the layout used by
-	// `signatory handoff --clone-dir filestore/clones/` and the /analyze
-	// pipeline's Step 1, so a subsequent `signatory handoff` run reuses
-	// the same directory without ceremony.
-	//
-	// Empty ShortName (some pkg:* canonical URIs) falls through to the
-	// existing ErrPathMissing in resolveClonePath — the default depends on
-	// having a name to key off.
-	if cmd.Clone && cmd.Path == "" && resolved.ShortName != "" {
-		cmd.Path = filepath.Join("filestore", "clones", resolved.ShortName)
-	}
-
-	// Look up an existing entity by canonical URI. A matching entity
-	// means the user has analyzed this target before — we reuse its
-	// UUID ID so FK references stay stable.
-	entity, err := s.FindEntityByURI(ctx, resolved.CanonicalURI)
-	if errors.Is(err, store.ErrNotFound) {
-		entity = nil
-	} else if err != nil {
-		return fmt.Errorf("lookup entity: %w", err)
+		return err
 	}
 
 	// Decide what to do based on cache state and --refresh.
 	if !cmd.Refresh {
-		if entity == nil {
-			// "Nothing to report" messages go to stderr — stdout is
-			// reserved for the rendered output, and in this branch
-			// there's no output to render. A scripted consumer sees
-			// an empty stdout and a zero exit code; diagnostics
-			// explaining why are on stderr.
-			// Write-error suppression (`_, _ =`) on the last statement
-			// before a clean return: the write target is stderr and
-			// there's no propagation opportunity. errcheck flags
-			// these specifically because they're terminal; the
-			// explicit discard matches the intent.
-			_, _ = fmt.Fprintf(stderr, "No cached data for: %s\n", cmd.Target)
-			_, _ = fmt.Fprintf(stderr, "Resolved to: %s\n", resolved.CanonicalURI)
-			_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub.")
-			return nil
-		}
-		existingSignals, err := s.GetLatestSignals(ctx, entity.ID)
-		if err != nil {
-			return fmt.Errorf("read cached signals: %w", err)
-		}
-		analystOutputs, err := cmd.fetchAnalystOutputs(ctx, s, entity.ID)
-		if err != nil {
-			return fmt.Errorf("read analyst outputs: %w", err)
-		}
-		// Cached state is non-empty if we have signals OR analyst
-		// outputs. Either qualifies as "we know things about this
-		// target." Emptiness in both is the only "go run --refresh"
-		// case.
-		if len(existingSignals) == 0 && len(analystOutputs) == 0 {
-			_, _ = fmt.Fprintf(stderr, "No cached signals or analyst outputs for: %s\n", cmd.Target)
-			_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub,")
-			_, _ = fmt.Fprintln(stderr, "or run `signatory ingest <file>` to load an analyst output.")
-			return nil
-		}
-		return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
+		return cmd.handleNonRefresh(ctx, s, entity, resolved, stdout, stderr)
 	}
 
 	// --- Refresh path: collect fresh signals. ---
 
-	// Pre-collection burn gate (Path B follow-on). Burned vendor =
-	// not safe; collecting fresh signals on a known-burned target
-	// risks producing signals that contradict the operator-burn
-	// classification (a competent attacker may keep most signal
-	// surface clean). EffectiveBurnByURI walks BOTH URI-derived
-	// candidates (catches brand-new repos by burned operators) AND
-	// signal-derived candidates (catches cached entities), so the
-	// gate fires whether or not we've analyzed this target before.
+	entity, created, err := cmd.prepareEntityForRefresh(ctx, s, entity, resolved, stderr)
+	if err != nil {
+		return err
+	}
+
+	// Source-of-record resolution: for package-form entities
+	// (pkg:npm/X, pkg:pypi/X, pkg:cargo/X, pkg:gem/X, pkg:maven/X,
+	// pkg:golang/X), ask the relevant registry where the source lives
+	// and stamp the answer on the entity so downstream collectors
+	// (github, git-local-clone, repofiles, openssf) pick it up via
+	// entity.URL.
 	//
-	// --ignore-burn overrides for forensic / verification cases.
-	// Withdrawing the burn (signatory burn remove) is the cleaner
-	// path when the burn turns out to have been premature — that
-	// re-opens analyze for everyone, not just this invocation.
+	// Each ecosystem's resolver is registered in ecosystemResolvers
+	// (defined above); performEcosystemResolution carries the shared
+	// failure-recording + fail-loud-on-refresh contract. See the
+	// godoc on those two for the full rationale (especially: why we
+	// gate on Ecosystem rather than Type, and why a resolver error
+	// always writes absence:repo_declaration even on the non-refresh
+	// path).
+	//
+	// The Match lists are disjoint, so at most one entry fires per
+	// invocation. break after the first match avoids redundant
+	// comparisons on the rest of the table.
+	for _, entry := range ecosystemResolvers {
+		if !slices.Contains(entry.Match, entity.Ecosystem) {
+			continue
+		}
+		if err := performEcosystemResolution(ctx, s, entity, globals, entry, cmd.Refresh, stderr); err != nil {
+			return err
+		}
+		break
+	}
+
+	cmd.printPreCollectionDiagnostics(stderr, entity)
+
+	allSignals, err := cmd.collectFreshSignals(ctx, s, entity, globals, stderr)
+	if err != nil {
+		return err
+	}
+
+	if err := s.AppendSignals(ctx, allSignals); err != nil {
+		return fmt.Errorf("store signals: %w", err)
+	}
+
+	cmd.printStorageBreadcrumb(stderr, globals.DBPath, entity.CanonicalURI, len(allSignals))
+
+	entity.UpdatedAt = time.Now().UTC()
+	if err := s.PutEntity(ctx, entity); err != nil {
+		return fmt.Errorf("update entity: %w", err)
+	}
+
+	return cmd.finalizeRefreshOutput(ctx, s, entity, allSignals, created, auditLog, actor, stdout, stderr)
+}
+
+// applyIODefaults wires command-level I/O knobs to their defaults.
+// Tests inject cmd.Stdout / cmd.Stderr; production paths fall through
+// to os.Stdout / os.Stderr. globals.Context, when set, carries the
+// SIGINT-cancellation wiring from main(); Ctrl-C at the CLI propagates
+// through the HTTP client and cancels in-flight network work. Tests
+// or library callers that don't set it get a fresh background
+// context.
+func (cmd *AnalyzeCmd) applyIODefaults(globals *Globals) (context.Context, io.Writer, io.Writer) {
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := cmd.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return ctx, stdout, stderr
+}
+
+// resolveTargetAndEntity normalizes the user-supplied target string
+// to a canonical URI and looks up any existing entity row for it.
+// Composes four distinct phases:
+//
+//  1. Parse cmd.Target via profile.ResolveTarget — the one place
+//     where free-form input crosses into stable internal identifiers.
+//     Everything downstream uses resolved.CanonicalURI as the
+//     lookup key.
+//  2. Scheme guard: analyze is for repo: and pkg: targets only.
+//     identity:, org:, and patch: URIs identify entities the system
+//     stores and burns against, but no Layer-1 collection path
+//     exists for them today (every collector in collectorsFor gates
+//     itself out). Failing loud at the top unifies fresh-DB and
+//     load-path errors with one message; the per-scheme switch in
+//     prepareEntityForRefresh keeps its default branch as
+//     defense-in-depth.
+//  3. Default --path when --clone is set without --path: a stable
+//     filestore location keyed by the resolved short-name. Matches
+//     the layout used by `signatory handoff --clone-dir
+//     filestore/clones/`, so a subsequent handoff reuses the same
+//     directory without ceremony. Empty ShortName falls through to
+//     the existing ErrPathMissing in resolveClonePath. This step
+//     mutates cmd.Path; everything downstream that reads it sees
+//     the resolved value.
+//  4. FindEntityByURI: a matching entity means the user has
+//     analyzed this target before; we reuse its UUID ID so FK
+//     references stay stable. ErrNotFound becomes a nil entity
+//     (caller decides whether to mint or error); other errors
+//     propagate.
+func (cmd *AnalyzeCmd) resolveTargetAndEntity(
+	ctx context.Context,
+	s store.Store,
+) (*profile.ResolvedTarget, *profile.Entity, error) {
+	resolved, err := profile.ResolveTarget(cmd.Target)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse target %q: %w", cmd.Target, err)
+	}
+	if resolved.Scheme != "repo" && resolved.Scheme != "pkg" {
+		return nil, nil, fmt.Errorf("analyze does not yet support %q-scheme targets (got %q); "+
+			"use `signatory summary %s` to view cached state",
+			resolved.Scheme, resolved.CanonicalURI, resolved.CanonicalURI)
+	}
+	if cmd.Clone && cmd.Path == "" && resolved.ShortName != "" {
+		cmd.Path = filepath.Join("filestore", "clones", resolved.ShortName)
+	}
+	entity, err := s.FindEntityByURI(ctx, resolved.CanonicalURI)
+	if errors.Is(err, store.ErrNotFound) {
+		entity = nil
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("lookup entity: %w", err)
+	}
+	return resolved, entity, nil
+}
+
+// handleNonRefresh serves the cache-display path: --refresh is unset,
+// so we either render whatever the store already knows about the
+// target or print a "nothing cached" hint. Always returns from the
+// command's perspective — the caller (Run) does `return cmd.handleNonRefresh(...)`.
+//
+// Three terminal states:
+//
+//  1. No entity row: print "no cached data" + the resolved canonical
+//     URI + a nudge to use --refresh, exit 0.
+//  2. Entity row exists but neither signals nor analyst outputs:
+//     print "no cached signals or analyst outputs" + nudges for both
+//     ways to populate (--refresh, ingest), exit 0.
+//  3. Entity row with signals OR analyst outputs (either qualifies
+//     as "we know things"): delegate to displayProfile.
+//
+// Diagnostic strings go to stderr; stdout is reserved for rendered
+// output. A scripted consumer sees an empty stdout + zero exit on
+// the first two cases. Write-error suppression (`_, _ =`) on the
+// terminal stderr writes is deliberate: errcheck flags them
+// because they're the last statement before return — explicit
+// discard matches the intent.
+func (cmd *AnalyzeCmd) handleNonRefresh(
+	ctx context.Context,
+	s store.Store,
+	entity *profile.Entity,
+	resolved *profile.ResolvedTarget,
+	stdout, stderr io.Writer,
+) error {
+	if entity == nil {
+		_, _ = fmt.Fprintf(stderr, "No cached data for: %s\n", cmd.Target)
+		_, _ = fmt.Fprintf(stderr, "Resolved to: %s\n", resolved.CanonicalURI)
+		_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub.")
+		return nil
+	}
+	existingSignals, err := s.GetLatestSignals(ctx, entity.ID)
+	if err != nil {
+		return fmt.Errorf("read cached signals: %w", err)
+	}
+	analystOutputs, err := cmd.fetchAnalystOutputs(ctx, s, entity.ID)
+	if err != nil {
+		return fmt.Errorf("read analyst outputs: %w", err)
+	}
+	if len(existingSignals) == 0 && len(analystOutputs) == 0 {
+		_, _ = fmt.Fprintf(stderr, "No cached signals or analyst outputs for: %s\n", cmd.Target)
+		_, _ = fmt.Fprintln(stderr, "Run with --refresh to collect signals from GitHub,")
+		_, _ = fmt.Fprintln(stderr, "or run `signatory ingest <file>` to load an analyst output.")
+		return nil
+	}
+	return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
+}
+
+// prepareEntityForRefresh runs the pre-collection burn gate and
+// ensures an entity row exists for the resolved target with its
+// Ecosystem and URL fields stamped. Returns the prepared entity,
+// a flag indicating whether this run minted it (used for the
+// audit log's `created_entity` field), or an error if the burn
+// gate fires or entity creation fails.
+//
+// Three kinds of work:
+//
+//  1. Burn gate: if the URI is burned and --ignore-burn is not set,
+//     return formatBurnGateError. EffectiveBurnByURI walks both
+//     URI-derived and signal-derived candidates, so the gate fires
+//     whether or not we've analyzed this target before. Withdrawing
+//     the burn (signatory burn remove) is the cleaner path when
+//     the burn turns out to have been premature — that re-opens
+//     analyze for everyone, not just this invocation.
+//
+//  2. Create-on-miss: when entity is nil, mint a fresh row with
+//     scheme-appropriate Type/ShortName/URL/Ecosystem. The
+//     unsupported-scheme `default` branch stays as defense-in-depth
+//     even though the top-of-Run guard already rejects non-repo,
+//     non-pkg schemes.
+//
+//  3. Defensive backfill: stale rows whose Ecosystem or URL are
+//     empty but derivable from the resolved target get patched and
+//     persisted. The Ecosystem backfill closes the 2026-04-28 idna
+//     refresh meltdown (resolvers gate on Ecosystem); the URL
+//     backfill closes the 2026-04-30 kong dogfood (collectors gate
+//     on isGitHostedEntity, which checks URL). Persistence errors
+//     warn to stderr but don't fail the run — the in-memory entity
+//     carries correct values through the rest of the invocation.
+func (cmd *AnalyzeCmd) prepareEntityForRefresh(
+	ctx context.Context,
+	s store.Store,
+	entity *profile.Entity,
+	resolved *profile.ResolvedTarget,
+	stderr io.Writer,
+) (*profile.Entity, bool, error) {
 	if !cmd.IgnoreBurn {
 		gateBurn, gateCtx, gateErr := s.EffectiveBurnByURI(ctx, resolved.CanonicalURI)
 		if gateErr != nil && !errors.Is(gateErr, store.ErrNotFound) {
-			return fmt.Errorf("pre-collection burn gate: %w", gateErr)
+			return nil, false, fmt.Errorf("pre-collection burn gate: %w", gateErr)
 		}
 		if gateErr == nil {
-			return formatBurnGateError(resolved.CanonicalURI, gateBurn, gateCtx)
+			return nil, false, formatBurnGateError(resolved.CanonicalURI, gateBurn, gateCtx)
 		}
 	}
 
-	// Create the entity if it doesn't exist yet. Type, ShortName,
-	// URL, and Ecosystem are derived from the resolved target's
-	// scheme — repo: entities are github-hosted projects today;
-	// pkg: entities are registry packages whose repo URL may be
-	// resolved asynchronously by the provider (A.5 will add that
-	// step for npm; leaving URL empty is benign for Phase A).
 	created := false
 	if entity == nil {
 		entity = &profile.Entity{
@@ -446,50 +585,24 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			// --refresh for those.
 			entity.URL = resolved.CloneURL
 		default:
-			return fmt.Errorf("analyze does not yet support %q-scheme targets (got %q)",
+			return nil, false, fmt.Errorf("analyze does not yet support %q-scheme targets (got %q)",
 				resolved.Scheme, resolved.CanonicalURI)
 		}
 		if err := s.PutEntity(ctx, entity); err != nil {
-			return fmt.Errorf("create entity: %w", err)
+			return nil, false, fmt.Errorf("create entity: %w", err)
 		}
 		created = true
 	}
 
-	// Defensive backfill: an entity loaded from the store with an
-	// empty Ecosystem but a known one from the resolved target is
-	// either (a) data created by a pre-fix `ensureEntity` that
-	// omitted the field, or (b) a future entity-creation path
-	// that forgot it. Either way, the resolver guards below gate
-	// on entity.Ecosystem; without backfill they silently skip
-	// and Layer-1 collection emits zero signals (the 2026-04-28
-	// idna refresh meltdown). Persist the backfilled value so
-	// subsequent reads see it without re-running this branch.
 	if entity.Ecosystem == "" && resolved.Ecosystem != "" {
 		entity.Ecosystem = resolved.Ecosystem
 		entity.UpdatedAt = time.Now().UTC()
 		if err := s.PutEntity(ctx, entity); err != nil {
-			// Don't fail the run on a backfill persistence error —
-			// the in-memory entity carries the correct value through
-			// the rest of this invocation, just won't survive past
-			// it. Surface the warning so an operator notices.
 			_, _ = fmt.Fprintf(stderr, "warning: backfill ecosystem on %s failed: %v\n",
 				entity.CanonicalURI, err)
 		}
 	}
 
-	// Defensive backfill of entity.URL: same shape as the Ecosystem
-	// backfill above. Stale rows created before ResolveTarget wired
-	// CloneURL for pkg:{golang,go}/github.com/* and golang.org/x/Y
-	// have empty URL, which keeps isGitHostedEntity false in
-	// collectorsFor and silently skips the github + git + repofiles
-	// + openssf collectors. Backfill from resolved.CloneURL when
-	// known so the next dispatch fires the full collector set.
-	//
-	// Closes the symptom of the 2026-04-30 dogfood:
-	// `signatory analyze --clone --refresh pkg:golang/github.com/alecthomas/kong`
-	// returned only the 4 gopublish signals because the entity (from
-	// a 7-day-old security analysis) had URL="" and the just-shipped
-	// CloneURL wiring only fires during entity creation.
 	if entity.URL == "" && resolved.CloneURL != "" {
 		entity.URL = resolved.CloneURL
 		entity.UpdatedAt = time.Now().UTC()
@@ -499,292 +612,34 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		}
 	}
 
-	// Resolve the entity's upstream repo URL when it's an npm
-	// package that hasn't been resolved yet. The registry tells us
-	// where the package's source lives; the orchestrator stamps it
-	// on the entity so downstream collectors (github, git-local-clone)
-	// pick it up via entity.URL.
-	//
-	// Failure is always recorded as an absence:repo_declaration signal
-	// with retryable=true so the stored profile carries a machine-
-	// readable marker: "we tried and the registry failed." This
-	// distinguishes the degraded state from a legitimate "no declared
-	// repo" result and from "we never tried." On an explicit --refresh,
-	// the error is also returned to the caller (fail loud) because the
-	// user asked for fresh data and we cannot silently decline.
-	//
-	// Gates on Ecosystem rather than Type — same rationale as the
-	// go-module gate below (and the symmetric pypi gate that follows):
-	// pre-PR0 entities in dogfood stores carry Type=EntityProject from
-	// the analyst-output ingest path (analyst_output.go) that hardcoded
-	// the type before profile.EntityTypeForURI was hoisted out. The
-	// Ecosystem field is the load-bearing one; gating on it lets the
-	// resolver fire on legacy mistyped rows without requiring a data
-	// migration. PR0 fixed the producer; this defensive gate covers
-	// the rows that were already in users' stores when PR0 landed.
-	if entity.Ecosystem == "npm" {
-		if resolveErr := resolveNpmRepo(ctx, s, entity, globals); resolveErr != nil {
-			// Always write an absence signal so the profile carries a
-			// stored record of the failure — not just ephemeral stderr
-			// chatter. This is a standalone AppendSignals write so it
-			// persists even when we return an error on the --refresh path.
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"npm-registry",
-				resolveErr.Error(),
-				true, // retryable: transient registry failure or attacker-controlled response
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
+	return entity, created, nil
+}
 
-			if cmd.Refresh {
-				// Deliberate `_, _ =` on stderr writes throughout Run():
-				// these are diagnostic progress/warning lines, not the
-				// command's contract output. A failure to write them
-				// (stderr closed, broken pipe) doesn't change what we
-				// should report.
-				_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh npm repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			// Non-refresh path: warn only. The absence signal above
-			// gives operators a stored trail; analysis continues with
-			// whatever signals the npm collector can still provide.
-			_, _ = fmt.Fprintf(stderr, "warning: npm repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// PyPI parallel to the npm resolution above. Same shape, same
-	// failure semantics — closes the gap surfaced by the 2026-04-28
-	// ms dogfood audit where pkg:pypi/ targets reached the analysts
-	// with no resolved github source, so the github + git collectors
-	// silently skipped and the analysts went to upstream APIs.
-	//
-	// Gates on Ecosystem rather than Type — see the npm gate above
-	// for the rationale (legacy mistyped rows from the pre-PR0
-	// analyst_output.go hardcode).
-	if entity.Ecosystem == "pypi" {
-		if resolveErr := resolvePyPIRepo(ctx, s, entity, globals); resolveErr != nil {
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"pypi-registry",
-				resolveErr.Error(),
-				true,
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
-
-			if cmd.Refresh {
-				_, _ = fmt.Fprintf(stderr, "warning: pypi repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh pypi repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "warning: pypi repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// Cargo source resolution: parallel to npm/pypi above. Queries
-	// crates.io for the crate's declared repository URL and stamps it
-	// on the entity when present. Unlocks github + git + repofiles +
-	// openssf collectors for Rust packages.
-	//
-	// Gates on Ecosystem rather than Type — same rationale as above.
-	// Failure semantics match npm/pypi: transport errors write
-	// absence:repo_declaration and fail-loud on --refresh. A crate
-	// that exists but declares no repository leaves URL empty — the
-	// git-side collectors gate themselves out, user still gets the
-	// 10 cargo-registry signals.
-	if entity.Ecosystem == "cargo" || entity.Ecosystem == "crates" {
-		if resolveErr := resolveCargoRepo(ctx, s, entity, globals); resolveErr != nil {
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"cargo-registry",
-				resolveErr.Error(),
-				true,
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
-
-			if cmd.Refresh {
-				_, _ = fmt.Fprintf(stderr, "warning: cargo repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh cargo repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "warning: cargo repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// RubyGems source resolution: parallel to npm/pypi/cargo above.
-	// Queries rubygems.org for the gem's declared source_code_uri (or
-	// homepage_uri fallback) and stamps it on the entity when present.
-	// Unlocks github + git + repofiles + openssf collectors for Ruby
-	// packages.
-	//
-	// Gates on Ecosystem rather than Type — same rationale as above.
-	// Failure semantics match npm/pypi/cargo: transport errors write
-	// absence:repo_declaration and fail-loud on --refresh. A gem that
-	// exists but declares no github source leaves URL empty — the
-	// git-side collectors gate themselves out, user still gets the
-	// 7 gem-registry signals.
-	if entity.Ecosystem == "gem" {
-		if resolveErr := resolveGemRepo(ctx, s, entity, globals); resolveErr != nil {
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"gem-registry",
-				resolveErr.Error(),
-				true,
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
-
-			if cmd.Refresh {
-				_, _ = fmt.Fprintf(stderr, "warning: gem repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh gem repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "warning: gem repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// Maven POM-based source resolution: parallel to npm/pypi/cargo/gem
-	// above. The Maven client's two-step flow (SearchVersions for the
-	// latest version, then POM fetch for the SCM URL) is orchestrated
-	// by resolveMavenRepo. An artifact whose POM declares no <scm>
-	// section leaves URL empty — the git-side collectors gate
-	// themselves out, user still gets the 4 maven-registry signals.
-	if entity.Ecosystem == "maven" {
-		if resolveErr := resolveMavenRepo(ctx, s, entity, globals); resolveErr != nil {
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"maven-registry",
-				resolveErr.Error(),
-				true,
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort
-
-			if cmd.Refresh {
-				_, _ = fmt.Fprintf(stderr, "warning: maven repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh maven repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "warning: maven repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// Go-module vanity-host resolution: parallel to npm/pypi/cargo above.
-	// Triggers for entities whose Ecosystem is "golang"/"go" and
-	// whose URL stayed empty after parse-time CloneURL stamping —
-	// i.e., vanity hosts (gopkg.in, modernc.org, k8s.io) where the
-	// URI alone doesn't algorithmically yield a github source.
-	// Resolver queries proxy.golang.org for an Origin block and,
-	// if that fails, falls back to the vanity host's go-import
-	// meta tag.
-	//
-	// Gates on Ecosystem rather than Type because pre-fix entities
-	// in some users' stores carry Type=EntityProject (created via
-	// MCP ingest paths that didn't classify the URI as a package);
-	// the Ecosystem field is the load-bearing one, already stamped
-	// by the defensive backfill above. The URI prefix
-	// (pkg:golang/* or pkg:go/*) is implied by Ecosystem.
-	//
-	// Failure semantics match npm/pypi/cargo: a transport error during
-	// resolution writes an absence:repo_declaration signal AND
-	// returns a wrapped error on --refresh (loud-fail). A "no source
-	// resolvable" outcome (proxy 404 + no meta tag) is NOT a failure
-	// — empty URL stays empty, github + git + repofiles + openssf
-	// collectors gate themselves out, and the user still gets
-	// gopublish signals.
-	if entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
-		if resolveErr := resolveGoRepo(ctx, s, entity, globals); resolveErr != nil {
-			absenceSig := signal.MakeAbsence(
-				entity.ID,
-				"repo_declaration",
-				"goproxy",
-				resolveErr.Error(),
-				true,
-				time.Now().UTC(),
-			)
-			_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
-
-			if cmd.Refresh {
-				_, _ = fmt.Fprintf(stderr, "warning: go-module repo resolution for %s failed: %v\n",
-					entity.CanonicalURI, resolveErr)
-				return fmt.Errorf("refresh go-module repo resolution for %s: %w",
-					entity.CanonicalURI, resolveErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "warning: go-module repo resolution for %s failed: %v\n",
-				entity.CanonicalURI, resolveErr)
-		}
-	}
-
-	// Unsupported-ecosystem hint: when the user --refresh's a
-	// pkg:<ecosystem>/<name> target whose ecosystem isn't one
-	// signatory has wired a resolver for, every git-side collector
-	// (github, git, repofiles, openssf) silently sits out because
-	// entity.URL is empty and isGitHostedEntity returns false. The
-	// user sees zero collected signals and has no idea why.
-	//
-	// Surfacing the gap here closes the last user-visible
-	// silent-skip path identified in design/openssf-problem.txt.
-	// Distinct from npm/pypi/golang's failed-resolution case
-	// (which writes absence:repo_declaration); this is the
-	// "we didn't try because no resolver exists" case.
-	//
-	// Gates on Ecosystem rather than Type — same rationale as
-	// resolveGoRepo: pre-fix entities in some users' stores carry
-	// Type=EntityProject from MCP ingest paths that didn't classify
-	// the URI as a package. Ecosystem is the load-bearing field;
-	// when it's set and not in the resolvable set, the URI is a
-	// pkg:<ecosystem>/* and we're missing a resolver.
-	if entity.Ecosystem != "" &&
-		entity.URL == "" &&
-		!resolvableEcosystems[entity.Ecosystem] {
-		_, _ = fmt.Fprintf(stderr,
-			"note: ecosystem %q has no source resolver yet — github + git + repofiles + openssf collectors won't fire for this target.\n",
-			entity.Ecosystem)
-	}
-
-	// Nudge users analyzing a Go module via its github URL form
-	// (repo:github/X/Y) toward the canonical pkg:golang/<modpath>
-	// form, which gets the gopublish collector. No-op for
-	// non-Go-module repos and for entities already using pkg:golang.
-	// See maybeWarnGoModuleViaRepoForm for the full rationale.
-	maybeWarnGoModuleViaRepoForm(stderr, entity, cmd.Path)
-
-	if os.Getenv("GITHUB_TOKEN") == "" {
-		_, _ = fmt.Fprintf(stderr, "warning: GITHUB_TOKEN not set — GitHub API signals may be absent or rate-limited\n")
-	}
-
-	_, _ = fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
-
-	// Decide which collectors to run. Tests inject mocks via
-	// globals.Collectors (see functional_test.go); in production that
-	// field is empty and we build the collector list per-target based
-	// on the entity's shape plus --path / --clone.
-	//
-	// inRunResult accumulates signals as collectors complete so that
-	// later collectors can read earlier collectors' emissions in the
-	// same run. Currently only the source-evolution collector consumes
-	// this — it reads gopublish's version_pin_table to anchor matrix
-	// rows to commit SHAs. The pointer is captured at construction
-	// time so subsequent mutations inside this loop are visible to
-	// source-evolution's Collect.
+// collectFreshSignals builds the per-target collector set and runs
+// each one against the prepared entity, returning the flat slice of
+// signals to persist. Tests inject mocks via globals.Collectors (see
+// functional_test.go); in production that field is empty and the
+// list is built per-target by collectorsFor based on the entity's
+// shape plus --path / --clone.
+//
+// inRunResult accumulates signals as collectors complete so that
+// later collectors can read earlier collectors' emissions in the
+// same run. Currently only the source-evolution collector consumes
+// this — it reads gopublish's version_pin_table to anchor matrix
+// rows to commit SHAs. The pointer is captured at construction
+// time so subsequent mutations inside the loop are visible to
+// source-evolution's Collect.
+//
+// .Collected (not .Signals()) is appended to inRunResult because
+// Signals() flattens absences for storage, but the in-run lookup
+// wants the full record set.
+func (cmd *AnalyzeCmd) collectFreshSignals(
+	ctx context.Context,
+	s store.Store,
+	entity *profile.Entity,
+	globals *Globals,
+	stderr io.Writer,
+) ([]profile.Signal, error) {
 	inRunResult := &signal.CollectionResult{}
 
 	collectors := globals.Collectors
@@ -804,7 +659,7 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			EntityStore: s,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		collectors = c
 	}
@@ -813,44 +668,45 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 	for _, collector := range collectors {
 		result, err := collector.Collect(ctx, entity)
 		if err != nil {
-			return fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
+			return nil, fmt.Errorf("collect signals (%s): %w", collector.Name(), err)
 		}
-		// Accumulate into inRunResult so subsequent collectors see
-		// this collector's signals. Append to .Collected (not
-		// .Signals()) because Signals() flattens absences for
-		// storage, but the in-run lookup wants the full record set.
 		inRunResult.Collected = append(inRunResult.Collected, result.Collected...)
 		allSignals = append(allSignals, result.Signals()...)
 		_, _ = fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
 	}
+	return allSignals, nil
+}
 
-	if err := s.AppendSignals(ctx, allSignals); err != nil {
-		return fmt.Errorf("store signals: %w", err)
-	}
-
-	// Storage breadcrumb: tell the user where their freshly-collected
-	// signals went and how to query them. Names the resolved DB path
-	// so a manual `signatory analyze --refresh` invocation hands the
-	// user the next thread to pull (signatory show-conclusions, or a
-	// direct sqlite3 inspection of the file). When --clone planted a
-	// clone, also surface that path so `cd <path> && git log` is one
-	// hop away. ResolvePath errors are swallowed: the path resolution
-	// can't fail in any way that matters AFTER a successful AppendSignals
-	// against the same DBPath, so a warning would be noise — fall back
-	// to just naming the count.
-	if dbPath, perr := store.ResolvePath(globals.DBPath); perr == nil {
-		_, _ = fmt.Fprintf(stderr, "Stored %d signals in %s\n", len(allSignals), dbPath)
+// printStorageBreadcrumb writes the post-AppendSignals user trail to
+// stderr: where the signals went, how to query them, and (if a
+// clone landed) where to find it. Names the resolved DB path so a
+// manual `signatory analyze --refresh` invocation hands the user
+// the next thread to pull (signatory show-conclusions, or a direct
+// sqlite3 inspection of the file).
+//
+// ResolvePath errors are swallowed: the resolution can't fail in
+// any way that matters AFTER a successful AppendSignals against
+// the same DBPath, so a warning would be noise — fall back to
+// just naming the count.
+//
+// The inspect-clone hint only surfaces when a clone actually
+// exists. --clone may have been requested but never executed
+// (vanity-host Go module with no derivable github source: the
+// dispatch gate keeps the git-side collectors out, ensureCloneAtPath
+// never runs). The .git probe is the honest test — promising a
+// clone path that isn't there sends the user on a wild goose chase.
+func (cmd *AnalyzeCmd) printStorageBreadcrumb(
+	stderr io.Writer,
+	dbPathRaw, canonicalURI string,
+	signalCount int,
+) {
+	if dbPath, perr := store.ResolvePath(dbPathRaw); perr == nil {
+		_, _ = fmt.Fprintf(stderr, "Stored %d signals in %s\n", signalCount, dbPath)
 	} else {
-		_, _ = fmt.Fprintf(stderr, "Stored %d signals\n", len(allSignals))
+		_, _ = fmt.Fprintf(stderr, "Stored %d signals\n", signalCount)
 	}
 	_, _ = fmt.Fprintf(stderr,
-		"  query: signatory show-conclusions --target %s\n", entity.CanonicalURI)
-	// Only surface the inspect-clone hint if a clone actually exists.
-	// --clone may have been requested but never executed (vanity-host
-	// Go module with no derivable github source: dispatch gate keeps
-	// the git-side collectors out, ensureCloneAtPath never runs). The
-	// .git probe is the honest test — promising a clone path that
-	// isn't there sends the user on a wild goose chase.
+		"  query: signatory show-conclusions --target %s\n", canonicalURI)
 	if cmd.Clone && cmd.Path != "" {
 		if absClone, aerr := filepath.Abs(cmd.Path); aerr == nil {
 			if _, gitErr := os.Stat(filepath.Join(absClone, ".git")); gitErr == nil {
@@ -858,15 +714,84 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 			}
 		}
 	}
+}
 
-	entity.UpdatedAt = time.Now().UTC()
-	if err := s.PutEntity(ctx, entity); err != nil {
-		return fmt.Errorf("update entity: %w", err)
+// printPreCollectionDiagnostics writes the three operator-facing
+// stderr nudges that fire after entity preparation but before the
+// collector loop:
+//
+//  1. Unsupported-ecosystem hint: when the entity carries a known
+//     ecosystem string but no resolver is wired for it, every
+//     git-side collector (github, git, repofiles, openssf) silently
+//     sits out (no URL → isGitHostedEntity false). Without this
+//     hint the user sees zero collected signals and has no idea
+//     why. Closes the silent-skip path identified in
+//     design/openssf-problem.txt. Distinct from the
+//     resolver-failure case, which writes absence:repo_declaration
+//     via performEcosystemResolution; this is "we didn't try
+//     because no resolver exists." Gates on Ecosystem rather than
+//     Type for the same reason resolveGoRepo does (pre-fix
+//     EntityProject rows from MCP ingest paths).
+//
+//  2. Go-module-via-repo-form hint: maybeWarnGoModuleViaRepoForm
+//     nudges users analyzing a Go module via its github URL form
+//     toward the canonical pkg:golang/<modpath> form, which gets
+//     the gopublish collector. No-op for non-Go-module repos and
+//     for entities already using pkg:golang.
+//
+//  3. GITHUB_TOKEN absence warning: a missing token doesn't fail
+//     the run, but the github collector hits a much lower rate
+//     limit unauthenticated. Surface so users aren't surprised
+//     when API-derived signals are sparse.
+//
+// Followed by the "Collecting signals for: <URI>" header that
+// frames the collector loop's per-line summaries.
+func (cmd *AnalyzeCmd) printPreCollectionDiagnostics(stderr io.Writer, entity *profile.Entity) {
+	if entity.Ecosystem != "" &&
+		entity.URL == "" &&
+		!resolvableEcosystems[entity.Ecosystem] {
+		_, _ = fmt.Fprintf(stderr,
+			"note: ecosystem %q has no source resolver yet — github + git + repofiles + openssf collectors won't fire for this target.\n",
+			entity.Ecosystem)
 	}
 
-	// Audit the analysis. Failure is non-fatal — the signals are
-	// already in the store; a missing audit line is a secondary
-	// observability concern, not a correctness failure.
+	maybeWarnGoModuleViaRepoForm(stderr, entity, cmd.Path)
+
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		_, _ = fmt.Fprintf(stderr, "warning: GITHUB_TOKEN not set — GitHub API signals may be absent or rate-limited\n")
+	}
+
+	_, _ = fmt.Fprintf(stderr, "Collecting signals for: %s\n", entity.CanonicalURI)
+}
+
+// finalizeRefreshOutput closes out the refresh path: writes the
+// audit-log line, fetches any cached analyst outputs (Layer 2 — not
+// touched by the Layer 1 collectors that just ran), and renders the
+// combined profile to stdout.
+//
+// Audit failure is non-fatal: the signals are already in the store
+// at this point, and a missing audit line is a secondary
+// observability concern, not a correctness failure. The warning
+// goes to stderr so an operator notices.
+//
+// fetchAnalystOutputs failure IS fatal — if the store can't read
+// what it should be able to read, something is wrong enough to
+// warrant a loud exit rather than a half-rendered display.
+//
+// The blank stderr line before display separates the progress
+// stream from the upcoming rendered output. On a terminal that
+// interleaves both, this divides diagnostic chatter from data; on
+// a pipe (--json | jq), stdout stays clean JSON regardless.
+func (cmd *AnalyzeCmd) finalizeRefreshOutput(
+	ctx context.Context,
+	s store.Store,
+	entity *profile.Entity,
+	allSignals []profile.Signal,
+	created bool,
+	auditLog *audit.Logger,
+	actor string,
+	stdout, stderr io.Writer,
+) error {
 	detail, _ := json.Marshal(map[string]any{
 		"target":            cmd.Target,
 		"canonical_uri":     entity.CanonicalURI,
@@ -877,20 +802,11 @@ func (cmd *AnalyzeCmd) Run(globals *Globals) error {
 		_, _ = fmt.Fprintf(stderr, "warning: audit log write failed: %v\n", err)
 	}
 
-	// Even on a refresh path, surface any cached analyst outputs —
-	// they're the Layer 2 picture; the Layer 1 collectors don't
-	// touch them. An agent calling `analyze --refresh` after a
-	// previous ingest still benefits from seeing that an analyst
-	// output exists (and a recent one at that).
 	analystOutputs, err := cmd.fetchAnalystOutputs(ctx, s, entity.ID)
 	if err != nil {
 		return fmt.Errorf("read analyst outputs (post-refresh): %w", err)
 	}
 
-	// Blank separator between the progress stream (stderr) and the
-	// upcoming rendered output (stdout). On a terminal that
-	// interleaves both, this separates the diagnostic chatter from
-	// the data; on a pipe (--json | jq), stdout stays clean JSON.
 	_, _ = fmt.Fprintln(stderr)
 	return cmd.displayProfile(ctx, s, entity, analystOutputs, stdout)
 }
@@ -1288,6 +1204,60 @@ func (s *stickyWriter) Writeln(args ...any) {
 // Err returns the first error encountered, or nil.
 func (s *stickyWriter) Err() error {
 	return s.err
+}
+
+// performEcosystemResolution runs one entry from ecosystemResolvers
+// and records the outcome. On resolver success it returns nil; on
+// failure it always writes an absence:repo_declaration signal with
+// retryable=true so the stored profile carries a machine-readable
+// "we tried and the registry failed" marker — distinct from the
+// "no declared repo" case (resolver returns nil with empty URL)
+// and from "we never tried" (no resolver wired for this ecosystem).
+//
+// Behavior split on refresh:
+//
+//   - --refresh: warn to stderr AND return a wrapped error so the
+//     caller fails loud. The user asked for fresh data; we cannot
+//     silently decline.
+//   - non-refresh: warn to stderr only. Analysis continues with
+//     whatever signals the registry-side collector can still
+//     produce on its own.
+//
+// stderr writes intentionally use `_, _ =` discard: these are
+// diagnostic progress lines, not the command's contract output.
+// A failure to write them (stderr closed, broken pipe) doesn't
+// change what we should report.
+func performEcosystemResolution(
+	ctx context.Context,
+	s store.Store,
+	entity *profile.Entity,
+	globals *Globals,
+	entry ecosystemResolverEntry,
+	refresh bool,
+	stderr io.Writer,
+) error {
+	resolveErr := entry.Resolve(ctx, s, entity, globals)
+	if resolveErr == nil {
+		return nil
+	}
+
+	absenceSig := signal.MakeAbsence(
+		entity.ID,
+		"repo_declaration",
+		entry.AbsenceSource,
+		resolveErr.Error(),
+		true, // retryable: transient registry failure or attacker-controlled response
+		time.Now().UTC(),
+	)
+	_ = s.AppendSignals(ctx, []profile.Signal{absenceSig.ToSignal()}) //nolint:errcheck // best-effort; primary error is resolveErr
+
+	_, _ = fmt.Fprintf(stderr, "warning: %s repo resolution for %s failed: %v\n",
+		entry.Label, entity.CanonicalURI, resolveErr)
+	if refresh {
+		return fmt.Errorf("refresh %s repo resolution for %s: %w",
+			entry.Label, entity.CanonicalURI, resolveErr)
+	}
+	return nil
 }
 
 // resolveNpmRepo asks the npm registry for the package's declared
