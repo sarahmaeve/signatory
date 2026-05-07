@@ -85,6 +85,14 @@ func TestRunMethods_PropagateGlobalsContext(t *testing.T) {
 			"expected context.Canceled in error chain, got: %v", err)
 	})
 
+	t.Run("PostureListCmd", func(t *testing.T) {
+		t.Parallel()
+		err := (&PostureListCmd{}).Run(preCancelledGlobals(t))
+		require.Error(t, err)
+		require.Truef(t, errors.Is(err, context.Canceled),
+			"expected context.Canceled in error chain, got: %v", err)
+	})
+
 	t.Run("PostureSetCmd", func(t *testing.T) {
 		t.Parallel()
 		err := (&PostureSetCmd{

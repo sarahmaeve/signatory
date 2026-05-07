@@ -803,6 +803,73 @@ func TestListBurns(t *testing.T) {
 	assert.Len(t, burns, 3)
 }
 
+func TestListPostures(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	// Create three entities with postures at staggered times.
+	// Oldest first so we can assert DESC ordering.
+	for i, name := range []string{"alpha", "beta", "gamma"} {
+		id := "ent-" + name
+		entity := testEntity(id, "pkg:npm/"+name, name, base)
+		require.NoError(t, s.PutEntity(ctx, entity))
+		p := &profile.Posture{
+			EntityID:  id,
+			Tier:      profile.PostureTrustedForNow,
+			Version:   "1.0.0",
+			Rationale: "looks good",
+			SetBy:     "team:sarah",
+			SetAt:     base.Add(time.Duration(i) * time.Hour),
+		}
+		require.NoError(t, s.SetPosture(ctx, p))
+	}
+
+	postures, err := s.ListPostures(ctx)
+	require.NoError(t, err)
+	require.Len(t, postures, 3)
+
+	// Most-recent first (gamma → beta → alpha).
+	assert.Equal(t, "ent-gamma", postures[0].EntityID)
+	assert.Equal(t, "ent-beta", postures[1].EntityID)
+	assert.Equal(t, "ent-alpha", postures[2].EntityID)
+}
+
+func TestListPostures_Empty(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	postures, err := s.ListPostures(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, postures)
+}
+
+func TestListPostures_ExcludesWithdrawn(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	id := "ent-withdrawn"
+	entity := testEntity(id, "pkg:npm/withdrawn-pkg", "withdrawn-pkg", now)
+	require.NoError(t, s.PutEntity(ctx, entity))
+	p := &profile.Posture{
+		EntityID:  id,
+		Tier:      profile.PostureTrustedForNow,
+		Version:   "1.0.0",
+		Rationale: "was good",
+		SetBy:     "team:sarah",
+		SetAt:     now,
+	}
+	require.NoError(t, s.SetPosture(ctx, p))
+
+	// Withdraw the posture.
+	require.NoError(t, s.WithdrawPosture(ctx, id, "1.0.0", "team:sarah", "changed mind", now.Add(time.Hour)))
+
+	postures, err := s.ListPostures(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, postures, "ListPostures must exclude withdrawn rows")
+}
+
 func TestListBurns_Empty(t *testing.T) {
 	s := newTestDB(t)
 	ctx := context.Background()

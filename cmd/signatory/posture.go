@@ -27,6 +27,7 @@ type PostureCmd struct {
 	Set    PostureSetCmd    `cmd:"" help:"Set the posture tier for an entity."`
 	Unset  PostureUnsetCmd  `cmd:"" help:"Withdraw (soft-delete) a previously-set posture. Use when a recorded decision turns out to be wrong."`
 	Accept PostureAcceptCmd `cmd:"" help:"Promote a synthesist's proposed posture into a recorded posture row. Reads the proposal from a synthesis output id and writes a posture with optional tier/version/rationale overrides."`
+	List   PostureListCmd   `cmd:"" help:"List all active postures across every entity."`
 }
 
 // PostureGetCmd views the posture for an entity.
@@ -143,6 +144,51 @@ func printPosture(entity *profile.Entity, p *profile.Posture) {
 	fmt.Printf("Rationale: %s\n", p.Rationale)
 	fmt.Printf("Set by:    %s\n", p.SetBy)
 	fmt.Printf("Set at:    %s\n", p.SetAt.Format(time.RFC3339))
+}
+
+// PostureListCmd lists all active postures across every entity,
+// ordered most-recently-set first. Analogous to `signatory burn list`.
+type PostureListCmd struct{}
+
+func (cmd *PostureListCmd) Run(globals *Globals) error {
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
+
+	postures, err := s.ListPostures(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(postures) == 0 {
+		fmt.Println("No active postures.")
+		return nil
+	}
+
+	// Look up each entity so we can show ShortName and CanonicalURI
+	// rather than the opaque UUID.
+	for _, p := range postures {
+		entity, err := s.GetEntity(ctx, p.EntityID)
+		name := p.EntityID
+		uri := ""
+		if err == nil && entity != nil {
+			name = entity.ShortName
+			uri = entity.CanonicalURI
+		}
+		ver := p.Version
+		if ver == "" {
+			ver = "(unversioned)"
+		}
+		fmt.Printf("%-30s  %-40s  %-18s  %-14s  %s\n",
+			name, uri, p.Tier, ver, p.SetAt.Format(time.RFC3339))
+	}
+	return nil
 }
 
 // PostureSetCmd records a posture decision.

@@ -165,6 +165,13 @@ func TestBurnCmd_MissingReason(t *testing.T) {
 
 // --- Posture ---
 
+func TestPostureListCmd_SubcommandParsing(t *testing.T) {
+	t.Parallel()
+
+	ctx, _ := parseCLI(t, "posture", "list")
+	assert.Equal(t, "posture list", ctx.Command())
+}
+
 func TestPostureGetCmd_ValidArgs(t *testing.T) {
 	t.Parallel()
 

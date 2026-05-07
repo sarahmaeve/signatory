@@ -744,6 +744,28 @@ func TestFunctional_BurnListWithEntries(t *testing.T) {
 	require.NoError(t, listCmd.Run(globals))
 }
 
+func TestFunctional_PostureListEmpty(t *testing.T) {
+	globals := testGlobals(t)
+
+	listCmd := &PostureListCmd{}
+	require.NoError(t, listCmd.Run(globals))
+}
+
+func TestFunctional_PostureListWithEntries(t *testing.T) {
+	globals := testGlobals(t)
+
+	for _, target := range []string{"pkg:npm/alpha", "pkg:npm/beta"} {
+		cmd := &PostureSetCmd{
+			Target: target, Tier: "trusted-for-now",
+			Rationale: "looks fine", Version: "1.0.0",
+		}
+		require.NoError(t, cmd.Run(globals))
+	}
+
+	listCmd := &PostureListCmd{}
+	require.NoError(t, listCmd.Run(globals))
+}
+
 // --- Analyze functional tests (mock collector, no network) ---
 
 func TestFunctional_AnalyzeRefreshWithMock(t *testing.T) {

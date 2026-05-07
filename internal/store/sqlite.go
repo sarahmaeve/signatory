@@ -607,6 +607,30 @@ func (s *SQLite) GetPostures(ctx context.Context, entityID string) ([]profile.Po
 	return postures, rows.Err()
 }
 
+// ListPostures returns all active (non-withdrawn) postures across
+// every entity, ordered newest-first by set_at. Analogous to
+// ListBurns; used by `signatory posture list`.
+func (s *SQLite) ListPostures(ctx context.Context) ([]profile.Posture, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+postureColumns+` FROM postures
+		 WHERE withdrawn_at = ''
+		 ORDER BY set_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // close on read-only rows; any real error surfaced during Scan
+
+	var postures []profile.Posture
+	for rows.Next() {
+		p, err := scanPostureRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		postures = append(postures, *p)
+	}
+	return postures, rows.Err()
+}
+
 // SetPosture inserts or updates a posture for a given (entity_id,
 // version) pair. Re-calling with the same pair replaces the earlier
 // posture's tier, rationale, set_by, and set_at — this is intentional:

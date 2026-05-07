@@ -44,6 +44,10 @@ type Store interface {
 	HasPostures(ctx context.Context, entityID string) (bool, error)
 	SetPosture(ctx context.Context, posture *profile.Posture) error
 	WithdrawPosture(ctx context.Context, entityID, version, withdrawnBy, reason string, at time.Time) error
+	// ListPostures returns all active (non-withdrawn) postures across
+	// all entities, ordered newest-first by set_at. Analogous to
+	// ListBurns; used by `signatory posture list`.
+	ListPostures(ctx context.Context) ([]profile.Posture, error)
 
 	// Burn operations. WithdrawBurn is the soft-delete counterpart
 	// to SetBurn; GetBurn and ListBurns filter out withdrawn rows
