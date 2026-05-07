@@ -1,0 +1,363 @@
+/*
+ * signatory show-synthesis --html stylesheet (Phase A).
+ *
+ * Minimal but real: severity colour swatches, posture call-out,
+ * missing-reference banner, readable body typography. No theming,
+ * no responsive tricks, no JS-coupled state. A future iteration
+ * can add light/dark/print variants if real use surfaces a need
+ * (see design §10).
+ */
+
+/* ------------------------------------------------------------------ */
+/* Page foundations                                                   */
+/* ------------------------------------------------------------------ */
+
+html {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+	             "Helvetica Neue", Arial, sans-serif;
+	font-size: 16px;
+	line-height: 1.5;
+	color: #1a1a1a;
+	background: #fafafa;
+}
+
+body {
+	max-width: 56rem;
+	margin: 2rem auto;
+	padding: 0 1.5rem 4rem;
+	position: relative;
+}
+
+/* Otis watermark — every page carries a subtle backdrop anchored to
+ * the right edge of the viewport. Positioned with bottom rather than
+ * top so the watermark settles below the verdict heading on a fresh
+ * load, then stays put as the reader scrolls (background-attachment:
+ * fixed semantics, achieved here via position: fixed on a pseudo-
+ * element so we can apply opacity).
+ * pointer-events:none keeps it from swallowing clicks; z-index:-1
+ * places it behind body content. */
+
+body::before {
+	content: "";
+	position: fixed;
+	bottom: 1rem;
+	right: -2rem;
+	width: 22rem;
+	height: 22rem;
+	background-image: url('images/otis-watermark.jpg');
+	background-repeat: no-repeat;
+	background-size: contain;
+	background-position: bottom right;
+	opacity: 0.2;
+	pointer-events: none;
+	z-index: -1;
+}
+
+/* Top-of-page banner. Monospace / courier-ish; stamps every page
+ * with "this is signatory output" before the reader gets to the
+ * verdict. Kept above the h1 so the page hierarchy reads
+ * banner → page-title → sections. */
+
+.agent-banner {
+	font-family: "Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-weight: 700;
+	font-size: 0.95rem;
+	letter-spacing: 0.18em;
+	text-align: center;
+	color: #333;
+	background: #1a1a1a;
+	color: #fafafa;
+	padding: 0.5rem 1rem;
+	margin: -2rem -1.5rem 2rem;
+	border-radius: 0 0 4px 4px;
+}
+
+h1 {
+	font-size: 1.75rem;
+	margin-top: 0;
+	border-bottom: 1px solid #ddd;
+	padding-bottom: 0.5rem;
+}
+
+h2 {
+	font-size: 1.25rem;
+	margin-top: 2rem;
+	color: #333;
+}
+
+h3 {
+	font-size: 1.05rem;
+	color: #444;
+}
+
+p { margin: 0.5rem 0; }
+
+code, blockquote {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.95em;
+}
+
+code {
+	background: #eef0f3;
+	padding: 0.1em 0.35em;
+	border-radius: 3px;
+}
+
+blockquote {
+	margin: 0.5rem 0;
+	padding: 0.5rem 0.75rem;
+	border-left: 3px solid #ccc;
+	background: #f4f4f4;
+	color: #333;
+}
+
+a { color: #0a52cc; }
+a:hover { text-decoration: underline; }
+
+dl.metadata dt {
+	font-weight: 600;
+	color: #555;
+	float: left;
+	clear: left;
+	width: 9rem;
+}
+
+dl.metadata dd {
+	margin: 0 0 0.25rem 9.5rem;
+}
+
+section { margin-top: 2rem; }
+
+/* Summary section gets a blue sidebar so it stands out against the
+ * surrounding sections — operators looking for the executive
+ * paragraph should be able to spot it from a long way down the
+ * page. */
+
+section.summary {
+	border-left: 4px solid #2563eb;
+	padding: 0.25rem 0 0.25rem 1rem;
+	background: #f4f7fe;
+	border-radius: 0 4px 4px 0;
+}
+
+section.summary h2 {
+	margin-top: 0.25rem;
+	color: #1a3da8;
+}
+
+ul, ol { padding-left: 1.5rem; }
+
+/* ------------------------------------------------------------------ */
+/* Posture call-out                                                   */
+/* ------------------------------------------------------------------ */
+
+.posture-callout {
+	margin: 1rem 0 2rem;
+	padding: 1rem 1.25rem;
+	border-radius: 6px;
+	border-left: 6px solid #888;
+	background: #f0f0f0;
+}
+
+.posture-callout strong {
+	font-size: 1.1rem;
+}
+
+.posture-callout .version-scope {
+	color: #555;
+	font-weight: 400;
+}
+
+.posture-vetted-frozen     { border-left-color: #1f7a1f; background: #e9f5e9; }
+.posture-trusted-for-now   { border-left-color: #2563eb; background: #e7eefe; }
+.posture-unexamined        { border-left-color: #888;    background: #f0f0f0; }
+.posture-unknown-provenance{ border-left-color: #c97a00; background: #fef0d9; }
+.posture-rejected          { border-left-color: #b3261e; background: #fbe5e3; }
+.posture-unknown           { border-left-color: #888;    background: #f0f0f0; }
+
+.posture-source {
+	color: #555;
+	font-weight: 400;
+	font-size: 0.85em;
+}
+
+.posture-meta {
+	color: #555;
+	font-size: 0.9em;
+	margin-top: 0.4rem;
+}
+
+/* When the recorded posture disagrees with the synthesist's
+ * recommendation, override the tier-based palette with a clashing
+ * red dashed border + warning label so the conflict is visually
+ * loud and impossible to miss while skimming. */
+
+.posture-callout.recorded.differs-from-recommended {
+	border: 3px dashed #b3261e;
+	border-left-width: 6px;
+	background: #fff8f7;
+}
+
+.posture-callout.recorded.differs-from-recommended::after {
+	content: "↯ Differs from recommendation";
+	display: inline-block;
+	margin-top: 0.5rem;
+	padding: 0.15rem 0.6rem;
+	background: #b3261e;
+	color: #fff;
+	font-weight: 600;
+	font-size: 0.8rem;
+	border-radius: 3px;
+	letter-spacing: 0.05em;
+}
+
+/* ------------------------------------------------------------------ */
+/* Severity badges                                                    */
+/* ------------------------------------------------------------------ */
+
+.severity-badge {
+	display: inline-block;
+	padding: 0.15rem 0.6rem;
+	border-radius: 999px;
+	font-size: 0.85rem;
+	font-weight: 600;
+	margin: 0.5rem 0 1rem;
+	border: 1px solid transparent;
+}
+
+.severity-tag {
+	display: inline-block;
+	padding: 0 0.4rem;
+	border-radius: 3px;
+	font-size: 0.8rem;
+	font-family: ui-monospace, monospace;
+	margin-left: 0.4rem;
+}
+
+.severity-critical      { background: #fbe5e3; color: #780a04; border-color: #b3261e; }
+.severity-high          { background: #fde2cf; color: #7a3a00; border-color: #c97a00; }
+.severity-medium        { background: #fef3c7; color: #6b5400; border-color: #b78d00; }
+.severity-low           { background: #fef9d9; color: #555000; border-color: #b1a100; }
+.severity-informational { background: #e7eefe; color: #1a3da8; border-color: #2563eb; }
+.severity-positive      { background: #e9f5e9; color: #14541a; border-color: #1f7a1f; }
+.severity-unknown       { background: #f0f0f0; color: #333;    border-color: #888;    }
+
+/* Conclusion-entry list items adopt a left border colour matching
+ * severity, so a scrollable analyst page is scannable at a glance. */
+
+.conclusion-entry {
+	border-left: 4px solid #888;
+	padding-left: 0.6rem;
+	margin: 0.4rem 0;
+}
+
+.conclusion-entry.severity-critical      { border-left-color: #b3261e; }
+.conclusion-entry.severity-high          { border-left-color: #c97a00; }
+.conclusion-entry.severity-medium        { border-left-color: #b78d00; }
+.conclusion-entry.severity-low           { border-left-color: #b1a100; }
+.conclusion-entry.severity-informational { border-left-color: #2563eb; }
+.conclusion-entry.severity-positive      { border-left-color: #1f7a1f; }
+
+/* ------------------------------------------------------------------ */
+/* Concordance and contradiction entries                              */
+/* ------------------------------------------------------------------ */
+
+.concordance-entry,
+.contradiction-entry {
+	margin: 1rem 0;
+	padding: 0.75rem 1rem;
+	border-radius: 4px;
+	border: 1px solid #ddd;
+	background: #fff;
+}
+
+.concordance-entry { border-left: 4px solid #1f7a1f; }
+.contradiction-entry { border-left: 4px solid #c97a00; }
+
+.confidence {
+	color: #555;
+	font-weight: 400;
+	font-size: 0.9em;
+}
+
+/* ------------------------------------------------------------------ */
+/* Citations + methodology                                            */
+/* ------------------------------------------------------------------ */
+
+.citation {
+	margin: 0.25rem 0;
+}
+
+.citation .commit {
+	color: #555;
+	font-family: ui-monospace, monospace;
+	font-size: 0.9em;
+}
+
+.methodology-pattern {
+	margin: 0.4rem 0;
+}
+
+.methodology-pattern .collector-hint {
+	color: #555;
+	font-family: ui-monospace, monospace;
+	font-size: 0.85em;
+}
+
+.methodology-pattern .hit  { color: #14541a; font-weight: 600; }
+.methodology-pattern .miss { color: #780a04; font-weight: 600; }
+
+/* ------------------------------------------------------------------ */
+/* Key-conclusion list                                                */
+/* ------------------------------------------------------------------ */
+
+.key-conclusion-ref {
+	margin: 0.4rem 0;
+}
+
+.key-conclusion-ref .forgery-resistance {
+	color: #555;
+	font-size: 0.9em;
+}
+
+.key-conclusion-ref .dangling {
+	color: #780a04;
+	font-style: italic;
+}
+
+/* ------------------------------------------------------------------ */
+/* Missing-reference banner                                           */
+/* ------------------------------------------------------------------ */
+
+.missing-reference-banner {
+	margin: 1rem 0;
+	padding: 1rem 1.25rem;
+	border-radius: 6px;
+	border-left: 6px solid #b3261e;
+	background: #fbe5e3;
+	color: #4a0a04;
+}
+
+.missing-reference-banner strong { color: #780a04; }
+.missing-reference-banner code   { background: #fff; }
+
+/* ------------------------------------------------------------------ */
+/* Footer                                                             */
+/* ------------------------------------------------------------------ */
+
+.report-footer {
+	margin-top: 3rem;
+	padding-top: 1rem;
+	border-top: 1px solid #ddd;
+	color: #555;
+	font-size: 0.9rem;
+}
+
+.back-links {
+	margin-bottom: 0.5rem;
+}
+
+.unresolved {
+	color: #780a04;
+	font-style: italic;
+}

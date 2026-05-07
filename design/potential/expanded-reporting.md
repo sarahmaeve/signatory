@@ -1,8 +1,15 @@
 # Expanded Reporting: `show-synthesis --html`
 
-**Status:** proposed, captured 2026-05-01 from a brainstorming pass on
-"how do I read a synthesis without running five follow-up CLI
-commands?"
+**Status:** WIP brainstorm, captured 2026-05-01. Significantly
+overengineered relative to the actual v0.1 ship target — sections 5–9
+sketch a fuller link graph, stub-page semantics, four-layer test
+slicing, and CSS taxonomy that are *not* prerequisites for landing a
+useful first cut. Treat the document as a design space, not a
+specification. Phase A's actual scope is pinned in §0 below; sections
+beyond it are reference material for later iteration.
+
+The brainstorm was captured from "how do I read a synthesis without
+running five follow-up CLI commands?"
 
 **Scope:** extend `signatory show-synthesis` with an `--html=<dir>`
 mode that writes a static, cross-linked HTML site rendering one
@@ -15,6 +22,71 @@ fully attributed, signing-ready, provenance-bearing artifact. It is a
 *reading view* of what is already in the signatory store. If the
 store record is incomplete, the HTML reflects the incompleteness; we
 do not paper over it.
+
+## 0. Decisions for Phase A (minimum ship)
+
+Pinning these so Phase A doesn't get re-litigated mid-implementation.
+Everything in §1–§9 is reference; the rules below are what the first
+cut actually does.
+
+- **No new dependencies.** Stdlib only. No goldmark, no bluemonday,
+  no html/template. Renderers are `fmt.Fprintf`-style, mirroring
+  `renderSynthesisMarkdown`.
+- **No Markdown → HTML conversion.** Synthesis prose (`Reasoning`,
+  `Summary`, `Notes`, `Conclusion.Rationale`) is split on blank lines
+  and emitted as `<p>…</p>`, escaped via `html.EscapeString`.
+  Inline Markdown (`*bold*`, links) renders as literal text in v0.1.
+  Acceptable; iterate later if it grates.
+- **Escaping discipline.** Every string sourced from a synthesis or
+  analyst output passes through `html.EscapeString` before it lands
+  in HTML. One stdlib call, applied uniformly. There is no template
+  engine, so escaping is the renderer's responsibility on every
+  write.
+- **Package home: `internal/htmlreport/`.** Renderers, link-plan
+  builder, and embedded `style.css` live here. `cmd/signatory/` calls
+  in.
+- **Determinism.** Renderers take `now string` and `version string`
+  as parameters. No `time.Now()` inside; no version lookup inside.
+  Unit tests pass fixed values; the CLI wires the live clock and
+  build-time stamps at the call site.
+- **Linked-output discovery.** The set of analyst outputs whose pages
+  get rendered = `distinct(KeyConclusionRefs[].OutputID)`. No new
+  store query; `Run` loads each via `GetAnalystOutput`. If one fails
+  to load, that's a `DanglingRef`.
+- **Concordance / contradiction local-ID resolution.** For each bare
+  `F00x` in `ConcordanceEntry.ConclusionIDs` /
+  `ContradictionEntry.ConclusionIDsA|B`, walk the entry's
+  `AnalystRefs` (concordance) or `SupportingAnalystA|B` (contradiction)
+  to pick which linked output owns it. If unresolvable: render the ID
+  as escaped text, no link, no stub page. Stub pages remain for
+  `KeyConclusionRefs` only (where the OutputID is explicit and the
+  miss is unambiguously a data problem).
+- **Stylesheet.** Hand-written `style.css` embedded via `embed.FS`.
+  Minimal but real: severity colour swatches, posture call-out,
+  `.missing-reference-banner`, readable body type. No theming.
+- **What ships in Phase A.** `RenderSynthesisIndex` plus the
+  `LinkPlan` / `DanglingRef` types and a unit test layer. Conclusion
+  pages, analyst pages, stub pages, the directory writer, and the
+  CLI flag wiring are explicitly *next* phases. Markdown stdout
+  remains the default and is unaffected.
+- **Citations render as escaped text, not anchors.** §5.2 said
+  "Citations rendered as `<a href>` links — the URI value already
+  carries the external URL." That's incorrect — `exchange.Citation`
+  has `Path`/`LineStart`/`LineEnd`/`Scope`/`CommitSHA`/`Quoted` and
+  no URL field. Phase A renders the available fields as a small
+  metadata block per citation. If a future schema change adds an
+  external-URL field, the renderer becomes anchor-shaped trivially.
+- **Page-relative paths via `RootPrefix`.** `LinkPlan` paths are
+  root-relative (`conclusions/foo.html`). Renderers that write from
+  a sub-directory (conclusion pages live in `conclusions/`, analyst
+  pages in `analysts/`) prepend a `RootPrefix` ("../") supplied via
+  the page-context input. The directory writer (next phase) computes
+  it once per page-class.
+
+Defer until Phase A ships and we're reading real output:
+methodology-trace formatting, multi-stylesheet, `--style=`,
+`--force`, multi-target index, JS, RelatedURIs surfacing,
+sophisticated prose rendering.
 
 ## 1. Motivation
 
