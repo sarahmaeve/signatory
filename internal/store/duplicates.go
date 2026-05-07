@@ -368,7 +368,10 @@ func applyMerge(ctx context.Context, tx *sql.Tx, op ConsolidationOp, report *Con
 		if err != nil {
 			return fmt.Errorf("%s: %w", r.label, err)
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected after retargeting %s: %w", r.label, err)
+		}
 		if n > 0 {
 			report.RowsByTable[r.label] += int(n)
 		}
@@ -386,7 +389,11 @@ func applyMerge(ctx context.Context, tx *sql.Tx, op ConsolidationOp, report *Con
 	if err != nil {
 		return fmt.Errorf("null self-referential collected_from: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected after nulling self-referential collected_from: %w", err)
+	}
+	if n > 0 {
 		report.RowsByTable["analyst_outputs (collected_from null'd)"] += int(n)
 	}
 
@@ -411,7 +418,15 @@ func applyRename(ctx context.Context, tx *sql.Tx, op ConsolidationOp) error {
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		// A driver fault on RowsAffected is meaningfully different
+		// from "wrong row count" — surfacing the underlying error
+		// keeps the message honest. The torn-rename branch below
+		// would otherwise report "got 0" and mislead an operator
+		// into thinking a concurrent deletion happened.
+		return fmt.Errorf("rows affected after rename: %w", err)
+	}
 	if n != 1 {
 		return fmt.Errorf("expected exactly 1 row updated for rename, got %d (entity may have been deleted concurrently)", n)
 	}

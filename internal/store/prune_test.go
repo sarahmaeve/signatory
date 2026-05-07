@@ -324,3 +324,36 @@ func urisForIDs(t *testing.T, s *SQLite, ids []string) []string {
 	}
 	return out
 }
+
+// TestPruneEntities_PlanMatchesReport pins the dry-run trust property:
+// what PlanPruneEntities promises and what PruneEntities actually
+// deletes must agree, both in label set and per-label count.
+//
+// If the plan undercounts (missing tables) or uses a different label
+// vocabulary than the apply, the operator sees a smaller/different
+// cascade in dry-run than what --destructive executes — silently
+// breaking the preview-then-apply trust model.
+//
+// Asserts plan.RowsByTable == report.RowsByTable for a fixture that
+// exercises citations (which sit transitively under conclusions and
+// were missing from plan output prior to the fix).
+func TestPruneEntities_PlanMatchesReport(t *testing.T) {
+	s := newTestDB(t)
+	ctx := context.Background()
+
+	// pruneOutputFor seeds one conclusion with one citation, so the
+	// apply will touch four tables: entities, analyst_outputs,
+	// conclusions, citations. The plan must reflect the same four.
+	result, err := s.IngestAnalystOutput(ctx, pruneOutputFor("pkg:npm/parity-test"), "test")
+	require.NoError(t, err)
+
+	plan, err := s.PlanPruneEntities(ctx, []string{result.EntityID})
+	require.NoError(t, err)
+
+	report, err := s.PruneEntities(ctx, []string{result.EntityID})
+	require.NoError(t, err)
+
+	assert.Equal(t, plan.RowsByTable, report.RowsByTable,
+		"plan and report must use the same labels and counts so the operator "+
+			"can verify dry-run vs apply; divergence here means dry-run lies about what apply will do")
+}

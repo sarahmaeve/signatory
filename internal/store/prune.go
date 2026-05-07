@@ -35,6 +35,24 @@ type EntityPruneDetail struct {
 // entity IDs were pruned, without touching the store. Read-only;
 // safe to call from dry-run paths. Output is suitable for rendering
 // directly or for gating a confirmation prompt.
+//
+// The returned report has two parts that serve different purposes:
+//
+//   - Entities []EntityPruneDetail — best-effort per-entity breakdown
+//     for the CLI listing. Computed via planOneEntity per id; uses
+//     "analyst_outputs (collected_from)" as a separate label from
+//     "analyst_outputs" so the operator can see WHICH column drove
+//     the count. Per-entity counts may overcount cross-referenced
+//     rows when multiple entities are pruned together (one row that
+//     references entity A via entity_id and entity B via
+//     collected_from gets one count under A and another under B).
+//
+//   - RowsByTable map[string]int — the parity-checked aggregate.
+//     Computed via aggregatePruneCounts in a read-only tx. Uses
+//     simple table-name labels matching executePruneDeletes' actual
+//     output, so the operator can verify dry-run vs apply by reading
+//     this map alone. TestPruneEntities_PlanMatchesReport pins the
+//     plan ↔ apply equality for this map.
 func (s *SQLite) PlanPruneEntities(ctx context.Context, entityIDs []string) (*PruneReport, error) {
 	if len(entityIDs) == 0 {
 		return &PruneReport{RowsByTable: map[string]int{}}, nil
@@ -55,13 +73,266 @@ func (s *SQLite) PlanPruneEntities(ctx context.Context, entityIDs []string) (*Pr
 			continue
 		}
 		report.Entities = append(report.Entities, *detail)
-		for table, count := range detail.ChildCounts {
-			report.RowsByTable[table] += count
+	}
+
+	// Aggregate counts mirror executePruneDeletes' actual cascade so
+	// dry-run output matches apply output. This is the source of
+	// truth for RowsByTable; the per-entity ChildCounts above are a
+	// diagnostic breakdown only.
+	aggregate, err := s.aggregatePruneCounts(ctx, entityIDs)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate plan counts: %w", err)
+	}
+	report.RowsByTable = aggregate
+	return report, nil
+}
+
+// aggregatePruneCounts mirrors executePruneDeletes' walk in count
+// mode, returning a per-table row-count map keyed by the same labels
+// executePruneDeletes uses. plan.RowsByTable equality with
+// report.RowsByTable depends on this function and executePruneDeletes
+// touching the same set of tables with the same labels.
+//
+// Adding a new table to executePruneDeletes REQUIRES adding the same
+// table here. TestPruneEntities_PlanMatchesReport catches the
+// divergence at test time.
+//
+// Implementation: collects intermediate ID lists (output, conclusion,
+// absence, observation, signal, pattern) inside one read-only tx, then
+// runs COUNT(*) per table using those ID sieves. The ID-collection
+// phase mirrors executePruneDeletes' shape exactly so additions stay
+// in lockstep. The read-only tx provides snapshot semantics — without
+// it, a concurrent INSERT mid-walk could land between two of our
+// counts and the aggregate would no longer be self-consistent.
+func (s *SQLite) aggregatePruneCounts(ctx context.Context, entityIDs []string) (map[string]int, error) {
+	counts := map[string]int{}
+	if len(entityIDs) == 0 {
+		return counts, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin read-only tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only tx; rollback releases the snapshot, no error to act on
+
+	// --- Step 1: collect ID sieves (mirrors executePruneDeletes lines ~345-373).
+	outputIDs, err := collectIDs(ctx, tx,
+		`SELECT id FROM analyst_outputs WHERE entity_id IN `+inPlaceholders(len(entityIDs))+
+			` OR collected_from_entity_id IN `+inPlaceholders(len(entityIDs)),
+		doubleArgs(entityIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("collect output ids: %w", err)
+	}
+
+	var conclusionIDs, absenceIDs, observationIDs, patternIDs []string
+	if len(outputIDs) > 0 {
+		conclusionIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM conclusions WHERE output_id IN `+inPlaceholders(len(outputIDs)),
+			toAnyArgs(outputIDs)...)
+		if err != nil {
+			return nil, fmt.Errorf("collect conclusion ids: %w", err)
+		}
+		absenceIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM positive_absences WHERE output_id IN `+inPlaceholders(len(outputIDs)),
+			toAnyArgs(outputIDs)...)
+		if err != nil {
+			return nil, fmt.Errorf("collect absence ids: %w", err)
+		}
+		observationIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM observations WHERE output_id IN `+inPlaceholders(len(outputIDs)),
+			toAnyArgs(outputIDs)...)
+		if err != nil {
+			return nil, fmt.Errorf("collect observation ids: %w", err)
+		}
+		patternIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM methodology_patterns WHERE output_id IN `+inPlaceholders(len(outputIDs)),
+			toAnyArgs(outputIDs)...)
+		if err != nil {
+			return nil, fmt.Errorf("collect pattern ids: %w", err)
 		}
 	}
-	// Entities themselves are always counted.
-	report.RowsByTable["entities"] += len(report.Entities)
-	return report, nil
+
+	signalIDs, err := collectIDs(ctx, tx,
+		`SELECT id FROM signals WHERE entity_id IN `+inPlaceholders(len(entityIDs)),
+		toAnyArgs(entityIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("collect signal ids: %w", err)
+	}
+
+	// --- Step 2: COUNT each table executePruneDeletes deletes from.
+
+	// Level 5: conclusion children (mirrors lines ~377-392).
+	for _, sp := range []struct{ table, column string }{
+		{"conclusion_severity_contexts", "conclusion_id"},
+		{"conclusion_supersedes", "conclusion_id"},
+		{"conclusion_prerequisites", "conclusion_id"},
+		{"conclusion_remediation_hints", "conclusion_id"},
+		{"conclusion_related", "conclusion_id"},
+	} {
+		n, err := countByIDs(ctx, tx, sp.table, sp.column, conclusionIDs)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			counts[sp.table] = n
+		}
+	}
+
+	// Citations — three passes per kind, summed under "citations"
+	// (mirrors lines ~394-416).
+	citationCount := 0
+	for _, kc := range []struct {
+		kind string
+		ids  []string
+	}{
+		{"conclusion", conclusionIDs},
+		{"positive_absence", absenceIDs},
+		{"observation", observationIDs},
+	} {
+		if len(kc.ids) == 0 {
+			continue
+		}
+		var n int
+		q := `SELECT COUNT(*) FROM citations WHERE parent_kind = ? AND parent_id IN ` + inPlaceholders(len(kc.ids))
+		args := append([]any{kc.kind}, toAnyArgs(kc.ids)...)
+		if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count citations/%s: %w", kc.kind, err)
+		}
+		citationCount += n
+	}
+	if citationCount > 0 {
+		counts["citations"] = citationCount
+	}
+
+	// Methodology pattern chain (mirrors lines ~422-438).
+	if n, err := countByIDs(ctx, tx, "methodology_pattern_composes", "pattern_id", patternIDs); err != nil {
+		return nil, err
+	} else if n > 0 {
+		counts["methodology_pattern_composes"] = n
+	}
+	if n, err := countByIDs(ctx, tx, "methodology_patterns", "output_id", outputIDs); err != nil {
+		return nil, err
+	} else if n > 0 {
+		counts["methodology_patterns"] = n
+	}
+
+	// Level 4: output children (mirrors lines ~441-458).
+	for _, table := range []string{
+		"conclusions", "positive_absences", "observations",
+		"methodology_catalogs", "output_supersedes", "output_reframes_from",
+	} {
+		n, err := countByIDs(ctx, tx, table, "output_id", outputIDs)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			counts[table] = n
+		}
+	}
+
+	// Level 3: signals' children (mirrors lines ~460-480).
+	if n, err := countByIDs(ctx, tx, "signal_evidence", "signal_id", signalIDs); err != nil {
+		return nil, err
+	} else if n > 0 {
+		counts["signal_evidence"] = n
+	}
+
+	// signal_resolutions: union of the signal_id sweep AND the entity_id
+	// sweep. Apply does these as two sequential DELETEs that sum their
+	// counts; a single SELECT with OR gets the same count (rows that
+	// match both clauses contribute once, matching the second DELETE
+	// finding zero rows after the first removed them).
+	sigResCount, err := countSignalResolutions(ctx, tx, signalIDs, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	if sigResCount > 0 {
+		counts["signal_resolutions"] = sigResCount
+	}
+
+	// Level 2: direct entity children (mirrors lines ~493-511).
+	//
+	// analyst_outputs is counted via OR across both columns: apply does
+	// two DELETEs (entity_id then collected_from_entity_id) that sum,
+	// but the second finds zero rows after the first removed them, so
+	// SELECT COUNT WHERE entity_id IN ... OR collected_from_entity_id
+	// IN ... gives the same total without double-counting cross-refs.
+	var analystOutputsCount int
+	{
+		q := `SELECT COUNT(*) FROM analyst_outputs WHERE entity_id IN ` + inPlaceholders(len(entityIDs)) +
+			` OR collected_from_entity_id IN ` + inPlaceholders(len(entityIDs))
+		if err := tx.QueryRowContext(ctx, q, doubleArgs(entityIDs)...).Scan(&analystOutputsCount); err != nil {
+			return nil, fmt.Errorf("count analyst_outputs: %w", err)
+		}
+	}
+	if analystOutputsCount > 0 {
+		counts["analyst_outputs"] = analystOutputsCount
+	}
+
+	for _, sp := range []struct{ table, column string }{
+		{"postures", "entity_id"},
+		{"burns", "entity_id"},
+		{"signals", "entity_id"},
+		{"dependency_observations", "project_id"},
+		{"audit_log", "entity_id"},
+	} {
+		n, err := countByIDs(ctx, tx, sp.table, sp.column, entityIDs)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			counts[sp.table] = n
+		}
+	}
+
+	// Level 1: entities themselves.
+	if n, err := countByIDs(ctx, tx, "entities", "id", entityIDs); err != nil {
+		return nil, err
+	} else if n > 0 {
+		counts["entities"] = n
+	}
+
+	return counts, nil
+}
+
+// countByIDs runs SELECT COUNT(*) FROM <table> WHERE <column> IN (?...).
+// Returns 0 with no error on empty id list, matching deleteByIDs'
+// no-op-on-empty contract.
+func countByIDs(ctx context.Context, tx *sql.Tx, table, column string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s IN %s`, table, column, inPlaceholders(len(ids))) //nolint:gosec // G201: table/column names are package constants, not user input
+	var n int
+	if err := tx.QueryRowContext(ctx, q, toAnyArgs(ids)...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count %s: %w", table, err)
+	}
+	return n, nil
+}
+
+// countSignalResolutions counts the union of two sweeps apply
+// performs (signal_id IN signalIDs OR entity_id IN entityIDs).
+// Either list may be empty; the function adapts the WHERE clause
+// so a no-signal entity prune still counts entity_id-keyed
+// resolutions.
+func countSignalResolutions(ctx context.Context, tx *sql.Tx, signalIDs, entityIDs []string) (int, error) {
+	switch {
+	case len(signalIDs) == 0 && len(entityIDs) == 0:
+		return 0, nil
+	case len(signalIDs) == 0:
+		return countByIDs(ctx, tx, "signal_resolutions", "entity_id", entityIDs)
+	case len(entityIDs) == 0:
+		return countByIDs(ctx, tx, "signal_resolutions", "signal_id", signalIDs)
+	}
+	q := `SELECT COUNT(*) FROM signal_resolutions WHERE signal_id IN ` + inPlaceholders(len(signalIDs)) +
+		` OR entity_id IN ` + inPlaceholders(len(entityIDs))
+	args := append(toAnyArgs(signalIDs), toAnyArgs(entityIDs)...)
+	var n int
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count signal_resolutions: %w", err)
+	}
+	return n, nil
 }
 
 // planOneEntity collects row counts for one entity's children.
@@ -219,8 +490,11 @@ func (s *SQLite) PruneEntities(ctx context.Context, entityIDs []string) (*PruneR
 
 	// Capture the per-entity detail BEFORE the delete so the report
 	// carries meaningful canonical_uri / short_name fields. The plan
-	// is also the source of truth for counts — we compare actual
-	// rowsAffected in the deletes to catch divergence.
+	// also feeds the entity listing the CLI renders. Plan ↔ apply
+	// count parity is enforced by TestPruneEntities_PlanMatchesReport
+	// against aggregatePruneCounts (used to populate plan.RowsByTable);
+	// a divergence at runtime would mean one of those two walks fell
+	// out of sync with executePruneDeletes' table set.
 	plan, err := s.PlanPruneEntities(ctx, entityIDs)
 	if err != nil {
 		return nil, fmt.Errorf("plan prune: %w", err)
@@ -411,7 +685,10 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 		if err != nil {
 			return nil, fmt.Errorf("delete citations/%s: %w", spec.kind, err)
 		}
-		n, _ := r.RowsAffected()
+		n, err := r.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("rows affected after deleting citations/%s: %w", spec.kind, err)
+		}
 		counts["citations"] += int(n)
 	}
 
@@ -531,7 +808,10 @@ func deleteByIDs(ctx context.Context, tx *sql.Tx, table, column string, ids []st
 	if err != nil {
 		return 0, fmt.Errorf("delete %s: %w", table, err)
 	}
-	n, _ := r.RowsAffected()
+	n, err := r.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected after deleting %s: %w", table, err)
+	}
 	return int(n), nil
 }
 
