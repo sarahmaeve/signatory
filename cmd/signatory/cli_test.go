@@ -13,24 +13,37 @@ import (
 	"github.com/sarahmaeve/signatory/internal/pipeline"
 )
 
+// testVars returns the kong.Vars used by all test parsers.
+func testVars() kong.Vars {
+	return kong.Vars{
+		"version":     "test",
+		"commit":      "abc123",
+		"pipelineURL": pipeline.DefaultURL,
+	}
+}
+
+// newTestParser constructs a Kong parser wired to the shared
+// KongOptions (same group definitions, description, etc. as
+// production) with test-appropriate overrides for exit and writers.
+func newTestParser(t *testing.T, cli *CLI, stdout, stderr *bytes.Buffer) *kong.Kong {
+	t.Helper()
+
+	opts := KongOptions(testVars())
+	opts = append(opts,
+		kong.Exit(func(int) {}),
+		kong.Writers(stdout, stderr),
+	)
+	parser, err := kong.New(cli, opts...)
+	require.NoError(t, err)
+	return parser
+}
+
 // parseCLI is a test helper that parses args into the CLI struct and returns the parsed context.
 func parseCLI(t *testing.T, args ...string) (*kong.Context, *CLI) {
 	t.Helper()
 
 	cli := &CLI{}
-	parser, err := kong.New(cli,
-		kong.Name("signatory"),
-		kong.Description("Supply chain trust analysis tool."),
-		kong.Exit(func(int) {}), // Prevent os.Exit in tests
-		kong.Writers(new(bytes.Buffer), new(bytes.Buffer)),
-		kong.Vars{
-			"version":     "test",
-			"commit":      "abc123",
-			"pipelineURL": pipeline.DefaultURL,
-		},
-	)
-	require.NoError(t, err)
-
+	parser := newTestParser(t, cli, new(bytes.Buffer), new(bytes.Buffer))
 	ctx, err := parser.Parse(args)
 	if err != nil {
 		t.Fatalf("failed to parse args %v: %v", args, err)
@@ -43,20 +56,8 @@ func parseCLIExpectError(t *testing.T, args ...string) error {
 	t.Helper()
 
 	cli := &CLI{}
-	parser, err := kong.New(cli,
-		kong.Name("signatory"),
-		kong.Description("Supply chain trust analysis tool."),
-		kong.Exit(func(int) {}),
-		kong.Writers(new(bytes.Buffer), new(bytes.Buffer)),
-		kong.Vars{
-			"version":     "test",
-			"commit":      "abc123",
-			"pipelineURL": pipeline.DefaultURL,
-		},
-	)
-	require.NoError(t, err)
-
-	_, err = parser.Parse(args)
+	parser := newTestParser(t, cli, new(bytes.Buffer), new(bytes.Buffer))
+	_, err := parser.Parse(args)
 	return err
 }
 
@@ -66,19 +67,7 @@ func getHelpOutput(t *testing.T) string {
 
 	cli := &CLI{}
 	var buf bytes.Buffer
-	parser, err := kong.New(cli,
-		kong.Name("signatory"),
-		kong.Description("Supply chain trust analysis tool."),
-		kong.Exit(func(int) {}),
-		kong.Writers(&buf, &buf),
-		kong.Vars{
-			"version":     "test",
-			"commit":      "abc123",
-			"pipelineURL": pipeline.DefaultURL,
-		},
-	)
-	require.NoError(t, err)
-
+	parser := newTestParser(t, cli, &buf, &buf)
 	_, _ = parser.Parse([]string{"--help"})
 	return buf.String()
 }
@@ -365,6 +354,83 @@ func TestHelpOutput_ContainsDescription(t *testing.T) {
 
 	help := getHelpOutput(t)
 	assert.Contains(t, help, "Supply chain trust analysis tool")
+}
+
+// TestHelpOutput_GroupHeaders verifies that the help output contains
+// the five group headers in the expected order. A new user scanning
+// the help should see commands organized by workflow stage, not a
+// flat alphabetical list.
+func TestHelpOutput_GroupHeaders(t *testing.T) {
+	t.Parallel()
+
+	help := getHelpOutput(t)
+
+	// Groups must appear in this order — workflow-first, internals last.
+	groups := []string{
+		"Investigate",
+		"Decide",
+		"Review",
+		"Infrastructure",
+		"Pipeline",
+	}
+	for _, g := range groups {
+		assert.Contains(t, help, g,
+			"help output must contain group header %q", g)
+	}
+
+	// Verify ordering: each group header appears after the previous one.
+	lastIdx := -1
+	for _, g := range groups {
+		idx := strings.Index(help, g)
+		require.NotEqual(t, -1, idx,
+			"group header %q not found in help output", g)
+		assert.Greater(t, idx, lastIdx,
+			"group %q (at %d) must appear after the previous group (at %d);\nhelp output:\n%s",
+			g, idx, lastIdx, help)
+		lastIdx = idx
+	}
+}
+
+// TestHelpOutput_CommandsInExpectedGroups spot-checks that key commands
+// appear under the correct group header, not just anywhere in the output.
+func TestHelpOutput_CommandsInExpectedGroups(t *testing.T) {
+	t.Parallel()
+
+	help := getHelpOutput(t)
+
+	// Map from group header to commands expected under it.
+	groupCommands := map[string][]string{
+		"Investigate":    {"summary", "survey", "analyze"},
+		"Decide":         {"posture", "burn"},
+		"Review":         {"show-analyses", "show-conclusions", "show-synthesis"},
+		"Infrastructure": {"init", "serve", "certs", "mcp", "version"},
+		"Pipeline":       {"pipeline", "analysis", "handoff", "ingest", "prune"},
+	}
+
+	for group, cmds := range groupCommands {
+		groupIdx := strings.Index(help, group)
+		require.NotEqual(t, -1, groupIdx,
+			"group header %q not found in help output", group)
+
+		// Find the start of the NEXT group after this one (or end of string).
+		allGroups := []string{"Investigate", "Decide", "Review", "Infrastructure", "Pipeline"}
+		nextGroupIdx := len(help)
+		for i, g := range allGroups {
+			if g == group && i+1 < len(allGroups) {
+				next := strings.Index(help[groupIdx+len(group):], allGroups[i+1])
+				if next != -1 {
+					nextGroupIdx = groupIdx + len(group) + next
+				}
+				break
+			}
+		}
+
+		section := help[groupIdx:nextGroupIdx]
+		for _, cmd := range cmds {
+			assert.Contains(t, section, cmd,
+				"command %q should appear under group %q, but found in section:\n%s", cmd, group, section)
+		}
+	}
 }
 
 // --- No Subcommand ---

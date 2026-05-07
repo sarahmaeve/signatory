@@ -16,31 +16,45 @@ import (
 )
 
 // CLI defines signatory's command structure.
+//
+// Commands are organized into groups via Kong's `group:""` tag so the
+// help output reads as a workflow guide rather than an alphabetical
+// dump. Group ordering is controlled by ExplicitGroups in
+// KongOptions(); the struct field order is irrelevant to display.
 type CLI struct {
 	DB      string `help:"Path to signatory database." default:"~/.signatory/signatory.db" type:"path" env:"SIGNATORY_DB"`
 	Verbose bool   `help:"Verbose output." short:"v"`
 
-	Analyze         AnalyzeCmd         `cmd:"" help:"Collect Layer 1 signals (github/git/registry metadata) and display the cached trust profile for a target. Does NOT produce a trust verdict — run /analyze in a Claude session for that. v0.1 scope: signal collection + cached-profile display; LLM-backed synthesis is v0.2."`
-	Analysis        AnalysisCmd        `cmd:"" help:"Manage analysis-session lifecycle: the durable audit identity for each /analyze run. Subcommands: begin, end, list, show."`
-	Summary         SummaryCmd         `cmd:"" help:"One-call view: canonical URI, posture, burn status, analyses rollup, related identities. The 'start here' verb for any target."`
-	Survey          SurveyCmd          `cmd:"" help:"Assess trust posture of a project's dependency tree."`
-	Burn            BurnCmd            `cmd:"" help:"Burn an entity, degrading its trust signals."`
-	Posture         PostureCmd         `cmd:"" help:"Set or view dependency posture tier for an entity."`
-	Init            InitCmd            `cmd:"" help:"Scaffold ./templates/, ./filestore/, and signatory.config.toml in a project."`
-	Handoff         HandoffCmd         `cmd:"" help:"Render a handoff prompt for a fresh analyst agent."`
-	FormatCheck     FormatCheckCmd     `cmd:"format-check" help:"Check an analyst output file (JSON or markdown) for v1 schema conformance."`
-	Ingest          IngestCmd          `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store."`
-	BuildOutput     BuildOutputCmd     `cmd:"build-output" help:"Convert structured agent text to v1-schema JSON."`
-	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target."`
-	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs."`
-	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs."`
-	ShowSynthesis   ShowSynthesisCmd   `cmd:"show-synthesis" help:"Render a synthesis output (analyst_id signatory-synthesis-*) as markdown. Writes to stdout; the store row is canonical."`
-	MCP             MCPCmd             `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio."`
-	Pipeline        PipelineCmd        `cmd:"" help:"Interact with the local pipeline message service (sessions, messages)."`
-	Serve           ServeCmd           `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)."`
-	Certs           CertsCmd           `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS) so Claude Code's WebFetch can reach the pipeline service over HTTPS."`
-	Prune           PruneCmd           `cmd:"" help:"Delete entities and their child rows from the store. Destructive; use with --yes."`
-	Version         VersionCmd         `cmd:"" help:"Print version information."`
+	// --- Investigate: first verbs a new user reaches for ---
+	Summary SummaryCmd `cmd:"" help:"One-call view: canonical URI, posture, burn status, analyses rollup, related identities. The 'start here' verb for any target." group:"investigate"`
+	Survey  SurveyCmd  `cmd:"" help:"Assess trust posture of a project's dependency tree." group:"investigate"`
+	Analyze AnalyzeCmd `cmd:"" help:"Collect signals (github/git/registry metadata) and display the cached trust profile for a target." group:"investigate"`
+
+	// --- Decide: recording trust decisions ---
+	Posture PostureCmd `cmd:"" help:"Set or view dependency posture tier for an entity." group:"decide"`
+	Burn    BurnCmd    `cmd:"" help:"Burn an entity, degrading its trust signals." group:"decide"`
+
+	// --- Review: reading stored analysis data ---
+	ShowAnalyses    ShowAnalysesCmd    `cmd:"show-analyses" help:"List ingested analyst outputs, optionally filtered by target." group:"review"`
+	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs." group:"review"`
+	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs." group:"review"`
+	ShowSynthesis   ShowSynthesisCmd   `cmd:"show-synthesis" help:"Render a synthesis output as markdown or static HTML." group:"review"`
+
+	// --- Infrastructure: setup and services ---
+	Init    InitCmd    `cmd:"" help:"Scaffold ./templates/, ./filestore/, and signatory.config.toml in a project." group:"infra"`
+	Serve   ServeCmd   `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)." group:"infra"`
+	Certs   CertsCmd   `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS)." group:"infra"`
+	MCP     MCPCmd     `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio." group:"infra"`
+	Version VersionCmd `cmd:"" help:"Print version information." group:"infra"`
+
+	// --- Pipeline: internal orchestration ---
+	Pipeline    PipelineCmd    `cmd:"" help:"Interact with the local pipeline message service (sessions, messages)." group:"pipeline"`
+	Analysis    AnalysisCmd    `cmd:"" help:"Manage analysis-session lifecycle (begin, end, list, show, timing)." group:"pipeline"`
+	Handoff     HandoffCmd     `cmd:"" help:"Render a handoff prompt for a fresh analyst agent." group:"pipeline"`
+	FormatCheck FormatCheckCmd `cmd:"format-check" help:"Check an analyst output file for v1 schema conformance." group:"pipeline"`
+	BuildOutput BuildOutputCmd `cmd:"build-output" help:"Convert structured agent text to v1-schema JSON." group:"pipeline"`
+	Ingest      IngestCmd      `cmd:"" help:"Ingest a v1-schema analyst output file into the signatory store." group:"pipeline"`
+	Prune       PruneCmd       `cmd:"" help:"Delete entities and their child rows from the store. Destructive; use with --yes." group:"pipeline"`
 }
 
 // version, commit, and buildDate are stamped by the Makefile via
@@ -60,18 +74,35 @@ var (
 	buildDate = "unknown"
 )
 
-func main() {
-	cli := CLI{}
-	kctx := kong.Parse(&cli,
+// KongOptions returns the Kong configuration options shared between
+// production (main) and tests (parseCLI, getHelpOutput). Keeping
+// them in one place prevents the help-grouping tests from diverging
+// from the real CLI surface.
+//
+// vars must supply "version", "commit", and "pipelineURL".
+func KongOptions(vars kong.Vars) []kong.Option {
+	return []kong.Option{
 		kong.Name("signatory"),
 		kong.Description("Supply chain trust analysis tool."),
 		kong.UsageOnError(),
-		kong.Vars{
-			"version":     version,
-			"commit":      commit,
-			"pipelineURL": pipeline.DefaultURL,
-		},
-	)
+		vars,
+		kong.ExplicitGroups([]kong.Group{
+			{Key: "investigate", Title: "Investigate", Description: "Look up a target or scan a dependency tree."},
+			{Key: "decide", Title: "Decide", Description: "Record trust decisions."},
+			{Key: "review", Title: "Review", Description: "Read stored analysis data."},
+			{Key: "infra", Title: "Infrastructure", Description: "Setup and services."},
+			{Key: "pipeline", Title: "Pipeline", Description: "Internal orchestration — most users won't need these directly."},
+		}),
+	}
+}
+
+func main() {
+	cli := CLI{}
+	kctx := kong.Parse(&cli, KongOptions(kong.Vars{
+		"version":     version,
+		"commit":      commit,
+		"pipelineURL": pipeline.DefaultURL,
+	})...)
 
 	// Root context. signal.NotifyContext routes SIGINT (Ctrl-C)
 	// and SIGTERM to context cancellation, so every long-running
