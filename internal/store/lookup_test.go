@@ -296,3 +296,68 @@ func TestLookupEntity_RichHitShortCircuitsAlternateWalk(t *testing.T) {
 	assert.Equal(t, 0, f.findVersionedCalls,
 		"versioned-base scan must NOT run when the alternate-walk already returned")
 }
+
+// TestLookupEntityID_EmptyInput: empty target returns empty ID and
+// no error. Lets callers chain into a filter struct's EntityID field
+// without nil-checking — empty there means "no filter."
+func TestLookupEntityID_EmptyInput(t *testing.T) {
+	t.Parallel()
+	f := &fakeLookuper{}
+
+	id, err := LookupEntityID(context.Background(), f, "")
+	require.NoError(t, err)
+	assert.Empty(t, id)
+	assert.Equal(t, 0, f.findByURICalls,
+		"empty input must short-circuit before any lookup")
+}
+
+// TestLookupEntityID_VanityResolution: the regression case. A vanity
+// Go path queries through the alternate-URI walk to the real entity
+// at the github form. Pre-fix, show-* commands were stuck on a
+// direct FindEntityByURI that missed this equivalence; the helper
+// exists specifically to put them on LookupEntity's footing.
+func TestLookupEntityID_VanityResolution(t *testing.T) {
+	t.Parallel()
+	want := &profile.Entity{ID: "ent-mod", CanonicalURI: "repo:github/golang/mod"}
+	f := &fakeLookuper{
+		byURI: map[string]*profile.Entity{
+			"repo:github/golang/mod": want,
+		},
+		posturedEntityIDs: map[string]bool{"ent-mod": true},
+	}
+
+	id, err := LookupEntityID(context.Background(), f, "golang.org/x/mod")
+	require.NoError(t, err)
+	assert.Equal(t, "ent-mod", id,
+		"vanity input must walk to the github form and return its entity ID")
+}
+
+// TestLookupEntityID_NotFound: ErrNotFound from the underlying
+// alternate walk surfaces verbatim. Show-* commands rely on this
+// sentinel to render the "no entity matches" message.
+func TestLookupEntityID_NotFound(t *testing.T) {
+	t.Parallel()
+	f := &fakeLookuper{} // empty maps → every lookup misses
+
+	id, err := LookupEntityID(context.Background(), f, "repo:github/nobody/nothing")
+	require.ErrorIs(t, err, ErrNotFound,
+		"unmatched target must surface as ErrNotFound for caller branch detection")
+	assert.Empty(t, id)
+}
+
+// TestLookupEntityID_PropagatesProfileError: malformed input that
+// profile.ResolveTarget rejects surfaces as a non-ErrNotFound error.
+// CLI callers swallow this back to "no entity matches" UX; MCP
+// callers map it to CodeSchemaViolation. The helper itself stays
+// truthful and propagates rather than masking the distinction.
+func TestLookupEntityID_PropagatesProfileError(t *testing.T) {
+	t.Parallel()
+	f := &fakeLookuper{}
+
+	id, err := LookupEntityID(context.Background(), f, "not a valid uri or shorthand at all !!!")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNotFound,
+		"profile parse failures must NOT be silently flattened to ErrNotFound here; "+
+			"callers that want that flattening apply it explicitly at their layer")
+	assert.Empty(t, id)
+}

@@ -76,8 +76,15 @@ func (t *ShowMethodologyTool) Handle(ctx context.Context, raw json.RawMessage) *
 		limit = 20
 	}
 
+	// See ShowAnalysesTool.Handle / lookup.go for why filter
+	// resolution moved to the alternate-walking LookupEntityID.
+	entityID, lookupErr := resolveTargetForFilter(ctx, t.Store, in.Target)
+	if errResp := mapTargetLookupErr(lookupErr, in.Target); errResp != nil {
+		return errResp
+	}
+
 	filter := store.MethodologyPatternFilter{
-		EntityURI:   normalizeTargetURI(in.Target),
+		EntityID:    entityID,
 		AnalystID:   in.AnalystID,
 		SignalGroup: in.SignalGroup,
 		Limit:       limit,
@@ -93,6 +100,9 @@ func (t *ShowMethodologyTool) Handle(ctx context.Context, raw json.RawMessage) *
 
 	rows, err := t.Store.ListMethodologyPatterns(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		// Defensive — resolveTargetForFilter already gated absent
+		// entities; this branch keeps the tool's failure shape stable
+		// if a future store-side change reintroduces a NotFound path.
 		return mcp.Err(mcp.CodeNotFound,
 			"entity not found: "+in.Target,
 			map[string]string{"target": in.Target})

@@ -133,3 +133,38 @@ func LookupEntity(ctx context.Context, s EntityLookuper, target string) (*profil
 	}
 	return nil, ErrNotFound
 }
+
+// LookupEntityID is the filter-resolution sugar wrapper around
+// LookupEntity for callers that want an EntityID (suitable for a
+// store filter's EntityID field) rather than the full *profile.Entity.
+//
+// Empty target returns ("", nil) — callers that treat empty input as
+// "no filter" can chain straight into a filter struct without
+// nil-checking. Non-empty input goes through LookupEntity and
+// inherits its alternate-URI walking and weight-aware preference.
+//
+// Errors propagate verbatim from LookupEntity:
+//
+//   - ErrNotFound when the alternate walk found nothing (the show-*
+//     commands' "no entity matches" branch fires from this).
+//   - profile.ResolveTarget errors when the input doesn't parse as
+//     any recognized URI form (caller-shape; CLI/MCP map this to
+//     a usage/schema error).
+//   - Other errors from underlying lookups (DB closed, etc).
+//
+// Added 2026-05-07 to retrofit alternate-URI walking onto the show-*
+// CLI/MCP read paths. Without this, queries like `show-analyses
+// golang.org/x/mod` missed analyses indexed under the equivalent
+// repo:github/golang/mod even though `summary golang.org/x/mod`
+// resolved them via the same walk. See lookup.go:LookupEntity for
+// the underlying walk semantics this delegates to.
+func LookupEntityID(ctx context.Context, s EntityLookuper, target string) (string, error) {
+	if target == "" {
+		return "", nil
+	}
+	ent, err := LookupEntity(ctx, s, target)
+	if err != nil {
+		return "", err
+	}
+	return ent.ID, nil
+}

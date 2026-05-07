@@ -76,6 +76,11 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 	// List-all (canonicalURI == "") skips this — there's no
 	// specific target to attribute a banner to, and per-row
 	// burn-tagging would be N+1 store calls for marginal value.
+	//
+	// Note: this still uses the URI-form (not the resolved entity
+	// ID) so the URI-derived-cascade case still fires for inputs
+	// that don't have an entity row yet — that's the whole point
+	// of EffectiveBurnByURI's third case.
 	if canonicalURI != "" {
 		if burn, ebCtx, burnErr := s.EffectiveBurnByURI(ctx, canonicalURI); burnErr == nil {
 			renderShowAnalysesBurnBanner(burn, ebCtx)
@@ -84,18 +89,42 @@ func (cmd *ShowAnalysesCmd) Run(globals *Globals) error {
 		}
 	}
 
-	filter := store.AnalystOutputFilter{
-		EntityURI: canonicalURI,
-		AnalystID: cmd.Analyst,
-		Limit:     cmd.Limit,
-	}
+	// Listing-filter resolution: the alternate-URI walk lives here,
+	// not in normalizeTargetForQuery, because the "find me the
+	// entity behind this target" lookup needs to reach the same
+	// equivalence class summary uses. Pre-2026-05-07 this was a
+	// direct FindEntityByURI on the canonical URI, which missed
+	// vanity-Go-path / cross-scheme equivalents that summary's
+	// LookupEntity walk handled correctly.
+	entityID, err := resolveTargetEntityID(ctx, s, cmd.Target)
 	stdout := cmd.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
+	if errors.Is(err, store.ErrNotFound) {
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowAnalysesResult{Status: "no_entity"})
+		}
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	filter := store.AnalystOutputFilter{
+		EntityID:  entityID,
+		AnalystID: cmd.Analyst,
+		Limit:     cmd.Limit,
+	}
 
 	rows, err := s.ListAnalystOutputs(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		// Defensive: resolveTargetEntityID already passed, so the
+		// entity exists. ListAnalystOutputs should not return
+		// ErrNotFound for an EntityID-keyed filter. If it does,
+		// fall through to the same UX as the resolution miss
+		// rather than leaking the surprising error to the user.
 		if cmd.JSON {
 			return writeJSON(stdout, &ShowAnalysesResult{Status: "no_entity"})
 		}
@@ -197,21 +226,39 @@ func (cmd *ShowConclusionsCmd) Run(globals *Globals) error {
 	if err != nil {
 		return err
 	}
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	// See ShowAnalysesCmd.Run for why the resolution moved off
+	// FindEntityByURI onto the alternate-walking LookupEntityID.
+	entityID, err := resolveTargetEntityID(ctx, s, cmd.Target)
+	if errors.Is(err, store.ErrNotFound) {
+		if cmd.JSON {
+			return writeJSON(stdout, &ShowConclusionsResult{Status: "no_entity"})
+		}
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
 	filter := store.ConclusionFilter{
-		EntityURI:        normalizeTargetForQuery(cmd.Target),
+		EntityID:         entityID,
 		AnalystID:        cmd.Analyst,
 		SignalType:       cmd.SignalType,
 		SeverityIn:       severities,
 		DesignIntentOnly: cmd.DesignIntent,
 		Limit:            cmd.Limit,
 	}
-	stdout := cmd.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
 
 	rows, err := s.ListConclusions(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		// Defensive: same as ShowAnalysesCmd — resolveTargetEntityID
+		// already gated the absent-entity case, so this branch is
+		// belt-and-braces against a future store-side change.
 		if cmd.JSON {
 			return writeJSON(stdout, &ShowConclusionsResult{Status: "no_entity"})
 		}
@@ -280,8 +327,19 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit; error is not actionable
 
+	// See ShowAnalysesCmd.Run for why the resolution moved off
+	// FindEntityByURI onto the alternate-walking LookupEntityID.
+	entityID, err := resolveTargetEntityID(ctx, s, cmd.Target)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
 	filter := store.MethodologyPatternFilter{
-		EntityURI:   normalizeTargetForQuery(cmd.Target),
+		EntityID:    entityID,
 		AnalystID:   cmd.Analyst,
 		SignalGroup: cmd.SignalGroup,
 		Limit:       cmd.Limit,
@@ -297,6 +355,7 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 
 	rows, err := s.ListMethodologyPatterns(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		// Defensive — same rationale as the sibling show-* commands.
 		fmt.Printf("No entity matches %q (target has never been ingested)\n", cmd.Target)
 		return nil
 	}
@@ -345,6 +404,10 @@ func (cmd *ShowMethodologyCmd) Run(globals *Globals) error {
 // target_test.go for the full accepted-forms matrix. This wrapper
 // just handles the show-command ergonomics (empty input is fine;
 // unresolvable input should pass through rather than error).
+//
+// Used today only for the show-analyses burn-banner URI — the
+// listing-filter resolution moved to resolveTargetEntityID so the
+// show-* family inherits LookupEntity's alternate-URI walk.
 func normalizeTargetForQuery(target string) string {
 	if target == "" {
 		return ""
@@ -358,6 +421,54 @@ func normalizeTargetForQuery(target string) string {
 		return target
 	}
 	return resolved.CanonicalURI
+}
+
+// resolveTargetEntityID translates a user-supplied target string to
+// an entity ID for use as a store filter (filter.EntityID). Walks
+// the canonical-URI alternates via store.LookupEntityID — the same
+// equivalence rules summary uses — so vanity Go paths,
+// pkg:go ↔ pkg:golang swaps, and case-fold variants resolve to the
+// underlying entity row regardless of which form the user typed.
+//
+// Empty target returns ("", nil) — "no filter" semantics propagate
+// straight into the filter struct.
+//
+// The error contract is intentionally narrow:
+//
+//   - ErrNotFound covers BOTH "no entity in the alternate walk" AND
+//     "input didn't parse as any URI form." Show-* commands print
+//     the user's original input in their "no entity matches"
+//     message; collapsing the malformed-input case here keeps that
+//     prose uniform whether the input was unparseable garbage or
+//     well-formed-but-unmatched.
+//   - Other errors (DB-side) propagate verbatim.
+//
+// The collapse is a deliberate CLI UX choice — the parallel MCP
+// surfaces handle the malformed-vs-unmatched distinction explicitly
+// because their consumers (LLM agents) benefit from the typed
+// distinction. See internal/mcp/tools/show_analyses.go for the
+// CodeSchemaViolation vs CodeNotFound branching.
+func resolveTargetEntityID(ctx context.Context, s store.Store, target string) (string, error) {
+	if target == "" {
+		return "", nil
+	}
+	id, err := store.LookupEntityID(ctx, s, target)
+	if err == nil {
+		return id, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	// Heuristic for the malformed-input collapse: if a fresh
+	// ResolveTarget call also fails, the original error is from
+	// profile parsing and we treat it as "no entity matches" per
+	// the doc. Otherwise it's a DB-side error and we propagate.
+	// Cheap (in-memory parse) and keeps the behavior boundary
+	// truthful: only known-malformed input is swallowed.
+	if _, perr := profile.ResolveTarget(target); perr != nil {
+		return "", store.ErrNotFound
+	}
+	return "", err
 }
 
 // parseSeverities converts CLI --severity strings into the typed

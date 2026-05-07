@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/mcp"
-	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -67,8 +65,18 @@ func (t *ShowAnalysesTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 		limit = 20
 	}
 
+	// Resolve target via LookupEntityID — the alternate-URI walk
+	// reaches the same equivalence class summary uses, so a vanity
+	// Go path (golang.org/x/mod) lands on the entity row stored at
+	// the resolved repo:github/golang/mod. Pre-2026-05-07 this was
+	// a normalize-then-pass-URI path that missed those equivalents.
+	entityID, lookupErr := resolveTargetForFilter(ctx, t.Store, in.Target)
+	if errResp := mapTargetLookupErr(lookupErr, in.Target); errResp != nil {
+		return errResp
+	}
+
 	filter := store.AnalystOutputFilter{
-		EntityURI: normalizeTargetURI(in.Target),
+		EntityID:  entityID,
 		AnalystID: in.AnalystID,
 		Limit:     limit,
 	}
@@ -85,6 +93,10 @@ func (t *ShowAnalysesTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 
 	rows, err := t.Store.ListAnalystOutputs(ctx, filter)
 	if errors.Is(err, store.ErrNotFound) {
+		// Defensive: resolveTargetForFilter already gated the absent-
+		// entity case via LookupEntityID. If the store still returns
+		// ErrNotFound from the EntityID-keyed path, surface it the
+		// same way for stable caller branching.
 		return mcp.Err(mcp.CodeNotFound,
 			"entity not found: "+in.Target,
 			map[string]string{"target": in.Target})
@@ -104,26 +116,3 @@ func (t *ShowAnalysesTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 	})
 }
 
-// normalizeTargetURI returns the canonical form of a target string for use
-// in store filters. Already-canonical URIs (pkg:, repo:, etc.) pass through
-// unchanged; GitHub-shaped inputs (owner/repo, https://github.com/..., etc.)
-// go through profile.NormalizeGitHubRepoInput to reach the canonical
-// repo:github/owner/name form; anything else falls through as-is so the
-// store's FindEntityByURI can either match a verbatim-stored canonical
-// URI or return ErrNotFound. This mirrors normalizeTargetForQuery in
-// cmd/signatory/show.go — both CLI and MCP surfaces accept the same
-// target shapes.
-func normalizeTargetURI(target string) string {
-	if target == "" {
-		return ""
-	}
-	for _, prefix := range []string{"pkg:", "repo:", "identity:", "org:", "patch:"} {
-		if strings.HasPrefix(target, prefix) {
-			return target
-		}
-	}
-	if uri, _, _, err := profile.NormalizeGitHubRepoInput(target); err == nil {
-		return uri
-	}
-	return target
-}
