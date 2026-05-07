@@ -92,3 +92,6 @@ Start with [vision.md](design/vision.md).
 
 Requires Go 1.25+, plus a Claude Code (or MCP-capable) client to run
 `/analyze`. Pre-v0.1; see [ROADMAP](design/ROADMAP.md).
+
+For a five-minute walkthrough see [QUICKSTART](QUICKSTART.md); when something
+breaks, [TROUBLESHOOTING](TROUBLESHOOTING.md) lists the common failure modes.
