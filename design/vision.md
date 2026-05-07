@@ -81,7 +81,7 @@ trusting whatever is top-of-stack or appears first in a search engine.
 - **Validate against real attacks.** Real-world supply chain incidents are test
   cases for the signal model. Each new attack should be analyzed: "would signatory
   have surfaced this?" If yes, the model is working. If no, we learn what signal
-  is missing. See the `design/example-*.md` files for worked examples.
+  is missing. 
 
 ## Implementation Language
 
