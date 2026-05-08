@@ -156,224 +156,29 @@ func run(target string) error {
 	}
 	rep.pass("parsed; %d signals reported", len(result.Signals))
 
-	// =====================================================
-	// version_pin_table
-	// =====================================================
-
-	rep.step("find version_pin_table signal")
-	pinSig, ok := result.findSignal("version_pin_table")
-	if !ok {
-		return enumerateMissingSignal(result, "version_pin_table")
-	}
-	rep.pass("version_pin_table present")
-
-	rep.step("validate version_pin_table metadata")
-	if err := validateMetadata(pinSig, "publication", "very-high", "go-publish"); err != nil {
-		return err
-	}
-	rep.pass("metadata: group=publication forgery=very-high source=go-publish")
-
-	rep.step("validate version_pin_table value shape")
-	var pinTable pinTableValue
-	if err := json.Unmarshal(pinSig.Value, &pinTable); err != nil {
-		return fmt.Errorf("unmarshal version_pin_table value: %w", err)
-	}
 	wantModulePath := strings.TrimPrefix(target, "pkg:golang/")
 	wantModulePath = strings.TrimPrefix(wantModulePath, "pkg:go/")
-	if pinTable.ModulePath != wantModulePath {
-		return fmt.Errorf("expected module_path=%q, got %q", wantModulePath, pinTable.ModulePath)
-	}
-	if err := validatePinTableCounts(pinTable); err != nil {
+
+	pinTable, err := validatePinTable(result, wantModulePath, rep)
+	if err != nil {
 		return err
 	}
-	if err := validatePinShape(pinTable.Pins); err != nil {
+
+	matrix, presentCount, err := validateSourceMatrix(result, wantModulePath, rep)
+	if err != nil {
 		return err
 	}
-	rep.pass("counts: total=%d processed=%d (cap=%d), %d pins all valid",
-		pinTable.VersionCountTotal, pinTable.VersionCountProcessed,
-		expectedProcessedCount, len(pinTable.Pins))
 
-	// =====================================================
-	// source_evolution_matrix
-	// =====================================================
-
-	rep.step("find source_evolution_matrix signal")
-	matrixSig, ok := result.findSignal("source_evolution_matrix")
-	if !ok {
-		return enumerateMissingSignal(result, "source_evolution_matrix")
-	}
-	rep.pass("source_evolution_matrix present")
-
-	rep.step("validate source_evolution_matrix metadata")
-	if err := validateMetadata(matrixSig, "publication", "very-high", "source-evolution"); err != nil {
+	if err := validateCrossSignalAnchors(matrix, pinTable, rep); err != nil {
 		return err
 	}
-	rep.pass("metadata: group=publication forgery=very-high source=source-evolution")
 
-	rep.step("validate source_evolution_matrix value shape")
-	var matrix matrixValue
-	if err := json.Unmarshal(matrixSig.Value, &matrix); err != nil {
-		return fmt.Errorf("unmarshal source_evolution_matrix value: %w", err)
-	}
-	if matrix.ModulePath != wantModulePath {
-		return fmt.Errorf("matrix.module_path: expected %q, got %q", wantModulePath, matrix.ModulePath)
-	}
-	if matrix.Ecosystem != "go" {
-		return fmt.Errorf("matrix.ecosystem: expected \"go\", got %q", matrix.Ecosystem)
-	}
-	if len(matrix.Rows) == 0 {
-		return fmt.Errorf("matrix has zero rows; expected > 0 for a healthy module")
-	}
-	// LastN=12 default. For a single-major history (kong is all
-	// v1.x in its recent 12), MajorLeaves contributes 0 and
-	// HardCap doesn't engage. Multi-major modules see up to 16.
-	if len(matrix.Rows) > 20 {
-		return fmt.Errorf("matrix has %d rows; HardCap=20 should bound this", len(matrix.Rows))
-	}
-	rep.pass("matrix: module_path=%s ecosystem=go rows=%d",
-		matrix.ModulePath, len(matrix.Rows))
-
-	rep.step("validate matrix row shape")
-	presentCount := 0
-	for i, r := range matrix.Rows {
-		if r.Version == "" {
-			return fmt.Errorf("row[%d]: empty version", i)
-		}
-		if r.TagSHALocalStatus == "" {
-			return fmt.Errorf("row[%d] (%s): empty tag_sha_local_status", i, r.Version)
-		}
-		// Only "present" rows have AST + Structural populated;
-		// other statuses (missing_from_clone, missing_origin,
-		// fetch_failed) leave them nil.
-		switch r.TagSHALocalStatus {
-		case "present":
-			presentCount++
-			if r.AST == nil {
-				return fmt.Errorf("row[%d] (%s, present): AST is nil", i, r.Version)
-			}
-			if r.Structural == nil {
-				return fmt.Errorf("row[%d] (%s, present): Structural is nil", i, r.Version)
-			}
-			if len(r.TagSHA) != shaHexLen {
-				return fmt.Errorf("row[%d] (%s): expected %d-char tag_sha, got %d (%q)",
-					i, r.Version, shaHexLen, len(r.TagSHA), r.TagSHA)
-			}
-			if !isHexLower(r.TagSHA) {
-				return fmt.Errorf("row[%d] (%s): tag_sha contains non-hex: %q", i, r.Version, r.TagSHA)
-			}
-			if r.TagSHASource != "proxy.golang.org" {
-				return fmt.Errorf("row[%d] (%s): expected tag_sha_source=proxy.golang.org, got %q",
-					i, r.Version, r.TagSHASource)
-			}
-		case "missing_from_clone", "missing_origin", "fetch_failed":
-			// Partial row — analysis blocks may be nil. No
-			// further shape constraints at this level.
-		default:
-			return fmt.Errorf("row[%d] (%s): unknown tag_sha_local_status %q",
-				i, r.Version, r.TagSHALocalStatus)
-		}
-	}
-	if presentCount == 0 {
-		return fmt.Errorf("matrix has %d rows but none are present; expected most rows present for a healthy module", len(matrix.Rows))
-	}
-	rep.pass("rows: %d total, %d present, all status enum values valid",
-		len(matrix.Rows), presentCount)
-
-	rep.step("cross-signal: every present row's tag_sha is in pin table")
-	pinSHAs := make(map[string]struct{}, len(pinTable.Pins))
-	for _, p := range pinTable.Pins {
-		pinSHAs[p.SHA] = struct{}{}
-	}
-	for _, r := range matrix.Rows {
-		if r.TagSHALocalStatus != "present" {
-			continue
-		}
-		if _, ok := pinSHAs[r.TagSHA]; !ok {
-			return fmt.Errorf("row (%s) tag_sha=%s not found in version_pin_table.pins — cross-signal anchor broken",
-				r.Version, r.TagSHA)
-		}
-	}
-	rep.pass("all present rows anchor to a pin in version_pin_table")
-
-	rep.step("validate cross-version diff plumbing")
-	// The newest row (matrix.Rows[0]) should have
-	// DiffFromPrevious populated when there's at least one
-	// previous "present" row to diff against.
-	if len(matrix.Rows) >= 2 && matrix.Rows[0].TagSHALocalStatus == "present" &&
-		matrix.Rows[1].TagSHALocalStatus == "present" {
-		if matrix.Rows[0].DiffFromPrevious == nil {
-			return fmt.Errorf("newest row's DiffFromPrevious is nil but both rows are present")
-		}
-	}
-	// The oldest row should always have DiffFromPrevious nil.
-	last := matrix.Rows[len(matrix.Rows)-1]
-	if last.DiffFromPrevious != nil {
-		return fmt.Errorf("oldest row (%s) has non-nil DiffFromPrevious; expected nil", last.Version)
-	}
-	rep.pass("diff_from_previous: populated on newer rows, nil on oldest")
-
-	// =====================================================
-	// source_evolution_anomaly
-	// =====================================================
-
-	rep.step("find source_evolution_anomaly signal")
-	anomalySig, ok := result.findSignal("source_evolution_anomaly")
-	if !ok {
-		return enumerateMissingSignal(result, "source_evolution_anomaly")
-	}
-	rep.pass("source_evolution_anomaly present")
-
-	rep.step("validate source_evolution_anomaly metadata")
-	if err := validateMetadata(anomalySig, "publication", "very-high", "source-evolution"); err != nil {
+	anomaly, err := validateSourceAnomaly(result, rep)
+	if err != nil {
 		return err
 	}
-	rep.pass("metadata: group=publication forgery=very-high source=source-evolution")
 
-	rep.step("validate anomaly value shape — healthy library should not fire anomaly")
-	var anomaly anomalyValue
-	if err := json.Unmarshal(anomalySig.Value, &anomaly); err != nil {
-		return fmt.Errorf("unmarshal source_evolution_anomaly value: %w", err)
-	}
-	// LOAD-BEARING ASSERTION: a healthy, well-maintained library
-	// (kong, go-retryablehttp, google/uuid) must NOT fire the
-	// anomaly. If this fires for a clean target, the threshold
-	// is too aggressive and would false-positive in production.
-	if anomaly.AnomalyPresent {
-		return fmt.Errorf(
-			"anomaly fired on healthy library — false positive!\n"+
-				"  first_anomalous_version: %s\n"+
-				"  previous_version:        %s\n"+
-				"  spiked_features:         %v\n"+
-				"  This indicates the multi-feature joint threshold (MinSpikedFeatures=2)\n"+
-				"  is too sensitive for legitimate package evolution. Either the target's\n"+
-				"  history has unusual features that read as a spike, or the threshold\n"+
-				"  needs tightening (more features, or near-zero baseline tolerance).",
-			anomaly.FirstAnomalousVersion, anomaly.PreviousVersion, anomaly.SpikedFeatures)
-	}
-	rep.pass("anomaly_present=false (no false positive on healthy library)")
-
-	// =====================================================
-	// summary
-	// =====================================================
-
-	fmt.Println()
-	fmt.Println("=== smoke-source-evolution: ALL CHECKS PASSED ===")
-	fmt.Printf("Target:                %s\n", target)
-	fmt.Printf("version_pin_table:     %d pins, %d missing-origin, %d fetch-failed\n",
-		len(pinTable.Pins), len(pinTable.MissingOriginVersions), len(pinTable.FetchFailedVersions))
-	fmt.Printf("matrix:                %d rows (%d present)\n", len(matrix.Rows), presentCount)
-	fmt.Printf("anomaly_present:       %v (expected: false on healthy library)\n", anomaly.AnomalyPresent)
-	if len(matrix.Rows) > 0 && matrix.Rows[0].TagSHALocalStatus == "present" {
-		newest := matrix.Rows[0]
-		fmt.Printf("Newest row:            %s @ %s\n",
-			newest.Version, newest.TagSHA[:12])
-		if newest.AST != nil {
-			fmt.Printf("Newest row AST:        init=%d network=%d sensitive=%d exec=%d xor=%d base64=%d\n",
-				newest.AST.InitCount, newest.AST.NetworkCallSites,
-				newest.AST.SensitivePathReads, newest.AST.ExecCalls,
-				newest.AST.XORAssignments, newest.AST.Base64DecodeCalls)
-		}
-	}
+	printSmokeSummary(target, pinTable, matrix, anomaly, presentCount)
 	return nil
 }
 
@@ -464,6 +269,277 @@ func enumerateMissingSignal(result analyzeJSON, expected string) error {
 		types = append(types, s.Type)
 	}
 	return fmt.Errorf("%s signal not found; got types: %s", expected, strings.Join(types, ", "))
+}
+
+// validatePinTable finds the version_pin_table signal in the analyze
+// output, validates its metadata, parses its value, and runs full
+// shape checks (module_path match, count bounds, per-pin shape).
+// Returns the parsed pinTableValue for use by the cross-signal
+// anchor check that runs once both pin table and matrix are
+// in hand.
+func validatePinTable(result analyzeJSON, wantModulePath string, rep *reporter) (pinTableValue, error) {
+	rep.step("find version_pin_table signal")
+	sig, ok := result.findSignal("version_pin_table")
+	if !ok {
+		return pinTableValue{}, enumerateMissingSignal(result, "version_pin_table")
+	}
+	rep.pass("version_pin_table present")
+
+	rep.step("validate version_pin_table metadata")
+	if err := validateMetadata(sig, "publication", "very-high", "go-publish"); err != nil {
+		return pinTableValue{}, err
+	}
+	rep.pass("metadata: group=publication forgery=very-high source=go-publish")
+
+	rep.step("validate version_pin_table value shape")
+	var pt pinTableValue
+	if err := json.Unmarshal(sig.Value, &pt); err != nil {
+		return pinTableValue{}, fmt.Errorf("unmarshal version_pin_table value: %w", err)
+	}
+	if pt.ModulePath != wantModulePath {
+		return pinTableValue{}, fmt.Errorf("expected module_path=%q, got %q", wantModulePath, pt.ModulePath)
+	}
+	if err := validatePinTableCounts(pt); err != nil {
+		return pinTableValue{}, err
+	}
+	if err := validatePinShape(pt.Pins); err != nil {
+		return pinTableValue{}, err
+	}
+	rep.pass("counts: total=%d processed=%d (cap=%d), %d pins all valid",
+		pt.VersionCountTotal, pt.VersionCountProcessed,
+		expectedProcessedCount, len(pt.Pins))
+	return pt, nil
+}
+
+// validateSourceMatrix finds the source_evolution_matrix signal,
+// validates its metadata + envelope (module_path, ecosystem, row
+// bounds), then delegates per-row shape and diff-plumbing checks
+// to focused helpers. Returns the parsed matrix and the count of
+// rows whose TagSHALocalStatus is "present" — the latter is needed
+// by the summary printer and by the cross-signal anchor check.
+func validateSourceMatrix(result analyzeJSON, wantModulePath string, rep *reporter) (matrixValue, int, error) {
+	rep.step("find source_evolution_matrix signal")
+	sig, ok := result.findSignal("source_evolution_matrix")
+	if !ok {
+		return matrixValue{}, 0, enumerateMissingSignal(result, "source_evolution_matrix")
+	}
+	rep.pass("source_evolution_matrix present")
+
+	rep.step("validate source_evolution_matrix metadata")
+	if err := validateMetadata(sig, "publication", "very-high", "source-evolution"); err != nil {
+		return matrixValue{}, 0, err
+	}
+	rep.pass("metadata: group=publication forgery=very-high source=source-evolution")
+
+	rep.step("validate source_evolution_matrix value shape")
+	var m matrixValue
+	if err := json.Unmarshal(sig.Value, &m); err != nil {
+		return matrixValue{}, 0, fmt.Errorf("unmarshal source_evolution_matrix value: %w", err)
+	}
+	if m.ModulePath != wantModulePath {
+		return matrixValue{}, 0, fmt.Errorf("matrix.module_path: expected %q, got %q", wantModulePath, m.ModulePath)
+	}
+	if m.Ecosystem != "go" {
+		return matrixValue{}, 0, fmt.Errorf("matrix.ecosystem: expected \"go\", got %q", m.Ecosystem)
+	}
+	if len(m.Rows) == 0 {
+		return matrixValue{}, 0, fmt.Errorf("matrix has zero rows; expected > 0 for a healthy module")
+	}
+	// LastN=12 default. For a single-major history (kong is all
+	// v1.x in its recent 12), MajorLeaves contributes 0 and
+	// HardCap doesn't engage. Multi-major modules see up to 16.
+	if len(m.Rows) > 20 {
+		return matrixValue{}, 0, fmt.Errorf("matrix has %d rows; HardCap=20 should bound this", len(m.Rows))
+	}
+	rep.pass("matrix: module_path=%s ecosystem=go rows=%d",
+		m.ModulePath, len(m.Rows))
+
+	rep.step("validate matrix row shape")
+	presentCount, err := validateMatrixRows(m.Rows)
+	if err != nil {
+		return matrixValue{}, 0, err
+	}
+	if presentCount == 0 {
+		return matrixValue{}, 0, fmt.Errorf("matrix has %d rows but none are present; expected most rows present for a healthy module", len(m.Rows))
+	}
+	rep.pass("rows: %d total, %d present, all status enum values valid",
+		len(m.Rows), presentCount)
+
+	rep.step("validate cross-version diff plumbing")
+	if err := validateMatrixDiffPlumbing(m.Rows); err != nil {
+		return matrixValue{}, 0, err
+	}
+	rep.pass("diff_from_previous: populated on newer rows, nil on oldest")
+
+	return m, presentCount, nil
+}
+
+// validateMatrixRows enforces the per-row shape contract: every row
+// must have a Version and TagSHALocalStatus; rows whose status is
+// "present" must have AST/Structural populated and a 40-char lower-
+// hex tag_sha sourced from proxy.golang.org. Other status values
+// (missing_from_clone, missing_origin, fetch_failed) are partial
+// rows where analysis blocks may be nil — no further shape
+// constraints at this level. Returns the count of "present" rows
+// so the caller can assert "at least one fresh row" downstream.
+func validateMatrixRows(rows []matrixRow) (int, error) {
+	presentCount := 0
+	for i, r := range rows {
+		if r.Version == "" {
+			return 0, fmt.Errorf("row[%d]: empty version", i)
+		}
+		if r.TagSHALocalStatus == "" {
+			return 0, fmt.Errorf("row[%d] (%s): empty tag_sha_local_status", i, r.Version)
+		}
+		switch r.TagSHALocalStatus {
+		case "present":
+			presentCount++
+			if r.AST == nil {
+				return 0, fmt.Errorf("row[%d] (%s, present): AST is nil", i, r.Version)
+			}
+			if r.Structural == nil {
+				return 0, fmt.Errorf("row[%d] (%s, present): Structural is nil", i, r.Version)
+			}
+			if len(r.TagSHA) != shaHexLen {
+				return 0, fmt.Errorf("row[%d] (%s): expected %d-char tag_sha, got %d (%q)",
+					i, r.Version, shaHexLen, len(r.TagSHA), r.TagSHA)
+			}
+			if !isHexLower(r.TagSHA) {
+				return 0, fmt.Errorf("row[%d] (%s): tag_sha contains non-hex: %q", i, r.Version, r.TagSHA)
+			}
+			if r.TagSHASource != "proxy.golang.org" {
+				return 0, fmt.Errorf("row[%d] (%s): expected tag_sha_source=proxy.golang.org, got %q",
+					i, r.Version, r.TagSHASource)
+			}
+		case "missing_from_clone", "missing_origin", "fetch_failed":
+			// Partial row — analysis blocks may be nil. No
+			// further shape constraints at this level.
+		default:
+			return 0, fmt.Errorf("row[%d] (%s): unknown tag_sha_local_status %q",
+				i, r.Version, r.TagSHALocalStatus)
+		}
+	}
+	return presentCount, nil
+}
+
+// validateMatrixDiffPlumbing verifies the diff-from-previous plumbing
+// at the row endpoints: the newest row should have DiffFromPrevious
+// populated when there's at least one previous "present" row to
+// diff against, and the oldest row should always have
+// DiffFromPrevious nil (nothing earlier to diff from).
+func validateMatrixDiffPlumbing(rows []matrixRow) error {
+	if len(rows) >= 2 && rows[0].TagSHALocalStatus == "present" &&
+		rows[1].TagSHALocalStatus == "present" {
+		if rows[0].DiffFromPrevious == nil {
+			return fmt.Errorf("newest row's DiffFromPrevious is nil but both rows are present")
+		}
+	}
+	last := rows[len(rows)-1]
+	if last.DiffFromPrevious != nil {
+		return fmt.Errorf("oldest row (%s) has non-nil DiffFromPrevious; expected nil", last.Version)
+	}
+	return nil
+}
+
+// validateCrossSignalAnchors confirms every "present" row's tag_sha
+// is also a pin in the version_pin_table. Proves both signals were
+// derived from the same anchor set, not independent (and possibly
+// divergent) views of the module's history. A miss here means the
+// matrix and pin table disagree on which versions are real, which
+// would invalidate the pin table's role as the matrix's anchor.
+func validateCrossSignalAnchors(matrix matrixValue, pt pinTableValue, rep *reporter) error {
+	rep.step("cross-signal: every present row's tag_sha is in pin table")
+	pinSHAs := make(map[string]struct{}, len(pt.Pins))
+	for _, p := range pt.Pins {
+		pinSHAs[p.SHA] = struct{}{}
+	}
+	for _, r := range matrix.Rows {
+		if r.TagSHALocalStatus != "present" {
+			continue
+		}
+		if _, ok := pinSHAs[r.TagSHA]; !ok {
+			return fmt.Errorf("row (%s) tag_sha=%s not found in version_pin_table.pins — cross-signal anchor broken",
+				r.Version, r.TagSHA)
+		}
+	}
+	rep.pass("all present rows anchor to a pin in version_pin_table")
+	return nil
+}
+
+// validateSourceAnomaly finds the source_evolution_anomaly signal,
+// validates its metadata, parses its value, and asserts the
+// load-bearing healthy-library invariant: a well-maintained library
+// (kong, go-retryablehttp, google/uuid) must NOT fire the anomaly.
+// Firing on a clean target indicates the joint threshold
+// (MinSpikedFeatures=2) is too aggressive and would false-positive
+// in production. Failing this assertion is the smoke binary's whole
+// reason to exist.
+func validateSourceAnomaly(result analyzeJSON, rep *reporter) (anomalyValue, error) {
+	rep.step("find source_evolution_anomaly signal")
+	sig, ok := result.findSignal("source_evolution_anomaly")
+	if !ok {
+		return anomalyValue{}, enumerateMissingSignal(result, "source_evolution_anomaly")
+	}
+	rep.pass("source_evolution_anomaly present")
+
+	rep.step("validate source_evolution_anomaly metadata")
+	if err := validateMetadata(sig, "publication", "very-high", "source-evolution"); err != nil {
+		return anomalyValue{}, err
+	}
+	rep.pass("metadata: group=publication forgery=very-high source=source-evolution")
+
+	rep.step("validate anomaly value shape — healthy library should not fire anomaly")
+	var a anomalyValue
+	if err := json.Unmarshal(sig.Value, &a); err != nil {
+		return anomalyValue{}, fmt.Errorf("unmarshal source_evolution_anomaly value: %w", err)
+	}
+	if a.AnomalyPresent {
+		return anomalyValue{}, fmt.Errorf(
+			"anomaly fired on healthy library — false positive!\n"+
+				"  first_anomalous_version: %s\n"+
+				"  previous_version:        %s\n"+
+				"  spiked_features:         %v\n"+
+				"  This indicates the multi-feature joint threshold (MinSpikedFeatures=2)\n"+
+				"  is too sensitive for legitimate package evolution. Either the target's\n"+
+				"  history has unusual features that read as a spike, or the threshold\n"+
+				"  needs tightening (more features, or near-zero baseline tolerance).",
+			a.FirstAnomalousVersion, a.PreviousVersion, a.SpikedFeatures)
+	}
+	rep.pass("anomaly_present=false (no false positive on healthy library)")
+	return a, nil
+}
+
+// printSmokeSummary writes the final all-checks-passed banner plus
+// a one-line view of each signal's headline numbers — pins+missing
+// counts for the pin table, total+present row counts for the
+// matrix, anomaly_present for the anomaly. When the newest row is
+// "present", also prints its short SHA and AST feature counts so
+// dogfood operators can spot-check what the matrix actually saw.
+func printSmokeSummary(
+	target string,
+	pinTable pinTableValue,
+	matrix matrixValue,
+	anomaly anomalyValue,
+	presentCount int,
+) {
+	fmt.Println()
+	fmt.Println("=== smoke-source-evolution: ALL CHECKS PASSED ===")
+	fmt.Printf("Target:                %s\n", target)
+	fmt.Printf("version_pin_table:     %d pins, %d missing-origin, %d fetch-failed\n",
+		len(pinTable.Pins), len(pinTable.MissingOriginVersions), len(pinTable.FetchFailedVersions))
+	fmt.Printf("matrix:                %d rows (%d present)\n", len(matrix.Rows), presentCount)
+	fmt.Printf("anomaly_present:       %v (expected: false on healthy library)\n", anomaly.AnomalyPresent)
+	if len(matrix.Rows) > 0 && matrix.Rows[0].TagSHALocalStatus == "present" {
+		newest := matrix.Rows[0]
+		fmt.Printf("Newest row:            %s @ %s\n",
+			newest.Version, newest.TagSHA[:12])
+		if newest.AST != nil {
+			fmt.Printf("Newest row AST:        init=%d network=%d sensitive=%d exec=%d xor=%d base64=%d\n",
+				newest.AST.InitCount, newest.AST.NetworkCallSites,
+				newest.AST.SensitivePathReads, newest.AST.ExecCalls,
+				newest.AST.XORAssignments, newest.AST.Base64DecodeCalls)
+		}
+	}
 }
 
 // buildTarget compiles the signatory binary into binPath.

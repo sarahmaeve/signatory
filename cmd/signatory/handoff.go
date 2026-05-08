@@ -151,10 +151,8 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 
 	// Single-destination rule: --output (file), stdout (default), and
 	// --deposit-to (pipeline service) are the three mutually exclusive
-	// sinks a rendered handoff can go to. Two of them together is a
-	// user-input mistake, caught here rather than after clone/render
-	// work has happened. --output vs stdout was already single-sink via
-	// writeHandoff's logic; this adds --deposit-to to the same rule.
+	// sinks a rendered handoff can go to. Caught here rather than
+	// after clone/render work has happened.
 	if cmd.DepositTo != "" && cmd.Output != "" {
 		return NewUsageError(fmt.Errorf(
 			"--deposit-to and --output are mutually exclusive; choose one destination"))
@@ -162,99 +160,121 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 
 	// Reconcile --intake / --intake-file (§3.4 agent-facing-contract).
 	// Intake is optional — the template falls back to an embedded
-	// default — so an empty result is fine; the readFreeText helper
-	// only cares about conflict and malformed inputs.
+	// default — so an empty result is fine; readFreeText only cares
+	// about conflict and malformed inputs.
 	intake, err := readFreeText("intake", cmd.Intake, cmd.IntakeFile)
 	if err != nil {
 		return err
 	}
 	cmd.Intake = intake
 
-	// Resolve the target to canonical form. For any input that
-	// ResolveTarget understands (GitHub shorthand, github.com URL,
-	// `repo:` canonical URI, etc.) pre-populate --name and --url
-	// from the resolved metadata, and rewrite cmd.Target itself to
-	// the HTTPS clone URL so downstream classifier-driven code
-	// (HandoffSubstitutions, applyClone) sees a form it handles
-	// natively.
-	//
-	// Non-URI / non-shorthand inputs — local filesystem paths like
-	// ~/code/thefuck, /Users/me/code/proj, ./relative — cleanly
-	// fail ResolveTarget; the rest of Run() then handles them via
-	// TargetPath as before. ResolveTarget failure is not a CLI
-	// error here; it's a signal that the target isn't a
-	// remote-repo form.
-	if resolved, err := profile.ResolveTarget(cmd.Target); err == nil {
-		if cmd.Name == "" {
-			cmd.Name = resolved.ShortName
-		}
-		// Capture the @version suffix (if any) for applyClone.
-		// CloneURL deliberately omits the version (it's the bare
-		// HTTPS git URL); the version is a separate clone-time
-		// parameter (`git clone --branch`).
-		cmd.requestedVersion = resolved.Version
-		if resolved.CloneURL != "" {
-			if cmd.URL == "" {
-				if cmd.Role == "synthesist" {
-					// Synthesist's TARGET_URL must carry the
-					// canonical URI WITH @V so its output's
-					// `target` field matches the analysts' outputs
-					// it's synthesizing — same entity, same store
-					// row. Without this, the synthesist would set
-					// target to the bare clone URL, ingest under
-					// the BARE URI, and the resulting analysis
-					// would live at a different entity from the
-					// security/provenance outputs the synthesist
-					// just rolled up. Surfaced by the halted
-					// /analyze testify@v1.11.1 dogfood.
-					cmd.URL = resolved.CanonicalURI
-				} else {
-					cmd.URL = resolved.CloneURL
-				}
-			}
-			// Feed the HTTPS URL form to downstream steps. This
-			// turns every accepted form — owner/repo,
-			// github.com/owner/repo, repo:github/owner/name — into
-			// the same effective target for --clone-dir processing
-			// (which expects a URL git can clone, not a canonical
-			// URI). The version is preserved separately on
-			// cmd.requestedVersion for applyClone's --branch arg.
-			cmd.Target = resolved.CloneURL
-		} else if cmd.Role == "synthesist" && cmd.URL == "" {
-			// Canonical-URI fallback for the synthesist role when
-			// the target is a pkg URI with no clone URL
-			// (pkg:npm/X, pkg:go/...). Without this, {TARGET_URL}
-			// renders literal in the handoff body (surfaced by
-			// the 2026-04-21 dogfood).
-			cmd.URL = resolved.CanonicalURI
-		}
+	cmd.applyTargetResolution()
+
+	precheckReport, cloneReport, err := cmd.runPrechecksAndClone(ctx)
+	if err != nil {
+		return err
 	}
 
-	// Network precheck runs early: it may fill --language and
-	// --ecosystem, which both influence later steps (template name
-	// inference, provenance-role validation).
-	var precheckReport string
+	raw, source, embedded, err := cmd.loadTemplate()
+	if err != nil {
+		return err
+	}
+
+	subs, err := cmd.buildSubstitutions(ctx, globals)
+	if err != nil {
+		return err
+	}
+
+	rendered, unfilled := config.RenderTemplate(raw, subs)
+
+	if err := cmd.dispatchOutput(ctx, rendered); err != nil {
+		return err
+	}
+
+	cmd.printReports(source, embedded, unfilled, precheckReport, cloneReport, len(rendered))
+	return nil
+}
+
+// applyTargetResolution attempts profile.ResolveTarget on cmd.Target
+// and, on success, pre-populates downstream cmd fields from the
+// resolved metadata: Name, URL, requestedVersion, and a rewritten
+// Target (set to the bare HTTPS clone URL so classifier-driven
+// downstream code — HandoffSubstitutions, applyClone — sees a form
+// it handles natively).
+//
+// Role-specific URL handling:
+//
+//   - synthesist gets the canonical URI (with @V) for {TARGET_URL}
+//     so its output's `target` field matches the analysts' outputs
+//     it's synthesizing — same entity, same store row. Without
+//     this, the synthesist would set target to the bare clone URL,
+//     ingest under the BARE URI, and the resulting analysis would
+//     live at a different entity from the security/provenance
+//     outputs it just rolled up. Surfaced by the halted /analyze
+//     testify@v1.11.1 dogfood.
+//   - other roles get the bare clone URL.
+//   - synthesist also gets a canonical-URI fallback when CloneURL
+//     is empty (pkg URI with no derivable clone URL: pkg:npm/X,
+//     pkg:go/...). Without this, {TARGET_URL} renders literal in
+//     the handoff body (surfaced by the 2026-04-21 dogfood).
+//
+// The version suffix (if any) is captured separately on
+// cmd.requestedVersion for applyClone's --branch argument; CloneURL
+// itself is the bare HTTPS git URL.
+//
+// Non-URI / non-shorthand inputs (local filesystem paths like
+// ~/code/thefuck, /Users/me/code/proj, ./relative) cleanly fail
+// ResolveTarget; this method is then a no-op and Run's downstream
+// uses TargetPath as before. ResolveTarget failure is not a CLI
+// error — it's a signal that the target isn't a remote-repo form.
+func (cmd *HandoffCmd) applyTargetResolution() {
+	resolved, err := profile.ResolveTarget(cmd.Target)
+	if err != nil {
+		return
+	}
+	if cmd.Name == "" {
+		cmd.Name = resolved.ShortName
+	}
+	cmd.requestedVersion = resolved.Version
+	if resolved.CloneURL != "" {
+		if cmd.URL == "" {
+			if cmd.Role == "synthesist" {
+				cmd.URL = resolved.CanonicalURI
+			} else {
+				cmd.URL = resolved.CloneURL
+			}
+		}
+		cmd.Target = resolved.CloneURL
+	} else if cmd.Role == "synthesist" && cmd.URL == "" {
+		cmd.URL = resolved.CanonicalURI
+	}
+}
+
+// runPrechecksAndClone runs the optional network precheck and clone
+// steps in sequence, returning their report strings (empty when the
+// corresponding step was skipped). May mutate cmd.Path with the
+// cloned path when --clone-dir was set and the user did not also
+// pass --path explicitly (--path wins; --clone-dir is the auto-fill).
+//
+// Order is load-bearing: precheck may fill --language and --ecosystem
+// (which influence template-name inference and provenance-role
+// validation); clone runs after precheck so a precheck-confirmed
+// GitHub URL is canonical. Both run BEFORE template resolution so
+// TARGET_PATH is available to the substitution map.
+func (cmd *HandoffCmd) runPrechecksAndClone(ctx context.Context) (precheckReport, cloneReport string, err error) {
 	if cmd.NetworkPrecheck {
-		report, err := cmd.applyNetworkPrecheck(ctx)
-		if err != nil {
-			return fmt.Errorf("network-precheck: %w", err)
+		report, perr := cmd.applyNetworkPrecheck(ctx)
+		if perr != nil {
+			return "", "", fmt.Errorf("network-precheck: %w", perr)
 		}
 		precheckReport = report
 	}
-
-	// Clone step: full-clone the target URL if --clone-dir was passed.
-	// Runs AFTER precheck (precheck may confirm the target is a GitHub URL)
-	// but BEFORE template resolution (so TARGET_PATH is available).
-	var cloneReport string
 	if cmd.CloneDir != "" {
-		clonedPath, report, err := cmd.applyClone(ctx)
-		if err != nil {
-			return fmt.Errorf("clone-dir: %w", err)
+		clonedPath, report, cerr := cmd.applyClone(ctx)
+		if cerr != nil {
+			return "", "", fmt.Errorf("clone-dir: %w", cerr)
 		}
 		cloneReport = report
-		// --path wins if the user set it explicitly; --clone-dir is
-		// the "auto-fill" path. We check cmd.Path here — kong leaves
-		// it empty when the user didn't pass the flag.
 		if cmd.Path == "" {
 			cmd.Path = clonedPath
 		} else if !cmd.Quiet {
@@ -265,40 +285,64 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 			fmt.Fprintf(os.Stderr, "# clone-dir: cloned to %s but --path=%s wins\n", clonedPath, cmd.Path)
 		}
 	}
+	return precheckReport, cloneReport, nil
+}
 
-	// Language stays as whatever precheck detected (or "" if
-	// undetected / no precheck). inferTemplateName maps "" to the
-	// generic security template — no hardcoded Python default.
-
+// loadTemplate resolves the handoff template, defaulting --template
+// when unset (inferTemplateName picks based on --role and detected
+// language; "" maps to the generic security template — no hardcoded
+// Python default), opens it through the resolver, and reads it into
+// memory. Returns (raw, source, embedded, error) where source names
+// where the template came from (for reportToStderr) and embedded is
+// true when it was served from the embedded fallback rather than a
+// user override.
+func (cmd *HandoffCmd) loadTemplate() ([]byte, string, bool, error) {
 	resolver, err := cmd.buildResolver()
 	if err != nil {
-		return err
+		return nil, "", false, err
 	}
-
 	templateName := cmd.Template
 	if templateName == "" {
 		templateName = inferTemplateName(cmd.Role, cmd.Language)
 	}
-
 	rc, source, embedded, err := resolver.OpenTemplate(templateName)
 	if err != nil {
-		return fmt.Errorf("load template: %w", err)
+		return nil, "", false, fmt.Errorf("load template: %w", err)
 	}
 	defer rc.Close() //nolint:errcheck // template reader close; errors here are not actionable after the read below
 	raw, err := io.ReadAll(rc)
 	if err != nil {
-		return fmt.Errorf("read template %s: %w", source, err)
+		return nil, "", false, fmt.Errorf("read template %s: %w", source, err)
 	}
+	return raw, source, embedded, nil
+}
 
-	// Validate --analysis-session-id BEFORE we open anything else
-	// or invoke network precheck side-effects — a typo'd session id
-	// should fail cheaply. The subsequent HandoffSubstitutions call
-	// simply threads the id through into the SESSION_INSTRUCTION
-	// placeholder; this block is the place where correctness is
-	// enforced.
+// buildSubstitutions validates the analysis session id (if set) and
+// prepares the placeholder map for RenderTemplate. Five sub-phases:
+//
+//  1. validateAnalysisSession (when --analysis-session-id is set):
+//     a typo'd id should fail before render. HandoffSubstitutions
+//     just threads the id through into SESSION_INSTRUCTION; this is
+//     where correctness is enforced.
+//  2. config.HandoffSubstitutions: the canonical form-resolution
+//     that returns the placeholder map.
+//  3. Ecosystem-required guard for the provenance role: error
+//     loudly if --ecosystem wasn't supplied, rather than rendering
+//     with a literal {ECOSYSTEM}.
+//  4. Synthesist evidence rollup: the synthesis-v1 template embeds
+//     it as the body of a fenced JSON block under {EVIDENCE_JSON}
+//     (M6c wiring; agent-facing-contract §3.5). Keeps store access
+//     out of the security-handoff path.
+//  5. Provenance LAYER_1_SIGNALS nudge: replaces what was previously
+//     a server-rendered JSON dump with a short MCP-pointer
+//     instruction — the agent queries the store at runtime via
+//     signatory_signals, eliminating the render-time store
+//     dependency, the race-vs-refresh concern, and the bloated
+//     handoff token count.
+func (cmd *HandoffCmd) buildSubstitutions(ctx context.Context, globals *Globals) (map[string]string, error) {
 	if cmd.AnalysisSessionID != "" {
 		if err := cmd.validateAnalysisSession(ctx, globals); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -313,74 +357,67 @@ func (cmd *HandoffCmd) Run(globals *Globals) error {
 		AnalysisSessionID: cmd.AnalysisSessionID,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Surface ecosystem-required roles before render time so the user
-	// doesn't silently get a handoff with `{ECOSYSTEM}` literal.
 	if cmd.Role == "provenance" && subs["ECOSYSTEM"] == "" {
-		return fmt.Errorf("provenance role requires --ecosystem (one of: pypi, npm, crates, go)")
+		return nil, fmt.Errorf("provenance role requires --ecosystem (one of: pypi, npm, crates, go)")
 	}
 
-	// Synthesist role needs the evidence rollup assembled from the
-	// store — the synthesis-v1 template embeds it as the body of a
-	// fenced JSON block under {EVIDENCE_JSON}. This is the M6c wiring
-	// that turns the synthesist from a store-browsing agent into a
-	// self-contained one (agent-facing-contract §3.5). Other roles
-	// don't need store access; leaving the map untouched keeps the
-	// security handoff path offline.
 	if cmd.Role == "synthesist" {
 		evidenceJSON, err := cmd.assembleSynthesisEvidence(ctx, globals)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		subs["EVIDENCE_JSON"] = evidenceJSON
 	}
 
-	// The provenance template's {LAYER_1_SIGNALS} placeholder is no
-	// longer rendered server-side. The agent now queries the store at
-	// runtime via the signatory_signals MCP tool — eliminating the
-	// render-time store dependency, the race-vs-refresh concern, and
-	// the large inlined JSON block that inflated the handoff token
-	// count. The placeholder is replaced with a short instruction
-	// pointing the agent to MCP.
 	if cmd.Role == "provenance" {
 		subs["LAYER_1_SIGNALS"] = "_Retrieve Layer-1 signals at runtime via the signatory_signals MCP tool (target = the canonical URI above). Do not WebFetch data the store already has._"
 	}
 
-	rendered, unfilled := config.RenderTemplate(raw, subs)
+	return subs, nil
+}
 
-	// Destination fork. Three mutually exclusive sinks, already
-	// validated up top:
-	//
-	//   --deposit-to SID  → POST to the pipeline service as a
-	//                       'handoff' message on that session.
-	//   --output FILE     → write rendered bytes to a file.
-	//   (neither)         → write rendered bytes to stdout.
+// dispatchOutput writes the rendered handoff to the chosen sink:
+// --deposit-to POSTs to the pipeline service, --output writes a
+// file, neither writes stdout. The mutual-exclusion guard at the
+// top of Run already validated that at most one of --deposit-to /
+// --output is set.
+func (cmd *HandoffCmd) dispatchOutput(ctx context.Context, rendered []byte) error {
 	if cmd.DepositTo != "" {
-		if err := cmd.depositRendered(ctx, rendered); err != nil {
-			return err
-		}
-	} else {
-		if err := writeHandoff(cmd.Output, cmd.Force, rendered); err != nil {
-			return err
-		}
+		return cmd.depositRendered(ctx, rendered)
 	}
+	return writeHandoff(cmd.Output, cmd.Force, rendered)
+}
 
-	if !cmd.Quiet {
-		reportToStderr(source, embedded, unfilled)
-		if precheckReport != "" {
-			fmt.Fprint(os.Stderr, precheckReport)
-		}
-		if cloneReport != "" {
-			fmt.Fprint(os.Stderr, cloneReport)
-		}
-		if cmd.DepositTo != "" {
-			fmt.Fprintf(os.Stderr, "# deposited: session=%s role=%s bytes=%d\n",
-				cmd.DepositTo, cmd.Role, len(rendered))
-		}
+// printReports writes the post-render diagnostic block to stderr:
+// template source/embedded indicator, unfilled-placeholder list,
+// precheck and clone reports (when those steps ran), and a deposit
+// confirmation (when --deposit-to was used). All of it is gated by
+// !cmd.Quiet — automation callers that asked for silent stderr get
+// exactly that.
+func (cmd *HandoffCmd) printReports(
+	source string,
+	embedded bool,
+	unfilled []string,
+	precheckReport, cloneReport string,
+	renderedBytes int,
+) {
+	if cmd.Quiet {
+		return
 	}
-	return nil
+	reportToStderr(source, embedded, unfilled)
+	if precheckReport != "" {
+		fmt.Fprint(os.Stderr, precheckReport)
+	}
+	if cloneReport != "" {
+		fmt.Fprint(os.Stderr, cloneReport)
+	}
+	if cmd.DepositTo != "" {
+		fmt.Fprintf(os.Stderr, "# deposited: session=%s role=%s bytes=%d\n",
+			cmd.DepositTo, cmd.Role, renderedBytes)
+	}
 }
 
 // depositRendered POSTs the rendered handoff to the pipeline service

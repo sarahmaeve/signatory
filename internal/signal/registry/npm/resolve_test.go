@@ -33,13 +33,24 @@ func TestNormalizeDeclaredRepoURL(t *testing.T) {
 		{"ssh alone", "ssh://git@github.com/expressjs/express.git", "https://github.com/expressjs/express"},
 		{"git@ SCP form", "git@github.com:expressjs/express.git", "https://github.com/expressjs/express"},
 		{"scoped repo", "git+https://github.com/types/node.git", "https://github.com/types/node"},
+		// git:// on github.com: the scheme is plaintext but the host
+		// anchors the identity, and we never actually clone over git://
+		// — downstream collectors hit https. Rewriting here recovers
+		// the long tail of older packages (e.g., image-size) that set
+		// repository.url once a decade ago and never updated it.
+		{"git:// github upgraded to https", "git://github.com/image-size/image-size.git", "https://github.com/image-size/image-size"},
+		{"git:// github with fragment", "git://github.com/foo/bar.git#main", "https://github.com/foo/bar"},
 
 		// Rejected forms → empty string.
 		{"empty", "", ""},
 		{"whitespace only", "   ", ""},
 		{"gitlab host", "https://gitlab.com/foo/bar.git", ""},
 		{"bitbucket host", "https://bitbucket.org/foo/bar.git", ""},
-		{"git:// plaintext protocol", "git://github.com/foo/bar.git", ""},
+		// git:// on a non-github host stays refused — the upgrade
+		// trick only works because we know github serves https on the
+		// same identity. We can't make that promise for arbitrary
+		// hosts.
+		{"git:// non-github still rejected", "git://gitlab.com/foo/bar.git", ""},
 		{"unrecognized scheme", "svn+ssh://example.com/foo", ""},
 		{"garbage", "not a url at all", ""},
 	}

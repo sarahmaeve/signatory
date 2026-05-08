@@ -199,6 +199,257 @@ func (s *SQLite) findCollateralEntities(ctx context.Context, entityIDs []string)
 	return out, nil
 }
 
+// pruneIDSet holds the chains of intermediate IDs needed to walk
+// the prune cascade: analyst_outputs and their conclusion / absence
+// / observation / pattern children, plus the entity's signals.
+// aggregatePruneCounts and executePruneDeletes both populate this
+// upfront via collectPruneIDs so the cascade walks below operate
+// on identical id sets — the structural foundation that makes
+// plan.RowsByTable equality with report.RowsByTable possible.
+type pruneIDSet struct {
+	outputIDs      []string
+	conclusionIDs  []string
+	absenceIDs     []string
+	observationIDs []string
+	patternIDs     []string
+	signalIDs      []string
+}
+
+// pruneLevel5Tables lists the tables hanging off conclusions via
+// conclusion_id. aggregatePruneCounts and executePruneDeletes walk
+// this list in identical order so adding a level-5 child table
+// updates both sides automatically.
+var pruneLevel5Tables = []string{
+	"conclusion_severity_contexts",
+	"conclusion_supersedes",
+	"conclusion_prerequisites",
+	"conclusion_remediation_hints",
+	"conclusion_related",
+}
+
+// pruneLevel4Tables lists the tables hanging off analyst_outputs
+// via output_id. Same lockstep contract as pruneLevel5Tables.
+var pruneLevel4Tables = []string{
+	"conclusions",
+	"positive_absences",
+	"observations",
+	"methodology_catalogs",
+	"output_supersedes",
+	"output_reframes_from",
+}
+
+// pruneLevel2SimpleChildren is the subset of Level-2 entity children
+// that count and delete the same way: simple "WHERE <column> IN (?...)"
+// keyed on entity_id (or project_id for dependency_observations).
+// analyst_outputs and signal_resolutions don't fit this shape and
+// are handled in their own helpers (analyst_outputs uses an OR
+// across two columns; signal_resolutions is hit by both a signal_id
+// sweep at Level-3 and an entity_id sweep at Level-2).
+var pruneLevel2SimpleChildren = []struct{ table, column string }{
+	{"postures", "entity_id"},
+	{"burns", "entity_id"},
+	{"signals", "entity_id"},
+	{"dependency_observations", "project_id"},
+	{"audit_log", "entity_id"},
+}
+
+// pruneCitationKind binds a citation parent_kind enum value to the
+// ID list it references. The three kinds are walked in order by
+// both the count and delete helpers.
+type pruneCitationKind struct {
+	kind    string
+	idsFrom func(pruneIDSet) []string
+}
+
+var pruneCitationKinds = []pruneCitationKind{
+	{"conclusion", func(ids pruneIDSet) []string { return ids.conclusionIDs }},
+	{"positive_absence", func(ids pruneIDSet) []string { return ids.absenceIDs }},
+	{"observation", func(ids pruneIDSet) []string { return ids.observationIDs }},
+}
+
+// collectPruneIDs walks the analyst_outputs → conclusions / absences
+// / observations / methodology_patterns chain plus the entity →
+// signals chain, returning every ID needed for the per-level
+// cascade. Used in lockstep by aggregatePruneCounts (under a
+// read-only tx providing a consistent snapshot for planning) and
+// executePruneDeletes (under a read-write tx that will then issue
+// the deletes); the outputs must be identical or the
+// TestPruneEntities_PlanMatchesReport invariant fails.
+//
+// Caller must guarantee non-empty entityIDs — inPlaceholders
+// panics on zero, by design (see TestInPlaceholders_PanicOnZero).
+func collectPruneIDs(ctx context.Context, tx *sql.Tx, entityIDs []string) (pruneIDSet, error) {
+	var ids pruneIDSet
+	var err error
+	ids.outputIDs, err = collectIDs(ctx, tx,
+		`SELECT id FROM analyst_outputs WHERE entity_id IN `+inPlaceholders(len(entityIDs))+
+			` OR collected_from_entity_id IN `+inPlaceholders(len(entityIDs)),
+		doubleArgs(entityIDs)...)
+	if err != nil {
+		return ids, fmt.Errorf("collect output ids: %w", err)
+	}
+	if len(ids.outputIDs) > 0 {
+		ids.conclusionIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM conclusions WHERE output_id IN `+inPlaceholders(len(ids.outputIDs)),
+			toAnyArgs(ids.outputIDs)...)
+		if err != nil {
+			return ids, fmt.Errorf("collect conclusion ids: %w", err)
+		}
+		ids.absenceIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM positive_absences WHERE output_id IN `+inPlaceholders(len(ids.outputIDs)),
+			toAnyArgs(ids.outputIDs)...)
+		if err != nil {
+			return ids, fmt.Errorf("collect absence ids: %w", err)
+		}
+		ids.observationIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM observations WHERE output_id IN `+inPlaceholders(len(ids.outputIDs)),
+			toAnyArgs(ids.outputIDs)...)
+		if err != nil {
+			return ids, fmt.Errorf("collect observation ids: %w", err)
+		}
+		ids.patternIDs, err = collectIDs(ctx, tx,
+			`SELECT id FROM methodology_patterns WHERE output_id IN `+inPlaceholders(len(ids.outputIDs)),
+			toAnyArgs(ids.outputIDs)...)
+		if err != nil {
+			return ids, fmt.Errorf("collect pattern ids: %w", err)
+		}
+	}
+	ids.signalIDs, err = collectIDs(ctx, tx,
+		`SELECT id FROM signals WHERE entity_id IN `+inPlaceholders(len(entityIDs)),
+		toAnyArgs(entityIDs)...)
+	if err != nil {
+		return ids, fmt.Errorf("collect signal ids: %w", err)
+	}
+	return ids, nil
+}
+
+// countLevel5 counts conclusion-children rows that executePruneDeletes
+// will delete in its Level-5 sweep. Walks pruneLevel5Tables — the
+// shared list keeps the count and delete sides in lockstep.
+func countLevel5(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	for _, table := range pruneLevel5Tables {
+		n, err := countByIDs(ctx, tx, table, "conclusion_id", ids.conclusionIDs)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			counts[table] = n
+		}
+	}
+	return nil
+}
+
+// countCitations sums citation rows across the three parent_kind
+// values (conclusion, positive_absence, observation), returning
+// the total. The caller stores it under a single "citations" key
+// — same shape as executePruneDeletes, which sums via += into
+// counts["citations"] across the three DELETE passes.
+func countCitations(ctx context.Context, tx *sql.Tx, ids pruneIDSet) (int, error) {
+	total := 0
+	for _, ck := range pruneCitationKinds {
+		kindIDs := ck.idsFrom(ids)
+		if len(kindIDs) == 0 {
+			continue
+		}
+		var n int
+		q := `SELECT COUNT(*) FROM citations WHERE parent_kind = ? AND parent_id IN ` + inPlaceholders(len(kindIDs))
+		args := append([]any{ck.kind}, toAnyArgs(kindIDs)...)
+		if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+			return 0, fmt.Errorf("count citations/%s: %w", ck.kind, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// countMethodologyChain counts the methodology_pattern_composes
+// (keyed on pattern_id) and methodology_patterns (keyed on output_id)
+// rows. Patterns chain to outputs directly via output_id; catalogs
+// use output_id as their PK so they're handled by the Level-4 sweep
+// instead.
+func countMethodologyChain(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	if n, err := countByIDs(ctx, tx, "methodology_pattern_composes", "pattern_id", ids.patternIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["methodology_pattern_composes"] = n
+	}
+	if n, err := countByIDs(ctx, tx, "methodology_patterns", "output_id", ids.outputIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["methodology_patterns"] = n
+	}
+	return nil
+}
+
+// countLevel4 counts analyst_output-children rows that
+// executePruneDeletes will delete in its Level-4 sweep. Walks
+// pruneLevel4Tables — same lockstep contract as countLevel5.
+func countLevel4(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	for _, table := range pruneLevel4Tables {
+		n, err := countByIDs(ctx, tx, table, "output_id", ids.outputIDs)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			counts[table] = n
+		}
+	}
+	return nil
+}
+
+// countSignalChildren counts signal_evidence (keyed on signal_id)
+// and signal_resolutions (union of signal_id sweep + entity_id
+// sweep). The signal_resolutions union matches what executePruneDeletes
+// achieves via two sequential DELETEs (the second finds zero rows
+// after the first removed them), so a single SELECT COUNT with OR
+// across both clauses gives the same total without double-counting.
+func countSignalChildren(ctx context.Context, tx *sql.Tx, ids pruneIDSet, entityIDs []string, counts map[string]int) error {
+	if n, err := countByIDs(ctx, tx, "signal_evidence", "signal_id", ids.signalIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["signal_evidence"] = n
+	}
+	sigResCount, err := countSignalResolutions(ctx, tx, ids.signalIDs, entityIDs)
+	if err != nil {
+		return err
+	}
+	if sigResCount > 0 {
+		counts["signal_resolutions"] = sigResCount
+	}
+	return nil
+}
+
+// countDirectEntityChildren counts the Level-2 tables that hang
+// directly off entities: analyst_outputs (special-case OR across
+// entity_id and collected_from_entity_id; executePruneDeletes does
+// two DELETEs whose counts sum, the OR yields the same total) plus
+// the simple table list pruneLevel2SimpleChildren.
+//
+// signal_resolutions is intentionally NOT in this helper — its
+// entity_id sweep on the delete side belongs to Level 2 but the
+// count side already handled it via the union in countSignalChildren.
+func countDirectEntityChildren(ctx context.Context, tx *sql.Tx, entityIDs []string, counts map[string]int) error {
+	var aoCount int
+	q := `SELECT COUNT(*) FROM analyst_outputs WHERE entity_id IN ` + inPlaceholders(len(entityIDs)) +
+		` OR collected_from_entity_id IN ` + inPlaceholders(len(entityIDs))
+	if err := tx.QueryRowContext(ctx, q, doubleArgs(entityIDs)...).Scan(&aoCount); err != nil {
+		return fmt.Errorf("count analyst_outputs: %w", err)
+	}
+	if aoCount > 0 {
+		counts["analyst_outputs"] = aoCount
+	}
+	for _, sp := range pruneLevel2SimpleChildren {
+		n, err := countByIDs(ctx, tx, sp.table, sp.column, entityIDs)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			counts[sp.table] = n
+		}
+	}
+	return nil
+}
+
 // aggregatePruneCounts mirrors executePruneDeletes' walk in count
 // mode, returning a per-table row-count map keyed by the same labels
 // executePruneDeletes uses. plan.RowsByTable equality with
@@ -206,199 +457,55 @@ func (s *SQLite) findCollateralEntities(ctx context.Context, entityIDs []string)
 // touching the same set of tables with the same labels.
 //
 // Adding a new table to executePruneDeletes REQUIRES adding the same
-// table here. TestPruneEntities_PlanMatchesReport catches the
-// divergence at test time.
+// table here. The shared pruneLevel5Tables / pruneLevel4Tables /
+// pruneLevel2SimpleChildren / pruneCitationKinds slices make most
+// such additions a single-line change that updates both sides.
+// TestPruneEntities_PlanMatchesReport catches any divergence.
 //
 // Implementation: collects intermediate ID lists (output, conclusion,
-// absence, observation, signal, pattern) inside one read-only tx, then
-// runs COUNT(*) per table using those ID sieves. The ID-collection
-// phase mirrors executePruneDeletes' shape exactly so additions stay
-// in lockstep. The read-only tx provides snapshot semantics — without
-// it, a concurrent INSERT mid-walk could land between two of our
-// counts and the aggregate would no longer be self-consistent.
+// absence, observation, pattern, signal) inside one read-only tx via
+// collectPruneIDs, then runs paired count helpers per cascade level.
+// The read-only tx provides snapshot semantics — without it, a
+// concurrent INSERT mid-walk could land between two of our counts and
+// the aggregate would no longer be self-consistent.
 func (s *SQLite) aggregatePruneCounts(ctx context.Context, entityIDs []string) (map[string]int, error) {
 	counts := map[string]int{}
 	if len(entityIDs) == 0 {
 		return counts, nil
 	}
-
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("begin read-only tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only tx; rollback releases the snapshot, no error to act on
 
-	// --- Step 1: collect ID sieves (mirrors executePruneDeletes lines ~345-373).
-	outputIDs, err := collectIDs(ctx, tx,
-		`SELECT id FROM analyst_outputs WHERE entity_id IN `+inPlaceholders(len(entityIDs))+
-			` OR collected_from_entity_id IN `+inPlaceholders(len(entityIDs)),
-		doubleArgs(entityIDs)...)
+	ids, err := collectPruneIDs(ctx, tx, entityIDs)
 	if err != nil {
-		return nil, fmt.Errorf("collect output ids: %w", err)
+		return nil, err
 	}
 
-	var conclusionIDs, absenceIDs, observationIDs, patternIDs []string
-	if len(outputIDs) > 0 {
-		conclusionIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM conclusions WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, fmt.Errorf("collect conclusion ids: %w", err)
-		}
-		absenceIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM positive_absences WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, fmt.Errorf("collect absence ids: %w", err)
-		}
-		observationIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM observations WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, fmt.Errorf("collect observation ids: %w", err)
-		}
-		patternIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM methodology_patterns WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, fmt.Errorf("collect pattern ids: %w", err)
-		}
+	if err := countLevel5(ctx, tx, ids, counts); err != nil {
+		return nil, err
 	}
-
-	signalIDs, err := collectIDs(ctx, tx,
-		`SELECT id FROM signals WHERE entity_id IN `+inPlaceholders(len(entityIDs)),
-		toAnyArgs(entityIDs)...)
+	citationCount, err := countCitations(ctx, tx, ids)
 	if err != nil {
-		return nil, fmt.Errorf("collect signal ids: %w", err)
-	}
-
-	// --- Step 2: COUNT each table executePruneDeletes deletes from.
-
-	// Level 5: conclusion children (mirrors lines ~377-392).
-	for _, sp := range []struct{ table, column string }{
-		{"conclusion_severity_contexts", "conclusion_id"},
-		{"conclusion_supersedes", "conclusion_id"},
-		{"conclusion_prerequisites", "conclusion_id"},
-		{"conclusion_remediation_hints", "conclusion_id"},
-		{"conclusion_related", "conclusion_id"},
-	} {
-		n, err := countByIDs(ctx, tx, sp.table, sp.column, conclusionIDs)
-		if err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			counts[sp.table] = n
-		}
-	}
-
-	// Citations — three passes per kind, summed under "citations"
-	// (mirrors lines ~394-416).
-	citationCount := 0
-	for _, kc := range []struct {
-		kind string
-		ids  []string
-	}{
-		{"conclusion", conclusionIDs},
-		{"positive_absence", absenceIDs},
-		{"observation", observationIDs},
-	} {
-		if len(kc.ids) == 0 {
-			continue
-		}
-		var n int
-		q := `SELECT COUNT(*) FROM citations WHERE parent_kind = ? AND parent_id IN ` + inPlaceholders(len(kc.ids))
-		args := append([]any{kc.kind}, toAnyArgs(kc.ids)...)
-		if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
-			return nil, fmt.Errorf("count citations/%s: %w", kc.kind, err)
-		}
-		citationCount += n
+		return nil, err
 	}
 	if citationCount > 0 {
 		counts["citations"] = citationCount
 	}
-
-	// Methodology pattern chain (mirrors lines ~422-438).
-	if n, err := countByIDs(ctx, tx, "methodology_pattern_composes", "pattern_id", patternIDs); err != nil {
-		return nil, err
-	} else if n > 0 {
-		counts["methodology_pattern_composes"] = n
-	}
-	if n, err := countByIDs(ctx, tx, "methodology_patterns", "output_id", outputIDs); err != nil {
-		return nil, err
-	} else if n > 0 {
-		counts["methodology_patterns"] = n
-	}
-
-	// Level 4: output children (mirrors lines ~441-458).
-	for _, table := range []string{
-		"conclusions", "positive_absences", "observations",
-		"methodology_catalogs", "output_supersedes", "output_reframes_from",
-	} {
-		n, err := countByIDs(ctx, tx, table, "output_id", outputIDs)
-		if err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			counts[table] = n
-		}
-	}
-
-	// Level 3: signals' children (mirrors lines ~460-480).
-	if n, err := countByIDs(ctx, tx, "signal_evidence", "signal_id", signalIDs); err != nil {
-		return nil, err
-	} else if n > 0 {
-		counts["signal_evidence"] = n
-	}
-
-	// signal_resolutions: union of the signal_id sweep AND the entity_id
-	// sweep. Apply does these as two sequential DELETEs that sum their
-	// counts; a single SELECT with OR gets the same count (rows that
-	// match both clauses contribute once, matching the second DELETE
-	// finding zero rows after the first removed them).
-	sigResCount, err := countSignalResolutions(ctx, tx, signalIDs, entityIDs)
-	if err != nil {
+	if err := countMethodologyChain(ctx, tx, ids, counts); err != nil {
 		return nil, err
 	}
-	if sigResCount > 0 {
-		counts["signal_resolutions"] = sigResCount
+	if err := countLevel4(ctx, tx, ids, counts); err != nil {
+		return nil, err
 	}
-
-	// Level 2: direct entity children (mirrors lines ~493-511).
-	//
-	// analyst_outputs is counted via OR across both columns: apply does
-	// two DELETEs (entity_id then collected_from_entity_id) that sum,
-	// but the second finds zero rows after the first removed them, so
-	// SELECT COUNT WHERE entity_id IN ... OR collected_from_entity_id
-	// IN ... gives the same total without double-counting cross-refs.
-	var analystOutputsCount int
-	{
-		q := `SELECT COUNT(*) FROM analyst_outputs WHERE entity_id IN ` + inPlaceholders(len(entityIDs)) +
-			` OR collected_from_entity_id IN ` + inPlaceholders(len(entityIDs))
-		if err := tx.QueryRowContext(ctx, q, doubleArgs(entityIDs)...).Scan(&analystOutputsCount); err != nil {
-			return nil, fmt.Errorf("count analyst_outputs: %w", err)
-		}
+	if err := countSignalChildren(ctx, tx, ids, entityIDs, counts); err != nil {
+		return nil, err
 	}
-	if analystOutputsCount > 0 {
-		counts["analyst_outputs"] = analystOutputsCount
+	if err := countDirectEntityChildren(ctx, tx, entityIDs, counts); err != nil {
+		return nil, err
 	}
-
-	for _, sp := range []struct{ table, column string }{
-		{"postures", "entity_id"},
-		{"burns", "entity_id"},
-		{"signals", "entity_id"},
-		{"dependency_observations", "project_id"},
-		{"audit_log", "entity_id"},
-	} {
-		n, err := countByIDs(ctx, tx, sp.table, sp.column, entityIDs)
-		if err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			counts[sp.table] = n
-		}
-	}
-
-	// Level 1: entities themselves.
 	if n, err := countByIDs(ctx, tx, "entities", "id", entityIDs); err != nil {
 		return nil, err
 	} else if n > 0 {
@@ -764,171 +871,116 @@ func reinstallTriggers(ctx context.Context, tx *sql.Tx, triggers []appendOnlyTri
 	return nil
 }
 
-// executePruneDeletes runs the full cascade for a set of entity
-// IDs. Order matters: deepest children first, then working up
-// toward the entity row. FK constraints enforce this ordering at
-// commit time, but following it in the statements themselves keeps
-// error messages pointed at the true cause.
-//
-// Returns the actual per-table row counts observed during the
-// deletes.
-func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (map[string]int, error) {
-	counts := map[string]int{}
-
-	// Collect output_ids + their conclusion / absence / observation /
-	// methodology-catalog child IDs so the deeply-nested citations
-	// and conclusion_* tables can be pruned cleanly.
-	outputIDs, err := collectIDs(ctx, tx,
-		`SELECT id FROM analyst_outputs WHERE entity_id IN `+inPlaceholders(len(entityIDs))+
-			` OR collected_from_entity_id IN `+inPlaceholders(len(entityIDs)),
-		doubleArgs(entityIDs)...)
-	if err != nil {
-		return nil, fmt.Errorf("collect output ids: %w", err)
-	}
-
-	var conclusionIDs, absenceIDs, observationIDs []string
-	if len(outputIDs) > 0 {
-		conclusionIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM conclusions WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, err
-		}
-		absenceIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM positive_absences WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, err
-		}
-		observationIDs, err = collectIDs(ctx, tx,
-			`SELECT id FROM observations WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Level 5: children of conclusions / absences / observations /
-	// methodology patterns.
-	for _, spec := range []struct {
-		table, column string
-		ids           []string
-	}{
-		{"conclusion_severity_contexts", "conclusion_id", conclusionIDs},
-		{"conclusion_supersedes", "conclusion_id", conclusionIDs},
-		{"conclusion_prerequisites", "conclusion_id", conclusionIDs},
-		{"conclusion_remediation_hints", "conclusion_id", conclusionIDs},
-		{"conclusion_related", "conclusion_id", conclusionIDs},
-	} {
-		if n, err := deleteByIDs(ctx, tx, spec.table, spec.column, spec.ids); err != nil {
-			return nil, err
+// deleteLevel5 deletes conclusion-children rows in the order
+// pruneLevel5Tables specifies. The shared table list keeps this
+// sweep in lockstep with countLevel5; adding a level-5 child table
+// is a single-line change that updates both sides.
+func deleteLevel5(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	for _, table := range pruneLevel5Tables {
+		if n, err := deleteByIDs(ctx, tx, table, "conclusion_id", ids.conclusionIDs); err != nil {
+			return err
 		} else if n > 0 {
-			counts[spec.table] = n
+			counts[table] = n
 		}
 	}
+	return nil
+}
 
-	// Citations (parented by kind + id — three passes, one per kind).
-	for _, spec := range []struct {
-		kind string
-		ids  []string
-	}{
-		{"conclusion", conclusionIDs},
-		{"positive_absence", absenceIDs},
-		{"observation", observationIDs},
-	} {
-		if len(spec.ids) == 0 {
+// deleteCitations runs three DELETE passes (one per parent_kind),
+// summing the row counts under a single "citations" key. Returns
+// the running total so the caller stores it like
+// counts["citations"] = total — same shape as countCitations,
+// which sums via local accumulator across the three SELECT COUNT
+// passes.
+func deleteCitations(ctx context.Context, tx *sql.Tx, ids pruneIDSet) (int, error) {
+	total := 0
+	for _, ck := range pruneCitationKinds {
+		kindIDs := ck.idsFrom(ids)
+		if len(kindIDs) == 0 {
 			continue
 		}
-		placeholders := inPlaceholders(len(spec.ids))
+		placeholders := inPlaceholders(len(kindIDs))
 		//nolint:gosec // G202: placeholders is a generated (?,?,?) string from an integer count, not user input; actual values bind via ExecContext args below
 		q := `DELETE FROM citations WHERE parent_kind = ? AND parent_id IN ` + placeholders
-		args := append([]any{spec.kind}, toAnyArgs(spec.ids)...)
+		args := append([]any{ck.kind}, toAnyArgs(kindIDs)...)
 		r, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("delete citations/%s: %w", spec.kind, err)
+			return 0, fmt.Errorf("delete citations/%s: %w", ck.kind, err)
 		}
 		n, err := r.RowsAffected()
 		if err != nil {
-			return nil, fmt.Errorf("rows affected after deleting citations/%s: %w", spec.kind, err)
+			return 0, fmt.Errorf("rows affected after deleting citations/%s: %w", ck.kind, err)
 		}
-		counts["citations"] += int(n)
+		total += int(n)
 	}
+	return total, nil
+}
 
-	// Methodology chain: patterns reference analyst_outputs directly
-	// via output_id (NOT via an intermediate catalog id); catalogs
-	// use output_id itself as their PK. So both chain to output_id
-	// without a middle-layer id scan.
-	if len(outputIDs) > 0 {
-		patternIDs, err := collectIDs(ctx, tx,
-			`SELECT id FROM methodology_patterns WHERE output_id IN `+inPlaceholders(len(outputIDs)),
-			toAnyArgs(outputIDs)...)
-		if err != nil {
-			return nil, err
-		}
-		if n, err := deleteByIDs(ctx, tx, "methodology_pattern_composes", "pattern_id", patternIDs); err != nil {
-			return nil, err
-		} else if n > 0 {
-			counts["methodology_pattern_composes"] = n
-		}
-		if n, err := deleteByIDs(ctx, tx, "methodology_patterns", "output_id", outputIDs); err != nil {
-			return nil, err
-		} else if n > 0 {
-			counts["methodology_patterns"] = n
-		}
+// deleteMethodologyChain deletes methodology_pattern_composes
+// (keyed on pattern_id) and methodology_patterns (keyed on
+// output_id). Patterns reference analyst_outputs directly via
+// output_id (NOT via an intermediate catalog id); catalogs use
+// output_id itself as their PK and are handled by the Level-4
+// sweep below.
+func deleteMethodologyChain(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	if n, err := deleteByIDs(ctx, tx, "methodology_pattern_composes", "pattern_id", ids.patternIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["methodology_pattern_composes"] = n
 	}
+	if n, err := deleteByIDs(ctx, tx, "methodology_patterns", "output_id", ids.outputIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["methodology_patterns"] = n
+	}
+	return nil
+}
 
-	// Level 4: children of analyst_outputs.
-	for _, spec := range []struct {
-		table string
-		ids   []string
-	}{
-		{"conclusions", outputIDs},
-		{"positive_absences", outputIDs},
-		{"observations", outputIDs},
-		{"methodology_catalogs", outputIDs},
-		{"output_supersedes", outputIDs},
-		{"output_reframes_from", outputIDs},
-	} {
-		if n, err := deleteByIDs(ctx, tx, spec.table, "output_id", spec.ids); err != nil {
-			return nil, err
+// deleteLevel4 deletes analyst_output-children rows in the order
+// pruneLevel4Tables specifies. Lockstep contract with countLevel4
+// via the shared table list.
+func deleteLevel4(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	for _, table := range pruneLevel4Tables {
+		if n, err := deleteByIDs(ctx, tx, table, "output_id", ids.outputIDs); err != nil {
+			return err
 		} else if n > 0 {
-			counts[spec.table] = n
+			counts[table] = n
 		}
 	}
+	return nil
+}
 
-	// Level 3: signals' children (signal_evidence keyed on signal_id,
-	// signal_resolutions keyed on signal_id) before the signals
-	// themselves.
-	if len(entityIDs) > 0 {
-		signalIDs, err := collectIDs(ctx, tx,
-			`SELECT id FROM signals WHERE entity_id IN `+inPlaceholders(len(entityIDs)),
-			toAnyArgs(entityIDs)...)
-		if err != nil {
-			return nil, err
-		}
-		if n, err := deleteByIDs(ctx, tx, "signal_evidence", "signal_id", signalIDs); err != nil {
-			return nil, err
-		} else if n > 0 {
-			counts["signal_evidence"] = n
-		}
-		if n, err := deleteByIDs(ctx, tx, "signal_resolutions", "signal_id", signalIDs); err != nil {
-			return nil, err
-		} else if n > 0 {
-			counts["signal_resolutions"] = n
-		}
+// deleteSignalChildren deletes signal_evidence and signal_resolutions
+// keyed on signal_id. signal_resolutions also gets an entity_id sweep
+// in deleteDirectEntityChildren below — that sweep is the
+// belt-and-suspenders pass catching cross-entity rows where a
+// signal_resolutions row's entity_id matches a pruned entity but
+// its signal_id doesn't (possible under the cross-entity-consistency
+// gap documented by sqlite_security_test.go). counts["signal_resolutions"]
+// uses += in the entity_id sweep so the two passes accumulate
+// correctly.
+func deleteSignalChildren(ctx context.Context, tx *sql.Tx, ids pruneIDSet, counts map[string]int) error {
+	if n, err := deleteByIDs(ctx, tx, "signal_evidence", "signal_id", ids.signalIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["signal_evidence"] = n
 	}
+	if n, err := deleteByIDs(ctx, tx, "signal_resolutions", "signal_id", ids.signalIDs); err != nil {
+		return err
+	} else if n > 0 {
+		counts["signal_resolutions"] = n
+	}
+	return nil
+}
 
-	// Level 2: direct children of entities.
-	//
-	// signal_resolutions gains an entity_id sweep from v12 (orphan-
-	// prevention audit; design/orphanage.md). Without it, pruning
-	// entity X would leave signal_resolutions rows whose entity_id=X
-	// but whose signal_id doesn't belong to X's signals (possible
-	// under the cross-entity-consistency gap documented by
-	// sqlite_security_test.go), and the subsequent DELETE FROM
-	// entities would fail the new FK constraint. The Level-3 sweep
-	// above already removes rows by signal_id — this sweep is the
-	// belt-and-suspenders pass catching the cross-entity case.
+// deleteDirectEntityChildren deletes the Level-2 tables that hang
+// directly off entities. analyst_outputs gets two passes (entity_id
+// then collected_from_entity_id) summed via counts[c.table] += n.
+// signal_resolutions gets a third pass here (after deleteSignalChildren's
+// signal_id sweep) — the orphan-prevention belt-and-suspenders from
+// v12 (design/orphanage.md). The += accumulator handles both
+// double-passes uniformly.
+func deleteDirectEntityChildren(ctx context.Context, tx *sql.Tx, entityIDs []string, counts map[string]int) error {
 	directChildren := []struct{ table, column string }{
 		{"analyst_outputs", "entity_id"},
 		{"analyst_outputs", "collected_from_entity_id"},
@@ -941,15 +993,59 @@ func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (m
 	}
 	for _, c := range directChildren {
 		if n, err := deleteByIDs(ctx, tx, c.table, c.column, entityIDs); err != nil {
-			return nil, err
+			return err
 		} else if n > 0 {
-			// Key by table; the "analyst_outputs" pass happens twice
-			// (entity_id + collected_from), we sum them.
 			counts[c.table] += n
 		}
 	}
+	return nil
+}
 
-	// Level 1: entities themselves.
+// executePruneDeletes runs the full cascade for a set of entity
+// IDs. Order matters: deepest children first, then working up
+// toward the entity row. FK constraints enforce this ordering at
+// commit time, but following it in the statements themselves keeps
+// error messages pointed at the true cause.
+//
+// Mirrors aggregatePruneCounts step-for-step via shared
+// infrastructure (collectPruneIDs, pruneLevel5Tables,
+// pruneLevel4Tables, pruneCitationKinds) so adding a table to one
+// side updates the other automatically.
+// TestPruneEntities_PlanMatchesReport asserts the resulting
+// counts maps match exactly.
+//
+// Returns the actual per-table row counts observed during the
+// deletes.
+func executePruneDeletes(ctx context.Context, tx *sql.Tx, entityIDs []string) (map[string]int, error) {
+	counts := map[string]int{}
+
+	ids, err := collectPruneIDs(ctx, tx, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := deleteLevel5(ctx, tx, ids, counts); err != nil {
+		return nil, err
+	}
+	citationCount, err := deleteCitations(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if citationCount > 0 {
+		counts["citations"] = citationCount
+	}
+	if err := deleteMethodologyChain(ctx, tx, ids, counts); err != nil {
+		return nil, err
+	}
+	if err := deleteLevel4(ctx, tx, ids, counts); err != nil {
+		return nil, err
+	}
+	if err := deleteSignalChildren(ctx, tx, ids, counts); err != nil {
+		return nil, err
+	}
+	if err := deleteDirectEntityChildren(ctx, tx, entityIDs, counts); err != nil {
+		return nil, err
+	}
 	if n, err := deleteByIDs(ctx, tx, "entities", "id", entityIDs); err != nil {
 		return nil, err
 	} else if n > 0 {
