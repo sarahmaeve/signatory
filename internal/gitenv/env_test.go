@@ -395,20 +395,141 @@ func TestNewCmd_DoesNotSetWaitDelay(t *testing.T) {
 }
 
 // TestNewCmd_PassesArgs locks the argv passthrough — args supplied
-// to NewCmd must reach cmd.Args verbatim, prefixed only by the "git"
-// binary name (cmd.Args[0] convention). Catches a regression where
-// NewCmd accidentally rewrites or filters args.
+// to NewCmd must reach cmd.Args verbatim, with "git" as argv[0] and
+// the safeOverrides "-c k=v" prefix between them. Catches a
+// regression where NewCmd accidentally rewrites or filters user
+// args.
+//
+// The suffix-equality form (rather than full-slice equality)
+// decouples this test from the file-vector override catalog, which
+// is locked separately by TestNewCmd_InjectsConfigOverrides. The two
+// concerns — "user args are passed verbatim" and "the override
+// catalog is what we documented" — failing independently makes the
+// failure mode legible to the reader.
 //
 // Revert proof: change NewCmd to e.g. exec.CommandContext(ctx, "git",
-// args[1:]...) (drop the first arg); this test fails because
-// cmd.Args[1] is no longer "log".
+// args[1:]...) (drop the first user arg); this test fails because
+// the suffix is no longer ["log", "--oneline", "-n", "5"].
 func TestNewCmd_PassesArgs(t *testing.T) {
 	t.Parallel()
 	cmd := NewCmd(t.Context(), "log", "--oneline", "-n", "5")
-	assert.Equal(t,
-		[]string{"git", "log", "--oneline", "-n", "5"},
-		cmd.Args,
-		"NewCmd must pass args verbatim with 'git' as argv[0]")
+	require.Equal(t, "git", cmd.Args[0],
+		"argv[0] must be the git binary")
+	suffix := []string{"log", "--oneline", "-n", "5"}
+	require.GreaterOrEqual(t, len(cmd.Args), len(suffix)+1,
+		"cmd.Args must carry at least argv[0] plus the user args (overrides may extend it)")
+	assert.Equal(t, suffix,
+		cmd.Args[len(cmd.Args)-len(suffix):],
+		"NewCmd must pass user args verbatim as the cmd.Args suffix")
+}
+
+// TestNewCmd_InjectsConfigOverrides locks the file-vector defense
+// for CVE-2025-41390 / TALOS-2025-2243 (CWE-829). Every git
+// subprocess signatory spawns must carry a `-c <key>=<value>` prefix
+// that neutralizes the on-disk `.git/config` directives reachable by
+// our command set: gpg.program (`git log --format=%G?`), core.hooksPath
+// (`git fetch` reference-transaction hook), credential.helper,
+// protocol.{file,ext}.allow, plus defense-in-depth for directives we
+// don't currently reach (core.fsmonitor, core.pager, core.sshCommand).
+//
+// The catalog is named explicitly here (rather than introspecting an
+// exported safeOverrides slice) so a silent edit that drops a
+// documented override fails this test, not just the next pentest.
+// See design/analysis/cve-2025-41390.md for the threat shape and the
+// per-entry rationale.
+//
+// Revert proof: remove the safeOverrides prepend in NewCmd; every
+// `required` lookup below fails because cmd.Args no longer carries
+// any "-c" pair.
+func TestNewCmd_InjectsConfigOverrides(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmd(t.Context(), "log")
+
+	required := []string{
+		"gpg.program=/usr/bin/false",
+		"gpg.openpgp.program=/usr/bin/false",
+		"gpg.x509.program=/usr/bin/false",
+		"gpg.ssh.program=/usr/bin/false",
+		"core.hooksPath=/dev/null",
+		"core.fsmonitor=",
+		"core.pager=cat",
+		"core.sshCommand=",
+		"credential.helper=",
+		"protocol.file.allow=user",
+		"protocol.ext.allow=never",
+	}
+	for _, want := range required {
+		// Walk pairs: argv shape is git, -c, k=v, -c, k=v, ...,
+		// user-args. Stop at len-1 so the i+1 lookup is in-bounds.
+		found := false
+		for i := 1; i < len(cmd.Args)-1; i++ {
+			if cmd.Args[i] == "-c" && cmd.Args[i+1] == want {
+				found = true
+				break
+			}
+		}
+		assert.Truef(t, found,
+			"config-override %q must appear as a `-c %s` pair in cmd.Args (catalog regression — see design/analysis/cve-2025-41390.md)",
+			want, want)
+	}
+}
+
+// TestNewCmd_OverridesPrecedeUserArgs locks the argv ordering. Git
+// applies `-c key=value` only when those flags appear BEFORE the
+// subcommand; a `-c` flag after the subcommand is parsed as a
+// subcommand argument and the directive silently does not apply.
+// Appending the override slice instead of prepending would leave the
+// file-vector defense off while looking on by inspection of cmd.Args
+// alone.
+//
+// Revert proof: change NewCmd to append rather than prepend the
+// override slice; this test fails because the first user arg ("log")
+// appears before any "-c" entry.
+func TestNewCmd_OverridesPrecedeUserArgs(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmd(t.Context(), "log", "--oneline")
+
+	firstUserIdx, lastOverrideValueIdx := -1, -1
+	for i, a := range cmd.Args {
+		switch a {
+		case "log":
+			if firstUserIdx == -1 {
+				firstUserIdx = i
+			}
+		case "-c":
+			// Track the index of the value following the latest
+			// -c (i+1); that's the right-most position any override
+			// occupies in argv.
+			lastOverrideValueIdx = i + 1
+		}
+	}
+	require.NotEqual(t, -1, firstUserIdx,
+		"user arg 'log' must appear in cmd.Args")
+	require.NotEqual(t, -1, lastOverrideValueIdx,
+		"at least one '-c <override>' pair must appear in cmd.Args")
+	assert.Less(t, lastOverrideValueIdx, firstUserIdx,
+		"every safe -c override must precede the first user arg — git ignores -c after the subcommand")
+}
+
+// TestNewCloneCmd_AlsoInjectsConfigOverrides locks the symmetry
+// between constructors for the file-vector defense, mirroring
+// TestNewCloneCmd_AlsoSetsSafeEnv for the env-vector defense. The
+// current implementation gets this for free by delegation, but the
+// assertion guards against a future "simplification" that builds the
+// clone-shaped cmd inline and forgets the override prefix.
+//
+// Revert proof: rewrite NewCloneCmd to build the cmd inline without
+// calling NewCmd, omitting the safeOverrides prepend; this test
+// fails because gpg.program is absent from cmd.Args.
+func TestNewCloneCmd_AlsoInjectsConfigOverrides(t *testing.T) {
+	t.Parallel()
+	cmd := NewCloneCmd(t.Context(), "clone", "https://example.invalid/repo.git", "/tmp/x")
+	assert.Contains(t, cmd.Args, "-c",
+		"NewCloneCmd's argv must carry -c override pairs (delegates to NewCmd)")
+	assert.Contains(t, cmd.Args, "gpg.program=/usr/bin/false",
+		"NewCloneCmd must inherit the file-vector override catalog — gpg.program is the canonical entry")
+	assert.Contains(t, cmd.Args, "core.hooksPath=/dev/null",
+		"NewCloneCmd must inherit core.hooksPath=/dev/null — fetch fires reference-transaction hooks")
 }
 
 // TestNewCloneCmd_SetsWaitDelay locks the post-SIGKILL pipe-drain

@@ -642,6 +642,21 @@ func (cmd *AnalyzeCmd) collectFreshSignals(
 ) ([]profile.Signal, error) {
 	inRunResult := &signal.CollectionResult{}
 
+	// cleanups carries deferred-cleanup callbacks registered by
+	// resolveClonePath (specifically the tempdir-removal for the
+	// file-vector clone-isolation defense — Fix #2 from
+	// design/analysis/cve-2025-41390.md). Drained in LIFO order
+	// after every collector finishes, regardless of success or
+	// failure of the collector loop.
+	var cleanups []func() error
+	defer func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if err := cleanups[i](); err != nil {
+				_, _ = fmt.Fprintf(stderr, "warning: post-collect cleanup: %v\n", err)
+			}
+		}
+	}()
+
 	collectors := globals.Collectors
 	if len(collectors) == 0 {
 		c, err := collectorsFor(ctx, entity, CollectOpts{
@@ -657,6 +672,9 @@ func (cmd *AnalyzeCmd) collectFreshSignals(
 			// so the github collector can mint identity:/org: rows
 			// for repo owners (Path A; entity-burn1.md §3.1).
 			EntityStore: s,
+			// File-vector clone-isolation cleanup registry. See
+			// CollectOpts.Cleanups doc for the threat model.
+			Cleanups: &cleanups,
 		})
 		if err != nil {
 			return nil, err

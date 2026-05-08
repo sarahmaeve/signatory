@@ -36,6 +36,31 @@ func initSourceRepo(t *testing.T, origin string) string {
 	return dir
 }
 
+// testCleanups returns a *[]func() error suitable for
+// CollectOpts.Cleanups, registered with t.Cleanup so the LIFO drain
+// runs when the test ends.
+//
+// Required at every collectorsFor / resolveClonePath call site that
+// passes a valid Path (with or without Clone:) — the file-vector
+// clone-isolation defense (Fix #2 from
+// design/analysis/cve-2025-41390.md) mints a fresh tempdir per call,
+// and without this drain the tempdirs leak into the OS temp directory
+// across test runs.
+//
+// Safe to use even on call sites that fail validation before
+// isolation runs: the slice stays empty and the deferred drain is a
+// no-op.
+func testCleanups(t *testing.T) *[]func() error {
+	t.Helper()
+	var cs []func() error
+	t.Cleanup(func() {
+		for i := len(cs) - 1; i >= 0; i-- {
+			_ = cs[i]()
+		}
+	})
+	return &cs
+}
+
 // mustRunGitInTest runs `git -C repo <args...>` and fails the test
 // on any non-zero exit. Routes through gitenv.NewCmd so the test
 // subprocess inherits the same env-strip + WaitDelay discipline
@@ -100,7 +125,7 @@ func TestCollectorsFor_CloneIntoNonEmptyNonClone_ReturnsErrPathNotAClone(t *test
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPathNotAClone,
 		"under the idempotent --clone contract, a non-empty non-clone dir is rejected by origin validation (no .git → ErrPathNotAClone), not the legacy ErrPathNotEmpty")
@@ -116,7 +141,7 @@ func TestCollectorsFor_ExistingPathNoGitDir_ReturnsErrPathNotAClone(t *testing.T
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: path})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: path, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPathNotAClone)
 }
@@ -135,7 +160,7 @@ func TestCollectorsFor_OriginMismatch_ReturnsErrOriginMismatch(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrOriginMismatch)
 }
@@ -150,7 +175,7 @@ func TestCollectorsFor_OriginMatches_ReturnsCollectorList(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	// Expect github + git collectors in the returned slice.
 	names := map[string]bool{}
@@ -178,7 +203,7 @@ func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	assert.NoError(t, err, "ssh-form origin should normalize to same canonical URI")
 }
 
@@ -197,7 +222,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 		URL:          src, // file path as "clone URL" — safeGitCloneURL accepts path-style URLs
 	}
 
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	assert.Len(t, collectors, 5, "github + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
@@ -220,7 +245,7 @@ func TestCollectorsFor_CloneIntoMissingDir_SucceedsByCreating(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          src,
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	assert.NoError(t, err)
 	assert.DirExists(t, filepath.Join(dst, ".git"))
 }
@@ -245,7 +270,7 @@ func TestResolveClonePath_AbsolutePathReturnedAsAbs(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	got, err := resolveClonePath(context.Background(), entity, CollectOpts{Path: pathArg})
+	got, err := resolveClonePath(context.Background(), entity, CollectOpts{Path: pathArg, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	assert.True(t, filepath.IsAbs(got), "resolveClonePath should return an absolute path")
 }
@@ -409,7 +434,7 @@ func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
 		Ecosystem:    "npm",
 		URL:          "https://github.com/expressjs/express",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -449,7 +474,7 @@ func TestCollectorsFor_GoModuleEntity_IncludesGoPublishAndSourceEvolution(t *tes
 		Ecosystem:    "golang",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -492,7 +517,7 @@ func TestCollectorsFor_GoModuleEntity_SourceEvolutionAfterGoPublish(t *testing.T
 		Ecosystem:    "golang",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	var goPublishIdx, sourceIdx = -1, -1
@@ -527,7 +552,7 @@ func TestCollectorsFor_GoModuleLegacyEcosystem_IncludesGoPublish(t *testing.T) {
 		Ecosystem:    "go",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -558,7 +583,7 @@ func TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution(t *testing.T)
 		Ecosystem:    "npm",
 		URL:          "https://github.com/expressjs/express",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	for _, c := range collectors {
@@ -642,18 +667,35 @@ func TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors(t *testing.T) {
 // gitenv.SafeEnv()'s output — the bug was specifically that cmd.Env wasn't
 // being assigned, so a test of gitenv.SafeEnv() in isolation wouldn't catch it.
 
-// installFakeGitEnvDump writes a POSIX shim named "git" into a fresh
+// installFakeGitDump writes a POSIX shim named "git" into a fresh
 // temp dir, dumps that dir at the head of PATH for the test's lifetime,
-// and returns the path to which the shim writes its environment. The
-// shim exits 0 unconditionally so the caller's gitCloneFull /
-// validateExistingClone returns nil and the test can read the dump.
+// and returns the paths to which the shim writes the parent's env AND
+// the shim's own argv. The shim exits 0 unconditionally so the
+// caller's gitCloneFull / validateExistingClone / defaultGitClone
+// returns nil and the test can read the dumps.
+//
+// Two assertion surfaces:
+//
+//   - envDump: contents of `env`. Tests that this output is missing
+//     dangerous parent vars (GIT_SSH_COMMAND, GIT_CONFIG_KEY_*, etc.)
+//     prove gitenv.SafeEnv reached cmd.Env.
+//   - argvDump: one argv slot per line via `printf '%s\n' "$@"`. Tests
+//     that the output begins with the safeOverrides "-c key=value"
+//     prefix prove gitenv.NewCmd / NewCloneCmd injected the file-vector
+//     defense before user args (CVE-2025-41390 / TALOS-2025-2243).
+//
+// The shim overwrites both files on each git invocation; tests that
+// invoke the parent multiple times must read between calls or accept
+// that only the last invocation's dump is observable.
 //
 // Cleanup is automatic: t.TempDir for the shim and dump locations,
 // t.Setenv for the PATH override.
-func installFakeGitEnvDump(t *testing.T) string {
+func installFakeGitDump(t *testing.T) (envDump, argvDump string) {
 	t.Helper()
 	shimDir := t.TempDir()
-	envDump := filepath.Join(t.TempDir(), "env-dump")
+	dumpDir := t.TempDir()
+	envDump = filepath.Join(dumpDir, "env-dump")
+	argvDump = filepath.Join(dumpDir, "argv-dump")
 	fakeGit := filepath.Join(shimDir, "git")
 	// `env` is POSIX. Single-quote the path so the shell doesn't
 	// expand $VAR, $(...), or `...` if a future t.TempDir ever lands
@@ -662,10 +704,18 @@ func installFakeGitEnvDump(t *testing.T) string {
 	// cheap to avoid by switching to single-quote escaping now.
 	// Embedded single quotes in the path get the canonical POSIX
 	// close-escape-reopen treatment (see shellSingleQuote below).
-	script := fmt.Sprintf("#!/bin/sh\nenv > %s\nexit 0\n", shellSingleQuote(envDump))
+	//
+	// `printf '%s\n' "$@"` writes one argv slot per line, which is
+	// trivial to readArgvDump-parse. Note the doubled %% to escape
+	// fmt.Sprintf's verb.
+	script := fmt.Sprintf(
+		"#!/bin/sh\nenv > %s\nprintf '%%s\\n' \"$@\" > %s\nexit 0\n",
+		shellSingleQuote(envDump),
+		shellSingleQuote(argvDump),
+	)
 	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o755))
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return envDump
+	return envDump, argvDump
 }
 
 // shellSingleQuote wraps s in POSIX-sh single quotes. Embedded single
@@ -696,6 +746,28 @@ func readEnvDump(t *testing.T, path string) map[string]string {
 	return out
 }
 
+// readArgvDump reads the argv-dump file written by the fake git shim
+// (one argv slot per line via `printf '%s\n' "$@"`) and returns the
+// argv slice. argv[0] in the shim's view is git's first argument, NOT
+// the binary name — the dump contains exactly what the parent passed,
+// not what /bin/sh prepended.
+//
+// Fails the test if the dump is missing; that indicates the parent
+// never spawned the subprocess (a regression worth surfacing in its
+// own right).
+func readArgvDump(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoErrorf(t, err, "fake git must have produced argv dump at %s", path)
+	// printf appends a trailing newline; TrimSpace then Split avoids
+	// a phantom empty-string final entry.
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
 // TestGitCloneFull_StripsDangerousEnv is the RED test for the analyze-
 // path env-sanitization drift. Before the fix, gitCloneFull called
 // exec.CommandContext without setting cmd.Env, so the subprocess
@@ -710,7 +782,7 @@ func readEnvDump(t *testing.T, path string) map[string]string {
 // NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
 // sequential.
 func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
-	envDump := installFakeGitEnvDump(t)
+	envDump, _ := installFakeGitDump(t)
 
 	// Hostile parent env — a representative sample of the vars
 	// gitenv.SafeEnv strips. Full coverage of the strip rule lives
@@ -755,6 +827,58 @@ func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
 		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
 }
 
+// --- Subprocess-boundary tests for the file-vector defense (CVE-2025-41390) ---
+//
+// These mirror the _StripsDangerousEnv tests above for the env-vector
+// defense, but assert the OTHER chokepoint contribution from
+// gitenv.NewCmd / NewCloneCmd: the safeOverrides "-c key=value" argv
+// prefix that neutralizes attacker-controlled `.git/config` directives
+// (gpg.program, core.hooksPath, credential.helper, etc.) before they
+// can drive arbitrary command execution.
+//
+// The unit-level catalog and prefix-vs-suffix ordering are locked by
+// internal/gitenv/env_test.go (TestNewCmd_InjectsConfigOverrides /
+// TestNewCmd_OverridesPrecedeUserArgs). These tests prove the
+// chokepoint REACHES the spawned subprocess at the production sites —
+// that is, that gitCloneFull / validateExistingClone / defaultGitClone
+// route through gitenv.NewCmd / NewCloneCmd rather than constructing
+// an exec.Cmd by hand and bypassing the discipline. The bug we're
+// guarding against is "someone adds a new git invocation with
+// exec.Command directly."
+//
+// Each test asserts that gpg.program=/usr/bin/false (the canonical
+// catalog entry covering the actual collectCommitSigning %G? attack
+// vector) AND core.hooksPath=/dev/null (covering the git fetch
+// reference-transaction hook vector) appear as `-c <kv>` pairs in the
+// child's argv. Asserting two entries rather than one catches a
+// half-fix where someone passes `-c gpg.program=...` ad-hoc but
+// doesn't go through the chokepoint.
+
+// TestGitCloneFull_PassesConfigOverrides proves the file-vector "-c"
+// prefix from gitenv.NewCloneCmd reaches the git subprocess for the
+// analyze-path full-clone site (gitCloneFull in collectors.go).
+//
+// Revert proof: change gitCloneFull to construct exec.Cmd directly
+// instead of via gitenv.NewCloneCmd; this test fails because
+// gpg.program / core.hooksPath are absent from the child's argv.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
+// sequential.
+func TestGitCloneFull_PassesConfigOverrides(t *testing.T) {
+	_, argDump := installFakeGitDump(t)
+
+	dest := filepath.Join(t.TempDir(), "clone-dest")
+	require.NoError(t,
+		gitCloneFull(context.Background(), "https://example.invalid/repo.git", dest),
+		"fake git must exit 0 — non-zero indicates the shim wasn't picked up via PATH")
+
+	args := readArgvDump(t, argDump)
+	assertCarriesOverride(t, args, "gpg.program=/usr/bin/false",
+		"gitCloneFull must route through gitenv.NewCloneCmd so the file-vector -c prefix reaches the child")
+	assertCarriesOverride(t, args, "core.hooksPath=/dev/null",
+		"gitCloneFull must carry core.hooksPath=/dev/null — clone fires reference-transaction hooks")
+}
+
 // TestValidateExistingClone_StripsDangerousEnv covers the second git-
 // subprocess site in collectors.go. validateExistingClone runs
 // `git -C <path> remote get-url origin` to verify the clone matches
@@ -769,7 +893,7 @@ func TestGitCloneFull_StripsDangerousEnv(t *testing.T) {
 // NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
 // sequential.
 func TestValidateExistingClone_StripsDangerousEnv(t *testing.T) {
-	envDump := installFakeGitEnvDump(t)
+	envDump, _ := installFakeGitDump(t)
 
 	t.Setenv("GIT_SSH_COMMAND", "evil-binary")
 	t.Setenv("GIT_CONFIG_COUNT", "1")
@@ -802,4 +926,51 @@ func TestValidateExistingClone_StripsDangerousEnv(t *testing.T) {
 	assert.NotEmpty(t, env["PATH"], "PATH must be preserved in child env")
 	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
 		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
+}
+
+// TestValidateExistingClone_PassesConfigOverrides proves the file-vector
+// "-c" prefix from gitenv.NewCmd reaches the git subprocess for the
+// analyze-path origin-validation site (validateCloneOrigin via
+// validateExistingClone in collectors.go).
+//
+// Revert proof: change validateCloneOrigin to construct exec.Cmd
+// directly instead of via gitenv.NewCmd; this test fails because
+// gpg.program is absent from the child's argv.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive; intentionally
+// sequential.
+func TestValidateExistingClone_PassesConfigOverrides(t *testing.T) {
+	_, argDump := installFakeGitDump(t)
+
+	clone := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(clone, ".git"), 0o755))
+
+	// As in TestValidateExistingClone_StripsDangerousEnv, the fake
+	// git's empty stdout makes origin parsing fail and the function
+	// returns an error — irrelevant to this test, which only cares
+	// that the subprocess was spawned and recorded its argv before
+	// origin parsing would have run.
+	_ = validateExistingClone(context.Background(), clone, "repo:github/owner/repo")
+
+	args := readArgvDump(t, argDump)
+	assertCarriesOverride(t, args, "gpg.program=/usr/bin/false",
+		"validateCloneOrigin must route through gitenv.NewCmd so the file-vector -c prefix reaches the child")
+	assertCarriesOverride(t, args, "core.hooksPath=/dev/null",
+		"validateCloneOrigin must carry core.hooksPath=/dev/null — defense-in-depth even on read-only ops")
+}
+
+// assertCarriesOverride fails the test unless args contains a
+// consecutive pair "-c", want. Walks pairs in argv, the same shape
+// gitenv.NewCmd produces. Shared by the three _PassesConfigOverrides
+// tests (gitCloneFull / validateExistingClone here, defaultGitClone
+// in handoff_test.go) so the assertion shape is identical at every
+// production site.
+func assertCarriesOverride(t *testing.T, args []string, want, msg string) {
+	t.Helper()
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-c" && args[i+1] == want {
+			return
+		}
+	}
+	t.Errorf("%s: expected `-c %s` pair in child argv but did not find it; argv=%v", msg, want, args)
 }

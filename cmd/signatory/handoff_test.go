@@ -2213,7 +2213,7 @@ func TestPrecheck_ErrorPropagatesWithContext(t *testing.T) {
 // NOTE: Uses t.Setenv, which panics if the test also calls t.Parallel().
 // Intentionally sequential.
 func TestDefaultGitClone_StripsDangerousEnv(t *testing.T) {
-	envDump := installFakeGitEnvDump(t)
+	envDump, _ := installFakeGitDump(t)
 
 	// Hostile parent env — representative sample of each threat class:
 	// transport override (GIT_SSH_COMMAND), config injection
@@ -2259,6 +2259,39 @@ func TestDefaultGitClone_StripsDangerousEnv(t *testing.T) {
 	// prevent the child from blocking on a credential prompt.
 	assert.Equal(t, "0", env["GIT_TERMINAL_PROMPT"],
 		"GIT_TERMINAL_PROMPT must be force-set to 0 in child env")
+}
+
+// TestDefaultGitClone_PassesConfigOverrides is the file-vector
+// counterpart to TestDefaultGitClone_StripsDangerousEnv. It proves the
+// safeOverrides "-c key=value" prefix from gitenv.NewCloneCmd reaches
+// the git subprocess for the handoff-path clone site (defaultGitClone
+// in handoff.go).
+//
+// See the doc comment block above TestGitCloneFull_PassesConfigOverrides
+// in collectors_test.go for the catalog and threat model. The pair of
+// assertions (gpg.program + core.hooksPath) is the same pattern at
+// every production site so a half-fix at one spawning location can't
+// hide.
+//
+// Revert proof: change defaultGitClone to construct exec.Cmd directly
+// instead of via gitenv.NewCloneCmd; this test fails because
+// gpg.program / core.hooksPath are absent from the child's argv.
+//
+// NOTE: t.Setenv and t.Parallel are mutually exclusive — this test
+// is intentionally sequential.
+func TestDefaultGitClone_PassesConfigOverrides(t *testing.T) {
+	_, argDump := installFakeGitDump(t)
+
+	dest := filepath.Join(t.TempDir(), "clone-dest")
+	require.NoError(t,
+		defaultGitClone(t.Context(), "https://example.invalid/repo.git", dest, ""),
+		"fake git must exit 0 — non-zero indicates the shim wasn't picked up via PATH")
+
+	args := readArgvDump(t, argDump)
+	assertCarriesOverride(t, args, "gpg.program=/usr/bin/false",
+		"defaultGitClone must route through gitenv.NewCloneCmd so the file-vector -c prefix reaches the child")
+	assertCarriesOverride(t, args, "core.hooksPath=/dev/null",
+		"defaultGitClone must carry core.hooksPath=/dev/null — clone fires reference-transaction hooks")
 }
 
 // TestCaptureStream_DrainGoroutineTerminatesOnClose verifies that captureStream's
@@ -2691,16 +2724,23 @@ func TestSafeGitVersion_RejectsUnsafeRefs(t *testing.T) {
 // would hard-fail Step 1b. Full clones are the only shape the
 // pipeline can use end-to-end.
 //
+// Suffix-equality form. Every git invocation now carries the
+// gitenv.safeOverrides "-c key=value" prefix (file-vector defense
+// for CVE-2025-41390 / TALOS-2025-2243) before the user args. The
+// catalog is locked separately by TestNewCmd_InjectsConfigOverrides
+// in internal/gitenv/env_test.go; this test focuses on the user-arg
+// shape (--branch, positional ordering, no --depth) by matching the
+// suffix of the dumped argv. Matches user intent: "did
+// defaultGitClone construct the right user args?" rather than
+// re-asserting the chokepoint contribution.
+//
 // NOTE: t.Setenv and t.Parallel are mutually exclusive — this
 // test is intentionally sequential.
 func TestDefaultGitClone_ArgvShape(t *testing.T) {
-	// Build a fake `git` shim that records its argv to a file.
-	shimDir := t.TempDir()
-	argDump := filepath.Join(t.TempDir(), "argv-dump")
-	fakeGit := filepath.Join(shimDir, "git")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit 0\n", argDump)
-	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o755))
-	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Shared shim records both env (unused here) and argv per
+	// invocation. Reusing installFakeGitDump keeps the shim shape
+	// consistent with the env-strip and -c-override tests.
+	_, argDump := installFakeGitDump(t)
 
 	// Versioned clone: --branch <version> must appear before the
 	// URL and dest positional args. No --depth=1 — handoff plants
@@ -2709,14 +2749,19 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 		"https://example.invalid/repo.git",
 		"/tmp/dest-versioned",
 		"v1.2.3"))
-	got, err := os.ReadFile(argDump)
-	require.NoError(t, err)
-	args := strings.Split(strings.TrimSpace(string(got)), "\n")
+	args := readArgvDump(t, argDump)
+	versionedSuffix := []string{"clone", "--branch", "v1.2.3",
+		"https://example.invalid/repo.git", "/tmp/dest-versioned"}
+	require.GreaterOrEqual(t, len(args), len(versionedSuffix),
+		"argv must carry at least the user args (gitenv -c prefix only extends it)")
 	assert.Equal(t,
-		[]string{"clone", "--branch", "v1.2.3",
-			"https://example.invalid/repo.git", "/tmp/dest-versioned"},
-		args,
-		"versioned clone must include --branch followed by ref, then URL, then dest, with no --depth flag")
+		versionedSuffix,
+		args[len(args)-len(versionedSuffix):],
+		"versioned clone must include --branch followed by ref, then URL, then dest, with no --depth flag (suffix match — gitenv -c prefix is locked separately)")
+	assert.NotContains(t, args, "--depth=1",
+		"versioned clone must not pass --depth=1 (full-clone chain integrity)")
+	assert.NotContains(t, args, "--depth",
+		"versioned clone must not pass --depth at all (full-clone chain integrity)")
 
 	// Unversioned clone: no --branch, no --depth.
 	require.NoError(t, os.Remove(argDump))
@@ -2724,14 +2769,19 @@ func TestDefaultGitClone_ArgvShape(t *testing.T) {
 		"https://example.invalid/repo.git",
 		"/tmp/dest-unversioned",
 		""))
-	got, err = os.ReadFile(argDump)
-	require.NoError(t, err)
-	args = strings.Split(strings.TrimSpace(string(got)), "\n")
+	args = readArgvDump(t, argDump)
+	unversionedSuffix := []string{"clone",
+		"https://example.invalid/repo.git", "/tmp/dest-unversioned"}
+	require.GreaterOrEqual(t, len(args), len(unversionedSuffix),
+		"argv must carry at least the user args (gitenv -c prefix only extends it)")
 	assert.Equal(t,
-		[]string{"clone",
-			"https://example.invalid/repo.git", "/tmp/dest-unversioned"},
-		args,
-		"unversioned clone must omit --branch and --depth entirely (full clone is the default)")
+		unversionedSuffix,
+		args[len(args)-len(unversionedSuffix):],
+		"unversioned clone must omit --branch and --depth entirely (full clone is the default; suffix match — gitenv -c prefix is locked separately)")
+	assert.NotContains(t, args, "--branch",
+		"unversioned clone must not pass --branch")
+	assert.NotContains(t, args, "--depth",
+		"unversioned clone must not pass --depth")
 }
 
 // TestHandoff_ClonePlantsFullClone_ChainIntegrity pins the /analyze

@@ -2,31 +2,52 @@
 // environment slice for every git subprocess signatory spawns —
 // production and test.
 //
+// Two siblings of the same attack class, defended at one chokepoint:
+//
+//   - Env-vector: GIT_CONFIG_KEY_*, GIT_SSH_COMMAND, etc. Defended by
+//     SafeEnv stripping every GIT_*, SSH_ASKPASS*, and libcurl proxy
+//     var before the subprocess starts.
+//   - File-vector: a malicious on-disk `.git/config` shipped in a
+//     tarball (CVE-2025-41390 / TALOS-2025-2243 / CWE-829). Defended
+//     by NewCmd prepending a `-c key=value` argv prefix from
+//     safeOverrides; the per-invocation `-c` flags override any on-
+//     disk directive that could exec an attacker binary
+//     (gpg.program, core.hooksPath, credential.helper, etc.).
+//
+// Both disciplines are applied unconditionally by every constructed
+// *exec.Cmd. Bypassing either is a regression — see the test patterns
+// at the end of "Callers" below.
+//
 // # API summary
 //
 //   - NewCmd is the constructor for local-porcelain git subprocesses
 //     (read-only operations against an already-cloned repo: log,
 //     for-each-ref, rev-list, rev-parse, remote get-url, etc.). It
-//     sets cmd.Env to SafeEnv. It does NOT set WaitDelay; these
+//     sets cmd.Env to SafeEnv AND prepends safeOverrides as `-c k=v`
+//     argv flags before user args. It does NOT set WaitDelay; these
 //     operations don't spawn ssh/askpass/credential-helper
 //     grandchildren in practice (see "WaitDelay rationale" below
 //     for why).
 //   - NewCloneCmd is the constructor for outbound git clones — the
 //     operations that talk to a remote and may fork ssh / askpass /
 //     credential-helper grandchildren that won't inherit SIGKILL.
-//     It sets cmd.Env to SafeEnv AND cmd.WaitDelay to WaitDelay.
-//     Used by defaultGitClone (handoff path) and gitCloneFull
-//     (analyze path). Both are the network-spawning sites.
+//     It applies NewCmd's env-strip + override-prefix discipline AND
+//     sets cmd.WaitDelay to WaitDelay. Used by defaultGitClone
+//     (handoff path) and gitCloneFull (analyze path). Both are the
+//     network-spawning sites.
 //   - SafeEnv returns the hardened env slice (dangerous vars
 //     stripped, GIT_TERMINAL_PROMPT=0 force-appended). Use directly
 //     when you need to append identity / date overrides on top of
 //     the hardened env (commitAs in identity_test.go, the
 //     backdated-commit site in collector_test.go, the date-override
-//     site in vitality_test.go).
+//     site in vitality_test.go). Note: SafeEnv covers only the env
+//     vector; callers that build their own *exec.Cmd around SafeEnv
+//     do NOT inherit the file-vector defense — prefer NewCmd /
+//     NewCloneCmd whenever possible.
 //   - WaitDelay is the exported value NewCloneCmd sets on
 //     cmd.WaitDelay. 5 seconds. See "WaitDelay rationale" below.
 //
-// # Design: deny-by-default, explicit re-admit
+// # Design: deny-by-default, explicit re-admit (env vector)
 //
 // Base state is absence. Any environment variable is assumed dangerous
 // and stripped unless explicitly re-admitted. Specifically:
@@ -67,6 +88,34 @@
 //
 //   - GIT_TERMINAL_PROMPT=0 is force-appended, guaranteeing
 //     non-interactive behavior regardless of what else we stripped.
+//
+// # Design: deny-by-default, explicit override (file vector)
+//
+// The env-strip closes the env-vector class of attacks against git
+// (GIT_CONFIG_KEY_*, GIT_SSH_COMMAND, etc.). The sibling class —
+// CVE-2025-41390 / TALOS-2025-2243 / CWE-829 — is FILE-vector: a
+// malicious `.git/config` shipped in a tarball, zip, or any archive
+// the operator extracts and points signatory at. The on-disk config
+// can declare e.g. `[gpg] program = /tmp/evil` and a single signed-
+// shaped commit is enough for `git log --format=%G?` (which
+// collectCommitSigning runs) to exec the attacker's binary. The
+// same shape applies to core.hooksPath via `git fetch`'s reference-
+// transaction hook, credential.helper for any auth'd fetch, and
+// other directives in the `safeOverrides` catalog below.
+//
+// The defense is structurally identical to the env strip, applied at
+// the same chokepoint: every NewCmd / NewCloneCmd invocation prepends
+// a `-c key=value` argv prefix from `safeOverrides` BEFORE any user
+// arg. Per-invocation `-c` overrides take precedence over the on-disk
+// `.git/config`, so the attacker's directives are observed-but-
+// neutralized: gpg.program=/usr/bin/false, core.hooksPath=/dev/null,
+// credential.helper=, etc. See safeOverrides for the catalog and
+// design/analysis/cve-2025-41390.md for the per-entry threat
+// rationale.
+//
+// The two defenses are siblings, both load-bearing. Env-strip alone
+// leaves the file-vector exposed; argv-override alone leaves the env-
+// vector exposed. NewCmd applies both unconditionally.
 //
 // # Why this shape, not a deny-list of named vars
 //
@@ -195,31 +244,46 @@ import (
 // bound.
 const WaitDelay = 5 * time.Second
 
-// NewCmd builds an *exec.Cmd for the git binary with the env-strip
-// discipline every git subprocess in this codebase must follow:
+// NewCmd builds an *exec.Cmd for the git binary with the two
+// disciplines every git subprocess in this codebase must follow:
 //
 //   - cmd.Env = SafeEnv() — strips GIT_*, SSH_ASKPASS*, libcurl proxy
-//     vars; force-appends GIT_TERMINAL_PROMPT=0
+//     vars; force-appends GIT_TERMINAL_PROMPT=0. Defends against the
+//     env-vector class of `.git/config`-shaped attacks.
+//   - argv carries the safeOverrides "-c key=value" prefix before
+//     any user-supplied arg. Defends against the FILE-vector class
+//     (CVE-2025-41390 / TALOS-2025-2243 / CWE-829): an attacker-
+//     controlled `.git/config` shipped in a tarball cannot reach
+//     gpg.program / core.hooksPath / credential.helper / etc. because
+//     the per-invocation -c override wins over the on-disk config.
+//     See safeOverrides for the catalog and design/analysis/
+//     cve-2025-41390.md for the threat model.
 //
 // Use NewCmd for local porcelain operations against an already-
 // cloned repo (log, for-each-ref, rev-list, rev-parse, remote
 // get-url, etc.). For clone-shaped operations that talk to a remote
 // and may fork ssh/askpass/credential-helper grandchildren, use
-// NewCloneCmd instead — it adds cmd.WaitDelay on top of the env
-// discipline.
+// NewCloneCmd instead — it adds cmd.WaitDelay on top of the same
+// env-strip + override-prefix discipline.
 //
-// The args are passed verbatim as argv to git. No shell. Each arg
-// occupies one argv slot; metacharacters are not interpreted.
+// The args are passed verbatim as argv to git, AFTER the safeOverrides
+// prefix. No shell. Each arg occupies one argv slot; metacharacters
+// are not interpreted.
 //
 // G204 note. Every call site that constructs args from caller-
 // supplied data must validate those args upstream (URL schemes,
 // path containment, ref-name shape, etc.) — argv-form exec is
 // shell-injection-safe but does not protect against argv-flag
 // injection (a "-evil" first arg parsed as a flag). Validation
-// remains the call site's responsibility; NewCmd just guarantees
-// the env discipline.
+// remains the call site's responsibility; NewCmd guarantees only
+// the env and -c-override disciplines.
 func NewCmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: argv-form; args validated by callers (URL schemes, path containment, ref-name shape)
+	full := make([]string, 0, 2*len(safeOverrides)+len(args))
+	for _, kv := range safeOverrides {
+		full = append(full, "-c", kv)
+	}
+	full = append(full, args...)
+	cmd := exec.CommandContext(ctx, "git", full...) //nolint:gosec // G204: argv-form; args validated by callers (URL schemes, path containment, ref-name shape)
 	cmd.Env = SafeEnv()
 	return cmd
 }
@@ -241,6 +305,81 @@ func NewCloneCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := NewCmd(ctx, args...)
 	cmd.WaitDelay = WaitDelay
 	return cmd
+}
+
+// safeOverrides is the catalog of `-c key=value` argv flags every
+// NewCmd / NewCloneCmd invocation prepends, in addition to the env-
+// strip discipline. Defends against the file-vector sibling of the
+// env-vector attack class: a malicious `.git/config` shipped in a
+// tarball or zip (CVE-2025-41390 / TALOS-2025-2243 / CWE-829) cannot
+// drive arbitrary command execution because git's per-invocation -c
+// flags take precedence over on-disk config.
+//
+// # Why each entry
+//
+// The catalog is sized to the threat model in design/analysis/
+// cve-2025-41390.md, which traced every git subcommand signatory
+// runs to the dangerous directives it could reach:
+//
+//   - gpg.program / gpg.openpgp.program / gpg.x509.program /
+//     gpg.ssh.program — reachable via `git log --format=%G?` in
+//     collectCommitSigning. The file-vector RCE Talos describes for
+//     `git status` (via core.fsmonitor) replays through %G? against
+//     attacker-controlled gpg.program. /usr/bin/false has the right
+//     exit shape for git's status parser (non-zero → status E,
+//     uncheckable, which classifySigning maps to classUnsigned).
+//   - core.hooksPath=/dev/null — reachable via `git fetch`'s
+//     reference-transaction hook on the --clone --refresh path.
+//     /dev/null is a directory-shaped sentinel git treats as "no
+//     hooks here" without erroring.
+//   - core.fsmonitor= — not currently reached by signatory's command
+//     set, but neutralized for defense-in-depth: it's the directive
+//     Talos named in the original CVE.
+//   - core.pager=cat — not currently reached (we capture stdout into
+//     bytes.Buffer, isatty(stdout) is false), but cheap structural
+//     guard against a future caller that wires a tty-shaped writer.
+//   - core.sshCommand= — not currently reached (origin URL is
+//     https), defense-in-depth.
+//   - credential.helper= — reachable via `git fetch` when the remote
+//     requires auth. Empty value disables every helper, including
+//     attacker-supplied ones.
+//   - protocol.file.allow=user / protocol.ext.allow=never — defends
+//     against attacker-controlled URLs in `.git/config` (e.g. an
+//     `[remote "origin"] url = ext::evil` overlay) that git fetch
+//     would otherwise resolve via the `ext` helper. `user` for
+//     protocol.file matches git's CVE-2022-39253 default;
+//     `protocol.ext.allow=never` is stricter than git's default.
+//
+// # Why a hardcoded catalog rather than runtime configurability
+//
+// Same rationale as denyPrefixes / denyExactLower: deny by default,
+// explicit re-admit. A configurable list would let a misuse, a test
+// helper, or a future "just for this one case" call site silently
+// shrink the file-vector defense and break the chokepoint property.
+// The catalog is part of the trust contract; changes go through
+// code review.
+//
+// # Behavioral side-effect on signing signals
+//
+// With gpg.program=/usr/bin/false in effect, %G? always reports E
+// (cannot check) for any signed commit. classifySigning already maps
+// E → classUnsigned (see internal/signal/git/signing.go), so the
+// signing-ratio signals downgrade to "treat as unsigned" rather than
+// crediting an unverifiable signature. This is the conservative
+// trust-model call documented in classifySigning's docstring;
+// neutralizing the file-vector attack does not change the policy.
+var safeOverrides = []string{
+	"gpg.program=/usr/bin/false",
+	"gpg.openpgp.program=/usr/bin/false",
+	"gpg.x509.program=/usr/bin/false",
+	"gpg.ssh.program=/usr/bin/false",
+	"core.hooksPath=/dev/null",
+	"core.fsmonitor=",
+	"core.pager=cat",
+	"core.sshCommand=",
+	"credential.helper=",
+	"protocol.file.allow=user",
+	"protocol.ext.allow=never",
 }
 
 // denyPrefixes enumerates the prefixes whose entire namespace is
