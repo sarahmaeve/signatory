@@ -44,7 +44,7 @@ func (c *Client) ResolveRepoURL(ctx context.Context, name string) (string, error
 //	"https://github.com/owner/repo.git"
 //	"https://github.com/owner/repo"
 //	"github:owner/repo"                       (npm shorthand)
-//	"git://github.com/owner/repo.git"         (legacy, refused)
+//	"git://github.com/owner/repo.git"         (legacy, upgraded)
 //
 // The function reduces each form to https://github.com/owner/repo
 // by delegating to profile.ResolveTarget for the canonical github
@@ -52,10 +52,14 @@ func (c *Client) ResolveRepoURL(ctx context.Context, name string) (string, error
 // Non-github hosts and unrecognized forms return empty string,
 // which is the unambiguous "no repo to resolve" signal.
 //
-// git:// is explicitly refused: it's an unauthenticated plaintext
-// protocol, and a subsequent git-clone collector would default to
-// downgrading to https or ssh anyway; returning empty keeps the
-// protocol choice explicit at the npm-plan-spec level.
+// git:// on github.com is upgraded to https: the scheme is
+// plaintext, but the host anchors the identity, and downstream
+// collectors hit https regardless. A long tail of older packages
+// (image-size is one) declared git://github.com/... once a decade
+// ago and never updated it; refusing the whole URL because of the
+// scheme threw out a valid identity. git:// on any other host
+// stays refused — the upgrade only works because github.com serves
+// the same identity over https.
 func NormalizeDeclaredRepoURL(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -72,10 +76,14 @@ func NormalizeDeclaredRepoURL(raw string) string {
 	// Strip the "git+" prefix common in npm's repository.url.
 	s = strings.TrimPrefix(s, "git+")
 
-	// git:// is an unauthenticated plaintext protocol we refuse to
-	// follow — see function doc. Also preempts ResolveTarget seeing
-	// the git:// and misparsing it.
-	if strings.HasPrefix(s, "git://") {
+	// git:// is unauthenticated plaintext. On github.com we upgrade
+	// to https because the host anchors the identity and we never
+	// actually clone over git:// downstream. On any other host we
+	// refuse — see function doc. The host check is anchored on the
+	// path separator to block lookalikes like git://github.com.evil/.
+	if rest, ok := strings.CutPrefix(s, "git://github.com/"); ok {
+		s = "https://github.com/" + rest
+	} else if strings.HasPrefix(s, "git://") {
 		return ""
 	}
 
