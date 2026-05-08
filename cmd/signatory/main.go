@@ -44,6 +44,7 @@ type CLI struct {
 	Init    InitCmd    `cmd:"" help:"Scaffold ./templates/, ./filestore/, and signatory.config.toml in a project." group:"infra"`
 	Serve   ServeCmd   `cmd:"" help:"Start the pipeline message service (local HTTP API for agent handoffs)." group:"infra"`
 	Certs   CertsCmd   `cmd:"" help:"Manage signatory's local TLS trust setup (mkcert CA + NODE_EXTRA_CA_CERTS)." group:"infra"`
+	Doctor  DoctorCmd  `cmd:"" help:"Diagnose the local signatory setup: Go, env vars, TLS, MCP wiring, store, service." group:"infra"`
 	MCP     MCPCmd     `cmd:"mcp" help:"Serve signatory as a Model Context Protocol server over stdio." group:"infra"`
 	Version VersionCmd `cmd:"" help:"Print version information." group:"infra"`
 

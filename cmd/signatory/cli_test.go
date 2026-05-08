@@ -410,7 +410,7 @@ func TestHelpOutput_CommandsInExpectedGroups(t *testing.T) {
 		"Investigate":    {"summary", "survey", "analyze"},
 		"Decide":         {"posture", "burn"},
 		"Review":         {"show-analyses", "show-conclusions", "show-synthesis"},
-		"Infrastructure": {"init", "serve", "certs", "mcp", "version"},
+		"Infrastructure": {"init", "serve", "certs", "doctor", "mcp", "version"},
 		"Pipeline":       {"pipeline", "analysis", "handoff", "ingest", "prune"},
 	}
 

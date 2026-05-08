@@ -3,8 +3,12 @@
 Common failure modes when getting signatory running, organized by phase. Each
 entry: what you see, why it happens, how to fix, and a command to confirm.
 
-If your symptom isn't here, three commands surface most state:
-`signatory --help`, `signatory certs doctor`, `signatory show-analyses`.
+If your symptom isn't here, start with `signatory doctor` — it runs
+the full breadth pass (Go runtime, env vars, TLS trust, MCP wiring,
+store, service) and points at the matching section below for any
+probe that fails. `signatory certs doctor` is the deeper TLS
+diagnostic when the `node-extra-ca-certs` probe trips, and
+`signatory show-analyses` lists what's already in the store.
 
 ## Install and build
 
@@ -183,8 +187,11 @@ It exports the OTEL env vars before exec-ing `claude`, so traces land in
 
 ## More state when stuck
 
+- `signatory doctor` — breadth pass over the local setup
+- `signatory doctor --json` — same, structured for scripts
+- `signatory doctor --strict` — promote any warning to a non-zero exit (CI gate)
 - `signatory version` — built version + commit + build date
-- `signatory certs doctor` — TLS environment dump
+- `signatory certs doctor` — TLS environment dump (deeper than `doctor`'s `node-extra-ca-certs` probe)
 - `signatory analysis list` — recent pipeline sessions
 - `signatory analysis show <session-id>` — what an analyst session ingested
 - `signatory show-analyses` — every analyst output in the store
