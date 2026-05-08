@@ -122,6 +122,25 @@ type CollectOpts struct {
 	// signals (owner_profile, maintainer_count, etc.) still emit
 	// regardless.
 	EntityStore ghcollector.EntityStore
+
+	// Cleanups, when non-nil, is the registry resolveClonePath
+	// appends deferred-cleanup callbacks to. Currently used for the
+	// temp-clone isolation step that defends against attacker-
+	// controlled `.git/config` and `.git/hooks/` shipped in the
+	// operator-supplied --path directory: the structural sibling of
+	// the gitenv `-c` override defense for CVE-2025-41390 / CWE-829
+	// (design/analysis/cve-2025-41390.md). resolveClonePath clones
+	// the validated path into a fresh tempdir so collectors observe
+	// a freshly-minted .git/config (only `core` defaults +
+	// `[remote "origin"]`) and only the default sample-only
+	// .git/hooks/, then registers the tempdir-removal callback here.
+	//
+	// The orchestrator (collectFreshSignals in analyze.go) drains
+	// these in LIFO order after every collector completes. Tests
+	// that don't run collectors and accept tempdir leakage between
+	// test functions can leave nil; the OS reclaims /tmp space
+	// eventually.
+	Cleanups *[]func() error
 }
 
 // Sentinel errors for each failure mode of collectorsFor.
@@ -293,11 +312,21 @@ func isGitHostedEntity(entity *profile.Entity) bool {
 }
 
 // resolveClonePath enforces the --path / --clone contract and
-// returns an absolute path to a verified local clone of entity.
+// returns an absolute path to a sanitized local clone of entity.
 //
 // The happy paths produce a path; every unhappy path returns a
 // sentinel-wrapped error that `signatory analyze` surfaces
 // directly to the operator.
+//
+// File-vector defense (Fix #2 from design/analysis/cve-2025-41390.md):
+// the returned path is NOT the operator's --path directly. After
+// validation succeeds, cloneToTempIsolated clones the validated path
+// into a fresh tempdir, and that tempdir is what collectors operate
+// against. The clone produces a minted `.git/config` (no attacker
+// directives carry over) and only the default sample `.git/hooks/`
+// (no executable hooks carry over). When opts.Cleanups is non-nil
+// (production wires this), the tempdir-removal callback is registered
+// there for the orchestrator to drain after collectors finish.
 //
 // Normalization of entity.URL to a github canonical URI is deferred
 // to the call sites that actually need it (validateExistingClone, and
@@ -325,7 +354,7 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 		if err := ensureCloneAtPath(ctx, opts.Stderr, opts.RunGit, absPath, entity.URL); err != nil {
 			return "", err
 		}
-		return absPath, nil
+		return isolatedClonePath(ctx, absPath, opts)
 	}
 
 	// --path-only branch: entity.URL must be a github-parseable URI so
@@ -342,7 +371,158 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 	if err := validateExistingClone(ctx, absPath, expectedURI); err != nil {
 		return "", err
 	}
-	return absPath, nil
+	return isolatedClonePath(ctx, absPath, opts)
+}
+
+// isolatedClonePath wraps cloneToTempIsolated with the
+// opts.Cleanups registration step. Pulled out as a helper so the two
+// resolveClonePath branches (--clone and --path-only) share one
+// implementation of the file-vector defense's last-mile plumbing.
+func isolatedClonePath(ctx context.Context, validatedPath string, opts CollectOpts) (string, error) {
+	tempPath, cleanup, err := cloneToTempIsolated(ctx, validatedPath)
+	if err != nil {
+		return "", err
+	}
+	if opts.Cleanups != nil {
+		*opts.Cleanups = append(*opts.Cleanups, cleanup)
+	}
+	return tempPath, nil
+}
+
+// cloneToTempIsolated runs `git clone <srcPath> <tempdir>` and
+// returns the tempdir path, a cleanup callback that removes it, and
+// any error from the clone subprocess.
+//
+// File-vector defense (Fix #2 from design/analysis/cve-2025-41390.md):
+// the structural sibling of gitenv's `-c` override prefix. Where
+// gitenv's overrides neutralize specific attacker directives at every
+// invocation, this helper neutralizes the entire on-disk attack
+// surface by producing a fresh clone whose `.git/config` is git's
+// minted default (only `core` + `[remote "origin"]`) and whose
+// `.git/hooks/` contains only the .sample template files git
+// installs from /usr/share/git-core/templates. Attacker-controlled
+// versions of either CANNOT carry over: `git clone <local> <dest>`
+// does not copy hooks, and the destination's config is freshly
+// written rather than copied.
+//
+// The clone subprocess goes through gitenv.NewCloneCmd, so:
+//
+//   - The `-c` override prefix from Fix #1 protects THIS clone from
+//     directives in srcPath's `.git/config` that would otherwise
+//     fire during the clone itself (e.g., `core.hooksPath` for the
+//     reference-transaction hook on dest). Fix #1 and Fix #2 thus
+//     compose: Fix #1 protects the clone-time read, Fix #2 the
+//     downstream-collector reads.
+//   - Env-strip applies (no GIT_DIR / GIT_CONFIG_KEY_* leaking from
+//     the parent).
+//   - WaitDelay applies, even though `git clone` of a local path
+//     doesn't typically fork ssh/askpass — the clone-shaped
+//     constructor is the right discipline by analogy.
+//
+// On error, tempPath is empty and cleanup is nil so the caller can
+// neither use the path nor double-call cleanup. The partial tempdir
+// is removed before the error returns.
+func cloneToTempIsolated(ctx context.Context, srcPath string) (tempPath string, cleanup func() error, err error) {
+	dest, err := os.MkdirTemp("", "signatory-iso-clone-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create isolation tempdir: %w", err)
+	}
+	// Remove the empty tempdir that os.MkdirTemp created. `git
+	// clone` requires its destination to be missing OR empty; we
+	// pass it the path and let git create the directory. (Empty
+	// works too on most git versions, but missing-or-empty is the
+	// documented contract — the empty branch lets us race with
+	// other processes that might create files in the destination
+	// between MkdirTemp and clone start.)
+	if err := os.Remove(dest); err != nil {
+		return "", nil, fmt.Errorf("clear isolation tempdir before clone: %w", err)
+	}
+
+	cmd := gitenv.NewCloneCmd(ctx, "clone", "--quiet", srcPath, dest)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		// Best-effort cleanup of any partial state git left behind.
+		// Ignore the RemoveAll error; the underlying clone failure is
+		// what the caller needs to see.
+		_ = os.RemoveAll(dest)
+		return "", nil, fmt.Errorf("clone %q to isolation tempdir: %w: %s",
+			srcPath, runErr, strings.TrimSpace(stderr.String()))
+	}
+
+	cleanup = func() error {
+		return os.RemoveAll(dest)
+	}
+
+	// Restore the operator's origin URL on the temp clone. `git clone
+	// <local> <dest>` defaults dest's origin to <local> (the operator's
+	// path), which silently breaks any downstream `git fetch origin` —
+	// notably source-evolution's --allow-fetch recovery, which expects
+	// to reach the real upstream remote (typically github), not loop
+	// back into the operator's already-stale clone.
+	//
+	// Best-effort: an origin-less source repo (test fixtures, fresh
+	// `git init` without `git remote add origin`) is tolerated. The
+	// production validation chain (validateCloneOrigin / safeGitCloneURL)
+	// guarantees a github-shaped origin upstream, so this branch is
+	// only ever a no-op outside of tests.
+	//
+	// Security note. The origin URL we read from srcPath is, in
+	// production, already validated as github-parseable by
+	// validateCloneOrigin (in the --path-only flow) or set by an
+	// already-validated entity.URL through safeGitCloneURL (in the
+	// --clone flow). Re-applying the same value is safe; no exec
+	// directive fires at config-set time, and any future fetch goes
+	// through gitenv.NewCloneCmd's `-c protocol.ext.allow=never` etc.
+	// override prefix.
+	if originErr := preserveOperatorOrigin(ctx, srcPath, dest); originErr != nil {
+		_ = cleanup()
+		return "", nil, fmt.Errorf("preserve operator origin on isolation clone: %w", originErr)
+	}
+
+	return dest, cleanup, nil
+}
+
+// preserveOperatorOrigin reads srcPath's origin URL and writes it as
+// destPath's origin URL, replacing whatever git's clone subprocess
+// initialized (which would be srcPath itself).
+//
+// Quietly succeeds when srcPath has no origin set: that's an origin-
+// less source repo (a fresh `git init` without `git remote add
+// origin`), legal in test fixtures and not a failure mode the
+// production --path-only path can reach because validateCloneOrigin
+// requires an origin.
+//
+// Returns an error from set-url. Read errors get classified as "no
+// origin" (most common reason: no `[remote "origin"]` block in the
+// source's config); all other read failures still surface via
+// cmd.Run's exec error path, which is fine for diagnostics.
+func preserveOperatorOrigin(ctx context.Context, srcPath, destPath string) error {
+	readCmd := gitenv.NewCmd(ctx, "-C", srcPath, "remote", "get-url", "origin")
+	var stdout bytes.Buffer
+	readCmd.Stdout = &stdout
+	if err := readCmd.Run(); err != nil {
+		// Treat any read failure as "no origin to preserve." In
+		// production, validateCloneOrigin has already proven the
+		// origin is github-shaped before reaching this code; a
+		// later disappearance is not something we'd want to
+		// fail-loud on. In tests, an origin-less fixture is the
+		// expected case.
+		return nil //nolint:nilerr // intentional: read-failure → graceful degradation
+	}
+	originURL := strings.TrimSpace(stdout.String())
+	if originURL == "" {
+		return nil
+	}
+
+	writeCmd := gitenv.NewCmd(ctx, "-C", destPath, "remote", "set-url", "origin", originURL)
+	var stderr bytes.Buffer
+	writeCmd.Stderr = &stderr
+	if err := writeCmd.Run(); err != nil {
+		return fmt.Errorf("set isolation clone origin %q: %w: %s",
+			originURL, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // validateCloneOrigin checks path is a git clone whose origin

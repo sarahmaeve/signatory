@@ -36,6 +36,31 @@ func initSourceRepo(t *testing.T, origin string) string {
 	return dir
 }
 
+// testCleanups returns a *[]func() error suitable for
+// CollectOpts.Cleanups, registered with t.Cleanup so the LIFO drain
+// runs when the test ends.
+//
+// Required at every collectorsFor / resolveClonePath call site that
+// passes a valid Path (with or without Clone:) — the file-vector
+// clone-isolation defense (Fix #2 from
+// design/analysis/cve-2025-41390.md) mints a fresh tempdir per call,
+// and without this drain the tempdirs leak into the OS temp directory
+// across test runs.
+//
+// Safe to use even on call sites that fail validation before
+// isolation runs: the slice stays empty and the deferred drain is a
+// no-op.
+func testCleanups(t *testing.T) *[]func() error {
+	t.Helper()
+	var cs []func() error
+	t.Cleanup(func() {
+		for i := len(cs) - 1; i >= 0; i-- {
+			_ = cs[i]()
+		}
+	})
+	return &cs
+}
+
 // mustRunGitInTest runs `git -C repo <args...>` and fails the test
 // on any non-zero exit. Routes through gitenv.NewCmd so the test
 // subprocess inherits the same env-strip + WaitDelay discipline
@@ -100,7 +125,7 @@ func TestCollectorsFor_CloneIntoNonEmptyNonClone_ReturnsErrPathNotAClone(t *test
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPathNotAClone,
 		"under the idempotent --clone contract, a non-empty non-clone dir is rejected by origin validation (no .git → ErrPathNotAClone), not the legacy ErrPathNotEmpty")
@@ -116,7 +141,7 @@ func TestCollectorsFor_ExistingPathNoGitDir_ReturnsErrPathNotAClone(t *testing.T
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: path})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: path, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPathNotAClone)
 }
@@ -135,7 +160,7 @@ func TestCollectorsFor_OriginMismatch_ReturnsErrOriginMismatch(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrOriginMismatch)
 }
@@ -150,7 +175,7 @@ func TestCollectorsFor_OriginMatches_ReturnsCollectorList(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	// Expect github + git collectors in the returned slice.
 	names := map[string]bool{}
@@ -178,7 +203,7 @@ func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	assert.NoError(t, err, "ssh-form origin should normalize to same canonical URI")
 }
 
@@ -197,7 +222,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 		URL:          src, // file path as "clone URL" — safeGitCloneURL accepts path-style URLs
 	}
 
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	assert.Len(t, collectors, 5, "github + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
@@ -220,7 +245,7 @@ func TestCollectorsFor_CloneIntoMissingDir_SucceedsByCreating(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          src,
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true})
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	assert.NoError(t, err)
 	assert.DirExists(t, filepath.Join(dst, ".git"))
 }
@@ -245,7 +270,7 @@ func TestResolveClonePath_AbsolutePathReturnedAsAbs(t *testing.T) {
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	got, err := resolveClonePath(context.Background(), entity, CollectOpts{Path: pathArg})
+	got, err := resolveClonePath(context.Background(), entity, CollectOpts{Path: pathArg, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 	assert.True(t, filepath.IsAbs(got), "resolveClonePath should return an absolute path")
 }
@@ -409,7 +434,7 @@ func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
 		Ecosystem:    "npm",
 		URL:          "https://github.com/expressjs/express",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -449,7 +474,7 @@ func TestCollectorsFor_GoModuleEntity_IncludesGoPublishAndSourceEvolution(t *tes
 		Ecosystem:    "golang",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -492,7 +517,7 @@ func TestCollectorsFor_GoModuleEntity_SourceEvolutionAfterGoPublish(t *testing.T
 		Ecosystem:    "golang",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	var goPublishIdx, sourceIdx = -1, -1
@@ -527,7 +552,7 @@ func TestCollectorsFor_GoModuleLegacyEcosystem_IncludesGoPublish(t *testing.T) {
 		Ecosystem:    "go",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	names := map[string]bool{}
@@ -558,7 +583,7 @@ func TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution(t *testing.T)
 		Ecosystem:    "npm",
 		URL:          "https://github.com/expressjs/express",
 	}
-	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src})
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
 	for _, c := range collectors {

@@ -278,8 +278,9 @@ func TestAnalyzeClone_FreshClone_WhenPathMissing(t *testing.T) {
 	}
 
 	_, err := collectorsFor(t.Context(), entity, CollectOpts{
-		Path:  dest,
-		Clone: true,
+		Path:     dest,
+		Clone:    true,
+		Cleanups: testCleanups(t),
 		RunGit: func(ctx context.Context, workdir string, args ...string) error {
 			recorder.record(ctx, workdir, args...) //nolint:errcheck // recorder returns nil
 			// Redirect the synthetic github URL to the local fixture so
@@ -331,9 +332,10 @@ func TestAnalyzeClone_RefreshesExistingValidClone(t *testing.T) {
 	}
 
 	_, err := collectorsFor(t.Context(), entity, CollectOpts{
-		Path:   dest,
-		Clone:  true,
-		RunGit: recorder.record,
+		Path:     dest,
+		Clone:    true,
+		Cleanups: testCleanups(t),
+		RunGit:   recorder.record,
 	})
 	require.NoError(t, err,
 		"--clone on an existing valid full clone must succeed (refresh via fetch, not re-clone)")
@@ -364,9 +366,10 @@ func TestAnalyzeClone_RefusesOriginMismatch(t *testing.T) {
 	}
 
 	_, err := collectorsFor(t.Context(), entity, CollectOpts{
-		Path:   dest,
-		Clone:  true,
-		RunGit: recorder.record,
+		Path:     dest,
+		Clone:    true,
+		Cleanups: testCleanups(t),
+		RunGit:   recorder.record,
 	})
 
 	require.Error(t, err, "origin mismatch must return an error")
@@ -430,8 +433,9 @@ func TestAnalyzeClone_UnshallowsExistingShallowClone(t *testing.T) {
 	}
 
 	_, err := collectorsFor(t.Context(), entity, CollectOpts{
-		Path:  dest,
-		Clone: true,
+		Path:     dest,
+		Clone:    true,
+		Cleanups: testCleanups(t),
 		RunGit: func(ctx context.Context, workdir string, args ...string) error {
 			recorder.record(ctx, workdir, args...) //nolint:errcheck // recorder always returns nil
 			// Perform the real unshallow when that's what's requested,
