@@ -5,7 +5,7 @@ Clone signatory, evaluate `golang.org/x/mod`, and record a posture decision.
 ## Prerequisites
 
 - Go 1.25+
-- Git on PATH
+- Git in PATH
 - [Claude Code](https://claude.com/claude-code) or another MCP-capable client
 - `GITHUB_TOKEN` in your environment — highly recommended; without it many GitHub signals come back empty
 - macOS or Linux (Windows is not yet supported)
@@ -41,8 +41,6 @@ agents dispatch, a synthesis lands in the store. Then in your shell:
 
     signatory summary golang.org/x/mod
     signatory show-analyses golang.org/x/mod
-    signatory posture set golang.org/x/mod --tier=trusted-for-now \
-      --rationale="Standard Go subrepo, strong tenure"
 
 ## Next
 
