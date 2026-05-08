@@ -115,4 +115,3 @@ func (t *ShowAnalysesTool) Handle(ctx context.Context, raw json.RawMessage) *mcp
 		"count":    len(rows),
 	})
 }
-
