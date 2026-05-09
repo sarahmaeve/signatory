@@ -164,14 +164,20 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
-	// ----- artifact_url (publication, handoff to artifact collector) -----
-	recordArtifactURL(result, entity.ID, proj, collectedAt)
-
 	// ----- Build version-file list (shared by Phase A and Phase B) -----
 	versions := buildVersionFiles(proj)
 
 	// ----- trusted_publishing: Phase A (snapshot) -----
+	//
+	// Reordered to run BEFORE artifact_url so the recovered
+	// AttestationResponse can feed git_head. The attestation's
+	// Fulcio cert carries the publisher-stamped commit SHA in OID
+	// 1.3.6.1.4.1.57264.1.13 — extracting it lifts pair confidence
+	// downstream from tag_match to exact_gitHead.
 	latestAttest, latestKnown := c.recordTrustedPublishing(ctx, result, entity.ID, packageName, versions, collectedAt)
+
+	// ----- artifact_url (publication, handoff to artifact collector) -----
+	recordArtifactURL(result, entity.ID, proj, latestAttest, collectedAt)
 
 	// ----- attestation_consistency: Phase B (longitudinal) -----
 	// Only fires when Phase A produced a definitive answer (attested or
@@ -394,8 +400,13 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 //     or carried on a different field shape (npm's dist.tarball).
 //
 //  2. PyPI exposes no publisher-stamped commit SHA in registry
-//     metadata. git_head is emitted empty; the artifact collector
-//     falls through to tag-match resolution against the local clone.
+//     metadata directly, but PEP 740 trusted-publishing
+//     attestations DO carry one in the Fulcio cert's source-repo-
+//     digest OID extension. When attest is non-nil and the cert
+//     parses cleanly, git_head ships the recovered SHA — pair
+//     confidence downstream becomes exact_gitHead. When attest
+//     is nil (no trusted publishing, or fetch failure) git_head
+//     ships empty and pair resolution falls through to tag-match.
 //
 // Sdist (packagetype=="sdist"), not wheel, is the right surface:
 // wheels are build outputs (compiled .pyc, sometimes C extensions,
@@ -409,7 +420,7 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 // internal/signal/types.go — but kept on the wire for the future
 // cross-check against the hash signatory computes during fetch.
 func recordArtifactURL(result *signal.CollectionResult, entityID string,
-	proj *Project, collectedAt time.Time) {
+	proj *Project, attest *AttestationResponse, collectedAt time.Time) {
 
 	const sigType = "artifact_url"
 
@@ -438,6 +449,15 @@ func recordArtifactURL(result *signal.CollectionResult, entityID string,
 		return b.publishedAt.Compare(a.publishedAt)
 	})
 
+	// Recover the publisher-stamped commit SHA from the trusted-
+	// publishing attestation when available. All artifacts in a
+	// release share the same source-repo-digest because they're
+	// all built from the same workflow run, so the SHA recovered
+	// from any attestation in the response is the right SHA for
+	// the sdist regardless of which file the attestation was
+	// fetched against.
+	gitHead, _ := extractGitHeadFromAttestation(attest)
+
 	for _, rec := range candidates {
 		if rec.yanked {
 			continue
@@ -455,7 +475,7 @@ func recordArtifactURL(result *signal.CollectionResult, entityID string,
 					"url":       d.URL,
 					"version":   rec.version,
 					"integrity": d.Digests.SHA256,
-					"git_head":  "", // PyPI does not expose this; falls through to tag-match.
+					"git_head":  gitHead, // populated from PEP 740 cert when present; empty otherwise (tag-match fallback)
 				})
 			return
 		}
