@@ -529,6 +529,32 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"absence does not mean clean — a sleeper that has not yet been weaponized produces a flat matrix, no anomaly fires, and the operator's metadata signals (account age, tag signing) carry the load until source diverges",
 		},
 	},
+	"artifact_url": {
+		Type:              "artifact_url",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "URL of the published source-distribution artifact (npm dist.tarball, PyPI sdist URL, etc.) plus the publisher-side metadata (version, integrity hash, gitHead when present) needed to fetch and pair it to a repo commit.",
+		Caveats: []string{
+			"emitted by the registry collector; CONSUMED by the artifact-vs-repo collector via the in-run accumulator — not a standalone analyst signal, but a structured handoff between collectors",
+			"git_head is publisher-stamped and only npm v≥5 carries it reliably; older publishes and other registries omit it, forcing the downstream collector to fall back to tag-name matching",
+			"integrity is the registry's own hash of the tarball, not a content hash signatory computed; useful as a cross-check, not as ground truth",
+			"absence is meaningful: a registry response without dist.tarball is rare in modern publishes and itself a hygiene observation",
+		},
+	},
+	"artifact_repo_divergence": {
+		Type:              "artifact_repo_divergence",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "One-directional set-difference: files present in the release tarball but absent from the git tree at the corresponding commit/tag. Surfaces the load-bearing signature of CVE-2024-3094 (xz-utils, build-to-host.m4 shipped only in the dist tarball).",
+		Caveats: []string{
+			"one-directional by design: files in repo but absent from tarball are NOT surfaced — every healthy publishing pipeline (npm .npmignore, PyPI MANIFEST.in, etc.) intentionally excludes tests/docs/.github/, and the resulting ~200-entry samples were drowning out actual signal in dogfood",
+			"header-only walk: file presence is detected, byte-level differences (same path, different content) are not — that's a separate phase deferred until dogfood traces show it's needed",
+			"a wrapping top-level directory in the tarball (npm 'package/', autotools '<name>-<version>/', PyPI sdist same) is auto-stripped before comparison; without that, every tarball file would falsely register as divergent",
+			"pair_confidence reports whether the tarball↔commit pairing was an exact gitHead match (npm v≥5) or a tag-name guess (everywhere else); the synthesist must weight tag-match evidence less heavily than exact-match evidence",
+			"healthy autotools projects ship configure / Makefile.in / aclocal.m4 in the tarball but not in git; the categorizer marks these as 'generated' so the signal payload distinguishes legitimate dist-prep noise from suspicious extras",
+			"unresolved pair_confidence is recorded as positive_absence rather than a divergence signal — 'we couldn't even pair this' is a hygiene fact about the project's release process, not a finding about its contents",
+		},
+	},
 	"exfil_capture_host": {
 		Type:              "exfil_capture_host",
 		Group:             profile.SignalGroupPublication,

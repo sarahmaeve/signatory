@@ -100,6 +100,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	recordBuildScriptPresent(result, entity.ID, cr, collectedAt)
 	recordYankedReleaseCount(result, entity.ID, cr, collectedAt)
 
+	// ----- artifact_url (publication, handoff to artifact collector) -----
+	recordArtifactURL(result, entity.ID, packageName, cr, collectedAt)
+
 	// ----- longitudinal: build_script_introduced + publish_origin_consistency -----
 	recordCrossVersionSignals(result, entity.ID, cr, collectedAt)
 
@@ -234,6 +237,56 @@ func recordYankedReleaseCount(result *signal.CollectionResult, entityID string,
 		})
 }
 
+// recordArtifactURL emits the artifact_url handoff signal that the
+// artifact-vs-repo divergence collector consumes from the in-run
+// accumulator.
+//
+// Cargo differs from npm in two ways the downstream collector relies on:
+//
+//  1. The .crate tarball URL is NOT in the registry response — it's a
+//     stable canonical form constructed from the package name and
+//     version: https://static.crates.io/crates/{name}/{version}/download.
+//
+//  2. crates.io exposes no publisher-stamped commit SHA in registry
+//     metadata (no equivalent of npm's `gitHead`). git_head is emitted
+//     empty here; the artifact collector recovers the SHA after fetch
+//     by reading .cargo_vcs_info.json from the tarball root, written
+//     by `cargo publish` itself rather than supplied by the publisher.
+//
+// integrity carries the crates.io `checksum` (hex sha256). It is
+// opaque to current downstream consumers — see the field's declared
+// caveat in internal/signal/types.go — but kept on the wire for the
+// future cross-check against the hash signatory computes during fetch.
+func recordArtifactURL(result *signal.CollectionResult, entityID, packageName string,
+	cr *CrateResponse, collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	recent := recentVersionsByPublishTime(cr, 1)
+	if len(recent) == 0 {
+		// No orderable non-yanked version → cannot construct a
+		// meaningful URL or pair to a tag. Recorded as absence so
+		// the artifact collector's downstream readArtifactURL lookup
+		// surfaces AbsenceReasonNoArtifactURL rather than silently
+		// no-opping.
+		result.RecordAbsence(entityID, sigType, collectorSource,
+			"no orderable non-yanked versions to publish artifact URL", false, collectedAt)
+		return
+	}
+
+	latest := recent[0]
+	url := fmt.Sprintf("https://static.crates.io/crates/%s/%s/download",
+		packageName, latest.version)
+
+	result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"url":       url,
+			"version":   latest.version,
+			"integrity": latest.checksum,
+			"git_head":  "", // crates.io does not expose this; recovered post-fetch from .cargo_vcs_info.json.
+		})
+}
+
 // recordMaintainerCount emits owner count + logins (mirrors npm's signal).
 func recordMaintainerCount(result *signal.CollectionResult, entityID string,
 	owners *OwnersResponse, collectedAt time.Time) {
@@ -293,6 +346,12 @@ type versionRecord struct {
 	createdAt      string
 	hasBuildScript bool
 	publisher      string
+	// checksum is the crates.io-supplied hex-encoded sha256 of the
+	// .crate tarball. Surfaced verbatim by recordArtifactURL as the
+	// `integrity` field — opaque to current consumers but carried on
+	// the wire for future cross-checking against the hash signatory
+	// computes itself during fetch.
+	checksum string
 }
 
 // recentVersionsByPublishTime returns up to n non-yanked versions sorted
@@ -312,6 +371,7 @@ func recentVersionsByPublishTime(cr *CrateResponse, n int) []versionRecord {
 			createdAt:      v.CreatedAt,
 			hasBuildScript: v.HasBuildScript,
 			publisher:      publisher,
+			checksum:       v.Checksum,
 		})
 	}
 

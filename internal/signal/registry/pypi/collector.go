@@ -168,7 +168,16 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	versions := buildVersionFiles(proj)
 
 	// ----- trusted_publishing: Phase A (snapshot) -----
+	//
+	// Reordered to run BEFORE artifact_url so the recovered
+	// AttestationResponse can feed git_head. The attestation's
+	// Fulcio cert carries the publisher-stamped commit SHA in OID
+	// 1.3.6.1.4.1.57264.1.13 — extracting it lifts pair confidence
+	// downstream from tag_match to exact_gitHead.
 	latestAttest, latestKnown := c.recordTrustedPublishing(ctx, result, entity.ID, packageName, versions, collectedAt)
+
+	// ----- artifact_url (publication, handoff to artifact collector) -----
+	recordArtifactURL(result, entity.ID, proj, latestAttest, collectedAt)
 
 	// ----- attestation_consistency: Phase B (longitudinal) -----
 	// Only fires when Phase A produced a definitive answer (attested or
@@ -377,6 +386,107 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			"window_hours":       int(span.Hours()),
 			"versions_checked":   len(window),
 		})
+}
+
+// recordArtifactURL emits the artifact_url handoff signal that the
+// artifact-vs-repo divergence collector consumes from the in-run
+// accumulator.
+//
+// PyPI differs from npm and cargo in two ways the downstream
+// collector relies on:
+//
+//  1. The sdist URL lives on Distribution.url directly (parsed
+//     from the registry response) rather than constructed (cargo)
+//     or carried on a different field shape (npm's dist.tarball).
+//
+//  2. PyPI exposes no publisher-stamped commit SHA in registry
+//     metadata directly, but PEP 740 trusted-publishing
+//     attestations DO carry one in the Fulcio cert's source-repo-
+//     digest OID extension. When attest is non-nil and the cert
+//     parses cleanly, git_head ships the recovered SHA — pair
+//     confidence downstream becomes exact_gitHead. When attest
+//     is nil (no trusted publishing, or fetch failure) git_head
+//     ships empty and pair resolution falls through to tag-match.
+//
+// Sdist (packagetype=="sdist"), not wheel, is the right surface:
+// wheels are build outputs (compiled .pyc, sometimes C extensions,
+// regenerated metadata), so wheel-vs-repo is a category error for
+// the xz-shaped check. The signal is "what does the publication
+// channel ship that the source-of-record git tree doesn't?" — for
+// Python that's exclusively the sdist.
+//
+// integrity carries the sdist's digests.sha256. Opaque to current
+// consumers — see urlSignalValue's declared caveat in
+// internal/signal/types.go — but kept on the wire for the future
+// cross-check against the hash signatory computes during fetch.
+func recordArtifactURL(result *signal.CollectionResult, entityID string,
+	proj *Project, attest *AttestationResponse, collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	// Walk releases newest-first; pick the first version that has a
+	// non-yanked sdist distribution. Versions whose timestamps don't
+	// parse are skipped — the same policy buildVersionFiles uses.
+	var candidates []versionRecord
+	for ver, dists := range proj.Releases {
+		if len(dists) == 0 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, versionRecord{
+			version:     ver,
+			publishedAt: t,
+			yanked:      isYanked(dists),
+		})
+	}
+	slices.SortFunc(candidates, func(a, b versionRecord) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.publishedAt.Compare(a.publishedAt)
+	})
+
+	// Recover the publisher-stamped commit SHA from the trusted-
+	// publishing attestation when available. All artifacts in a
+	// release share the same source-repo-digest because they're
+	// all built from the same workflow run, so the SHA recovered
+	// from any attestation in the response is the right SHA for
+	// the sdist regardless of which file the attestation was
+	// fetched against.
+	gitHead, _ := extractGitHeadFromAttestation(attest)
+
+	for _, rec := range candidates {
+		if rec.yanked {
+			continue
+		}
+		dists := proj.Releases[rec.version]
+		for _, d := range dists {
+			if d.PackageType != "sdist" {
+				continue
+			}
+			if d.URL == "" {
+				continue
+			}
+			result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+				map[string]any{
+					"url":       d.URL,
+					"version":   rec.version,
+					"integrity": d.Digests.SHA256,
+					"git_head":  gitHead, // populated from PEP 740 cert when present; empty otherwise (tag-match fallback)
+				})
+			return
+		}
+	}
+
+	// No non-yanked sdist with a URL across the entire release history.
+	// Recorded as absence so the artifact collector's downstream
+	// readArtifactURL lookup surfaces AbsenceReasonNoArtifactURL rather
+	// than silently no-opping.
+	result.RecordAbsence(entityID, sigType, source,
+		"no non-yanked sdist with a download URL in pypi response", false, collectedAt)
 }
 
 // recordSdistOnlyIntroduced detects whether the latest version is

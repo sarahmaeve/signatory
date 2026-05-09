@@ -502,3 +502,83 @@ func (m *mockEntityStore) EnsureEntityByCanonicalURI(_ context.Context, uri, sho
 	m.minted = append(m.minted, uri)
 	return &profile.Entity{ID: "mock-" + shortName, CanonicalURI: uri}, true, nil
 }
+
+// TestCollector_RecordsArtifactURL exercises the producer side of
+// the artifact-vs-repo divergence flow for gem. The gem registry
+// collector must emit an artifact_url signal carrying the
+// constructed `.gem` download URL, version, and integrity
+// (the SHA256 from the version entry). git_head is empty —
+// rubygems.org does not expose a publisher-stamped commit in
+// registry metadata, so the downstream artifact collector falls
+// through to tag-match resolution.
+//
+// The latest non-yanked, non-prerelease, ruby-platform version is
+// the one chosen: native-platform builds (e.g. "x86_64-linux") are
+// pre-compiled artifacts whose contents diverge from source by
+// design and would produce noise in the diff.
+func TestCollector_RecordsArtifactURL(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/rails.json":
+			json.NewEncoder(w).Encode(railsFixture()) //nolint:errcheck
+		case "/api/v1/versions/rails.json":
+			json.NewEncoder(w).Encode([]VersionEntry{
+				{
+					Number: "7.1.3", CreatedAt: "2024-01-16T10:00:00Z",
+					Platform: "ruby", Authors: "DHH",
+					SHA: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+				},
+				{
+					Number: "7.1.2", CreatedAt: "2023-11-10T10:00:00Z",
+					Platform: "ruby", Authors: "DHH",
+					SHA: "1111111111111111111111111111111111111111111111111111111111111111",
+				},
+			}) //nolint:errcheck
+		case "/api/v1/gems/rails/owners.json":
+			json.NewEncoder(w).Encode(railsOwners()) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-rails",
+		CanonicalURI: "pkg:gem/rails",
+		Ecosystem:    "gem",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "artifact_url",
+		"gem registry collector must emit artifact_url so the "+
+			"artifact-vs-repo collector can fetch and pair the .gem")
+
+	var au map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["artifact_url"], &au))
+
+	assert.Equal(t, "https://rubygems.org/downloads/rails-7.1.3.gem", au["url"],
+		"rubygems.org .gem URL is constructed from name + version; the "+
+			"canonical form is /downloads/{name}-{version}.gem")
+	assert.Equal(t, "7.1.3", au["version"],
+		"version is the latest non-yanked, non-prerelease, ruby-platform "+
+			"publish; downstream tag-match resolver pairs by this")
+	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", au["integrity"],
+		"integrity is the rubygems.org-supplied sha256 of the .gem")
+	assert.Equal(t, "", au["git_head"],
+		"rubygems.org does not expose git_head in registry metadata; "+
+			"the artifact collector falls through to tag-match resolution")
+}

@@ -229,7 +229,9 @@ func TestCollector_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, 6, result.SignalCount(), "all six signals should land on happy path")
+	assert.Equal(t, 7, result.SignalCount(), "all seven signals should land on happy path "+
+		"(last_publish, version_count, transparency_log_present, publish_origin, "+
+		"version_pin_table, version_publish_burst, artifact_url)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	require.True(t, hasSignal(result, "last_publish"))
@@ -252,6 +254,54 @@ func TestCollector_HappyPath(t *testing.T) {
 	assert.Equal(t, "https://go.googlesource.com/sync", po["url"])
 	assert.Equal(t, "refs/tags/v0.20.0", po["ref"])
 	assert.Equal(t, "ec11c4a93de22cde2abe2bf74d70791033c2464c", po["hash"])
+}
+
+// TestCollector_RecordsArtifactURL exercises the producer side of
+// the artifact-vs-repo divergence flow for Go modules. The
+// gopublish collector must emit an artifact_url signal carrying:
+//
+//   - url: the canonical proxy.golang.org module zip URL,
+//     constructed as <proxy-base>/<encoded-module>/@v/<version>.zip
+//   - version: the @latest pointer's Version field
+//   - git_head: Origin.Hash from the .info block — the publisher-
+//     stamped commit SHA. Same provenance strength as cargo's
+//     vcs_info, so the downstream collector pairs at
+//     PairConfidenceExactGitHead.
+//   - integrity: empty for now — the proxy serves a separate
+//     /@v/<version>.ziphash endpoint we don't currently fetch.
+//     The downstream collector tolerates empty integrity (it's
+//     opaque to current consumers; reserved for future
+//     cross-checking against signatory's own computed hash).
+//
+// The encoded-module path applies proxy.golang.org's `!`-escape
+// rule (uppercase letters → !lowercase). For "golang.org/x/sync"
+// no escapes are needed; the module path passes through verbatim.
+func TestCollector_RecordsArtifactURL(t *testing.T) {
+	t.Parallel()
+	fx := happyPathFixtures()
+	srv := fakeProxyAndSum(t, "golang.org/x/sync", fx)
+
+	c := noJitterCollector(srv.URL)
+	result, err := c.Collect(context.Background(), goEntity("golang.org/x/sync"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.True(t, hasSignal(result, "artifact_url"),
+		"gopublish collector must emit artifact_url so the artifact-vs-repo "+
+			"collector can fetch and pair the module zip")
+
+	au := getSignalValue(t, result, "artifact_url")
+	assert.Equal(t, srv.URL+"/golang.org/x/sync/@v/v0.20.0.zip", au["url"],
+		"url is constructed as <proxy-base>/<encoded-module>/@v/<version>.zip")
+	assert.Equal(t, "v0.20.0", au["version"],
+		"version is the @latest publish; downstream pair resolver pairs by this")
+	assert.Equal(t, "ec11c4a93de22cde2abe2bf74d70791033c2464c", au["git_head"],
+		"git_head is the proxy-supplied Origin.Hash — the publisher-stamped "+
+			"commit SHA. Same provenance strength as cargo's vcs_info: yields "+
+			"PairConfidenceExactGitHead at the downstream collector")
+	assert.Equal(t, "", au["integrity"],
+		"integrity is reserved for the ziphash cross-check; empty until the "+
+			"separate /@v/<version>.ziphash endpoint is wired")
 }
 
 // TestCollector_NonGoEntity: a non-pkg:golang entity yields an
@@ -292,7 +342,7 @@ func TestCollector_PkgGoLegacyURI(t *testing.T) {
 	c := noJitterCollector(srv.URL)
 	result, err := c.Collect(context.Background(), legacy)
 	require.NoError(t, err)
-	assert.Equal(t, 6, result.SignalCount(), "legacy pkg:go URI should still resolve")
+	assert.Equal(t, 7, result.SignalCount(), "legacy pkg:go URI should still resolve")
 }
 
 // TestCollector_LatestNotFound: @latest 404 turns into a fetch

@@ -1,11 +1,20 @@
 package pypi
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1320,4 +1329,167 @@ func TestCollector_AttestationConsistency_PhaseAError_SkipsPhaseB(t *testing.T) 
 	// Phase B must NOT emit a signal — it has no reliable latest state.
 	assert.False(t, hasSignal(result, "attestation_consistency"),
 		"Phase B must not emit when Phase A errored (nil means unknown, not absent)")
+}
+
+// ----- artifact_url (handoff to artifact-vs-repo collector) -----
+
+// TestCollector_Collect_ArtifactURL_EmitsForLatestSdist is the
+// smallest claim of the pypi→artifact-vs-repo wiring: the registry
+// collector must emit an artifact_url signal carrying the latest
+// version's sdist URL, version, integrity (sha256 from digests),
+// and an empty git_head.
+//
+// Empty git_head mirrors cargo: PyPI exposes no publisher-stamped
+// commit SHA in registry metadata. The downstream artifact collector
+// will fall through to tag-match resolution against the local clone.
+//
+// Sdist (not wheel) is the right comparison surface because wheels
+// are build outputs — the xz-shaped check is "what does the
+// publication channel ship that the source-of-record git tree doesn't?"
+// For Python that's the sdist.
+func TestCollector_Collect_ArtifactURL_EmitsForLatestSdist(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.2.3": {
+				{
+					UploadTimeISO: "2026-04-01T00:00:00Z",
+					PackageType:   "sdist",
+					Filename:      "hatch-1.2.3.tar.gz",
+					URL:           "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+					Digests:       Digests{SHA256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "artifact_url"),
+		"pypi registry collector must emit artifact_url so the artifact-vs-repo "+
+			"collector can fetch and pair the sdist tarball")
+
+	au := getSignalValue(t, result, "artifact_url")
+	assert.Equal(t, "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz", au["url"],
+		"url is the sdist's files.pythonhosted.org URL straight from the registry response")
+	assert.Equal(t, "1.2.3", au["version"],
+		"version is the latest non-yanked publish; downstream tag-match resolver pairs by this")
+	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", au["integrity"],
+		"integrity is the sdist's digests.sha256 — opaque to current consumers but kept on "+
+			"the wire for cross-checking against the hash signatory computes during fetch")
+	assert.Equal(t, "", au["git_head"],
+		"PyPI does not expose git_head in registry metadata; the downstream artifact "+
+			"collector falls through to tag-match resolution")
+}
+
+// TestCollector_Collect_ArtifactURL_GitHeadFromAttestation pins the
+// PEP 740 → exact_gitHead pipeline at the artifact_url emission
+// layer. When the package has a trusted-publishing attestation
+// whose Fulcio cert carries the source-repo-digest OID, the
+// recovered SHA must land in git_head — flipping pair confidence
+// downstream from tag_match to exact_gitHead for the subset of
+// pypi packages on trusted publishing.
+//
+// Test fixture: an HTTP server that serves both the project JSON
+// and a real PEP 740 Integrity API response. The Integrity response
+// carries a synthesised cert (base64-encoded DER, OID extension
+// set to a known SHA) — the same shape PyPI's production Integrity
+// API ships per the spec lookup.
+//
+// What this test does NOT cover:
+//   - DSSE envelope signature verification
+//   - Rekor inclusion proof verification
+//   - Fulcio CA chain verification
+//
+// All three are presence-and-extraction-only at this layer; full
+// cryptographic verification would layer on top via sigstore-go.
+func TestCollector_Collect_ArtifactURL_GitHeadFromAttestation(t *testing.T) {
+	t.Parallel()
+
+	const wantSHA = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+
+	// Build a synthesised cert with the source-repo-digest OID.
+	// Same construction as cert_test.go; kept inline here so the
+	// integration test reads independently.
+	oidValue, err := asn1.MarshalWithParams(wantSHA, "utf8")
+	require.NoError(t, err)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: fulcioSourceRepoDigestOID, Value: oidValue},
+		},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	certB64 := base64.StdEncoding.EncodeToString(certDER)
+
+	// Real PEP 740 attestation response shape: bundles[].publisher
+	// + bundles[].attestations[].verification_material.certificate.
+	attestBody, err := json.Marshal(AttestationResponse{
+		Version: 1,
+		Bundles: []AttestationBundle{
+			{
+				Publisher: AttestationPublisher{
+					Kind: "GitHub", Repository: "pallets/click",
+					Workflow: "publish.yaml", Environment: "publish",
+				},
+				Attestations: []SigstoreAttestation{
+					{VerificationMaterial: VerificationMaterial{Certificate: certB64}},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Project JSON: one version with one sdist.
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.2.3": {
+				{
+					UploadTimeISO: "2026-04-01T00:00:00Z",
+					PackageType:   "sdist",
+					Filename:      "hatch-1.2.3.tar.gz",
+					URL:           "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+					Digests:       Digests{SHA256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/pypi/"):
+			_, _ = w.Write(projBody)
+		case strings.HasPrefix(r.URL.Path, "/integrity/"):
+			_, _ = w.Write(attestBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "artifact_url"),
+		"artifact_url must still emit when an attestation is present")
+
+	au := getSignalValue(t, result, "artifact_url")
+	assert.Equal(t, wantSHA, au["git_head"],
+		"git_head must carry the SHA recovered from the Fulcio cert's "+
+			"source-repo-digest extension — without this lift the downstream "+
+			"artifact-vs-repo collector falls back to tag_match instead of "+
+			"using the publisher-stamped commit at exact_gitHead confidence")
 }

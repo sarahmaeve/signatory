@@ -99,6 +99,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		recordVersionCount(result, entity.ID, versions, collectedAt)
 		recordYankedReleaseCount(result, entity.ID, versions, collectedAt)
 		recordCrossVersionSignals(result, entity.ID, versions, collectedAt)
+		recordArtifactURL(result, entity.ID, packageName, versions, collectedAt)
 	}
 
 	// ----- owners -----
@@ -245,6 +246,62 @@ func recordOwnerCount(result *signal.CollectionResult, entityID string,
 		map[string]any{
 			"count": len(owners),
 		})
+}
+
+// recordArtifactURL emits the artifact_url handoff signal that the
+// artifact-vs-repo divergence collector consumes from the in-run
+// accumulator.
+//
+// Gem differs from npm/cargo/pypi in two ways the downstream
+// collector relies on:
+//
+//  1. The .gem URL is constructed from name + version: the
+//     canonical form is https://rubygems.org/downloads/{name}-{version}.gem.
+//     Registry metadata never carries the URL directly.
+//
+//  2. rubygems.org exposes no publisher-stamped commit SHA. git_head
+//     is emitted empty; pair resolution falls through to tag-match
+//     against the local clone.
+//
+// Only the latest non-yanked, non-prerelease, ruby-platform version
+// is chosen. Native-platform builds (e.g. "x86_64-linux") are
+// pre-compiled artifacts whose contents diverge from source by
+// design and would produce false-positive divergence noise — the
+// `.gem`-vs-repo signal is meaningful only against the pure-ruby
+// platform that ships actual source code.
+//
+// integrity carries the rubygems.org-supplied sha256 from the
+// version entry.
+func recordArtifactURL(result *signal.CollectionResult, entityID, packageName string,
+	versions []VersionEntry, collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	for _, v := range versions {
+		if v.Yanked || v.Prerelease {
+			continue
+		}
+		// Platform "ruby" or empty means pure-ruby gem (the source-
+		// shipping form). Anything else (e.g. "x86_64-linux",
+		// "java") is a pre-compiled artifact and the wrong surface
+		// for tarball-vs-repo comparison.
+		if v.Platform != "" && v.Platform != "ruby" {
+			continue
+		}
+		url := fmt.Sprintf("https://rubygems.org/downloads/%s-%s.gem",
+			packageName, v.Number)
+		result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
+			map[string]any{
+				"url":       url,
+				"version":   v.Number,
+				"integrity": v.SHA,
+				"git_head":  "", // rubygems.org does not expose this; falls through to tag-match.
+			})
+		return
+	}
+
+	result.RecordAbsence(entityID, sigType, collectorSource,
+		"no non-yanked, non-prerelease, ruby-platform version", false, collectedAt)
 }
 
 // recordMFARequired emits whether the gem mandates MFA for pushes.

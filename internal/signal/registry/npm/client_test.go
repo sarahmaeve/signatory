@@ -54,7 +54,9 @@ const sampleRegistryResponse = `{
         "postinstall": ""
       },
       "dist": {
-        "attestations": null
+        "attestations": null,
+        "tarball": "https://registry.npmjs.org/express/-/express-4.18.2.tgz",
+        "integrity": "sha512-5/PsL6iGPdfQ/lKM1UuielYgv3BUoJfz1aUwU9vHZ+J7gyvwdQXFEBIEIaxeGf0GIcreATNyBExtalisDbuMqQ=="
       }
     }
   },
@@ -145,7 +147,7 @@ func TestClient_GetPackage_OversizedResponse_Rejected(t *testing.T) {
 		// that a malformed decode fires.
 		_, _ = w.Write([]byte(`{"name":"x","pad":"`))
 		chunk := strings.Repeat("A", 1024*1024) // 1MB of A
-		for i := 0; i < 12; i++ {               // 12MB total > 10MB cap
+		for range 12 {                          // 12MB total > 10MB cap
 			_, _ = w.Write([]byte(chunk))
 		}
 		_, _ = w.Write([]byte(`"}`))

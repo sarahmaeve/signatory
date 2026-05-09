@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	artifactcollector "github.com/sarahmaeve/signatory/internal/signal/artifact"
 	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
@@ -25,6 +27,18 @@ import (
 	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
 	sourcecollector "github.com/sarahmaeve/signatory/internal/signal/source"
+)
+
+// Artifact-vs-repo collector tuning. artifactHTTPCap caps the HTTP
+// body read; artifactHTTPBudget caps the per-fetch wallclock. The
+// archive-side limits (uncompressed total, per-entry size, entry
+// count, compression ratio) live in stream.DefaultLimits and apply
+// when CollectorConfig.Limits is left zero-valued — keeping the
+// caps centralized in the stream package matches the rest of the
+// defensive surface (see internal/artifact/stream).
+const (
+	artifactHTTPCap    = 256 << 20 // 256 MiB on the wire
+	artifactHTTPBudget = 60 * time.Second
 )
 
 // CollectOpts carries per-invocation options from AnalyzeCmd's
@@ -289,6 +303,84 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
 			collectors = append(collectors,
 				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),
+			)
+		}
+
+		// Artifact-vs-repo: compares the registry-published source
+		// tarball against the git tree at the resolved tag. Closes
+		// the highest-leverage signal gap documented in
+		// design/threat-landscape/example-xz-utils-cve-2024-3094.md
+		// (CVE-2024-3094 — backdoor in the dist tarball, absent from
+		// git at the same tag).
+		//
+		// Gated on (a) entity has a registry collector queued
+		// (so artifact_url will be in InRun), and (b) clone path is
+		// resolved (we have a repo side to diff against). Currently
+		// covers npm, cargo, pypi, gem, and golang:
+		//
+		//   - npm: registry supplies gitHead in versions[v].gitHead
+		//     for v≥5 publishes; tag-match fallback otherwise.
+		//   - cargo: registry exposes no gitHead, so the collector's
+		//     CaptureIntent recovers the publisher-stamped SHA from
+		//     .cargo_vcs_info.json inside the tarball (written by
+		//     `cargo publish` itself, not user input).
+		//   - pypi: registry exposes no gitHead and there's no
+		//     equivalent of cargo's vcs_info embedded in the sdist.
+		//     Pair resolution falls through to tag-match against the
+		//     local clone's tag list. Confidence: pair_match.
+		//   - gem: outer .gem is a plain (uncompressed) tar holding
+		//     data.tar.gz + metadata.gz + checksums.yaml.gz. The
+		//     collector walks the outer with FormatTar, captures
+		//     data.tar.gz via CaptureIntent, then re-walks those
+		//     bytes as FormatTarGzip — the inner manifest feeds the
+		//     diff. rubygems.org exposes no gitHead, so pair
+		//     resolution also falls through to tag-match.
+		//   - golang/go: proxy.golang.org records Origin.Hash in the
+		//     .info block — the publisher-stamped commit SHA, same
+		//     provenance strength as cargo's vcs_info. Pair resolves
+		//     at exact_gitHead. Modules ship as zip with a multi-
+		//     segment "<module>@<version>/" wrapping prefix.
+		//
+		// maven: extend the gate when its collector learns to emit
+		// artifact_url. Note: source-jars only — class-jars compare
+		// bytecode to source, a category error.
+		//
+		// Known limitation: the tag-match fallback in
+		// internal/signal/artifact/pair.go only handles bare
+		// "<version>" and "v<version>" tag names. Repos that use
+		// "release-<version>" or "<name>-<version>" prefixes will
+		// fall through to AbsenceReasonPairUnresolved unless their
+		// ecosystem path supplies an exact gitHead (npm registry
+		// or cargo vcs_info). Tracking as a separate hardening item.
+		//
+		// Appended LAST so the in-run accumulator already holds the
+		// upstream registry collector's artifact_url emission by the
+		// time Collect runs. Same dispatch-order discipline as
+		// source-evolution above.
+		//
+		// Streams the tarball: no tempdir, no on-disk artifact. The
+		// HTTP fetcher's response body feeds directly into the
+		// header-only walker. Per the smallest-and-safest design,
+		// no bytes are ever written to disk (or persisted in
+		// filestore/) — re-runs re-fetch, but tarballs are small
+		// and the cache invalidation cost beats the bandwidth.
+		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" || entity.Ecosystem == "gem" || entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
+			collectors = append(collectors,
+				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
+					InRun:     opts.InRunResult,
+					ClonePath: clonePath,
+					Fetcher: artifactcollector.NewStreamArtifactFetcher(
+						artifactcollector.StreamFetcherOptions{
+							MaxBytes: artifactHTTPCap,
+							Timeout:  artifactHTTPBudget,
+						}),
+					Git: artifactcollector.NewGitInspector(clonePath),
+					// Limits left zero-valued — stream.Walk fills with
+					// stream.DefaultLimits (256MiB total / 64MiB entry /
+					// 100k entries / 100:1 ratio / 256MiB compressed).
+					// Same effective cap as the legacy MaxArchiveBytes
+					// (256 MiB) that was wired here before.
+				}),
 			)
 		}
 	}
