@@ -501,6 +501,150 @@ func TestCollector_EntityStore_MintsPublisherEntities(t *testing.T) {
 	assert.Contains(t, store.minted, "identity:cargo/dtolnay")
 }
 
+// TestCollector_RecordsArtifactURL exercises the producer side of the
+// artifact-vs-repo divergence flow for cargo. The cargo registry
+// collector must emit an artifact_url signal carrying the constructed
+// tarball URL, version, and integrity (hex sha256 from the crates.io
+// `checksum` field). git_head is empty for cargo — crates.io does not
+// expose a publisher-stamped commit in registry metadata; the
+// downstream artifact collector recovers the SHA from
+// .cargo_vcs_info.json embedded in the tarball.
+func TestCollector_RecordsArtifactURL(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{
+			Name:            "blake3",
+			Repository:      "https://github.com/BLAKE3-team/BLAKE3",
+			RecentDownloads: 25_000_000,
+			CreatedAt:       "2019-12-02T00:00:00Z",
+			MaxStableVer:    "1.8.5",
+		},
+		Versions: []Version{
+			{
+				Num: "1.8.5", CreatedAt: "2026-04-25T00:51:44Z",
+				Yanked: false, PublishedBy: &User{Login: "oconnor663"},
+				Checksum: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			},
+			{
+				Num: "1.8.4", CreatedAt: "2026-03-20T00:00:00Z",
+				Yanked: false, PublishedBy: &User{Login: "oconnor663"},
+				Checksum: "1111111111111111111111111111111111111111111111111111111111111111",
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/blake3":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/blake3/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{
+				Users: []Owner{{Login: "oconnor663", Kind: "user"}},
+			}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-blake3",
+		CanonicalURI: "pkg:cargo/blake3",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signals := result.Signals()
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range signals {
+		signalMap[s.Type] = s.Value
+	}
+
+	require.Contains(t, signalMap, "artifact_url",
+		"cargo registry collector must emit artifact_url so the artifact-vs-repo "+
+			"collector can fetch and pair the .crate tarball")
+
+	var au map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["artifact_url"], &au))
+
+	assert.Equal(t, "https://static.crates.io/crates/blake3/1.8.5/download", au["url"],
+		"crates.io tarball URL is constructed (not parsed from registry metadata); "+
+			"the canonical form is /crates/{name}/{version}/download")
+	assert.Equal(t, "1.8.5", au["version"],
+		"version is the latest non-yanked publish; downstream tag-match resolver pairs by this")
+	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", au["integrity"],
+		"integrity is the crates.io checksum (hex sha256). Opaque to current consumers "+
+			"but kept on the wire for cross-checking")
+	assert.Equal(t, "", au["git_head"],
+		"crates.io does not expose git_head in registry metadata; the artifact collector "+
+			"recovers the SHA from .cargo_vcs_info.json inside the tarball")
+}
+
+// TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions confirms the
+// absence path: a crate response with no orderable non-yanked versions
+// (e.g. all versions yanked) records an artifact_url absence rather
+// than emitting a malformed URL or panicking.
+func TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{
+			Name:         "all-yanked",
+			MaxStableVer: "0.1.0",
+		},
+		Versions: []Version{
+			{Num: "0.1.0", Yanked: true, CreatedAt: "2024-01-01T00:00:00Z"},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/all-yanked":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/all-yanked/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+
+	entity := &profile.Entity{
+		ID:           "test-all-yanked",
+		CanonicalURI: "pkg:cargo/all-yanked",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// Find the artifact_url absence on the result. Absences live in
+	// CollectionResult.Collected alongside signals, distinguished by
+	// IsAbsence() — there is no separate Absences() accessor.
+	found := false
+	for i := range result.Collected {
+		entry := result.Collected[i]
+		if entry.IsAbsence() && entry.Absence.SignalType == "artifact_url" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found,
+		"with no orderable non-yanked versions, artifact_url must be recorded as absence "+
+			"rather than emitted with a fabricated URL")
+}
+
 // mockEntityStore tracks which entity URIs were minted.
 type mockEntityStore struct {
 	minted []string
