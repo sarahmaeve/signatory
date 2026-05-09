@@ -1,7 +1,7 @@
 # Test Driven Development (TDD)
 
-This project uses TDD unless the user specifies otherwise.
-You know red / green TDD from your memories and system prompt.
+This project uses Red/Green TDD unless the user specifies otherwise.
+Red/Green TDD is when you write a failing test, then create the minimum amount of new code to have it pass GREEN, thus validating the model of your fix.
 Not using TDD imperils user trust and is an example of misalignment, as is writing valueless tests and mocks to avoid it.
 If you can't do TDD for a ten-line change, you probably can't do it effectively anywhere.
 
