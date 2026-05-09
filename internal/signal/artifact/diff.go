@@ -1,9 +1,10 @@
 package artifact
 
 import (
-	"archive/tar"
 	"slices"
 	"strings"
+
+	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 )
 
 // ClassifiedEntry is one entry in the extras-in-tarball sample,
@@ -44,117 +45,40 @@ type Diff struct {
 	Categories            map[string]int    `json:"categories"`
 }
 
-// stripCommonTopDir detects and removes a single shared top-level
-// directory across every entry. This handles the universal "tarball
-// wraps everything in a folder" convention: npm uses "package/",
-// PyPI sdists use "<name>-<version>/", autotools dist-tarballs use
-// "<project>-<version>/", GitHub release zips use "<repo>-<sha>/".
-//
-// The detection is "every entry shares a candidate top-level dir,"
-// not "the dir is named one of these specific things." Heuristic
-// stays universal across ecosystems and (more importantly) refuses
-// to strip when it can't be sure: a single root-level entry
-// disqualifies the whole strip, preserving a tarball that's already
-// root-relative as-is.
-//
-// Returns the (possibly rewritten) entries and the prefix that
-// was stripped (empty string when no strip happened). Callers can
-// surface the prefix into the signal payload so operators reading
-// the divergence row see what was normalized away.
-//
-// Directory-typed entries that match the prefix exactly (the
-// "package/" entry itself, with no tail) are dropped — they have
-// no path to rewrite to. Non-directory entries inside the prefix
-// keep their tails ("package/lib/foo.js" → "lib/foo.js").
-func stripCommonTopDir(entries []Entry) ([]Entry, string) {
-	if len(entries) == 0 {
-		return entries, ""
-	}
-
-	// Candidate prefix is the first path component of the first
-	// entry that has one. An entry with no slash anywhere (i.e.,
-	// already a root-level file) means there is no common top-dir
-	// candidate at all.
-	candidate := topComponent(entries[0].Path)
-	if candidate == "" {
-		return entries, ""
-	}
-
-	// Verify EVERY entry starts with the candidate. A single
-	// outlier vetoes the strip — better to surface the prefix as
-	// honest divergence than to silently rewrite paths and corrupt
-	// a downstream comparison.
-	for _, e := range entries[1:] {
-		if !strings.HasPrefix(e.Path, candidate) {
-			return entries, ""
-		}
-	}
-
-	stripped := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		// Drop directory-typed entries entirely. They have no git
-		// ls-tree counterpart (ls-tree -r emits only blobs), and
-		// callers that consume strip output directly expect a
-		// clean file-only list.
-		if e.Type == tar.TypeDir {
-			continue
-		}
-		newPath := strings.TrimPrefix(e.Path, candidate)
-		if newPath == "" {
-			continue
-		}
-		clone := e
-		clone.Path = newPath
-		stripped = append(stripped, clone)
-	}
-	return stripped, candidate
-}
-
-// topComponent returns the leading path component plus its trailing
-// slash, or "" if the path has no embedded slash. We keep the slash
-// on the prefix so HasPrefix in the verification loop matches at a
-// directory boundary rather than a string-prefix coincidence
-// ("package" wrongly matching "package-extra").
-func topComponent(p string) string {
-	i := strings.IndexByte(p, '/')
-	if i < 0 {
-		return ""
-	}
-	return p[:i+1]
-}
-
-// ComputeDiff builds a Diff from a tarball entry list and a git
-// path list. Directory-typed tarball entries are excluded from the
-// comparison: git ls-tree -r --name-only emits only blob (file)
-// paths, so counting tar directory headers as "extra in tarball"
+// ComputeDiff builds a Diff from a stream-walked archive manifest
+// and a git path list. Directory-typed entries are excluded from
+// the comparison: git ls-tree -r --name-only emits only blob (file)
+// paths, so counting tar/zip directory headers as "extra in tarball"
 // would falsely flag every healthy project.
 //
-// sampleCap bounds both ExtrasInTarballSample and ExtrasInRepoSample.
-// Extras are sorted by path for determinism (the same input always
-// produces the same sample, regardless of underlying map iteration
-// order). Order-by-size or order-by-category-priority is a
-// reasonable future variant; today, lexical order is the cheapest
-// thing that satisfies "deterministic across runs."
+// The manifest's StrippedTopDir (auto-detected by the stream walker
+// — "package/" for npm, "<name>-<version>/" for cargo and autotools)
+// is trimmed from each entry's path before set-comparison, so an
+// npm-style "package/" prefix doesn't register every file as
+// divergent. The walker exposes the prefix as metadata; ComputeDiff
+// applies it here so consumers don't have to.
 //
-// The result's Categories map is always non-nil even when both
-// sample slices are empty — keeps downstream JSON marshalling
-// emitting `"categories": {}` rather than `"categories": null`,
-// which round-trips through the synthesist more cleanly.
-func ComputeDiff(entries []Entry, gitPaths []string, sampleCap int) Diff {
-	// Normalize away the tarball's wrapping top-level directory
-	// before set-comparison, so an npm-style "package/" prefix
-	// or an autotools-style "<project>-<version>/" prefix doesn't
-	// register every file as divergent. See stripCommonTopDir
-	// for the detection heuristic and its safety guard.
-	entries, _ = stripCommonTopDir(entries)
+// sampleCap bounds ExtrasInTarballSample. Extras are sorted by path
+// for determinism (the same input always produces the same sample,
+// regardless of underlying map iteration order). Order-by-size or
+// order-by-category-priority is a reasonable future variant; today,
+// lexical order is the cheapest thing that satisfies "deterministic
+// across runs."
+//
+// The result's Categories map is always non-nil even when the
+// sample is empty — keeps downstream JSON marshalling emitting
+// `"categories": {}` rather than `"categories": null`, which
+// round-trips through the synthesist more cleanly.
+func ComputeDiff(manifest *stream.Manifest, gitPaths []string, sampleCap int) Diff {
+	stripPrefix := manifest.StrippedTopDir
 
 	gitSet := make(map[string]struct{}, len(gitPaths))
 	for _, p := range gitPaths {
 		gitSet[p] = struct{}{}
 	}
 
-	tarSet := make(map[string]Entry, len(entries))
-	for _, e := range entries {
+	tarSet := make(map[string]stream.Entry, len(manifest.Entries))
+	for _, e := range manifest.Entries {
 		// Filter to entries the comparison can meaningfully match
 		// against ls-tree output. Directories and other non-file
 		// types (block/char devices, fifos) are excluded: they have
@@ -165,12 +89,21 @@ func ComputeDiff(entries []Entry, gitPaths []string, sampleCap int) Diff {
 		// trees with mode 120000, and a symlink in a tarball that's
 		// absent from the git tree is itself a signal worth surfacing.
 		switch e.Type {
-		case tar.TypeReg, tar.TypeSymlink, tar.TypeLink:
-			tarSet[e.Path] = e
+		case stream.EntryFile, stream.EntrySymlink, stream.EntryHardlink:
+			// include
 		default:
-			// Directory, device, fifo, xglobal, xheader, ...
-			// Skip silently — not part of the file-set comparison.
+			// EntryDir, EntryOther, EntryUnknown — skip silently.
+			continue
 		}
+
+		path := strings.TrimPrefix(e.Path, stripPrefix)
+		if path == "" {
+			// Entry IS the wrapping directory itself (e.g. "package/"
+			// as a standalone tar header). No path to compare against
+			// git; drop silently.
+			continue
+		}
+		tarSet[path] = e
 	}
 
 	var extrasInTarball []ClassifiedEntry

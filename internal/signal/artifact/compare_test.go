@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 )
 
 // TestCompare_XZShapedFixture is the canonical case the whole
@@ -56,15 +58,22 @@ func TestCompare_XZShapedFixture(t *testing.T) {
 		"configure.ac",
 	}
 
-	cmp, err := Compare(bytes.NewReader(tarball), gitPaths, CompareOptions{
+	// Walk the tarball into a manifest, then build the comparison
+	// against the supplied gitPaths. Two-step shape mirrors the
+	// collector's flow: stream.Walk owns format dispatch + caps;
+	// Compare owns the trust-model layer (pairing metadata, diff
+	// classification) on top of the manifest.
+	manifest, err := stream.Walk(t.Context(), bytes.NewReader(tarball),
+		stream.FormatTarGzip, nil, stream.Limits{MaxTotalBytes: 1 << 20})
+	require.NoError(t, err)
+
+	cmp := Compare(manifest, gitPaths, CompareOptions{
 		ArtifactURL:    "https://example.invalid/xz-5.6.1.tar.gz",
 		GitRef:         "v5.6.1",
 		GitCommit:      "0000000000000000000000000000000000000000", // synthetic
 		PairConfidence: PairConfidenceTagMatch,
-		MaxBytes:       1 << 20,
 		SampleCap:      50,
 	})
-	require.NoError(t, err)
 
 	// 1. Headline assertion: the malicious file appears in extras.
 	var found *ClassifiedEntry

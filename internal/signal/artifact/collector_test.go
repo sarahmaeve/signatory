@@ -193,6 +193,474 @@ func TestCollector_Collect_HappyPathEmitsDivergenceSignal(t *testing.T) {
 			"with category=build_glue — the load-bearing CVE-2024-3094 fact")
 }
 
+// TestCollector_Collect_Cargo_VCSInfoRescuesPair is the canonical
+// cargo case: registry metadata exposes no gitHead (crates.io
+// doesn't carry one), and the version string is "0.0.0-dev" with
+// no matching tag in the repo. Without vcs_info recovery the
+// pairing would fail and the collector would emit an absence.
+//
+// The collector must:
+//
+//  1. Register a CaptureIntent for .cargo_vcs_info.json when the
+//     entity ecosystem is cargo.
+//  2. Walk the tarball, capturing the vcs_info bytes under the
+//     intent's MaxSize cap.
+//  3. Parse git.sha1 from the captured JSON.
+//  4. Use that SHA as the effective gitHead for ResolvePair, so
+//     the pairing succeeds with PairConfidenceExactGitHead even
+//     when registry metadata is silent.
+//  5. Surface the same divergence signal shape as the npm path:
+//     the extra-file (cargo-equivalent of CVE-2024-3094's
+//     build-to-host.m4) appears in extras_in_tarball_sample.
+//
+// This is the load-bearing test for B1 — closes the same
+// signal-gap as A1's Phase 1 work (cargo registry collector emits
+// artifact_url) but on the consumption side.
+func TestCollector_Collect_Cargo_VCSInfoRescuesPair(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-cargo"
+		version  = "0.0.0-dev" // deliberately doesn't match any tag
+		// 40-char hex SHA — must match what the stubGit advertises
+		// against vcsInfoSHA so the pairing resolves.
+		vcsInfoSHA = "abcdef0123456789abcdef0123456789abcdef01"
+	)
+
+	// Build a cargo-shaped tarball: .cargo_vcs_info.json at the
+	// archive root (typical for .crate format which uses
+	// "<name>-<version>/" as the wrapping directory; the walker's
+	// strip detection handles the wrapper, leaving the file at
+	// the root for intent matching).
+	vcsInfo := `{"git":{"sha1":"` + vcsInfoSHA + `"},"path_in_vcs":""}`
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "mycrate-0.0.0-dev/Cargo.toml", body: []byte("[package]\nname=\"mycrate\"")},
+		{path: "mycrate-0.0.0-dev/src/lib.rs", body: []byte("// real source")},
+		{path: "mycrate-0.0.0-dev/.cargo_vcs_info.json", body: []byte(vcsInfo)},
+		// The xz-equivalent: a file in the tarball that's NOT in
+		// the git tree at vcsInfoSHA. Surface in divergence.
+		{path: "mycrate-0.0.0-dev/build/inject.sh", body: []byte("#!/bin/sh\n# attacker payload")},
+	})
+
+	// gitPaths reflect what `git ls-tree -r --name-only` at the
+	// vcs_info SHA returns: the legitimate source, no inject.sh.
+	gitPaths := []string{
+		"Cargo.toml",
+		"src/lib.rs",
+	}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "cargo-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":       "https://static.crates.io/crates/mycrate/0.0.0-dev/download",
+			"version":   version,
+			"git_head":  "", // crates.io never supplies this — vcs_info path must rescue
+			"integrity": "abcd",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			// No tag matches version "0.0.0-dev" — tag-match path
+			// would fail. vcs_info SHA must be the rescue.
+			tags:        []string{"v1.0.0", "v0.9.0"},
+			pathsByRef:  map[string][]string{vcsInfoSHA: gitPaths},
+			commitByRef: map[string]string{vcsInfoSHA: vcsInfoSHA},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:cargo/mycrate",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.SignalCount(),
+		"vcs_info-rescued pair must produce one divergence signal — "+
+			"fall-through to absence here means the cargo-specific intent "+
+			"didn't fire or the SHA wasn't extracted")
+	assert.Equal(t, 0, result.AbsenceCount(),
+		"successful vcs_info rescue must NOT emit any absence row")
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type)
+
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	assert.Equal(t, vcsInfoSHA, cmp.GitCommit,
+		"resolved commit must equal the SHA recovered from .cargo_vcs_info.json")
+	assert.Equal(t, PairConfidenceExactGitHead, cmp.PairConfidence,
+		"vcs_info-derived pairing carries exact_gitHead confidence — same as "+
+			"npm's registry-supplied gitHead, since cargo's vcs_info is also "+
+			"publisher-attested (written by `cargo publish`, not user input)")
+	assert.Equal(t, 1, cmp.ExtrasInTarballCount,
+		"build/inject.sh is the one tarball-only file in this fixture")
+
+	var foundInject bool
+	for _, e := range cmp.ExtrasInTarballSample {
+		if e.Path == "build/inject.sh" {
+			foundInject = true
+		}
+	}
+	assert.True(t, foundInject,
+		"build/inject.sh must surface as divergence — the cargo-equivalent "+
+			"of CVE-2024-3094's build-to-host.m4: a file shipped only in the "+
+			"tarball, not present in the git tree at the publisher-stamped SHA")
+}
+
+// TestCollector_Collect_Cargo_VCSInfoSquatterIgnored verifies the
+// security boundary: an attacker who can write a non-canonical
+// .cargo_vcs_info.json into the tarball (at depth ≥ 2) must NOT
+// have that file's SHA used as the publisher-attested commit.
+//
+// The intent's depth-bounded matcher (TestCargoVCSInfoIntent_
+// DepthBoundedMatch covers the matcher in isolation) feeds the
+// collector's effective-gitHead resolution. Without the depth
+// bound, an attacker could publish a crate whose tarball ships
+// `mycrate-X/src/.cargo_vcs_info.json` pointing at a clean
+// commit while the actual tarball contents diverge from that
+// commit's tree — pairing succeeds, divergence vanishes, attack
+// hidden.
+//
+// In this fixture: only a squatted vcs_info exists. Pairing must
+// fall through to tag-match (which succeeds, exercising the
+// fallback path) and the resulting confidence must be tag_match,
+// NOT exact_gitHead — confirming the squatter's SHA was ignored.
+func TestCollector_Collect_Cargo_VCSInfoSquatterIgnored(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-cargo-squatter"
+		version  = "1.0.0"
+		tag      = "v1.0.0"
+		// The legitimate commit the tag points to. Distinct from
+		// the SHA the squatter advertises, so we can confirm
+		// pairing used the tag, not the squatter.
+		legitCommit = "1111111111111111111111111111111111111111"
+		// The SHA the squatted vcs_info advertises. If this ever
+		// shows up as cmp.GitCommit, the attack succeeded.
+		squatterSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	)
+
+	squatterPayload := `{"git":{"sha1":"` + squatterSHA + `"}}`
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "mycrate-1.0.0/Cargo.toml", body: []byte("[package]")},
+		{path: "mycrate-1.0.0/src/lib.rs", body: []byte("// real")},
+		// The squatter — at depth 2, must be ignored by the intent.
+		{path: "mycrate-1.0.0/src/.cargo_vcs_info.json", body: []byte(squatterPayload)},
+	})
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "cargo-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":      "https://static.crates.io/crates/mycrate/1.0.0/download",
+			"version":  version,
+			"git_head": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: {"Cargo.toml", "src/lib.rs"}},
+			commitByRef: map[string]string{tag: legitCommit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:cargo/mycrate",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.SignalCount(),
+		"tag-match fallback must produce a divergence signal — "+
+			"exact_gitHead via the squatter would also reach this point, "+
+			"so the next assertion is what actually catches the attack")
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	assert.Equal(t, PairConfidenceTagMatch, cmp.PairConfidence,
+		"pairing must come from the tag, NOT from the squatted vcs_info — "+
+			"if this is exact_gitHead the depth-bounded match was bypassed "+
+			"and the attacker's SHA reached ResolvePair")
+	assert.Equal(t, legitCommit, cmp.GitCommit,
+		"resolved commit must be the tag's, not the squatter's; "+
+			"%q would mean the attack succeeded", squatterSHA)
+	assert.NotEqual(t, squatterSHA, cmp.GitCommit,
+		"squatter's SHA MUST NOT appear as the resolved commit — "+
+			"the depth-bounded intent matcher is the load-bearing defense")
+}
+
+// TestCollector_Collect_Cargo_MalformedVCSInfoFallthrough verifies
+// graceful handling of a captured-but-unparseable vcs_info file.
+// An attacker (or a buggy publisher) could ship a .cargo_vcs_info.json
+// that's syntactically broken or has a non-SHA value in the sha1
+// field. parseVCSInfoSHA returns ("", false) silently; the
+// collector must fall through to tag-match without panicking and
+// without surfacing the parse failure as a hard error.
+func TestCollector_Collect_Cargo_MalformedVCSInfoFallthrough(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID    = "e-cargo-malformed"
+		version     = "2.0.0"
+		tag         = "v2.0.0"
+		legitCommit = "2222222222222222222222222222222222222222"
+	)
+
+	// Garbage JSON in the canonical location (depth 1, root after
+	// strip): the intent matches and captures, but parsing fails.
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "mycrate-2.0.0/Cargo.toml", body: []byte("[package]")},
+		{path: "mycrate-2.0.0/src/lib.rs", body: []byte("// real")},
+		{path: "mycrate-2.0.0/.cargo_vcs_info.json", body: []byte(`{this is not valid json`)},
+	})
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "cargo-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":      "https://static.crates.io/crates/mycrate/2.0.0/download",
+			"version":  version,
+			"git_head": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: {"Cargo.toml", "src/lib.rs"}},
+			commitByRef: map[string]string{tag: legitCommit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:cargo/mycrate",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err,
+		"malformed vcs_info must NOT propagate as a collector error — "+
+			"silent fallthrough to tag-match is the documented contract")
+
+	require.Equal(t, 1, result.SignalCount(),
+		"tag-match fallback must succeed; absence here means the parse "+
+			"failure surfaced as a hard collector failure rather than fallthrough")
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+	assert.Equal(t, PairConfidenceTagMatch, cmp.PairConfidence,
+		"with vcs_info unparseable, pairing must come from the tag — "+
+			"exact_gitHead here would mean some garbage SHA leaked through")
+}
+
+// TestCollector_Collect_Cargo_VCSInfoSHAMissingFromClone verifies
+// that when the publisher-attested vcs_info SHA isn't present in
+// the local clone (e.g. the publisher pushed a commit they later
+// rewrote out of history, or the clone is stale), the collector
+// records a clean PathsAtRef-failure absence rather than crashing
+// or pairing incorrectly.
+//
+// This exercises the failure path between "vcs_info SHA parsed
+// OK" and "PathsAtRef returns error" — it's the realistic shape
+// when a registry is fresher than a local mirror.
+func TestCollector_Collect_Cargo_VCSInfoSHAMissingFromClone(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-cargo-staleclone"
+		version  = "3.0.0"
+		// SHA the vcs_info advertises but that the stub clone
+		// doesn't know about.
+		unknownSHA = "3333333333333333333333333333333333333333"
+	)
+
+	vcsInfo := `{"git":{"sha1":"` + unknownSHA + `"}}`
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "mycrate-3.0.0/Cargo.toml", body: []byte("[package]")},
+		{path: "mycrate-3.0.0/.cargo_vcs_info.json", body: []byte(vcsInfo)},
+	})
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "cargo-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":      "https://static.crates.io/crates/mycrate/3.0.0/download",
+			"version":  version,
+			"git_head": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			// No tags AND no entry for unknownSHA in pathsByRef
+			// → PathsAtRef returns error for the SHA.
+			tags:        []string{},
+			pathsByRef:  map[string][]string{},
+			commitByRef: map[string]string{},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:cargo/mycrate",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err,
+		"PathsAtRef failure must surface as absence, NOT as a hard "+
+			"collector error — the signal model treats this as a hygiene "+
+			"observation about the clone's freshness, not a collection bug")
+
+	assert.Equal(t, 0, result.SignalCount(),
+		"no divergence signal when we couldn't read the git tree to "+
+			"diff against — emitting a signal with empty diff would be a lie")
+	require.Equal(t, 1, result.AbsenceCount(),
+		"exactly one absence row recording the read-failure")
+
+	var reason string
+	for _, s := range result.Signals() {
+		if s.Type == "absence:artifact_repo_divergence" {
+			reason = string(s.Value)
+		}
+	}
+	assert.Contains(t, reason, "read git tree",
+		"absence reason must point at the PathsAtRef failure for "+
+			"operator diagnostics; got: %q", reason)
+	assert.Contains(t, reason, unknownSHA,
+		"absence reason should include the SHA we tried to read, so "+
+			"operators can correlate against their clone state")
+}
+
+// TestCollector_Collect_Cargo_VCSInfoBeatsTagMatch is the priority
+// test: when a tarball has BOTH a parseable vcs_info AND a tag
+// matching the version, the resolved pairing must use the
+// vcs_info SHA (exact_gitHead confidence), not the tag (tag_match).
+//
+// This pins the priority order documented in collector.go:
+// registry-supplied gitHead > vcs_info-derived SHA > tag-match.
+// Both SHA-based pairings are equally trustworthy in provenance
+// terms (publisher-stamped at publish time); both should produce
+// exact_gitHead confidence rather than dropping to tag-match.
+func TestCollector_Collect_Cargo_VCSInfoBeatsTagMatch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID   = "e-cargo-priority"
+		version    = "4.0.0"
+		tag        = "v4.0.0"
+		vcsInfoSHA = "4444444444444444444444444444444444444444"
+		tagCommit  = "5555555555555555555555555555555555555555"
+	)
+
+	vcsInfo := `{"git":{"sha1":"` + vcsInfoSHA + `"}}`
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "mycrate-4.0.0/Cargo.toml", body: []byte("[package]")},
+		{path: "mycrate-4.0.0/.cargo_vcs_info.json", body: []byte(vcsInfo)},
+	})
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "cargo-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":      "https://static.crates.io/crates/mycrate/4.0.0/download",
+			"version":  version,
+			"git_head": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags: []string{tag},
+			// Both routes resolve, but to different commits — so
+			// the test can tell which one the collector picked.
+			pathsByRef: map[string][]string{
+				vcsInfoSHA: {"Cargo.toml"},
+				tag:        {"Cargo.toml"},
+			},
+			commitByRef: map[string]string{
+				vcsInfoSHA: vcsInfoSHA,
+				tag:        tagCommit,
+			},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:cargo/mycrate",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.SignalCount())
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	assert.Equal(t, PairConfidenceExactGitHead, cmp.PairConfidence,
+		"vcs_info SHA must beat tag-match — both are publisher-stamped "+
+			"and the exact-SHA form is documented as higher priority")
+	assert.Equal(t, vcsInfoSHA, cmp.GitCommit,
+		"resolved commit must be the vcs_info SHA, not the tag's; "+
+			"%q here would mean tag-match won when vcs_info should have", tagCommit)
+}
+
 // stubFetcher returns the same body for every URL — sufficient
 // for tests that exercise one Compare flow.
 type stubFetcher struct{ body []byte }

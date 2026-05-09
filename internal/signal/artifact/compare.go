@@ -1,19 +1,17 @@
 package artifact
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"io"
+	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 )
 
 // PairConfidence labels how the tarball↔commit pairing was
 // established. Travels through into the signal payload so the
 // synthesist can weight evidence: an exact gitHead pairing
-// (npm v≥5 publishes carry the publisher-recorded commit SHA)
-// is stronger than a tag-name match (PyPI, autotools, GitHub
-// releases — we infer the commit by matching the version string
-// against repo tags).
+// (npm v≥5 publishes carry the publisher-recorded commit SHA;
+// cargo .crate tarballs carry the SHA in .cargo_vcs_info.json
+// stamped by `cargo publish` itself) is stronger than a tag-name
+// match (PyPI, autotools, GitHub releases — we infer the commit
+// by matching the version string against repo tags).
 //
 // Constants are strings rather than an enum type because they
 // land directly in the signal payload's JSON; bare strings
@@ -28,8 +26,8 @@ const (
 // CompareOptions carries the per-comparison metadata the caller
 // (the artifact collector) supplies. Compare itself doesn't know
 // how the pairing was resolved or where the tarball came from —
-// that knowledge lives upstream in the dispatch / pair-resolver
-// stage.
+// that knowledge lives upstream in the collector's pair-resolver
+// and fetcher stages.
 type CompareOptions struct {
 	// ArtifactURL is the URL the tarball was fetched from. Goes
 	// into the signal payload so a reviewer can re-fetch and
@@ -50,13 +48,8 @@ type CompareOptions struct {
 	// through to Unresolved.
 	PairConfidence string
 
-	// MaxBytes caps the gunzipped stream — see WalkOptions.MaxBytes.
-	// Required for production calls; zero means unlimited (test only).
-	MaxBytes int64
-
-	// SampleCap bounds the extras_in_tarball_sample and
-	// extras_in_repo_sample slice lengths. Zero or negative
-	// means no cap.
+	// SampleCap bounds the extras_in_tarball_sample slice length.
+	// Zero or negative means no cap.
 	SampleCap int
 }
 
@@ -81,48 +74,34 @@ type Comparison struct {
 	Categories            map[string]int    `json:"categories"`
 }
 
-// Compare reads the tarball stream, walks its headers, and
-// computes the divergence against the supplied git path list.
-// It also computes the SHA-256 of the tarball bytes as it reads,
-// so the comparison's reproducibility anchor lands in the result
-// without a second pass over the data.
+// Compare builds a Comparison from a stream-walked archive manifest
+// and a git path list. The manifest is the upstream output of
+// stream.Walk (or stream.FetchAndWalk); the collector calls Walk
+// itself so it can register ecosystem-specific CaptureIntents and
+// post-process the manifest (e.g. cargo's .cargo_vcs_info.json SHA
+// recovery) before reaching this function.
 //
-// Returns the Comparison on success. On Walk failure (bomb cap,
-// malformed archive) returns the wrapped error from Walk; the
-// caller (the collector) converts that into a positive_absence
-// row rather than aborting the whole collection.
+// No error return: every failure mode lives upstream — Walk's
+// errors surface in the collector, which converts them into
+// positive_absence rows. Once we have a manifest, comparison is
+// pure computation against the supplied gitPaths.
 //
-// The reader is consumed exactly once. Callers that need the
-// tarball bytes for something else (re-emit, archive) should
-// io.TeeReader before calling — Compare itself does not
-// double-buffer.
-func Compare(r io.Reader, gitPaths []string, opts CompareOptions) (Comparison, error) {
+// The archive's sha256 comes from manifest.ArchiveSHA256, computed
+// by the walker as it consumed the stream — no second pass.
+func Compare(manifest *stream.Manifest, gitPaths []string, opts CompareOptions) Comparison {
 	confidence := opts.PairConfidence
 	if confidence == "" {
 		confidence = PairConfidenceUnresolved
 	}
-
-	// Tee the tarball stream into a sha256 hasher so we get the
-	// content hash for free as Walk consumes the bytes. No
-	// double-buffering, no second pass.
-	hasher := sha256.New()
-	teed := io.TeeReader(r, hasher)
-
-	entries, err := Walk(teed, WalkOptions{MaxBytes: opts.MaxBytes})
-	if err != nil {
-		return Comparison{}, fmt.Errorf("walk artifact: %w", err)
-	}
-
-	diff := ComputeDiff(entries, gitPaths, opts.SampleCap)
-
+	diff := ComputeDiff(manifest, gitPaths, opts.SampleCap)
 	return Comparison{
 		ArtifactURL:           opts.ArtifactURL,
-		ArtifactSHA256:        hex.EncodeToString(hasher.Sum(nil)),
+		ArtifactSHA256:        manifest.ArchiveSHA256,
 		GitRef:                opts.GitRef,
 		GitCommit:             opts.GitCommit,
 		PairConfidence:        confidence,
 		ExtrasInTarballCount:  diff.ExtrasInTarballCount,
 		ExtrasInTarballSample: diff.ExtrasInTarballSample,
 		Categories:            diff.Categories,
-	}, nil
+	}
 }

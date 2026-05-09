@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
@@ -52,10 +53,12 @@ type CollectorConfig struct {
 	// gitenv-backed implementation.
 	Git GitInspector
 
-	// MaxArchiveBytes caps the gunzipped stream during Walk.
-	// Zero → 256 MiB default; explicit override for tests that
-	// want a smaller cap.
-	MaxArchiveBytes int64
+	// Limits caps the walker's resource consumption (uncompressed
+	// total, per-entry size, entry count, compression ratio,
+	// compressed input). Zero-value fields fall back to
+	// stream.DefaultLimits — the conservative baseline appropriate
+	// for npm/cargo/pypi-sdist/gem/wheel-sized artifacts.
+	Limits stream.Limits
 
 	// SampleCap bounds the sample slices in the emitted signal.
 	// Zero → 50.
@@ -94,9 +97,9 @@ type Collector struct {
 // field of the config is optional; missing inputs yield absence
 // emissions at Collect time rather than construction errors.
 func NewCollector(cfg CollectorConfig) *Collector {
-	if cfg.MaxArchiveBytes <= 0 {
-		cfg.MaxArchiveBytes = 256 << 20 // 256 MiB
-	}
+	// stream.Walk applies stream.DefaultLimits internally for any
+	// zero-valued field of cfg.Limits, so we don't pre-fill them
+	// here — keeps the source of truth in the stream package.
 	if cfg.SampleCap <= 0 {
 		cfg.SampleCap = 50
 	}
@@ -139,16 +142,73 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	// 3. Resolve the tarball↔commit pairing.
+	// 3. Verify a fetcher is wired. Missing → absence.
+	if c.cfg.Fetcher == nil {
+		recordDivergenceAbsence(result, entity.ID,
+			"no artifact fetcher wired", collectedAt)
+		return result, nil
+	}
+
+	// 4. Tag list (cheap, used by the pair resolver).
 	tags, err := c.cfg.Git.Tags(ctx)
 	if err != nil {
 		recordDivergenceAbsence(result, entity.ID,
 			fmt.Sprintf("read git tags: %v", err), collectedAt)
 		return result, nil
 	}
+
+	// 5. Fetch + walk the archive. The walker registers ecosystem-
+	// specific CaptureIntents (e.g. cargo's .cargo_vcs_info.json),
+	// so this single pass produces both the manifest used for
+	// divergence diff AND any post-fetch metadata the pair resolver
+	// needs.
+	//
+	// Fetch happens BEFORE pair resolution — the previous
+	// "skip-fetch-on-unresolved" optimization would prevent the
+	// vcs_info path from rescuing cargo's no-tag-match case, since
+	// vcs_info lives in the tarball. Tarballs are small (low MB),
+	// so the cost of always fetching is negligible against the
+	// signal-coverage gain.
+	intents := captureIntentsForEcosystem(entity.Ecosystem)
+	body, err := c.cfg.Fetcher.Fetch(ctx, urlInfo.url)
+	if err != nil {
+		recordDivergenceAbsence(result, entity.ID,
+			fmt.Sprintf("fetch artifact: %v", err), collectedAt)
+		return result, nil
+	}
+	defer func() { _ = body.Close() }()
+
+	manifest, err := stream.Walk(ctx, body, stream.FormatTarGzip, intents, c.cfg.Limits)
+	if err != nil {
+		recordDivergenceAbsence(result, entity.ID,
+			fmt.Sprintf("walk artifact: %v", err), collectedAt)
+		return result, nil
+	}
+
+	// 6. Resolve the tarball↔commit pairing. Effective gitHead
+	// preference order:
+	//
+	//   a. Registry-supplied gitHead (npm versions[v].gitHead) —
+	//      strongest provenance: publisher-stamped at publish time
+	//      via the npm CLI.
+	//   b. .cargo_vcs_info.json SHA recovered from the tarball —
+	//      same strength as (a) because cargo's CLI writes the file
+	//      itself rather than trusting publisher input. Closes the
+	//      coverage gap for cargo, which exposes no SHA in registry
+	//      metadata.
+	//   c. Tag-name match against version (handled by ResolvePair
+	//      when GitHead is empty) — softer; the synthesist weights
+	//      tag-match evidence less heavily.
+	effectiveGitHead := urlInfo.gitHead
+	if effectiveGitHead == "" {
+		if sha, ok := extractCargoVCSInfoSHA(manifest); ok {
+			effectiveGitHead = sha
+		}
+	}
+
 	res, ok := ResolvePair(PairInputs{
 		Version: urlInfo.version,
-		GitHead: urlInfo.gitHead,
+		GitHead: effectiveGitHead,
 		Tags:    tags,
 	})
 	if !ok {
@@ -156,7 +216,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	// 4. Determine the ref to read paths from. ExactGitHead returned
+	// 7. Determine the ref to read paths from. ExactGitHead returned
 	// a commit SHA; tag-match returned a tag name. PathsAtRef accepts
 	// both (git ls-tree resolves either to a tree).
 	ref := res.Ref
@@ -171,6 +231,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
+	// Augment gitPaths with the well-known publisher-injected
+	// metadata files for this ecosystem (e.g. cargo's
+	// .cargo_vcs_info.json + Cargo.toml.orig). These are by-design
+	// outputs of the publish pipeline, not divergence — without
+	// suppression they'd surface as false-positive extras on every
+	// healthy cargo crate. ComputeDiff stays generic; the per-
+	// ecosystem knowledge lives in publisherMetadataPaths.
+	gitPaths = append(gitPaths, publisherMetadataPaths(entity.Ecosystem)...)
+
 	// Resolve commit SHA when we only have a ref. Best-effort: if
 	// the lookup fails, we still emit the divergence signal — the
 	// commit field just goes empty in the payload.
@@ -181,37 +250,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		}
 	}
 
-	// 5. Fetch the tarball. Missing fetcher → can't proceed; record
-	// absence rather than crash.
-	if c.cfg.Fetcher == nil {
-		recordDivergenceAbsence(result, entity.ID,
-			"no artifact fetcher wired", collectedAt)
-		return result, nil
-	}
-	body, err := c.cfg.Fetcher.Fetch(ctx, urlInfo.url)
-	if err != nil {
-		recordDivergenceAbsence(result, entity.ID,
-			fmt.Sprintf("fetch artifact: %v", err), collectedAt)
-		return result, nil
-	}
-	defer body.Close()
-
-	// 6. Compare.
-	cmp, err := Compare(body, gitPaths, CompareOptions{
+	// 8. Build and emit the comparison.
+	cmp := Compare(manifest, gitPaths, CompareOptions{
 		ArtifactURL:    urlInfo.url,
 		GitRef:         ref,
 		GitCommit:      commit,
 		PairConfidence: res.Confidence,
-		MaxBytes:       c.cfg.MaxArchiveBytes,
 		SampleCap:      c.cfg.SampleCap,
 	})
-	if err != nil {
-		recordDivergenceAbsence(result, entity.ID,
-			fmt.Sprintf("compare: %v", err), collectedAt)
-		return result, nil
-	}
 
-	// 7. Emit the signal.
 	result.RecordSignal(entity.ID, "artifact_repo_divergence", CollectorName,
 		collectedAt, defaultTTL, cmp)
 

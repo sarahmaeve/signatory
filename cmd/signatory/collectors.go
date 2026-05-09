@@ -29,14 +29,14 @@ import (
 	sourcecollector "github.com/sarahmaeve/signatory/internal/signal/source"
 )
 
-// Artifact-vs-repo collector tuning. The MaxArchiveBytes cap is the
-// gunzipped-stream limit (256 MiB matches the registry-collector
-// fetch caps); MaxArtifactBytes is the on-the-wire HTTP cap; Timeout
-// is the per-fetch budget. None of these are user-tunable today —
-// they're constants here rather than CLI flags because the
-// dogfood traces don't yet show a need for per-run override.
+// Artifact-vs-repo collector tuning. artifactHTTPCap caps the HTTP
+// body read; artifactHTTPBudget caps the per-fetch wallclock. The
+// archive-side limits (uncompressed total, per-entry size, entry
+// count, compression ratio) live in stream.DefaultLimits and apply
+// when CollectorConfig.Limits is left zero-valued — keeping the
+// caps centralized in the stream package matches the rest of the
+// defensive surface (see internal/artifact/stream).
 const (
-	artifactArchiveCap = 256 << 20 // 256 MiB gunzipped
 	artifactHTTPCap    = 256 << 20 // 256 MiB on the wire
 	artifactHTTPBudget = 60 * time.Second
 )
@@ -315,9 +315,26 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		//
 		// Gated on (a) entity has a registry collector queued
 		// (so artifact_url will be in InRun), and (b) clone path is
-		// resolved (we have a repo side to diff against). Phase 1
-		// covers npm only; pypi/cargo/etc. extend the gate as those
-		// collectors learn to emit artifact_url.
+		// resolved (we have a repo side to diff against). Currently
+		// covers npm and cargo:
+		//
+		//   - npm: registry supplies gitHead in versions[v].gitHead
+		//     for v≥5 publishes; tag-match fallback otherwise.
+		//   - cargo: registry exposes no gitHead, so the collector's
+		//     CaptureIntent recovers the publisher-stamped SHA from
+		//     .cargo_vcs_info.json inside the tarball (written by
+		//     `cargo publish` itself, not user input).
+		//
+		// pypi/gem/maven: extend the gate as those collectors learn
+		// to emit artifact_url.
+		//
+		// Known limitation: the tag-match fallback in
+		// internal/signal/artifact/pair.go only handles bare
+		// "<version>" and "v<version>" tag names. Repos that use
+		// "release-<version>" or "<name>-<version>" prefixes will
+		// fall through to AbsenceReasonPairUnresolved unless their
+		// ecosystem path supplies an exact gitHead (npm registry
+		// or cargo vcs_info). Tracking as a separate hardening item.
 		//
 		// Appended LAST so the in-run accumulator already holds the
 		// upstream registry collector's artifact_url emission by the
@@ -330,18 +347,22 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// no bytes are ever written to disk (or persisted in
 		// filestore/) — re-runs re-fetch, but tarballs are small
 		// and the cache invalidation cost beats the bandwidth.
-		if entity.Ecosystem == "npm" {
+		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" {
 			collectors = append(collectors,
 				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
 					InRun:     opts.InRunResult,
 					ClonePath: clonePath,
-					Fetcher: artifactcollector.NewHTTPFetcher(
-						artifactcollector.HTTPFetcherOptions{
+					Fetcher: artifactcollector.NewStreamArtifactFetcher(
+						artifactcollector.StreamFetcherOptions{
 							MaxBytes: artifactHTTPCap,
 							Timeout:  artifactHTTPBudget,
 						}),
-					Git:             artifactcollector.NewGitInspector(clonePath),
-					MaxArchiveBytes: artifactArchiveCap,
+					Git: artifactcollector.NewGitInspector(clonePath),
+					// Limits left zero-valued — stream.Walk fills with
+					// stream.DefaultLimits (256MiB total / 64MiB entry /
+					// 100k entries / 100:1 ratio / 256MiB compressed).
+					// Same effective cap as the legacy MaxArchiveBytes
+					// (256 MiB) that was wired here before.
 				}),
 			)
 		}
