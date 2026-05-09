@@ -97,11 +97,11 @@ func WriteReportTree(in WriteReportTreeInput) (string, error) {
 	// Create the tree. Mkdir (not MkdirAll) on the subdir surfaces
 	// EEXIST and EACCES distinctly and prevents accidental creation
 	// of intermediate dirs the operator didn't ask for.
-	if err := os.Mkdir(subdir, 0o755); err != nil {
+	if err := os.Mkdir(subdir, 0o750); err != nil {
 		return "", fmt.Errorf("create subdir: %w", err)
 	}
 	for _, child := range []string{"conclusions", "analysts", "assets"} {
-		if err := os.Mkdir(filepath.Join(subdir, child), 0o755); err != nil {
+		if err := os.Mkdir(filepath.Join(subdir, child), 0o750); err != nil {
 			return "", fmt.Errorf("create %s/: %w", child, err)
 		}
 	}
@@ -279,7 +279,8 @@ func findConclusion(ao *exchange.AnalystOutput, localID string) *exchange.Conclu
 // place — the directory writer's error path returns immediately and
 // the operator removes the subdir on retry.
 func writeFile(path string, fn func(*os.File) error) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	//nolint:gosec // G304/G306: path is package-controlled (subdir+filename built in writeTree); 0o600 perm; O_EXCL prevents clobber
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -300,12 +301,12 @@ func copyAssets(dst string) error {
 		}
 		out := filepath.Join(dst, p)
 		if d.IsDir() {
-			return os.MkdirAll(out, 0o755)
+			return os.MkdirAll(out, 0o750)
 		}
 		b, err := fs.ReadFile(AssetsFS(), p)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(out, b, 0o644)
+		return os.WriteFile(out, b, 0o600)
 	})
 }

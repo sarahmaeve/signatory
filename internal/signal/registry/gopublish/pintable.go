@@ -167,6 +167,7 @@ func (c *Collector) sleepWithJitter(ctx context.Context) bool {
 		return ctx.Err() == nil
 	}
 	spanMs := int((c.jitterMax-c.jitterMin)/time.Millisecond) + 1
+	//nolint:gosec // G404: retry jitter only — unguessability not required, math/rand/v2 is the right fit
 	delay := c.jitterMin + time.Duration(mathrandv2.IntN(spanMs))*time.Millisecond
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

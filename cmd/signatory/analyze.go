@@ -160,7 +160,7 @@ func formatBurnGateError(canonicalURI string, burn *profile.Burn, ctx *store.Eff
 			"  Reason: %s\n"+
 			"  Burned by: %s at %s\n"+
 			"  Pass --ignore-burn to collect anyway (forensic / verification cases),\n"+
-			"  or `signatory burn remove %s` if the burn was premature.",
+			"  or `signatory burn remove %s` if the burn was premature",
 		subject,
 		burn.Reason,
 		burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339),

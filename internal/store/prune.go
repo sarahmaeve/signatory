@@ -154,6 +154,7 @@ func (s *SQLite) findCollateralEntities(ctx context.Context, entityIDs []string)
 
 	// Each branch of the UNION uses entityIDs twice (one IN, one
 	// NOT IN); two branches → four copies total.
+	//nolint:gosec // G201: placeholders is generated from an integer count, not user input; values bind via QueryContext args below
 	q := fmt.Sprintf(`
 		SELECT e.id, e.canonical_uri, e.short_name, COUNT(*) AS n
 		  FROM (
@@ -170,7 +171,7 @@ func (s *SQLite) findCollateralEntities(ctx context.Context, entityIDs []string)
 		  ) c
 		  JOIN entities e ON e.id = c.collat_id
 		 GROUP BY e.id, e.canonical_uri, e.short_name
-		 ORDER BY e.canonical_uri`, placeholders) //nolint:gosec // G201: placeholders is generated from an integer count, not user input; values bind via QueryContext args below
+		 ORDER BY e.canonical_uri`, placeholders)
 
 	args := make([]any, 0, 4*len(entityIDs))
 	for range 4 {

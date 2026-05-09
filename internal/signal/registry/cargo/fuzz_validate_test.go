@@ -76,7 +76,9 @@ func FuzzValidateCrateName(f *testing.F) {
 		// Invariant 3: starts with a letter.
 		if len(name) > 0 {
 			first := rune(name[0])
-			if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
+			isLower := first >= 'a' && first <= 'z'
+			isUpper := first >= 'A' && first <= 'Z'
+			if !isLower && !isUpper {
 				t.Errorf("ValidateCrateName accepted name starting with non-letter %q: %q", first, name)
 			}
 		}

@@ -681,17 +681,17 @@ func TestSanitizeErrorForStorage_ContextSentinels(t *testing.T) {
 		},
 		{
 			name: "hidden-message wrapper of DeadlineExceeded",
-			// hiddenCtxErr.Error() returns a message that does NOT
+			// hiddenCtxError.Error() returns a message that does NOT
 			// include "context deadline exceeded" — the only path
 			// to classification is errors.Is unwrap. This case
 			// fails under string matching; it is the load-bearing
 			// regression test for the errors.Is fix.
-			err:  &hiddenCtxErr{inner: context.DeadlineExceeded},
+			err:  &hiddenCtxError{inner: context.DeadlineExceeded},
 			want: "request timeout",
 		},
 		{
 			name: "hidden-message wrapper of Canceled",
-			err:  &hiddenCtxErr{inner: context.Canceled},
+			err:  &hiddenCtxError{inner: context.Canceled},
 			want: "request cancelled",
 		},
 	}
@@ -738,7 +738,7 @@ func TestIsRetryable_ContextSentinels(t *testing.T) {
 			// wrapper whose Error() does NOT contain "context
 			// deadline exceeded" still classifies as retryable
 			// because errors.Is unwraps to the sentinel.
-			err:  &hiddenCtxErr{inner: context.DeadlineExceeded},
+			err:  &hiddenCtxError{inner: context.DeadlineExceeded},
 			want: true,
 		},
 		{
@@ -748,7 +748,7 @@ func TestIsRetryable_ContextSentinels(t *testing.T) {
 		},
 		{
 			name: "hidden-message wrapper of Canceled is NOT retryable",
-			err:  &hiddenCtxErr{inner: context.Canceled},
+			err:  &hiddenCtxError{inner: context.Canceled},
 			want: false,
 		},
 	}
@@ -856,18 +856,18 @@ func TestCollector_GoDepsCollectedForGoAndUnknownEcosystem(t *testing.T) {
 // testErr is a tiny helper to construct an error with a known message
 // without dragging in 'errors.New' at every callsite. Local to this
 // file to avoid polluting the package test surface.
-func testErr(msg string) error { return &simpleErr{msg: msg} }
+func testErr(msg string) error { return &simpleError{msg: msg} }
 
-type simpleErr struct{ msg string }
+type simpleError struct{ msg string }
 
-func (e *simpleErr) Error() string { return e.msg }
+func (e *simpleError) Error() string { return e.msg }
 
-// hiddenCtxErr wraps a context sentinel with an Error() message that
+// hiddenCtxError wraps a context sentinel with an Error() message that
 // deliberately does NOT include the sentinel's standard text. Used by
 // TestSanitizeErrorForStorage_ContextSentinels to demonstrate that
 // strings.Contains on err.Error() is insufficient — only errors.Is
 // unwraps the underlying sentinel through the custom Unwrap method.
-type hiddenCtxErr struct{ inner error }
+type hiddenCtxError struct{ inner error }
 
-func (e *hiddenCtxErr) Error() string { return "request failed for unrelated reasons" }
-func (e *hiddenCtxErr) Unwrap() error { return e.inner }
+func (e *hiddenCtxError) Error() string { return "request failed for unrelated reasons" }
+func (e *hiddenCtxError) Unwrap() error { return e.inner }

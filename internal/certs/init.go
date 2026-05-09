@@ -73,7 +73,7 @@ func Init(opts InitOptions) (*InitResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(opts.Stderr, "mkcert CA: %s\n", sourceCA)
+	_, _ = fmt.Fprintf(opts.Stderr, "mkcert CA: %s\n", sourceCA)
 
 	if err := os.MkdirAll(certDirResolved, 0o750); err != nil {
 		return nil, fmt.Errorf("create cert dir %q: %w", certDirResolved, err)
@@ -91,7 +91,7 @@ func Init(opts InitOptions) (*InitResult, error) {
 	}
 	result.Actions = append(result.Actions,
 		fmt.Sprintf("copied CA %s → %s", sourceCA, result.CAPath))
-	fmt.Fprintf(opts.Stderr, "wrote %s\n", result.CAPath)
+	_, _ = fmt.Fprintf(opts.Stderr, "wrote %s\n", result.CAPath)
 
 	return result, nil
 }

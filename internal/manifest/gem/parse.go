@@ -13,6 +13,7 @@ package gem
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -116,7 +117,7 @@ func Parse(path string) (manifest.ProjectInfo, []manifest.Dep, error) {
 func ParseGraph(lockPath string) (manifest.Graph, error) {
 	data, err := readCapped(lockPath, maxGemfileLockBytes)
 	if err != nil {
-		return manifest.Graph{}, fmt.Errorf("%w: %v", manifest.ErrGraphUnavailable, err)
+		return manifest.Graph{}, errors.Join(manifest.ErrGraphUnavailable, fmt.Errorf("read lockfile: %w", err))
 	}
 
 	edges := parseLockfileEdges(string(data))
@@ -397,11 +398,11 @@ func parseDepNameFromConstraint(s string) string {
 // readCapped reads a file up to maxBytes. Returns an error if the file
 // doesn't exist or can't be read.
 func readCapped(path string, maxBytes int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: lockfile path is the parser's input by design
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {

@@ -199,11 +199,11 @@ func FuzzParseSpecLine(f *testing.F) {
 		}
 
 		// Invariant 2: if input is non-empty and not just whitespace,
-		// name should be non-empty.
-		if strings.TrimSpace(s) != "" && name == "" && version == "" {
-			// This is acceptable only if the input is "()" or similar
-			// where the name part before "(" is empty.
-		}
+		// name should be non-empty — except when the name part before
+		// "(" is itself empty (inputs like "()" or "  (1.0)"). We
+		// do not assert on this case because the parser is permitted
+		// to return ("", version) for such inputs; downstream callers
+		// treat the empty name as "skip this entry".
 
 		// Invariant 3: version should not contain unbalanced parens
 		// from the parsing logic (the closing ")" should be stripped).

@@ -209,7 +209,7 @@ func (cmd *AnalysisEndCmd) Run(globals *Globals) error {
 	// Confirmation goes to stderr so stdout stays empty for
 	// scripts that pipe this command's output. `analysis end` is
 	// an action verb, not a data-producing one.
-	fmt.Fprintf(stderr, "Session %s closed (%s)\n", cmd.SessionID, status)
+	_, _ = fmt.Fprintf(stderr, "Session %s closed (%s)\n", cmd.SessionID, status)
 	return nil
 }
 
@@ -275,7 +275,7 @@ func (cmd *AnalysisListCmd) Run(globals *Globals) error {
 		return writeJSON(stdout, sessions)
 	}
 	if len(sessions) == 0 {
-		fmt.Fprintln(stdout, "No analysis sessions match the filter")
+		_, _ = fmt.Fprintln(stdout, "No analysis sessions match the filter")
 		return nil
 	}
 	for _, sess := range sessions {
@@ -537,7 +537,7 @@ func renderSessionDetail(
 	if sess.EndedAt != nil {
 		fmt.Fprintf(w, "  wall=%s", sess.EndedAt.Sub(sess.StartedAt).Round(time.Second))
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	fmt.Fprintf(w, "  target:    %s\n", displayTarget(sess))
 	fmt.Fprintf(w, "  by:        %s\n", sess.InvokedBy)
 	fmt.Fprintf(w, "  started:   %s\n", sess.StartedAt.Format(time.RFC3339))

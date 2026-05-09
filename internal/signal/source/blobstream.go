@@ -222,7 +222,7 @@ func (b *BlobStreamer) ReadBlob(ctx context.Context, sha string) ([]byte, error)
 		return nil, err
 	}
 	if fetchErr := b.ensureFetched(ctx); fetchErr != nil {
-		return nil, fmt.Errorf("%w (allow-fetch retry: %v)", err, fetchErr)
+		return nil, errors.Join(err, fmt.Errorf("allow-fetch retry: %w", fetchErr))
 	}
 	return b.readBlobOnce(ctx, sha)
 }
@@ -326,7 +326,7 @@ func (b *BlobStreamer) ListTreeBlobs(ctx context.Context, sha string) ([]TreeBlo
 		return nil, err
 	}
 	if fetchErr := b.ensureFetched(ctx); fetchErr != nil {
-		return nil, fmt.Errorf("%w (allow-fetch retry: %v)", err, fetchErr)
+		return nil, errors.Join(err, fmt.Errorf("allow-fetch retry: %w", fetchErr))
 	}
 	return b.listTreeBlobsOnce(ctx, sha)
 }

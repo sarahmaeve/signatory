@@ -47,7 +47,7 @@ func runListSessions(inDir string, w io.Writer) error {
 	}
 
 	if len(sessions) == 0 {
-		fmt.Fprintln(w, "no sessions found in", inDir)
+		_, _ = fmt.Fprintln(w, "no sessions found in", inDir)
 		return nil
 	}
 

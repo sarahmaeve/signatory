@@ -95,7 +95,7 @@ func (c *Collector) Collect(_ context.Context, entity *profile.Entity) (*signal.
 // Emits present=false when Cargo.toml exists but is not a proc macro.
 func (c *Collector) detectProcMacro(result *signal.CollectionResult, entityID string, collectedAt time.Time) {
 	cargoPath := filepath.Join(c.path, "Cargo.toml")
-	data, err := os.ReadFile(cargoPath)
+	data, err := os.ReadFile(cargoPath) //nolint:gosec // G304: c.path is the collector's by-design input (the clone root we were asked to inspect)
 	if err != nil {
 		// File doesn't exist or unreadable — not applicable. Don't
 		// emit anything; this is "signal not applicable" not "signal

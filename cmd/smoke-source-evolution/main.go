@@ -252,7 +252,7 @@ func validatePinShape(pins []pinTablePin) error {
 				i, pin.Version, pin.SHA)
 		}
 		if _, err := time.Parse(time.RFC3339, pin.PublishedAt); err != nil {
-			return fmt.Errorf("pin[%d] (%s): published_at not parseable as RFC3339: %q (%v)",
+			return fmt.Errorf("pin[%d] (%s): published_at %q not parseable as RFC3339: %w",
 				i, pin.Version, pin.PublishedAt, err)
 		}
 	}
@@ -502,7 +502,7 @@ func validateSourceAnomaly(result analyzeJSON, rep *reporter) (anomalyValue, err
 				"  This indicates the multi-feature joint threshold (MinSpikedFeatures=2)\n"+
 				"  is too sensitive for legitimate package evolution. Either the target's\n"+
 				"  history has unusual features that read as a spike, or the threshold\n"+
-				"  needs tightening (more features, or near-zero baseline tolerance).",
+				"  needs tightening (more features, or near-zero baseline tolerance)",
 			a.FirstAnomalousVersion, a.PreviousVersion, a.SpikedFeatures)
 	}
 	rep.pass("anomaly_present=false (no false positive on healthy library)")

@@ -82,7 +82,7 @@ func scanFile(root, path string) ([]Hit, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var hits []Hit
 	sc := bufio.NewScanner(f)

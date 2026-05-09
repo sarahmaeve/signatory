@@ -260,7 +260,7 @@ func (a *AgentAttribution) validate(path string) []error {
 				"canonical form `signatory-(security|provenance|synthesis)-v<N>`. "+
 				"Common drift to avoid: dropping the -v<N> suffix, omitting the "+
 				"signatory- prefix, substituting -analyst for -v<N>. Use the "+
-				"analyst_id given at the top of your dispatch prompt verbatim.",
+				"analyst_id given at the top of your dispatch prompt verbatim",
 			path, a.AnalystID))
 	}
 	// model and invoked_at are server-stamped, not caller-supplied.
@@ -287,7 +287,7 @@ func (a *AgentAttribution) validate(path string) []error {
 			"%s.model is server-stamped (filled in by OTEL backfill from "+
 				"gen_ai.request.model); remove from payload. Agents have no "+
 				"reliable way to know their own model identity — guesses get "+
-				"stored as facts and pollute the trust record.",
+				"stored as facts and pollute the trust record",
 			path))
 	}
 	if a.InvokedAt != "" {
@@ -295,7 +295,7 @@ func (a *AgentAttribution) validate(path string) []error {
 			"%s.invoked_at is server-stamped (set to time.Now() at ingest); "+
 				"remove from payload. Agents have no reliable wall-clock API; "+
 				"guessed timestamps round to suspicious values and obscure the "+
-				"actual ingest time.",
+				"actual ingest time",
 			path))
 	}
 	return errs

@@ -76,7 +76,7 @@ var selectOpPrompt = func(op store.ConsolidationOp) Decision {
 // per-op echo is the local reminder.
 func promptSelectOp(out io.Writer, in io.Reader, op store.ConsolidationOp) Decision {
 	fmt.Fprintf(out, "  [%s / %s] %s → %s\n", op.Action, op.Class, op.Source.CanonicalURI, op.CanonicalURI)
-	fmt.Fprint(out, "  Apply? [y]es / [n]o / [a]ll-remaining / [q]uit: ")
+	_, _ = fmt.Fprint(out, "  Apply? [y]es / [n]o / [a]ll-remaining / [q]uit: ")
 
 	var input string
 	if _, err := fmt.Fscanln(in, &input); err != nil {

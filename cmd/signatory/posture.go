@@ -345,10 +345,10 @@ func normalizeTargetForPosture(target, flagVersion string) (baseTarget, version 
 	if uriVersion == "" {
 		return target, flagVersion, nil
 	}
-	switch {
-	case flagVersion == "":
+	switch flagVersion {
+	case "":
 		return base, uriVersion, nil
-	case flagVersion == uriVersion:
+	case uriVersion:
 		return base, flagVersion, nil
 	default:
 		return "", "", fmt.Errorf(
@@ -792,9 +792,9 @@ func (cmd *PostureAcceptCmd) printProposalSummary(
 	}
 	fmt.Fprintf(w, "  Rationale: %s", firstLine(finalRationale))
 	if overrideRationale != "" && overrideRationale != proposal.RationaleSummary {
-		fmt.Fprint(w, " (overridden)")
+		_, _ = fmt.Fprint(w, " (overridden)")
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	fmt.Fprintf(w, "  Source:    synthesis output %s\n", cmd.OutputID)
 }
 

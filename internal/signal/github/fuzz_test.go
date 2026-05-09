@@ -57,9 +57,9 @@ func FuzzParseRepoURL(f *testing.F) {
 	f.Add("ssh://git@github.com/owner/repo")
 
 	// Adversarial: unicode normalization
-	f.Add("öwner/repö")   // non-ASCII
-	f.Add("ow​ner/re​po") // zero-width space
-	f.Add("owner̀/repo")  // combining diacritical
+	f.Add("öwner/repö")             // non-ASCII
+	f.Add("ow\u200bner/re\u200bpo") // zero-width space
+	f.Add("owner̀/repo")            // combining diacritical
 
 	// Adversarial: very long inputs
 	f.Add(strings.Repeat("a", 500) + "/" + strings.Repeat("b", 500))

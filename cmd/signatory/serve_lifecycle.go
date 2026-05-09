@@ -16,15 +16,13 @@ import (
 	"github.com/sarahmaeve/signatory/internal/certs"
 )
 
-// Default paths for service lifecycle state. Each can be overridden
-// via the per-subcommand flags, but the defaults are a stable
-// convention so callers can rely on `~/.signatory/serve.pid` and
-// `~/.signatory/logs/serve.log` without cross-referencing the
-// command invocation.
+// Default paths for service lifecycle state are encoded as the
+// `default:"..."` literals on the kong-tagged flag fields of each
+// subcommand (`~/.signatory/serve.pid`, `~/.signatory/logs/serve.log`).
+// kong tags can't reference Go consts, so the literal is the source
+// of truth — keep the strings consistent across ServeStartCmd,
+// ServeStopCmd, ServeStatusCmd, ServeRestartCmd, and ServeLogsCmd.
 const (
-	defaultPidPath = "~/.signatory/serve.pid"
-	defaultLogPath = "~/.signatory/logs/serve.log"
-
 	// stopGraceSeconds bounds how long Stop / Restart wait for a
 	// SIGTERM'd service to exit before escalating to SIGKILL.
 	// Five seconds is generous for a read-only HTTP server over

@@ -59,8 +59,12 @@ func FuzzAnalystOutputValidate(f *testing.F) {
 	f.Add([]byte(`{"attribution":{"analyst_id":"test","model":"m","invoked_at":"2026-01-01T00:00:00Z"},"target":"pkg:test/x","conclusions":[{"id":"F001","verdict":"v","rationale":"r","severity":{"default":"low"},"category":"c","citations":[{"path":"f","line_start":1,"scope":{"kind":"file","path":"f"}}]}]}`))
 	// Adversarial: control chars in verdict via JSON escape
 	f.Add([]byte(`{"attribution":{"analyst_id":"test","model":"m","invoked_at":"2026-01-01T00:00:00Z"},"target":"pkg:test/x","conclusions":[{"id":"F001","verdict":"injected\u0000null","rationale":"r","severity":{"default":"low"},"category":"c","citations":[{"path":"f","line_start":1}]}]}`))
-	// Adversarial: control chars in target
-	f.Add([]byte(`{"attribution":{"analyst_id":"test","model":"m","invoked_at":"2026-01-01T00:00:00Z"},"target":"pkg:test/x\u0000y","conclusions":[]}`))
+	// Adversarial: control chars in target. The U+0001 in analyst_id
+	// is built at runtime via string([]byte{0x01}) — no source-level
+	// string literal contains the control byte (ST1018), but the
+	// test input still carries the byte the parser should reject.
+	ctlByte := string([]byte{0x01})
+	f.Add([]byte(`{"attribution":{"analyst_id":"test` + ctlByte + `","model":"m","invoked_at":"2026-01-01T00:00:00Z"},"target":"pkg:test/x\u0000y","conclusions":[]}`))
 	// Adversarial: very long target
 	f.Add([]byte(`{"attribution":{"analyst_id":"test","model":"m","invoked_at":"2026-01-01T00:00:00Z"},"target":"` + strings.Repeat("a", 5000) + `","conclusions":[]}`))
 	// Adversarial: invalid posture tier
