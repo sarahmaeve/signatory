@@ -17,14 +17,29 @@ type Project struct {
 }
 
 // Distribution models one distribution file within a release.
-// Fields beyond the ones modelled here (digests, size, url, etc.)
-// are skipped by the JSON decoder's unknown-field policy.
+// Fields beyond the ones modelled here (size, etc.) are skipped by
+// the JSON decoder's unknown-field policy.
+//
+// URL and Digests are consumed by the artifact_url handoff to the
+// artifact-vs-repo collector — sdist URL plus its sha256 are the
+// minimum the downstream fetcher needs to fetch the bytes and
+// (eventually) cross-check the integrity.
 type Distribution struct {
-	UploadTimeISO string `json:"upload_time_iso_8601"`
-	Yanked        bool   `json:"yanked"`
-	PackageType   string `json:"packagetype"`
-	HasSig        bool   `json:"has_sig"`
-	Filename      string `json:"filename"`
+	UploadTimeISO string  `json:"upload_time_iso_8601"`
+	Yanked        bool    `json:"yanked"`
+	PackageType   string  `json:"packagetype"`
+	HasSig        bool    `json:"has_sig"`
+	Filename      string  `json:"filename"`
+	URL           string  `json:"url"`
+	Digests       Digests `json:"digests"`
+}
+
+// Digests carries the per-distribution hash set PyPI publishes
+// alongside each artifact. Only sha256 is read today; md5 and
+// blake2b_256 are deliberately unmodelled — md5 is cryptographically
+// dead and not worth carrying, blake2b_256 has no current consumer.
+type Digests struct {
+	SHA256 string `json:"sha256"`
 }
 
 // AttestationResponse models the PyPI Integrity API response at

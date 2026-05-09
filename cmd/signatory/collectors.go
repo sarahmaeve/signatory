@@ -316,7 +316,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// Gated on (a) entity has a registry collector queued
 		// (so artifact_url will be in InRun), and (b) clone path is
 		// resolved (we have a repo side to diff against). Currently
-		// covers npm and cargo:
+		// covers npm, cargo, and pypi:
 		//
 		//   - npm: registry supplies gitHead in versions[v].gitHead
 		//     for v≥5 publishes; tag-match fallback otherwise.
@@ -324,8 +324,12 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		//     CaptureIntent recovers the publisher-stamped SHA from
 		//     .cargo_vcs_info.json inside the tarball (written by
 		//     `cargo publish` itself, not user input).
+		//   - pypi: registry exposes no gitHead and there's no
+		//     equivalent of cargo's vcs_info embedded in the sdist.
+		//     Pair resolution falls through to tag-match against the
+		//     local clone's tag list. Confidence: pair_match.
 		//
-		// pypi/gem/maven: extend the gate as those collectors learn
+		// gem/maven: extend the gate as those collectors learn
 		// to emit artifact_url.
 		//
 		// Known limitation: the tag-match fallback in
@@ -347,7 +351,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// no bytes are ever written to disk (or persisted in
 		// filestore/) — re-runs re-fetch, but tarballs are small
 		// and the cache invalidation cost beats the bandwidth.
-		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" {
+		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" {
 			collectors = append(collectors,
 				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
 					InRun:     opts.InRunResult,

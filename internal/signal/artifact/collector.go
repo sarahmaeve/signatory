@@ -240,6 +240,17 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ecosystem knowledge lives in publisherMetadataPaths.
 	gitPaths = append(gitPaths, publisherMetadataPaths(entity.Ecosystem)...)
 
+	// Dynamic suppression for ecosystems whose injected paths embed
+	// the package name and so can't be expressed as fixed strings.
+	// PyPI's <name>.egg-info/* is the current case: directory name
+	// varies per package, so the concrete paths are derived from the
+	// walked manifest. Safe to call unconditionally — for non-pypi
+	// manifests no entry has a .egg-info first component and the
+	// helper returns nil.
+	if entity.Ecosystem == "pypi" {
+		gitPaths = append(gitPaths, eggInfoPaths(manifest)...)
+	}
+
 	// Resolve commit SHA when we only have a ref. Best-effort: if
 	// the lookup fails, we still emit the divergence signal — the
 	// commit field just goes empty in the payload.

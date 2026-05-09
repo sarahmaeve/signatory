@@ -1321,3 +1321,58 @@ func TestCollector_AttestationConsistency_PhaseAError_SkipsPhaseB(t *testing.T) 
 	assert.False(t, hasSignal(result, "attestation_consistency"),
 		"Phase B must not emit when Phase A errored (nil means unknown, not absent)")
 }
+
+// ----- artifact_url (handoff to artifact-vs-repo collector) -----
+
+// TestCollector_Collect_ArtifactURL_EmitsForLatestSdist is the
+// smallest claim of the pypi→artifact-vs-repo wiring: the registry
+// collector must emit an artifact_url signal carrying the latest
+// version's sdist URL, version, integrity (sha256 from digests),
+// and an empty git_head.
+//
+// Empty git_head mirrors cargo: PyPI exposes no publisher-stamped
+// commit SHA in registry metadata. The downstream artifact collector
+// will fall through to tag-match resolution against the local clone.
+//
+// Sdist (not wheel) is the right comparison surface because wheels
+// are build outputs — the xz-shaped check is "what does the
+// publication channel ship that the source-of-record git tree doesn't?"
+// For Python that's the sdist.
+func TestCollector_Collect_ArtifactURL_EmitsForLatestSdist(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.2.3": {
+				{
+					UploadTimeISO: "2026-04-01T00:00:00Z",
+					PackageType:   "sdist",
+					Filename:      "hatch-1.2.3.tar.gz",
+					URL:           "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+					Digests:       Digests{SHA256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+				},
+			},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "artifact_url"),
+		"pypi registry collector must emit artifact_url so the artifact-vs-repo "+
+			"collector can fetch and pair the sdist tarball")
+
+	au := getSignalValue(t, result, "artifact_url")
+	assert.Equal(t, "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz", au["url"],
+		"url is the sdist's files.pythonhosted.org URL straight from the registry response")
+	assert.Equal(t, "1.2.3", au["version"],
+		"version is the latest non-yanked publish; downstream tag-match resolver pairs by this")
+	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", au["integrity"],
+		"integrity is the sdist's digests.sha256 — opaque to current consumers but kept on "+
+			"the wire for cross-checking against the hash signatory computes during fetch")
+	assert.Equal(t, "", au["git_head"],
+		"PyPI does not expose git_head in registry metadata; the downstream artifact "+
+			"collector falls through to tag-match resolution")
+}

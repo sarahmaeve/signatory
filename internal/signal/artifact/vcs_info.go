@@ -197,7 +197,63 @@ func publisherMetadataPaths(ecosystem string) []string {
 			"Cargo.toml.orig",
 			"Cargo.lock",
 		}
+	case "pypi":
+		// PKG-INFO is the PEP 241 / core-metadata file every sdist
+		// carries at the wrapper root. Setuptools, hatch, flit, pdm,
+		// poetry — every modern build backend writes it. Never
+		// committed to git: it's a build output, regenerated each
+		// publish from pyproject.toml / setup.cfg.
+		//
+		// <name>.egg-info/* is also publisher-injected but the
+		// directory name embeds the package name and so can't be
+		// expressed as a literal here. eggInfoPaths derives the
+		// concrete paths from the walked manifest; the collector
+		// appends both to gitPaths.
+		return []string{"PKG-INFO"}
 	default:
 		return nil
 	}
+}
+
+// eggInfoPaths walks manifest for entries whose first POST-STRIP
+// path component ends with ".egg-info" and returns the post-strip
+// paths. The return is the merge-into-gitPaths input the collector
+// uses to suppress the egg-info subtree as expected publisher
+// output rather than surfacing it as divergence.
+//
+// Manifest entry paths are verbatim — pre-strip, with the wrapping
+// <name>-<version>/ prefix still attached. ComputeDiff applies
+// manifest.StrippedTopDir to compute the post-strip view it
+// compares against gitPaths. We mirror that same strip here so the
+// returned paths land in gitPaths in the form ComputeDiff will look
+// up.
+//
+// Returns nil for a nil manifest or one with no egg-info entries.
+// The collector's append-nil pattern handles both cleanly.
+func eggInfoPaths(manifest *stream.Manifest) []string {
+	if manifest == nil {
+		return nil
+	}
+	stripPrefix := manifest.StrippedTopDir
+	var out []string
+	for _, e := range manifest.Entries {
+		if e.Type != stream.EntryFile {
+			continue
+		}
+		path := strings.TrimPrefix(e.Path, stripPrefix)
+		if path == "" {
+			continue
+		}
+		// Check the first POST-STRIP path component for the .egg-info
+		// suffix. Covers "<name>.egg-info/PKG-INFO" and any nested
+		// entry under the egg-info directory.
+		first, _, ok := strings.Cut(path, "/")
+		if !ok {
+			continue
+		}
+		if strings.HasSuffix(first, ".egg-info") {
+			out = append(out, path)
+		}
+	}
+	return out
 }

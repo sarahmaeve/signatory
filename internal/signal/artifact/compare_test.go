@@ -121,6 +121,74 @@ func TestCompare_XZShapedFixture(t *testing.T) {
 		"category histogram must reflect the one build_glue extra")
 }
 
+// TestCompare_PyPISdistShape_PublisherInjectedFilesSuppressed pins
+// the noise-floor claim for PyPI sdists: a clean package run through
+// the diff produces zero extras-in-tarball once the publisher-
+// injected files are accounted for.
+//
+// Diagnostic run (no suppression) emitted exactly four extras on
+// this fixture: PKG-INFO and three files under <name>.egg-info/.
+// Both classes are sdist build outputs that are never committed
+// to the source repo. Without suppression, every healthy pypi
+// package surfaces them as false-positive divergence — same noise
+// pattern Cargo.lock produced for cargo before its suppression
+// landed.
+//
+// PKG-INFO is a literal path. <name>.egg-info/* is a prefix
+// pattern: the directory's name embeds the package name, so the
+// suppression list can't be a fixed string slice the way cargo's
+// is. The pattern is recognised dynamically by walking the manifest
+// for entries whose first path component ends with ".egg-info".
+//
+// The test calls publisherMetadataPaths and the dynamic egg-info
+// helper directly, mirroring the merge the collector will do at
+// production-call time. Keeps Compare ecosystem-agnostic.
+func TestCompare_PyPISdistShape_PublisherInjectedFilesSuppressed(t *testing.T) {
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "hatch-1.2.3/hatch/__init__.py", body: []byte("# real source")},
+		{path: "hatch-1.2.3/PKG-INFO", body: []byte("Metadata-Version: 2.1\nName: hatch\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/PKG-INFO", body: []byte("Metadata-Version: 2.1\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/SOURCES.txt", body: []byte("hatch/__init__.py\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/top_level.txt", body: []byte("hatch\n")},
+	})
+
+	// What `git ls-tree -r --name-only v1.2.3` would emit on a clean repo.
+	// PKG-INFO and *.egg-info/* are never committed; they're sdist build outputs.
+	gitPaths := []string{
+		"hatch/__init__.py",
+	}
+
+	manifest, err := stream.Walk(t.Context(), bytes.NewReader(tarball),
+		stream.FormatTarGzip, nil, stream.Limits{MaxTotalBytes: 1 << 20})
+	require.NoError(t, err)
+
+	// Production merge: collector appends static publisher metadata
+	// paths (literal) and dynamic egg-info paths (manifest-derived)
+	// to gitPaths so Compare's set-difference treats them as
+	// already-present-in-git.
+	gitPaths = append(gitPaths, publisherMetadataPaths("pypi")...)
+	gitPaths = append(gitPaths, eggInfoPaths(manifest)...)
+
+	cmp := Compare(manifest, gitPaths, CompareOptions{
+		ArtifactURL:    "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+		GitRef:         "v1.2.3",
+		PairConfidence: PairConfidenceTagMatch,
+		SampleCap:      50,
+	})
+
+	extras := make([]string, 0, len(cmp.ExtrasInTarballSample))
+	for _, e := range cmp.ExtrasInTarballSample {
+		extras = append(extras, e.Path)
+	}
+
+	assert.Empty(t, extras,
+		"on a clean pypi sdist, all four publisher-injected files "+
+			"(PKG-INFO + three under <name>.egg-info/) must be suppressed; "+
+			"any leftover entries here are real divergence the diff should surface")
+	assert.Equal(t, 0, cmp.ExtrasInTarballCount,
+		"count must agree with the empty sample")
+}
+
 // tarEntry is a tiny test-only constructor type — only what's
 // needed to express "regular file with these bytes at this path".
 type tarEntry struct {

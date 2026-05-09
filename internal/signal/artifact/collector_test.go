@@ -716,3 +716,113 @@ func TestCollector_Name(t *testing.T) {
 	c := NewCollector(CollectorConfig{})
 	assert.Equal(t, "artifact-vs-repo", c.Name())
 }
+
+// TestCollector_Collect_PyPI_SuppressesPublisherInjectedFiles is the
+// canonical pypi case: a sdist tarball walked through the full
+// collector path (artifact_url handoff → fetch → walk → tag-match
+// pair → diff) must surface ONLY real divergence and not the noise
+// floor of publisher-injected files (PKG-INFO + <name>.egg-info/*).
+//
+// Fixture mirrors the cargo VCSInfoRescuesPair shape: real source +
+// publisher-injected files + one xz-shaped extra not in the repo.
+// Tag-match path resolves the pair (PyPI registry never supplies
+// gitHead). Suppression must take the egg-info subtree to zero so
+// the only surfaced extra is the malicious file.
+//
+// This is the load-bearing test for the pypi consumer side: closes
+// the same signal-gap as the artifact_url emission on the producer
+// side (covered in internal/signal/registry/pypi/collector_test.go).
+func TestCollector_Collect_PyPI_SuppressesPublisherInjectedFiles(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-pypi"
+		version  = "1.2.3"
+		tag      = "v1.2.3" // tag-match resolver accepts "v"+version
+		commit   = "abcdef0123456789abcdef0123456789abcdef01"
+	)
+
+	// sdist-shaped tarball: <name>-<version>/ wrapper, real source,
+	// PKG-INFO at wrapper root, <name>.egg-info/ subtree, plus one
+	// xz-shaped malicious file not in the git tree.
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "hatch-1.2.3/hatch/__init__.py", body: []byte("# real source")},
+		{path: "hatch-1.2.3/hatch/cli.py", body: []byte("# real cli")},
+		{path: "hatch-1.2.3/PKG-INFO", body: []byte("Metadata-Version: 2.1\nName: hatch\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/PKG-INFO", body: []byte("Metadata-Version: 2.1\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/SOURCES.txt", body: []byte("hatch/__init__.py\n")},
+		{path: "hatch-1.2.3/hatch.egg-info/top_level.txt", body: []byte("hatch\n")},
+		// xz-equivalent: extra in tarball, never in git.
+		{path: "hatch-1.2.3/build_inject.py", body: []byte("# attacker payload")},
+	})
+
+	gitPaths := []string{
+		"hatch/__init__.py",
+		"hatch/cli.py",
+	}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "pypi-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":       "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+			"version":   version,
+			"git_head":  "", // PyPI never supplies this — tag-match path resolves
+			"integrity": "sha256-placeholder",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: gitPaths},
+			commitByRef: map[string]string{tag: commit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:pypi/hatch",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.SignalCount(),
+		"pypi divergence must produce one signal — fall-through to absence "+
+			"means tag-match didn't resolve or fetch/walk failed")
+	assert.Equal(t, 0, result.AbsenceCount())
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type)
+
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	extras := make([]string, 0, len(cmp.ExtrasInTarballSample))
+	for _, e := range cmp.ExtrasInTarballSample {
+		extras = append(extras, e.Path)
+	}
+
+	assert.Equal(t, []string{"build_inject.py"}, extras,
+		"only the malicious file should surface — PKG-INFO and the "+
+			"<name>.egg-info/ subtree are publisher-injected sdist outputs "+
+			"and must be suppressed (otherwise every healthy pypi package "+
+			"surfaces 4+ false-positive extras)")
+	assert.Equal(t, 1, cmp.ExtrasInTarballCount)
+
+	assert.Equal(t, PairConfidenceTagMatch, cmp.PairConfidence,
+		"PyPI exposes no publisher-stamped commit SHA in registry metadata; "+
+			"the resolver falls through to tag-match")
+	assert.Equal(t, commit, cmp.GitCommit)
+}

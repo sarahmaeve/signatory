@@ -164,6 +164,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
+	// ----- artifact_url (publication, handoff to artifact collector) -----
+	recordArtifactURL(result, entity.ID, proj, collectedAt)
+
 	// ----- Build version-file list (shared by Phase A and Phase B) -----
 	versions := buildVersionFiles(proj)
 
@@ -377,6 +380,93 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			"window_hours":       int(span.Hours()),
 			"versions_checked":   len(window),
 		})
+}
+
+// recordArtifactURL emits the artifact_url handoff signal that the
+// artifact-vs-repo divergence collector consumes from the in-run
+// accumulator.
+//
+// PyPI differs from npm and cargo in two ways the downstream
+// collector relies on:
+//
+//  1. The sdist URL lives on Distribution.url directly (parsed
+//     from the registry response) rather than constructed (cargo)
+//     or carried on a different field shape (npm's dist.tarball).
+//
+//  2. PyPI exposes no publisher-stamped commit SHA in registry
+//     metadata. git_head is emitted empty; the artifact collector
+//     falls through to tag-match resolution against the local clone.
+//
+// Sdist (packagetype=="sdist"), not wheel, is the right surface:
+// wheels are build outputs (compiled .pyc, sometimes C extensions,
+// regenerated metadata), so wheel-vs-repo is a category error for
+// the xz-shaped check. The signal is "what does the publication
+// channel ship that the source-of-record git tree doesn't?" — for
+// Python that's exclusively the sdist.
+//
+// integrity carries the sdist's digests.sha256. Opaque to current
+// consumers — see urlSignalValue's declared caveat in
+// internal/signal/types.go — but kept on the wire for the future
+// cross-check against the hash signatory computes during fetch.
+func recordArtifactURL(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	// Walk releases newest-first; pick the first version that has a
+	// non-yanked sdist distribution. Versions whose timestamps don't
+	// parse are skipped — the same policy buildVersionFiles uses.
+	var candidates []versionRecord
+	for ver, dists := range proj.Releases {
+		if len(dists) == 0 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, versionRecord{
+			version:     ver,
+			publishedAt: t,
+			yanked:      isYanked(dists),
+		})
+	}
+	slices.SortFunc(candidates, func(a, b versionRecord) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.publishedAt.Compare(a.publishedAt)
+	})
+
+	for _, rec := range candidates {
+		if rec.yanked {
+			continue
+		}
+		dists := proj.Releases[rec.version]
+		for _, d := range dists {
+			if d.PackageType != "sdist" {
+				continue
+			}
+			if d.URL == "" {
+				continue
+			}
+			result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+				map[string]any{
+					"url":       d.URL,
+					"version":   rec.version,
+					"integrity": d.Digests.SHA256,
+					"git_head":  "", // PyPI does not expose this; falls through to tag-match.
+				})
+			return
+		}
+	}
+
+	// No non-yanked sdist with a URL across the entire release history.
+	// Recorded as absence so the artifact collector's downstream
+	// readArtifactURL lookup surfaces AbsenceReasonNoArtifactURL rather
+	// than silently no-opping.
+	result.RecordAbsence(entityID, sigType, source,
+		"no non-yanked sdist with a download URL in pypi response", false, collectedAt)
 }
 
 // recordSdistOnlyIntroduced detects whether the latest version is
