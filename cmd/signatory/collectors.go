@@ -316,7 +316,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// Gated on (a) entity has a registry collector queued
 		// (so artifact_url will be in InRun), and (b) clone path is
 		// resolved (we have a repo side to diff against). Currently
-		// covers npm, cargo, and pypi:
+		// covers npm, cargo, pypi, and gem:
 		//
 		//   - npm: registry supplies gitHead in versions[v].gitHead
 		//     for v≥5 publishes; tag-match fallback otherwise.
@@ -328,9 +328,17 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		//     equivalent of cargo's vcs_info embedded in the sdist.
 		//     Pair resolution falls through to tag-match against the
 		//     local clone's tag list. Confidence: pair_match.
+		//   - gem: outer .gem is a plain (uncompressed) tar holding
+		//     data.tar.gz + metadata.gz + checksums.yaml.gz. The
+		//     collector walks the outer with FormatTar, captures
+		//     data.tar.gz via CaptureIntent, then re-walks those
+		//     bytes as FormatTarGzip — the inner manifest feeds the
+		//     diff. rubygems.org exposes no gitHead, so pair
+		//     resolution also falls through to tag-match.
 		//
-		// gem/maven: extend the gate as those collectors learn
-		// to emit artifact_url.
+		// maven: extend the gate when its collector learns to emit
+		// artifact_url. Note: source-jars only — class-jars compare
+		// bytecode to source, a category error.
 		//
 		// Known limitation: the tag-match fallback in
 		// internal/signal/artifact/pair.go only handles bare
@@ -351,7 +359,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// no bytes are ever written to disk (or persisted in
 		// filestore/) — re-runs re-fetch, but tarballs are small
 		// and the cache invalidation cost beats the bandwidth.
-		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" {
+		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" || entity.Ecosystem == "gem" {
 			collectors = append(collectors,
 				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
 					InRun:     opts.InRunResult,

@@ -1,7 +1,11 @@
 package artifact
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/artifact/stream"
@@ -149,6 +153,96 @@ func captureIntentsForEcosystem(ecosystem string) []stream.CaptureIntent {
 	default:
 		return nil
 	}
+}
+
+// gemDataIntentName is the CaptureIntent.Name the gem-side outer
+// walker registers. Used as the lookup key in Manifest.Captured by
+// the artifact collector to retrieve the inner data.tar.gz bytes
+// for the second-pass walk.
+const gemDataIntentName = "gem-data"
+
+// gemDataFileName is the basename `gem build` writes into the .gem
+// outer tar at the archive root — the actual file payload of a gem.
+// Sibling to metadata.gz and checksums.yaml.gz.
+const gemDataFileName = "data.tar.gz"
+
+// gemDataMaxBytes caps how many bytes the outer walker will copy
+// for the data.tar.gz capture. Matched to the default total cap so
+// any gem whose outer walk would have succeeded under the standard
+// resource ceiling can also have its inner data tarball captured
+// for the second-pass walk.
+const gemDataMaxBytes int64 = 256 * 1024 * 1024
+
+// gemDataIntent captures the inner data.tar.gz from a `.gem`
+// outer tar. The matcher is strict: the file must be at the archive
+// root (no wrapping directory — gems don't use one) and named
+// exactly "data.tar.gz". Anything else is suspicious for a gem and
+// should not feed the second-pass walk.
+//
+// First-match-wins is enforced by stream.Walk; a malformed gem with
+// two data.tar.gz entries would record the duplicate in
+// SkippedIntents, surfacing the anomaly as evidence rather than
+// silently choosing one.
+var gemDataIntent = stream.CaptureIntent{
+	Name: gemDataIntentName,
+	Match: func(e stream.Entry) bool {
+		if e.Type != stream.EntryFile {
+			return false
+		}
+		// Gems have no wrapping directory; data.tar.gz is at the
+		// outer root. Reject any path with a slash to refuse e.g.
+		// "subdir/data.tar.gz" planted by an attacker.
+		return e.Path == gemDataFileName
+	},
+	MaxSize: gemDataMaxBytes,
+}
+
+// walkGemArchive performs the two-pass walk a `.gem` requires:
+//
+//  1. Walk the outer (plain, uncompressed tar) capturing the inner
+//     data.tar.gz bytes via gemDataIntent.
+//  2. Re-walk those captured bytes as FormatTarGzip to produce the
+//     manifest used for the diff.
+//
+// The diff machinery upstream operates on the inner manifest — so
+// the comparison surface is the actual file payload, not the gem's
+// outer envelope (which would otherwise compare {data.tar.gz,
+// metadata.gz, checksums.yaml.gz} against source paths and produce
+// no useful signal).
+//
+// Both walks honour lim. The intent's MaxSize bounds how much of
+// the inner data.tar.gz the outer walk is willing to copy into
+// memory; the inner walk applies lim's MaxTotalBytes against the
+// gunzipped second-pass stream.
+//
+// Returns an error wrapped with context ("outer gem walk", "no
+// data.tar.gz", "inner data walk") so the caller's absence message
+// names which step failed.
+func walkGemArchive(ctx context.Context, src io.Reader,
+	lim stream.Limits) (*stream.Manifest, error) {
+
+	outer, err := stream.Walk(ctx, src, stream.FormatTar,
+		[]stream.CaptureIntent{gemDataIntent}, lim)
+	if err != nil {
+		return nil, fmt.Errorf("outer gem walk: %w", err)
+	}
+	innerBytes, ok := outer.Captured[gemDataIntentName]
+	if !ok {
+		// The outer didn't contain a data.tar.gz at the root. Either
+		// the file is absent or the matcher rejected its position
+		// (squatter at "subdir/data.tar.gz"). Either way, no inner
+		// payload to compare.
+		if reason, skipped := outer.SkippedIntents[gemDataIntentName]; skipped {
+			return nil, fmt.Errorf("no data.tar.gz captured: %s", reason)
+		}
+		return nil, fmt.Errorf("no data.tar.gz at gem outer root")
+	}
+	inner, err := stream.Walk(ctx, bytes.NewReader(innerBytes),
+		stream.FormatTarGzip, nil, lim)
+	if err != nil {
+		return nil, fmt.Errorf("inner data walk: %w", err)
+	}
+	return inner, nil
 }
 
 // publisherMetadataPaths returns the post-strip filenames the

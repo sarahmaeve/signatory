@@ -18,6 +18,18 @@ const (
 	// FormatZip is the PKZIP container used by pypi wheels (.whl),
 	// java jars (.jar), nupkg (.nupkg), and GitHub release zips.
 	FormatZip
+
+	// FormatTar is the plain (uncompressed) tar container. Currently
+	// used only for `.gem` outer wrappers — RubyGems' .gem format is
+	// a tar holding `data.tar.gz`, `metadata.gz`, and
+	// `checksums.yaml.gz` as siblings. Header-only walking dispatches
+	// here; the gem collector then re-walks the captured data.tar.gz
+	// bytes via FormatTarGzip in a second pass.
+	//
+	// Compression-ratio defenses don't apply (input is uncompressed,
+	// ratio is 1:1 by definition); MaxTotalBytes still enforces the
+	// process-resource ceiling on the same terms as the other formats.
+	FormatTar
 )
 
 // String renders the format for logging and error messages.
@@ -27,6 +39,8 @@ func (f Format) String() string {
 		return "tar.gz"
 	case FormatZip:
 		return "zip"
+	case FormatTar:
+		return "tar"
 	default:
 		return "unknown"
 	}

@@ -59,6 +59,8 @@ func Walk(ctx context.Context, src io.Reader, format Format,
 	switch format {
 	case FormatTarGzip:
 		return walkTarGzip(ctx, src, intents, lim)
+	case FormatTar:
+		return walkTar(ctx, src, intents, lim)
 	case FormatZip:
 		return walkZip(ctx, src, intents, lim)
 	default:

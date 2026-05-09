@@ -642,3 +642,66 @@ func indexByPath(entries []Entry) map[string]Entry {
 	}
 	return out
 }
+
+// TestTar_FormatTarHeaderWalk pins the smallest claim of the
+// gem-outer-wrapper model: stream.Walk with FormatTar reads tar
+// headers from a byte stream that is NOT wrapped in gzip and
+// produces the same Manifest shape FormatTarGzip produces.
+//
+// Header-only, no extraction. Same loop as FormatTarGzip, just
+// without the gunzip step. The compression-ratio cap is meaningless
+// for an uncompressed stream (1:1 by definition); MaxTotalBytes
+// still applies as the resource ceiling.
+//
+// Why FormatTar exists: a `.gem` file's outer container is a plain
+// tar (no gzip) holding `data.tar.gz`, `metadata.gz`, and
+// `checksums.yaml.gz` as siblings. Walking the outer to identify
+// data.tar.gz is the format dispatch this test verifies. Inner
+// data.tar.gz then walks via FormatTarGzip in a second pass.
+func TestTar_FormatTarHeaderWalk(t *testing.T) {
+	t.Parallel()
+
+	// Build a plain (uncompressed) tar with two entries.
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name:     "data.tar.gz",
+		Size:     5,
+		Mode:     0o644,
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tw.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name:     "metadata.gz",
+		Size:     5,
+		Mode:     0o644,
+		Typeflag: tar.TypeReg,
+	}))
+	_, err = tw.Write([]byte("world"))
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+
+	manifest, err := Walk(t.Context(), bytes.NewReader(buf.Bytes()),
+		FormatTar, nil, Limits{MaxTotalBytes: 1 << 20})
+	require.NoError(t, err,
+		"FormatTar must walk a plain (non-gzipped) tar without error — "+
+			"this is the outer-wrapper format `.gem` files use")
+
+	require.Len(t, manifest.Entries, 2)
+
+	idx := indexByPath(manifest.Entries)
+	assert.Contains(t, idx, "data.tar.gz",
+		"the data.tar.gz sibling is the gem payload that the second-pass "+
+			"walk will descend into")
+	assert.Contains(t, idx, "metadata.gz")
+	assert.Equal(t, EntryFile, idx["data.tar.gz"].Type)
+	assert.Equal(t, int64(5), idx["data.tar.gz"].Size)
+
+	// ArchiveSHA256 must still be populated. The whole-archive hash
+	// is independent of compression — the stream walker tees through
+	// sha256 in both Format paths.
+	assert.Len(t, manifest.ArchiveSHA256, 64,
+		"ArchiveSHA256 must be the hex-encoded sha256 of the input bytes "+
+			"regardless of format")
+}

@@ -178,7 +178,21 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 	defer func() { _ = body.Close() }()
 
-	manifest, err := stream.Walk(ctx, body, stream.FormatTarGzip, intents, c.cfg.Limits)
+	// Gem requires a two-pass walk: the outer `.gem` is a plain
+	// (uncompressed) tar holding data.tar.gz + metadata.gz +
+	// checksums.yaml.gz as siblings; only data.tar.gz contains the
+	// file payload comparable to the source repo. Walk the outer to
+	// capture the data.tar.gz bytes, then re-walk those bytes as
+	// tar.gz to produce the manifest used for the diff.
+	//
+	// All other ecosystems (npm, cargo, pypi sdist) use a single-
+	// pass tar.gz walk.
+	var manifest *stream.Manifest
+	if entity.Ecosystem == "gem" {
+		manifest, err = walkGemArchive(ctx, body, c.cfg.Limits)
+	} else {
+		manifest, err = stream.Walk(ctx, body, stream.FormatTarGzip, intents, c.cfg.Limits)
+	}
 	if err != nil {
 		recordDivergenceAbsence(result, entity.ID,
 			fmt.Sprintf("walk artifact: %v", err), collectedAt)

@@ -21,12 +21,8 @@ import (
 //  3. Wrap the gunzipped stream in a cap-enforcing reader so
 //     MaxTotalBytes and MaxCompressionRatio fire as ErrLimitExceeded
 //     anywhere in the walk.
-//  4. Iterate tar headers, classifying each entry by typeflag and
-//     evaluating CaptureIntents against the verbatim path. For
-//     intent matches, copy entry body bytes into a bounded buffer;
-//     for non-matches, advance past the body without copying.
-//  5. After EOF, detect the common top-level directory and finalize
-//     the manifest's hash.
+//  4. Hand off to walkTarHeaders which iterates tar headers,
+//     classifies each entry, and evaluates CaptureIntents.
 func walkTarGzip(ctx context.Context, src io.Reader,
 	intents []CaptureIntent, lim Limits) (*Manifest, error) {
 
@@ -56,6 +52,59 @@ func walkTarGzip(ctx context.Context, src io.Reader,
 		ratioMinCompressed:   ratioMinCompressedBytes,
 		ratioMinDecompressed: ratioMinDecompressedBytes,
 	}
+	return walkTarHeaders(ctx, capped, hasher, intents, lim)
+}
+
+// walkTar implements Walk for FormatTar — a plain (uncompressed)
+// tar header stream. Currently used only for `.gem` outer wrappers,
+// which are tar archives holding `data.tar.gz`, `metadata.gz`, and
+// `checksums.yaml.gz` as siblings.
+//
+// The reader chain is simpler than walkTarGzip's: there's no gzip
+// step, so compressed and decompressed bytes are the same stream.
+// The compression-ratio cap is wired but tautologically can't fire
+// (ratio is 1.0 by construction). MaxTotalBytes still applies as
+// the resource ceiling, on the same terms as the other formats.
+func walkTar(ctx context.Context, src io.Reader,
+	intents []CaptureIntent, lim Limits) (*Manifest, error) {
+
+	lim = resolveLimits(lim)
+
+	// Tee through sha256 for ArchiveSHA256; counting reader feeds
+	// the cappedReader's compressed-bytes denominator. For an
+	// uncompressed stream, "compressed" and "decompressed" track
+	// the same byte count — ratio stays at 1.0 throughout.
+	hasher := sha256.New()
+	counter := &countingReader{r: io.TeeReader(src, hasher)}
+
+	capped := &cappedReader{
+		r:                    counter,
+		maxTotal:             lim.MaxTotalBytes,
+		maxRatio:             lim.MaxCompressionRatio,
+		compressedCounter:    counter,
+		ratioMinCompressed:   ratioMinCompressedBytes,
+		ratioMinDecompressed: ratioMinDecompressedBytes,
+	}
+	return walkTarHeaders(ctx, capped, hasher, intents, lim)
+}
+
+// walkTarHeaders is the shared tar-header loop both walkTarGzip and
+// walkTar dispatch into once they've prepared the read chain.
+//
+// capped is the cap-enforcing reader the tar.Reader will pull from;
+// hasher is the running sha256 of the source bytes (already teed at
+// the outermost layer of the chain so it captures the on-the-wire
+// bytes regardless of compression).
+//
+// The loop classifies each entry by typeflag, evaluates
+// CaptureIntents against the verbatim path (copying body bytes for
+// matches into a bounded buffer; advancing past the body without
+// copying for non-matches), and finalises StrippedTopDir +
+// ArchiveSHA256 after EOF.
+func walkTarHeaders(ctx context.Context, capped io.Reader,
+	hasher interface{ Sum([]byte) []byte }, intents []CaptureIntent,
+	lim Limits) (*Manifest, error) {
+
 	tr := tar.NewReader(capped)
 
 	manifest := &Manifest{

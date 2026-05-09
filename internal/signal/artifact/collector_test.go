@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -715,6 +716,148 @@ func TestCollector_Name(t *testing.T) {
 	t.Parallel()
 	c := NewCollector(CollectorConfig{})
 	assert.Equal(t, "artifact-vs-repo", c.Name())
+}
+
+// TestCollector_Collect_Gem_DescendsIntoInnerDataTarball is the
+// canonical gem case: a `.gem` file is a plain (uncompressed) tar
+// holding `data.tar.gz` + `metadata.gz` + `checksums.yaml.gz` as
+// siblings. The artifact-vs-repo check only cares about
+// data.tar.gz — the actual file payload corresponding to the source
+// repo. The collector must:
+//
+//  1. Walk the outer `.gem` with FormatTar (no gunzip).
+//  2. Capture data.tar.gz bytes via a CaptureIntent (the same
+//     mechanism cargo uses for .cargo_vcs_info.json).
+//  3. Re-walk the captured bytes with FormatTarGzip to produce the
+//     inner manifest.
+//  4. Diff that INNER manifest against the git tree.
+//
+// Without that descent, the diff would compare {data.tar.gz,
+// metadata.gz, checksums.yaml.gz} against the repo's source files
+// and report every real source file as missing-from-tarball noise
+// — i.e. produce no useful signal at all.
+//
+// This is the load-bearing test for the gem extension: closes the
+// signal-gap by making the collector aware of the nested-tarball
+// shape.
+func TestCollector_Collect_Gem_DescendsIntoInnerDataTarball(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-gem"
+		version  = "1.2.3"
+		tag      = "v1.2.3"
+		commit   = "abcdef0123456789abcdef0123456789abcdef01"
+	)
+
+	// Build the inner data.tar.gz: real source plus one xz-shaped
+	// extra (file in tarball, not in git).
+	innerTarball := buildTarGz(t, []tarEntry{
+		{path: "lib/mygem.rb", body: []byte("# real source")},
+		{path: "lib/mygem/version.rb", body: []byte("VERSION = '1.2.3'")},
+		// xz-equivalent: shipped only in the tarball.
+		{path: "ext/inject.rb", body: []byte("# attacker payload")},
+	})
+
+	// Build the outer `.gem` (plain tar, no gzip) holding
+	// data.tar.gz + metadata.gz + checksums.yaml.gz as siblings.
+	outerGem := buildPlainTar(t, []tarEntry{
+		{path: "data.tar.gz", body: innerTarball},
+		{path: "metadata.gz", body: []byte("\x1f\x8b\x08\x00fake-metadata")},
+		{path: "checksums.yaml.gz", body: []byte("\x1f\x8b\x08\x00fake-checksums")},
+	})
+
+	// gitPaths reflect what `git ls-tree -r --name-only v1.2.3`
+	// returns: legitimate source, no inject.rb.
+	gitPaths := []string{
+		"lib/mygem.rb",
+		"lib/mygem/version.rb",
+	}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "gem-registry",
+		mustParseTime(t, "2026-04-01T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":       "https://rubygems.org/downloads/mygem-1.2.3.gem",
+			"version":   version,
+			"git_head":  "", // rubygems.org doesn't expose a publisher-stamped SHA
+			"integrity": "sha256-placeholder",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: outerGem},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: gitPaths},
+			commitByRef: map[string]string{tag: commit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:gem/mygem",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "gem",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.SignalCount(),
+		"gem divergence must produce one signal — fall-through to absence "+
+			"means the nested-tarball descent didn't happen")
+	assert.Equal(t, 0, result.AbsenceCount())
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type)
+
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	extras := make([]string, 0, len(cmp.ExtrasInTarballSample))
+	for _, e := range cmp.ExtrasInTarballSample {
+		extras = append(extras, e.Path)
+	}
+
+	assert.Equal(t, []string{"ext/inject.rb"}, extras,
+		"only the malicious inner file should surface — if data.tar.gz, "+
+			"metadata.gz, or checksums.yaml.gz appear here, the collector "+
+			"failed to descend into the inner data.tar.gz and is comparing "+
+			"the OUTER gem manifest against the source tree instead")
+	assert.Equal(t, 1, cmp.ExtrasInTarballCount)
+
+	assert.Equal(t, PairConfidenceTagMatch, cmp.PairConfidence,
+		"rubygems.org exposes no publisher-stamped commit SHA; "+
+			"the resolver falls through to tag-match")
+}
+
+// buildPlainTar writes a plain (uncompressed) tar archive in memory
+// and returns the bytes. Used by gem-shaped fixtures whose outer
+// container is a tar without gzip wrapping.
+func buildPlainTar(t *testing.T, entries []tarEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     e.path,
+			Size:     int64(len(e.body)),
+			Mode:     0o644,
+			Typeflag: tar.TypeReg,
+		}))
+		_, err := tw.Write(e.body)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	return buf.Bytes()
 }
 
 // TestCollector_Collect_PyPI_SuppressesPublisherInjectedFiles is the
