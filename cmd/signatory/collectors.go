@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	artifactcollector "github.com/sarahmaeve/signatory/internal/signal/artifact"
 	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
@@ -25,6 +27,18 @@ import (
 	pypicollector "github.com/sarahmaeve/signatory/internal/signal/registry/pypi"
 	repofilescollector "github.com/sarahmaeve/signatory/internal/signal/repofiles"
 	sourcecollector "github.com/sarahmaeve/signatory/internal/signal/source"
+)
+
+// Artifact-vs-repo collector tuning. The MaxArchiveBytes cap is the
+// gunzipped-stream limit (256 MiB matches the registry-collector
+// fetch caps); MaxArtifactBytes is the on-the-wire HTTP cap; Timeout
+// is the per-fetch budget. None of these are user-tunable today —
+// they're constants here rather than CLI flags because the
+// dogfood traces don't yet show a need for per-run override.
+const (
+	artifactArchiveCap = 256 << 20 // 256 MiB gunzipped
+	artifactHTTPCap    = 256 << 20 // 256 MiB on the wire
+	artifactHTTPBudget = 60 * time.Second
 )
 
 // CollectOpts carries per-invocation options from AnalyzeCmd's
@@ -289,6 +303,46 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
 			collectors = append(collectors,
 				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),
+			)
+		}
+
+		// Artifact-vs-repo: compares the registry-published source
+		// tarball against the git tree at the resolved tag. Closes
+		// the highest-leverage signal gap documented in
+		// design/threat-landscape/example-xz-utils-cve-2024-3094.md
+		// (CVE-2024-3094 — backdoor in the dist tarball, absent from
+		// git at the same tag).
+		//
+		// Gated on (a) entity has a registry collector queued
+		// (so artifact_url will be in InRun), and (b) clone path is
+		// resolved (we have a repo side to diff against). Phase 1
+		// covers npm only; pypi/cargo/etc. extend the gate as those
+		// collectors learn to emit artifact_url.
+		//
+		// Appended LAST so the in-run accumulator already holds the
+		// upstream registry collector's artifact_url emission by the
+		// time Collect runs. Same dispatch-order discipline as
+		// source-evolution above.
+		//
+		// Streams the tarball: no tempdir, no on-disk artifact. The
+		// HTTP fetcher's response body feeds directly into the
+		// header-only walker. Per the smallest-and-safest design,
+		// no bytes are ever written to disk (or persisted in
+		// filestore/) — re-runs re-fetch, but tarballs are small
+		// and the cache invalidation cost beats the bandwidth.
+		if entity.Ecosystem == "npm" {
+			collectors = append(collectors,
+				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
+					InRun:     opts.InRunResult,
+					ClonePath: clonePath,
+					Fetcher: artifactcollector.NewHTTPFetcher(
+						artifactcollector.HTTPFetcherOptions{
+							MaxBytes: artifactHTTPCap,
+							Timeout:  artifactHTTPBudget,
+						}),
+					Git:             artifactcollector.NewGitInspector(clonePath),
+					MaxArchiveBytes: artifactArchiveCap,
+				}),
 			)
 		}
 	}

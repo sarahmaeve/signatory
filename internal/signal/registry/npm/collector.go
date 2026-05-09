@@ -159,6 +159,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// per signal rather than re-doing the map fetch twice.
 	recordLatestVersionSignals(result, entity.ID, pkg, collectedAt)
 
+	// ----- artifact_url (publication) -----
+	//
+	// Source-distribution URL for the latest version. Read by the
+	// downstream artifact-vs-repo collector via the in-run accumulator;
+	// not consumed by analysts directly. Absent dist.tarball → record
+	// absence so the downstream collector sees the explicit "no URL
+	// available" fact rather than inferring from a missing signal.
+	recordArtifactURL(result, entity.ID, pkg, collectedAt)
+
 	// ----- weekly_downloads (criticality) -----
 	//
 	// Separate endpoint (api.npmjs.org/downloads) — one extra HTTP
@@ -369,6 +378,56 @@ func recordLatestVersionSignals(result *signal.CollectionResult, entityID string
 		map[string]any{
 			"present":         hasAttestation,
 			"version_checked": latest,
+		})
+}
+
+// recordArtifactURL emits the artifact_url signal carrying the
+// dist.tarball of the latest version, plus the metadata the
+// artifact-vs-repo collector needs to fetch the bytes and pair
+// them to a commit (version, integrity, gitHead).
+//
+// Absent dist-tags.latest → absence: same shape as the other latest-
+// version-derived signals. Present dist-tags.latest with empty
+// dist.tarball → also absence: this is rare in modern publishes
+// but happens for very old packages and private mirrors. Either
+// way, the downstream collector reads the absence and records its
+// own AbsenceReasonNoArtifactURL on the divergence signal.
+//
+// gitHead is best-effort: empty when the publisher's npm CLI didn't
+// stamp it (npm v<5, certain CI integrations). The downstream
+// collector's pair-resolver falls back to tag matching when it's
+// missing — see internal/signal/artifact/pair.go.
+func recordArtifactURL(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	latest := pkg.DistTags.Latest
+	if latest == "" {
+		result.RecordAbsence(entityID, sigType, source,
+			"registry response has no dist-tags.latest", false, collectedAt)
+		return
+	}
+	ver, ok := pkg.Versions[latest]
+	if !ok {
+		result.RecordAbsence(entityID, sigType, source,
+			fmt.Sprintf("registry response has no versions[%q] entry", latest),
+			true, collectedAt)
+		return
+	}
+	if ver.Dist.Tarball == "" {
+		result.RecordAbsence(entityID, sigType, source,
+			fmt.Sprintf("dist.tarball is empty for version %q", latest),
+			false, collectedAt)
+		return
+	}
+
+	result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+		map[string]any{
+			"url":       ver.Dist.Tarball,
+			"version":   latest,
+			"integrity": ver.Dist.Integrity,
+			"git_head":  ver.GitHead,
 		})
 }
 

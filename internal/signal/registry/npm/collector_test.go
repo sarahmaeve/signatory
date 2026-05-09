@@ -121,11 +121,11 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 
 	// All signals land, zero absences. (Five snapshot signals from
 	// Phase A+B, three cross-version signals from Phase B.6, plus
-	// version_count. The sample response has only a single version
-	// entry, so the cross-version signals land with stable-state
-	// payloads rather than transition flags.)
-	assert.Equal(t, 9, result.SignalCount(),
-		"all nine signals should land on happy path (5 snapshot + 3 cross-version + version_count)")
+	// version_count and artifact_url. The sample response has only
+	// a single version entry, so the cross-version signals land with
+	// stable-state payloads rather than transition flags.)
+	assert.Equal(t, 10, result.SignalCount(),
+		"all ten signals should land on happy path (5 snapshot + 3 cross-version + version_count + artifact_url)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// last_publish
@@ -253,11 +253,11 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Eight real signals (everything except weekly_downloads), one
+	// Nine real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
 	// failure must not poison the other signals. The three cross-
 	// version signals land from the same-wire versions map.
-	assert.Equal(t, 8, result.SignalCount())
+	assert.Equal(t, 9, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -965,6 +965,96 @@ func TestCollector_Collect_CrossVersion_NoOrderableVersions(t *testing.T) {
 	assert.True(t, hasAbsence(result, "postinstall_introduced"))
 	assert.True(t, hasAbsence(result, "publish_origin_consistency"))
 	assert.True(t, hasAbsence(result, "version_publish_burst"))
+}
+
+// ----- artifact_url -----
+//
+// The artifact_url signal carries the dist.tarball URL plus the
+// associated metadata (version, integrity, gitHead) that the
+// downstream artifact-vs-repo collector needs to fetch the tarball
+// and pair it to a commit. Wired in service of the CVE-2024-3094
+// (xz-utils) signal-gap closure documented in
+// design/threat-landscape/example-xz-utils-cve-2024-3094.md.
+
+func TestCollector_Collect_ArtifactURL_PresentWithGitHead(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "well-published",
+	  "dist-tags": {"latest": "5.6.1"},
+	  "time": {"5.6.1": "2026-04-01T00:00:00Z"},
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {
+	    "5.6.1": {
+	      "scripts": {},
+	      "gitHead": "deadbeefcafebabe1234567890abcdef12345678",
+	      "dist": {
+	        "tarball": "https://registry.npmjs.org/well-published/-/well-published-5.6.1.tgz",
+	        "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	      }
+	    }
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "well-published"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("well-published"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "artifact_url"),
+		"artifact_url must land when dist.tarball is set on the latest version — "+
+			"this is the URL the artifact-vs-repo collector consumes via "+
+			"the in-run accumulator")
+	au := getSignalValue(t, result, "artifact_url")
+
+	assert.Equal(t, "https://registry.npmjs.org/well-published/-/well-published-5.6.1.tgz",
+		au["url"], "url payload must match dist.tarball verbatim")
+	assert.Equal(t, "5.6.1", au["version"],
+		"version is the dist-tags.latest value the URL was sourced from")
+	assert.Equal(t, "deadbeefcafebabe1234567890abcdef12345678", au["git_head"],
+		"git_head must be the publisher-stamped commit SHA — the artifact "+
+			"collector uses this for exact_gitHead pair confidence")
+	assert.Contains(t, au["integrity"], "sha512-",
+		"integrity is the npm-supplied subresource integrity string; "+
+			"emit it so a downstream verifier can cross-check the bytes "+
+			"without re-downloading")
+}
+
+func TestCollector_Collect_ArtifactURL_AbsentWhenNoTarball(t *testing.T) {
+	t.Parallel()
+
+	// dist block has no tarball field. This shape is rare in modern
+	// npm publishes but happens for very old packages and for some
+	// scoped-private mirrors. The signal must absent gracefully so
+	// the downstream collector can record its own positive_absence
+	// (no_artifact_url) rather than receiving an empty string.
+	registryBody := `{
+	  "name": "no-tarball-package",
+	  "dist-tags": {"latest": "0.1.0"},
+	  "time": {"0.1.0": "2015-01-01T00:00:00Z"},
+	  "maintainers": [{"name": "ancient-maintainer"}],
+	  "versions": {
+	    "0.1.0": {
+	      "scripts": {},
+	      "dist": {}
+	    }
+	  }
+	}`
+	downloadsBody := `{"downloads": 0, "package": "no-tarball-package"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("no-tarball-package"))
+	require.NoError(t, err)
+
+	assert.False(t, hasSignal(result, "artifact_url"),
+		"artifact_url must NOT be emitted when dist.tarball is empty — "+
+			"the downstream collector reads its absence and records its own "+
+			"positive_absence with reason no-artifact-URL")
+	assert.True(t, hasAbsence(result, "artifact_url"),
+		"absence row must be recorded so the in-run accumulator carries "+
+			"the explicit fact 'we tried, the registry didn't expose a tarball'")
 }
 
 // ----- extractNpmPackageName unit test stays the same -----

@@ -180,11 +180,14 @@ type Maintainer struct {
 // PackageVersion is the per-version metadata block. Phase B reads
 // Scripts.Postinstall and Dist.Attestations; Phase B.6's longitudinal
 // signals add NpmUser for cross-version publisher-continuity analysis.
+// GitHead carries the publisher-stamped commit SHA (npm v≥5) the
+// artifact-vs-repo collector uses for exact-pair confidence.
 // Other fields on the wire are not modelled.
 type PackageVersion struct {
 	Scripts Scripts `json:"scripts"`
 	Dist    Dist    `json:"dist"`
 	NpmUser NpmUser `json:"_npmUser"`
+	GitHead string  `json:"gitHead"`
 }
 
 // NpmUser identifies who ran `npm publish` for a given version.
@@ -209,8 +212,16 @@ type Scripts struct {
 // publishing records when present; modelled as RawMessage because
 // the exact shape varies (and may change) and we only check presence
 // for v0.1.
+//
+// Tarball is the registry-hosted URL of the published .tgz; Integrity
+// is the npm-supplied subresource-integrity string for the same bytes.
+// Both feed the artifact_url signal that the artifact-vs-repo collector
+// consumes downstream — see internal/signal/artifact for the threat
+// model anchor (CVE-2024-3094).
 type Dist struct {
 	Attestations json.RawMessage `json:"attestations"`
+	Tarball      string          `json:"tarball"`
+	Integrity    string          `json:"integrity"`
 }
 
 // Repository is polymorphic in the npm registry: may be a bare
