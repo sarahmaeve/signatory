@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -837,6 +838,144 @@ func TestCollector_Collect_Gem_DescendsIntoInnerDataTarball(t *testing.T) {
 	assert.Equal(t, PairConfidenceTagMatch, cmp.PairConfidence,
 		"rubygems.org exposes no publisher-stamped commit SHA; "+
 			"the resolver falls through to tag-match")
+}
+
+// TestCollector_Collect_Go_ZipFormatAndExactGitHead is the canonical
+// Go-module case. proxy.golang.org serves modules as zip files
+// wrapped under "<module-path>@<version>/" — a multi-segment prefix
+// when the module path itself contains slashes. The collector must:
+//
+//  1. Dispatch FormatZip (not FormatTarGzip) for go-ecosystem
+//     entities — module zips are PKZIP.
+//  2. Strip the multi-segment wrapping prefix correctly so post-
+//     strip paths are comparable to git ls-tree output.
+//  3. Use the registry-supplied git_head (Origin.Hash) as the
+//     pair-resolver input, yielding PairConfidenceExactGitHead.
+//
+// Without (1) the walker would attempt to gunzip a zip and bail.
+// Without (2) every path would carry the wrapper prefix and the
+// diff would surface every legitimate source file as missing-
+// from-repo noise. Without (3) we'd fall through to tag-match —
+// usable but lower-confidence than the publisher-stamped SHA the
+// proxy already gives us.
+func TestCollector_Collect_Go_ZipFormatAndExactGitHead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-go"
+		version  = "v0.20.0"
+		// 40-char hex SHA — the proxy-recorded Origin.Hash. stubGit
+		// must advertise paths against this exact ref so the pairing
+		// resolves at exact_gitHead.
+		originHash = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+	)
+
+	// Build a Go-module zip with the spec-required wrapping prefix:
+	// "<module-path>@<version>/" where module-path itself has slashes.
+	// Real source plus one xz-shaped extra not in the git tree.
+	moduleZip := buildZip(t, []zipEntry{
+		{path: "golang.org/x/sync@v0.20.0/go.mod", body: []byte("module golang.org/x/sync\n")},
+		{path: "golang.org/x/sync@v0.20.0/sync.go", body: []byte("// real source")},
+		{path: "golang.org/x/sync@v0.20.0/errgroup/errgroup.go", body: []byte("// real source")},
+		// xz-equivalent: extra in zip, never in git.
+		{path: "golang.org/x/sync@v0.20.0/inject.go", body: []byte("// attacker payload")},
+	})
+
+	// What `git ls-tree -r --name-only <originHash>` returns.
+	gitPaths := []string{
+		"go.mod",
+		"sync.go",
+		"errgroup/errgroup.go",
+	}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "go-publish",
+		mustParseTime(t, "2026-04-15T10:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":       "https://proxy.golang.org/golang.org/x/sync/@v/v0.20.0.zip",
+			"version":   version,
+			"git_head":  originHash, // proxy-supplied — exact_gitHead
+			"integrity": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: moduleZip},
+		Git: &stubGit{
+			tags:        []string{"v0.20.0"},
+			pathsByRef:  map[string][]string{originHash: gitPaths},
+			commitByRef: map[string]string{originHash: originHash},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:golang/golang.org/x/sync",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "golang",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.SignalCount(),
+		"go module divergence must produce one signal — fall-through to "+
+			"absence means the FormatZip dispatch or multi-segment strip failed")
+	assert.Equal(t, 0, result.AbsenceCount())
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type)
+
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	extras := make([]string, 0, len(cmp.ExtrasInTarballSample))
+	for _, e := range cmp.ExtrasInTarballSample {
+		extras = append(extras, e.Path)
+	}
+
+	assert.Equal(t, []string{"inject.go"}, extras,
+		"only the malicious file should surface — if go.mod, sync.go, "+
+			"or errgroup/errgroup.go appear here, the multi-segment wrapping "+
+			"prefix wasn't stripped correctly and every legitimate source "+
+			"file looks like an extra")
+	assert.Equal(t, 1, cmp.ExtrasInTarballCount)
+
+	assert.Equal(t, PairConfidenceExactGitHead, cmp.PairConfidence,
+		"proxy.golang.org records the publisher-stamped commit SHA in "+
+			"Origin.Hash; same provenance strength as cargo's vcs_info, "+
+			"so pairing resolves at exact_gitHead — not tag-match")
+	assert.Equal(t, originHash, cmp.GitCommit)
+}
+
+// zipEntry is the test-only constructor type for buildZip.
+type zipEntry struct {
+	path string
+	body []byte
+}
+
+// buildZip writes a PKZIP archive in memory and returns the bytes.
+// Used by Go-module-shaped fixtures since the proxy serves modules
+// as zip, not tar.gz.
+func buildZip(t *testing.T, entries []zipEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		w, err := zw.Create(e.path)
+		require.NoError(t, err)
+		_, err = w.Write(e.body)
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
 }
 
 // buildPlainTar writes a plain (uncompressed) tar archive in memory

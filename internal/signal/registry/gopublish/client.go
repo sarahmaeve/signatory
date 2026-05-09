@@ -308,6 +308,21 @@ func (c *Client) GetVersionList(ctx context.Context, modulePath string) ([]strin
 	return versions, nil
 }
 
+// ZipURL returns the canonical proxy.golang.org module-zip URL for
+// the given module path and version: <proxy>/<encoded-path>/@v/<encoded-version>.zip.
+//
+// Used by the artifact_url handoff signal so the downstream
+// artifact-vs-repo collector can fetch the module zip and pair it
+// against the source repo. Pure URL construction — does not perform
+// any HTTP. Both module-path components apply proxy.golang.org's
+// `!`-escape rule (uppercase letters → !lowercase) so callers pass
+// plain module paths.
+func (c *Client) ZipURL(modulePath, version string) string {
+	encodedPath := encodeModulePath(modulePath)
+	encodedVer := encodeModulePath(version)
+	return c.proxyURL + "/" + encodedPath + "/@v/" + encodedVer + ".zip"
+}
+
 // GetVersionInfo fetches @v/<version>.info from the proxy. Both
 // the module path and version land in the URL, so both are
 // validated before substitution.

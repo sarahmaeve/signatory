@@ -178,19 +178,27 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 	defer func() { _ = body.Close() }()
 
-	// Gem requires a two-pass walk: the outer `.gem` is a plain
-	// (uncompressed) tar holding data.tar.gz + metadata.gz +
-	// checksums.yaml.gz as siblings; only data.tar.gz contains the
-	// file payload comparable to the source repo. Walk the outer to
-	// capture the data.tar.gz bytes, then re-walk those bytes as
-	// tar.gz to produce the manifest used for the diff.
+	// Format dispatch by ecosystem:
 	//
-	// All other ecosystems (npm, cargo, pypi sdist) use a single-
-	// pass tar.gz walk.
+	//   - gem requires a two-pass walk: the outer `.gem` is a plain
+	//     (uncompressed) tar holding data.tar.gz + metadata.gz +
+	//     checksums.yaml.gz as siblings; only data.tar.gz contains
+	//     the file payload comparable to the source repo. Walk the
+	//     outer to capture the data.tar.gz bytes, then re-walk those
+	//     bytes as tar.gz to produce the manifest used for the diff.
+	//
+	//   - golang/go modules ship as zip from proxy.golang.org. Single
+	//     pass, FormatZip dispatch.
+	//
+	//   - All other ecosystems (npm, cargo, pypi sdist) use a single-
+	//     pass tar.gz walk.
 	var manifest *stream.Manifest
-	if entity.Ecosystem == "gem" {
+	switch entity.Ecosystem {
+	case "gem":
 		manifest, err = walkGemArchive(ctx, body, c.cfg.Limits)
-	} else {
+	case "golang", "go":
+		manifest, err = stream.Walk(ctx, body, stream.FormatZip, intents, c.cfg.Limits)
+	default:
 		manifest, err = stream.Walk(ctx, body, stream.FormatTarGzip, intents, c.cfg.Limits)
 	}
 	if err != nil {

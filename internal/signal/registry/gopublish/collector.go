@@ -209,6 +209,15 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 			})
 	}
 
+	// ----- artifact_url (publication, handoff to artifact collector) -----
+	//
+	// Always emits when @latest succeeded — the URL is a function of
+	// modulePath + version and doesn't require Origin to be present.
+	// git_head is filled from Origin.Hash when the .info block has
+	// it (go ≥ 1.20 publishes); empty otherwise — downstream falls
+	// through to tag-match in that case.
+	recordArtifactURL(result, entity.ID, c.client, modulePath, latest.Version, info, collectedAt)
+
 	// ----- @v/<v>.info × N → version_pin_table + version_publish_burst -----
 	//
 	// Iterates up to maxPinFetches most-recent versions, fetching
@@ -241,6 +250,52 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 
 	return result, nil
+}
+
+// recordArtifactURL emits the artifact_url handoff signal that the
+// artifact-vs-repo divergence collector consumes from the in-run
+// accumulator.
+//
+// Go modules differ from npm/cargo/pypi/gem in how strong the
+// publisher provenance is:
+//
+//  1. The .zip URL is constructed from the proxy base + encoded
+//     module path + encoded version. Stable canonical form per
+//     the module-proxy spec (https://go.dev/ref/mod#goproxy-protocol).
+//
+//  2. git_head is populated from Origin.Hash — the publisher-
+//     stamped commit SHA the proxy records at publish time when
+//     `go mod` ≥ 1.20 publishes against a VCS. Same provenance
+//     strength as cargo's vcs_info (the SHA is recorded by the
+//     proxy from the VCS, not supplied by the publisher),
+//     yielding PairConfidenceExactGitHead at the downstream
+//     collector. For pre-go-1.20 publishes Origin is absent and
+//     git_head ships empty — pair resolution falls through to
+//     tag-match.
+//
+// integrity ships empty: the proxy serves the ziphash on a
+// separate /@v/<version>.ziphash endpoint we don't currently
+// fetch. The downstream collector tolerates empty integrity
+// (it's opaque to current consumers; reserved for future
+// cross-checking against signatory's own computed sha256).
+func recordArtifactURL(result *signal.CollectionResult, entityID string,
+	client *Client, modulePath, version string, info *VersionInfo,
+	collectedAt time.Time) {
+
+	const sigType = "artifact_url"
+
+	gitHead := ""
+	if info != nil {
+		gitHead = info.Origin.Hash
+	}
+
+	result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+		map[string]any{
+			"url":       client.ZipURL(modulePath, version),
+			"version":   version,
+			"integrity": "", // ziphash endpoint not yet wired
+			"git_head":  gitHead,
+		})
 }
 
 // burstThreshold is the maximum time span across the version window

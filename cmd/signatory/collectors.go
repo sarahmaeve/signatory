@@ -316,7 +316,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// Gated on (a) entity has a registry collector queued
 		// (so artifact_url will be in InRun), and (b) clone path is
 		// resolved (we have a repo side to diff against). Currently
-		// covers npm, cargo, pypi, and gem:
+		// covers npm, cargo, pypi, gem, and golang:
 		//
 		//   - npm: registry supplies gitHead in versions[v].gitHead
 		//     for v≥5 publishes; tag-match fallback otherwise.
@@ -335,6 +335,11 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		//     bytes as FormatTarGzip — the inner manifest feeds the
 		//     diff. rubygems.org exposes no gitHead, so pair
 		//     resolution also falls through to tag-match.
+		//   - golang/go: proxy.golang.org records Origin.Hash in the
+		//     .info block — the publisher-stamped commit SHA, same
+		//     provenance strength as cargo's vcs_info. Pair resolves
+		//     at exact_gitHead. Modules ship as zip with a multi-
+		//     segment "<module>@<version>/" wrapping prefix.
 		//
 		// maven: extend the gate when its collector learns to emit
 		// artifact_url. Note: source-jars only — class-jars compare
@@ -359,7 +364,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// no bytes are ever written to disk (or persisted in
 		// filestore/) — re-runs re-fetch, but tarballs are small
 		// and the cache invalidation cost beats the bandwidth.
-		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" || entity.Ecosystem == "gem" {
+		if entity.Ecosystem == "npm" || entity.Ecosystem == "cargo" || entity.Ecosystem == "pypi" || entity.Ecosystem == "gem" || entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
 			collectors = append(collectors,
 				artifactcollector.NewCollector(artifactcollector.CollectorConfig{
 					InRun:     opts.InRunResult,
