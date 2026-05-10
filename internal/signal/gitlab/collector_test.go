@@ -281,7 +281,16 @@ func TestCollector_HappyPath_EmitsOwnerType(t *testing.T) {
 // a user-owned project needs its own handler.
 func TestCollector_UserNamespace_EmitsOwnerTypeUser(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Explicit mux instead of a catch-all HandlerFunc: namespace.kind=
+	// "user" triggers a /users?username=alice call from emitOwnerProfile
+	// for the owner_profile signal. A catch-all that returns project
+	// JSON for every path would silently fail that decode (project
+	// object into []user) and leave owner_profile recorded as a failure
+	// rather than a clean lookup — uncontrolled side effect orthogonal
+	// to what this test is meant to pin. Wire both endpoints so the
+	// /users call gets a real user array.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/projects/alice%2Fdotfiles", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(project{
 			ID:              1,
 			Name:            "dotfiles",
@@ -294,7 +303,22 @@ func TestCollector_UserNamespace_EmitsOwnerTypeUser(t *testing.T) {
 			OpenIssuesCount: 0,
 		})
 	})
-	c := newTestCollector(t, handler)
+	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("username") != "alice" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":         42,
+				"username":   "alice",
+				"name":       "Alice Example",
+				"created_at": "2020-01-01T00:00:00Z",
+				"state":      "active",
+			},
+		})
+	})
+	c := newTestCollector(t, mux)
 	entity := &profile.Entity{
 		ID:        "e1",
 		Type:      profile.EntityProject,

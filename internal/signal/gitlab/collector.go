@@ -72,13 +72,19 @@ func (c *Collector) Name() string { return sourceName }
 // URLs) return a non-nil empty CollectionResult with nil error.
 // Symmetric with github / forgejo / openssf collector self-gates.
 //
-// Single API call: GET /api/v4/projects/{namespace_url_encoded}. Six
-// signals emitted on success (stars, forks, open_issues, archived,
-// repo_age, last_push). 404 surfaces as a Collect error so the
+// API calls:
+//   - GET /api/v4/projects/{namespace_url_encoded} — Tier 1 (six
+//     signals) plus owner_type (Tier 1.5, free from namespace.kind on
+//     the same response).
+//   - GET /api/v4/groups/{path} OR /api/v4/users?username=<login> —
+//     Tier 2 owner_profile, routed by namespace.kind. Independent
+//     failure path: an owner_profile lookup error records as a
+//     per-signal failure without disturbing Tier 1 or owner_type.
+//
+// 404 on the /projects call surfaces as a Collect error so the
 // orchestrator records the per-collector failure but continues.
 //
-// owner_type / owner_profile / contributors / license deferred to
-// Tier 1.5 / Tier 2.
+// Still deferred: contributors, license.
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	if entity == nil || entity.URL == "" || !isGitLabHost(entity.URL) {
 		return &signal.CollectionResult{}, nil

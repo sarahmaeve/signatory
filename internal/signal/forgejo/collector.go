@@ -45,9 +45,10 @@ func isForgejoHost(rawURL string) bool {
 	return host == "codeberg.org"
 }
 
-// Collector emits Tier 1 metadata signals from the Forgejo API for
-// codeberg-hosted entities. See the package doc for the signal
-// catalog and the design's deferred Tier 2 set.
+// Collector emits Tier 1 + Tier 1.5 + Tier 2 metadata signals from the
+// Forgejo API for codeberg-hosted entities. See the package doc for
+// the signal catalog and the contributors / license signals still
+// deferred.
 type Collector struct {
 	client *Client
 }
@@ -68,22 +69,27 @@ func NewCollectorWithClient(c *Client) *Collector {
 // narration keys on ("[forgejo] Collected N signals").
 func (c *Collector) Name() string { return sourceName }
 
-// Collect gathers Tier 1 metadata signals for a codeberg-hosted
-// entity. Self-gates on entity.URL host: non-codeberg URLs (and empty
-// URLs) return a non-nil empty CollectionResult with nil error. The
-// gate is symmetric with github's isGitHubHost and openssf's
+// Collect gathers Tier 1 + 1.5 + 2 metadata signals for a codeberg-
+// hosted entity. Self-gates on entity.URL host: non-codeberg URLs (and
+// empty URLs) return a non-nil empty CollectionResult with nil error.
+// The gate is symmetric with github's isGitHubHost and openssf's
 // extractOwnerRepo — it admits the orchestrator's pattern of wiring
 // every git-hosted collector unconditionally and letting each
 // collector own the host check for its own forge.
 //
-// Single API call: GET /api/v1/repos/{owner}/{repo}. Six signals
-// emitted on success (stars, forks, open_issues, archived, repo_age,
-// last_push). 404 surfaces as a Collect error so the orchestrator
-// records the per-collector failure but continues with the rest of
-// the dispatch — matches github's GetRepo failure handling.
+// API calls:
+//   - GET /api/v1/repos/{owner}/{repo} — Tier 1 (six signals).
+//   - GET /api/v1/orgs/{login} — Tier 1.5 owner_type probe.
+//   - GET /api/v1/users/{login} — Tier 2 owner_profile metadata.
 //
-// owner_type / owner_profile / contributors / license are deferred
-// to Tier 2 (need a second API call). See the package doc.
+// 404 on the /repos call surfaces as a Collect error so the
+// orchestrator records the per-collector failure but continues with
+// the rest of the dispatch — matches github's GetRepo failure
+// handling. Failures on the Tier 1.5 / Tier 2 calls are isolated to
+// the affected signal.
+//
+// Contributors / license are still deferred — each needs further
+// per-signal API calls.
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
 	if entity == nil || entity.URL == "" || !isForgejoHost(entity.URL) {
 		return &signal.CollectionResult{}, nil

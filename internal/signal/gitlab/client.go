@@ -3,8 +3,7 @@
 // explicit allow-list mechanism (same threat-model deferral as
 // self-hosted Forgejo) and ship in a follow-up.
 //
-// Tier 1 scope (this commit): the metadata signals derivable from a
-// single GET against /api/v4/projects/{namespace_url_encoded} —
+// Tier 1 (single GET against /api/v4/projects/{namespace_url_encoded}):
 //
 //   - stars        (star_count → count)
 //   - forks        (forks_count → count)
@@ -15,13 +14,24 @@
 //     expose a separate pushed_at and last_activity_at advances on
 //     push and on issue/MR activity)
 //
-// Tier 2 (deferred): owner_type, owner_profile, contributors,
-// license. owner_type is technically free on the same call
-// (namespace.kind discriminates user/group), but Tier 1 keeps the
-// signal set symmetric with the forgejo collector — landing
-// owner_type for both forges in one Tier 1.5 commit lets the
-// per-forge cost asymmetry (forgejo needs a second call, gitlab
-// doesn't) live in one place.
+// Tier 1.5 (free on the same /projects call — no extra round-trip):
+//
+//   - owner_type   (namespace.kind: "group" → Organization, anything
+//     else → User; the per-forge cost asymmetry vs. forgejo
+//     — which needs a separate /orgs/{name} probe — is
+//     deliberately landed in lockstep so cross-forge
+//     posture rules consume one signal alphabet)
+//
+// Tier 2 (one extra round-trip routed by namespace.kind — /groups/<path>
+// when "group", /users?username=<login> when "user"):
+//
+//   - owner_profile (login, name, created, account_age_days, type; same
+//     canonical shape as github / forgejo, with missing
+//     fields like public_repos / followers emitted as
+//     zero so the shape stays consistent across forges)
+//
+// Still deferred: contributors, license. Each would need a further
+// per-signal API call.
 //
 // Source name: signals carry source="gitlab". Same layering choice
 // as github / forgejo — source names the API contract.

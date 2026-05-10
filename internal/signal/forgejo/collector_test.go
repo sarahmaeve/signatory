@@ -497,3 +497,64 @@ func TestCollector_Name(t *testing.T) {
 	c := NewCollector()
 	assert.Equal(t, "forgejo", c.Name())
 }
+
+// TestClient_PathSegmentsAreEscaped is a defense-in-depth pin: every
+// path segment passed into a Forgejo API call (owner / repo / login)
+// goes through url.PathEscape before being concatenated into the
+// request path. Forgejo's server-side login grammar makes a
+// path-traversal sequence in a real r.Owner.Login implausible, but the
+// gitlab client already escapes equivalent segments via projectIDPath;
+// symmetry between forge clients is the property we pin here so a
+// future copy-paste from gitlab to forgejo (or vice versa) can't drop
+// the escaping silently.
+//
+// Test shape: feed each Client method a segment containing characters
+// that PathEscape encodes ("/", ".."). Record the URL the test server
+// receives on r.URL.EscapedPath() and assert the segment was encoded —
+// no raw "/" or ".." reaches the wire.
+func TestClient_PathSegmentsAreEscaped(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		seg       string
+		wantInURL string // the encoded form the request path must contain
+	}{
+		{"slash in segment encodes to %2F", "evil/admin", "evil%2Fadmin"},
+		{"dot-dot in segment encodes to %2E%2E", "../admin", "..%2Fadmin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var sawPath string
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sawPath = r.URL.EscapedPath()
+				w.WriteHeader(http.StatusNotFound) // body irrelevant; we assert on path
+			})
+			server := httptest.NewServer(handler)
+			t.Cleanup(server.Close)
+			c := &Client{httpClient: server.Client(), baseURL: server.URL}
+
+			// IsOrg path: /orgs/<segment>
+			_, _ = c.IsOrg(context.Background(), tc.seg)
+			assert.Contains(t, sawPath, tc.wantInURL,
+				"IsOrg must url.PathEscape its name argument before path concat; raw %q must NOT reach the wire", tc.seg)
+			assert.NotContains(t, sawPath, "/"+tc.seg,
+				"raw unescaped segment %q must NOT appear in the request path", tc.seg)
+
+			// GetUser path: /users/<segment>
+			_, _ = c.GetUser(context.Background(), tc.seg)
+			assert.Contains(t, sawPath, tc.wantInURL,
+				"GetUser must url.PathEscape its name argument")
+			assert.NotContains(t, sawPath, "/"+tc.seg,
+				"raw unescaped segment must NOT appear in the request path")
+
+			// GetRepo path: /repos/<owner>/<repo> — both segments
+			// escape. Pin the owner-side here; the repo-side is the
+			// same call site so one assertion covers the contract.
+			_, _ = c.GetRepo(context.Background(), tc.seg, "ok")
+			assert.Contains(t, sawPath, tc.wantInURL,
+				"GetRepo must url.PathEscape its owner argument")
+		})
+	}
+}

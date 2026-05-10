@@ -4,8 +4,7 @@
 // instances need an explicit allow-list (same threat-model deferral as
 // self-hosted GitLab) and ship in a follow-up.
 //
-// Tier 1 scope (this commit): the metadata signals derivable from a
-// single GET against /api/v1/repos/{owner}/{repo} —
+// Tier 1 (single GET against /api/v1/repos/{owner}/{repo}):
 //
 //   - stars        (stars_count → count)
 //   - forks        (forks_count → count)
@@ -16,11 +15,21 @@
 //     separate pushed_at so updated_at is the closest
 //     analog and advances on push)
 //
-// Tier 2 (deferred): owner_type, owner_profile, contributors, license.
-// Each requires a second API call against /users/{u}, /orgs/{o},
-// /repos/{o}/{r}/contributors, or a license-detection helper. Adding
-// them here would balloon the surface; landing the simple metadata
-// first proves the per-forge collector pattern.
+// Tier 1.5 (one extra round-trip against /api/v1/orgs/{name}):
+//
+//   - owner_type   (200 → Organization, 404 → User; Forgejo's repo
+//     response carries no User/Organization discriminator
+//     on the owner so the probe is mandatory)
+//
+// Tier 2 (one further round-trip against /api/v1/users/{name}):
+//
+//   - owner_profile (login, name, created, account_age_days, followers,
+//     type; same canonical shape as github's signal so
+//     cross-forge posture rules read uniform fields)
+//
+// Still deferred: contributors, license. Each would need a further
+// per-signal API call against /repos/{o}/{r}/contributors or a
+// license-detection helper.
 //
 // Source name: signals carry source="forgejo" (the API kind), not
 // "codeberg" (the deployment). Same layering choice as github — source
@@ -40,6 +49,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -174,9 +184,16 @@ func (c *Client) get(ctx context.Context, path string, result any) error {
 // GetRepo fetches /api/v1/repos/{owner}/{repo}. Returns ErrNotFound
 // (wrapped) when the repo doesn't exist or is private to the
 // unauthenticated client.
+//
+// owner and repoName are url.PathEscape'd before path concatenation as
+// defense-in-depth: production callers already validate the inputs
+// upstream (profile.NormalizeForgeRepoInput), and Forgejo's server-side
+// login grammar rejects path-traversal-shaped names, but escaping at
+// the call site keeps the client safe under any future caller and
+// matches the gitlab client's projectIDPath discipline.
 func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, error) {
 	var r repo
-	if err := c.get(ctx, fmt.Sprintf("/repos/%s/%s", owner, repoName), &r); err != nil {
+	if err := c.get(ctx, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repoName), &r); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -197,7 +214,8 @@ func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, er
 // call (see GetUser below), which works for both user accounts
 // and organizations in Forgejo's data model.
 func (c *Client) IsOrg(ctx context.Context, name string) (bool, error) {
-	err := c.get(ctx, "/orgs/"+name, nil)
+	// url.PathEscape: defense-in-depth, see GetRepo for rationale.
+	err := c.get(ctx, "/orgs/"+url.PathEscape(name), nil)
 	if err == nil {
 		return true, nil
 	}
@@ -240,7 +258,8 @@ type userProfile struct {
 // surface as status-only errors per the client convention.
 func (c *Client) GetUser(ctx context.Context, name string) (*userProfile, error) {
 	var u userProfile
-	if err := c.get(ctx, "/users/"+name, &u); err != nil {
+	// url.PathEscape: defense-in-depth, see GetRepo for rationale.
+	if err := c.get(ctx, "/users/"+url.PathEscape(name), &u); err != nil {
 		return nil, err
 	}
 	return &u, nil

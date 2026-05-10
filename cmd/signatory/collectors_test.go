@@ -374,16 +374,22 @@ func TestCollectorsFor_GitLabEntity_IncludesGitLabCollector(t *testing.T) {
 		"gitlab-hosted entity must dispatch the gitlab collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for gitlab targets")
 }
 
-// TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime
-// pins the inverse: a github entity routes through the forgejo
-// collector's dispatch, but the collector self-gates and emits zero
-// signals. The dispatch is unconditional (same shape as github /
-// openssf — every git-hosted entity goes through the full collector
-// list, each with its own self-gate); this test guards against a
-// future "let's only wire forgejo for codeberg URLs" optimization
-// that would silently break the symmetry and require host-aware
-// dispatch knowledge to leak into collectorsFor.
-func TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime(t *testing.T) {
+// TestCollectorsFor_GitHubEntity_DispatchesForgejoAndGitLab_SelfGateAtCollectTime
+// pins the dispatch contract: a github entity routes through the
+// forgejo AND gitlab collectors in the dispatched list, and each
+// collector self-gates at Collect time and emits zero signals for the
+// non-matching host. The dispatch is unconditional (same shape as
+// github / openssf — every git-hosted entity goes through the full
+// collector list, each with its own self-gate); this test guards
+// against a future "let's only wire forgejo for codeberg URLs"
+// optimization that would silently break the symmetry and require
+// host-aware dispatch knowledge to leak into collectorsFor.
+//
+// Renamed from OmitsForgejoCollectorAtCollectTime: the prior name
+// described the surface as "omits forgejo," but the body asserts the
+// opposite — forgejo IS dispatched and the self-gate decides emission.
+// The old name primed refactors to flip the assertion to NotContains.
+func TestCollectorsFor_GitHubEntity_DispatchesForgejoAndGitLab_SelfGateAtCollectTime(t *testing.T) {
 	t.Parallel()
 
 	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
