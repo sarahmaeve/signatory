@@ -394,9 +394,9 @@ func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
 	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
 	})
-	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(searchResult{TotalCount: 50})
-	})
+	// /search/code handler removed: adoption moved to
+	// internal/signal/adoption, github collector no longer calls
+	// the search endpoint.
 
 	// CI/CD checks are rate-limited.
 	mux.HandleFunc("/repos/owner/repo/contents/", func(w http.ResponseWriter, r *http.Request) {
@@ -465,9 +465,8 @@ func TestSecurity_ZeroCommitRepoProducesAbsence(t *testing.T) {
 	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
 	})
-	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(searchResult{TotalCount: 0})
-	})
+	// /search/code handler removed: see comment in the earlier
+	// occurrence in this file.
 	mux.HandleFunc("/repos/owner/empty/contents/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
@@ -970,9 +969,8 @@ func TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod(t *testing.T) {
 	mux.HandleFunc("/users/owner", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Now()})
 	})
-	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(searchResult{TotalCount: 50})
-	})
+	// /search/code handler removed: see comment in the earlier
+	// occurrence in this file.
 	// Default for any other path: 404 (CI checks etc. — they handle 404
 	// as "not present" without erroring).
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

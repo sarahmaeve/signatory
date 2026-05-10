@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -436,22 +435,6 @@ func (c *Client) GetUser(ctx context.Context, username string) (*user, error) {
 		return nil, err
 	}
 	return &u, nil
-}
-
-// searchResult represents a GitHub code search response.
-type searchResult struct {
-	TotalCount int `json:"total_count"`
-}
-
-// GetGoModRefCount searches for how many go.mod files reference the given module.
-func (c *Client) GetGoModRefCount(ctx context.Context, modulePath string) (int, error) {
-	var result searchResult
-	// The search API uses a different path and rate limit pool.
-	err := c.get(ctx, fmt.Sprintf("/search/code?q=%s+filename:go.mod&per_page=1", url.QueryEscape(modulePath)), &result)
-	if err != nil {
-		return 0, err
-	}
-	return result.TotalCount, nil
 }
 
 // repoContent represents a file or directory entry from the contents API.

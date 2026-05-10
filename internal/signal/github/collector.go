@@ -180,8 +180,13 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// Owner profile — independent.
 	c.collectOwnerProfile(ctx, &result, entity.ID, owner, now, ttl)
 
-	// Adoption (go.mod refs) — independent, uses search API with its own rate limit.
-	c.collectAdoption(ctx, &result, entity.ID, owner, repoName, r.StargazersCount, now, ttl)
+	// adoption (inbound go.mod refs) moved to internal/signal/adoption
+	// in commit "adoption: lift to standalone collector" — that
+	// collector dispatches independently in collectorsFor and handles
+	// github / codeberg / gitlab modules from one code path. The
+	// stars-aware ratio is preserved across the migration via the
+	// inRunResult bridge; the adoption collector reads this github
+	// collector's "stars" emission from the orchestrator's accumulator.
 
 	// CI/CD presence — independent.
 	c.collectCI(ctx, &result, entity.ID, owner, repoName, now, ttl)
@@ -350,34 +355,6 @@ func (c *Collector) collectOwnerProfile(ctx context.Context, result *signal.Coll
 			"public_repos":     ownerUser.PublicRepos,
 			"followers":        ownerUser.Followers,
 			"type":             ownerUser.Type,
-		})
-}
-
-func (c *Collector) collectAdoption(ctx context.Context, result *signal.CollectionResult,
-	entityID, owner, repoName string, stars int, now time.Time, ttl time.Duration) {
-
-	refCount, err := c.client.GetGoModRefCount(ctx, "github.com/"+owner+"/"+repoName)
-	if err != nil {
-		result.RecordFailure(entityID, "adoption", "github", sanitizeErrorForStorage(err), isRetryable(err), now)
-		return
-	}
-
-	ratio := float64(0)
-	if stars > 0 {
-		ratio = float64(refCount) / float64(stars)
-	}
-	adoptionType := "direct"
-	if ratio > 10 {
-		adoptionType = "mostly-transitive"
-	} else if ratio > 1 {
-		adoptionType = "mixed"
-	}
-	result.RecordSignal(entityID, "adoption", "github", now, ttl,
-		map[string]any{
-			"go_mod_refs":   refCount,
-			"stars":         stars,
-			"refs_to_stars": ratio,
-			"adoption_type": adoptionType,
 		})
 }
 

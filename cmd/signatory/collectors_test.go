@@ -297,6 +297,39 @@ func TestCollectorsFor_CodebergEntity_IncludesForgejoCollector(t *testing.T) {
 		"codeberg-hosted entity must dispatch the forgejo collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for codeberg targets")
 }
 
+// TestCollectorsFor_GitHostedEntity_IncludesAdoptionCollector pins
+// the adoption-lift wiring. After the github collector's
+// collectAdoption was lifted to internal/signal/adoption, the
+// standalone collector must be in the dispatch list for every
+// git-hosted entity (Go-ecosystem ones in particular). Without it,
+// the github lift-out would have silently dropped adoption from
+// every analyze run because no collector emits the signal anymore.
+//
+// Asserts on collector identity only — the adoption collector's
+// own package tests cover the ecosystem self-gate, the per-forge
+// module path derivation, and the stars-from-inRunResult ratio
+// computation.
+func TestCollectorsFor_GitHostedEntity_IncludesAdoptionCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:github/alecthomas/kong",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "adoption",
+		"adoption collector must be dispatched for every git-hosted entity; without it, the github collector's pre-lift adoption emission is gone and nothing replaces it")
+}
+
 // TestCollectorsFor_GitLabEntity_IncludesGitLabCollector pins the
 // gitlab Tier 1 wiring symmetric to the codeberg/forgejo pairing:
 // every git-hosted entity walks the full collector list, each with
@@ -394,7 +427,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 7, "github + forgejo + gitlab + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
+	assert.Len(t, collectors, 8, "github + forgejo + gitlab + adoption + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)

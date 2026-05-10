@@ -14,6 +14,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/gitenv"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	adoptioncollector "github.com/sarahmaeve/signatory/internal/signal/adoption"
 	artifactcollector "github.com/sarahmaeve/signatory/internal/signal/artifact"
 	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 	forgejocollector "github.com/sarahmaeve/signatory/internal/signal/forgejo"
@@ -309,6 +310,25 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// Self-hosted GitLab needs an explicit allow-list mechanism
 			// — same threat-model deferral as self-hosted Forgejo.
 			gitlabcollector.NewCollector(),
+			// Adoption collector — emits the "adoption" signal
+			// (inbound go.mod-ref count from GitHub code search,
+			// paired with stars for the refs_to_stars ratio) for any
+			// Go-ecosystem entity on github / codeberg / gitlab. Used
+			// to live inside the github collector as collectAdoption;
+			// lifted out so codeberg- and gitlab-hosted Go modules
+			// also receive the signal (the search backend stays
+			// GitHub-only, but the queried module path is forge-
+			// agnostic). Self-gates on ecosystem + URL host.
+			//
+			// WithInRun threads the orchestrator's in-run accumulator
+			// so the adoption emission can read whichever per-forge
+			// metadata collector emitted "stars" earlier in this same
+			// dispatch — github, forgejo, or gitlab. Dispatch order
+			// matters here: this collector is appended AFTER the three
+			// per-forge metadata collectors. Reordering would break
+			// the ratio (stars=0, refs_to_stars=0) — pinned by
+			// adoption package's TestCollector_NoStarsInRun_StillEmits.
+			adoptioncollector.NewCollector().WithInRun(opts.InRunResult),
 			// WithEntityStore wires the GPG signer-entity minting
 			// branch in the git collector (Path F). nil-safe — when
 			// opts.EntityStore is nil the branch silently skips.
