@@ -265,6 +265,73 @@ func TestCollectorsFor_CodebergOriginMatches_HTTPSForm(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestCollectorsFor_CodebergEntity_IncludesForgejoCollector pins the
+// Tier 1 wiring: a codeberg entity must get the forgejo collector in
+// its dispatched set. Without this, the new internal/signal/forgejo
+// package would land but never run — the github collector self-gates
+// on non-github URLs (correct) and there'd be nothing else collecting
+// the API-only metadata (stars, forks, archived, repo_age, etc.) for
+// codeberg targets.
+//
+// Asserts on collector names rather than instances so the test
+// remains decoupled from the exact construction shape (with/without
+// EntityStore, etc.). Same idiom the github wiring uses elsewhere.
+func TestCollectorsFor_CodebergEntity_IncludesForgejoCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://codeberg.org/forgejo/forgejo")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "forgejo",
+		"codeberg-hosted entity must dispatch the forgejo collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for codeberg targets")
+}
+
+// TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime
+// pins the inverse: a github entity routes through the forgejo
+// collector's dispatch, but the collector self-gates and emits zero
+// signals. The dispatch is unconditional (same shape as github /
+// openssf — every git-hosted entity goes through the full collector
+// list, each with its own self-gate); this test guards against a
+// future "let's only wire forgejo for codeberg URLs" optimization
+// that would silently break the symmetry and require host-aware
+// dispatch knowledge to leak into collectorsFor.
+func TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:github/alecthomas/kong",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	// forgejo IS in the dispatched list; the self-gate fires at Collect
+	// time and emits zero signals for non-codeberg URLs (proven by
+	// TestCollector_NonCodebergEntity_ReturnsEmpty in the forgejo
+	// package). The dispatch list itself is unconditional so the
+	// orchestrator stays host-agnostic.
+	assert.Contains(t, names, "forgejo",
+		"forgejo collector must be dispatched for every git-hosted entity; the self-gate decides whether to emit signals")
+}
+
 // TestCollectorsFor_GitLabOriginMatches_HTTPSForm — same shape for GitLab.
 func TestCollectorsFor_GitLabOriginMatches_HTTPSForm(t *testing.T) {
 	t.Parallel()
@@ -297,7 +364,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 5, "github + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
+	assert.Len(t, collectors, 6, "github + forgejo + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)

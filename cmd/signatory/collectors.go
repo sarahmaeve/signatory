@@ -16,6 +16,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	artifactcollector "github.com/sarahmaeve/signatory/internal/signal/artifact"
 	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
+	forgejocollector "github.com/sarahmaeve/signatory/internal/signal/forgejo"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
@@ -289,6 +290,17 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		}
 		collectors = append(collectors,
 			ghcollector.NewCollector().WithEntityStore(opts.EntityStore),
+			// Forgejo (codeberg.org) collector — Tier 1 metadata
+			// signals (stars/forks/archived/open_issues/repo_age/
+			// last_push) for codeberg-hosted entities. Self-gates on
+			// entity.URL host: github / gitlab / bitbucket URLs land
+			// in the dispatch but emit zero signals because the
+			// internal isForgejoHost check returns false. Same
+			// dispatch-shape discipline as the github / openssf
+			// collectors — every git-hosted entity walks the full
+			// collector list, each collector owns the host check for
+			// its own forge. The orchestrator stays host-agnostic.
+			forgejocollector.NewCollector(),
 			// WithEntityStore wires the GPG signer-entity minting
 			// branch in the git collector (Path F). nil-safe — when
 			// opts.EntityStore is nil the branch silently skips.
