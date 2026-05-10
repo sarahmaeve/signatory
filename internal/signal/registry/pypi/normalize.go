@@ -90,7 +90,7 @@ func NormalizeDeclaredRepoURL(raw string) string {
 	// Delegate to ResolveTarget for the actual forge-URL grammar.
 	// First-classed forges (github / codeberg / gitlab) get a
 	// non-empty CloneURL via profile.CloneURLForRepoPlatform; any
-	// other host either rejects at the URL gate (rejectNonGitHubURL)
+	// other host either rejects at the URL gate (rejectUnrecognizedForgeURL)
 	// or surfaces with an empty CloneURL — both routes map to
 	// "return empty string" here.
 	resolved, err := profile.ResolveTarget(s)

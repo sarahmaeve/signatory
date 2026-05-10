@@ -1340,14 +1340,14 @@ func TestIsCodebergURL(t *testing.T) {
 	}
 }
 
-// TestRejectNonGitHubURL_AdmitsCodeberg pins the URL gate's accept
+// TestRejectUnrecognizedForgeURL_AdmitsCodeberg pins the URL gate's accept
 // shape after Codeberg is recognized as a known forge. Both http(s)
 // URL form and SCP form must pass; previously these rejected with
 // "not yet supported" / "not a github.com host". The complementary
 // rejection cases for genuinely-unsupported forges (bitbucket,
 // self-hosted) still hold and are exercised end-to-end in
 // TestResolveTarget_Rejects.
-func TestRejectNonGitHubURL_AdmitsCodeberg(t *testing.T) {
+func TestRejectUnrecognizedForgeURL_AdmitsCodeberg(t *testing.T) {
 	t.Parallel()
 	cases := []string{
 		"https://codeberg.org/foo/bar",
@@ -1359,7 +1359,7 @@ func TestRejectNonGitHubURL_AdmitsCodeberg(t *testing.T) {
 	for _, in := range cases {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
-			err := rejectNonGitHubURL(in, in)
+			err := rejectUnrecognizedForgeURL(in, in)
 			assert.NoError(t, err,
 				"Codeberg URL %q must pass the URL gate", in)
 		})
@@ -1395,9 +1395,9 @@ func TestIsGitLabURL(t *testing.T) {
 	}
 }
 
-// TestRejectNonGitHubURL_AdmitsGitLab pins the URL gate's accept
-// shape for GitLab. Same rationale as TestRejectNonGitHubURL_AdmitsCodeberg.
-func TestRejectNonGitHubURL_AdmitsGitLab(t *testing.T) {
+// TestRejectUnrecognizedForgeURL_AdmitsGitLab pins the URL gate's accept
+// shape for GitLab. Same rationale as TestRejectUnrecognizedForgeURL_AdmitsCodeberg.
+func TestRejectUnrecognizedForgeURL_AdmitsGitLab(t *testing.T) {
 	t.Parallel()
 	cases := []string{
 		"https://gitlab.com/foo/bar",
@@ -1409,7 +1409,7 @@ func TestRejectNonGitHubURL_AdmitsGitLab(t *testing.T) {
 	for _, in := range cases {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
-			err := rejectNonGitHubURL(in, in)
+			err := rejectUnrecognizedForgeURL(in, in)
 			assert.NoError(t, err,
 				"GitLab URL %q must pass the URL gate", in)
 		})

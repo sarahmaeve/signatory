@@ -57,7 +57,7 @@ func TestNormalizeDeclaredRepoURL(t *testing.T) {
 		{"empty", "", ""},
 		{"git:// insecure", "git://github.com/serde-rs/serde", ""},
 		// Bitbucket and other unrecognized forges still reject — the
-		// URL gate (rejectNonGitHubURL) admits only first-classed
+		// URL gate (rejectUnrecognizedForgeURL) admits only first-classed
 		// forges, and CloneURLForRepoPlatform returns "" for the rest.
 		{"bitbucket", "https://bitbucket.org/team/repo", ""},
 		{"self-hosted", "https://git.example.com/foo/bar", ""},

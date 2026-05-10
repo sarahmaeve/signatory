@@ -203,7 +203,7 @@ func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
 // service (GitHub, Codeberg, GitLab). The substring check is
 // permissive — it doesn't host-anchor — which matches the rest of
 // the v0.1 gem resolver but is laxer than the host-anchored
-// rejectNonGitHubURL gate the other ecosystems' resolvers route
+// rejectUnrecognizedForgeURL gate the other ecosystems' resolvers route
 // through. Hardening to host-anchored is tracked separately; for
 // now, expanding the recognized set keeps gem in step with the rest
 // of the multi-forge work.

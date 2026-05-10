@@ -206,7 +206,7 @@ func TestResolveRepoURL_CodebergRepository(t *testing.T) {
 
 // TestResolveRepoURL_UnsupportedForgeRepository pins that forges NOT
 // yet first-classed (bitbucket, self-hosted) still resolve to empty.
-// The URL gate (rejectNonGitHubURL) is the source of truth for which
+// The URL gate (rejectUnrecognizedForgeURL) is the source of truth for which
 // forges are accepted; CloneURLForRepoPlatform returns "" for the rest.
 func TestResolveRepoURL_UnsupportedForgeRepository(t *testing.T) {
 	t.Parallel()

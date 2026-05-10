@@ -212,7 +212,7 @@ func CanonicalRepoURI(platform, owner, name string) string {
 // target.
 //
 // Adding a forge means adding a case here AND opening the URL gate
-// (rejectNonGitHubURL + the matching is*URL helper) AND adding
+// (rejectUnrecognizedForgeURL + the matching is*URL helper) AND adding
 // host-prefix entries to forgeHostPrefix.
 func CloneURLForRepoPlatform(platform, owner, name string) string {
 	owner = strings.ToLower(owner)
@@ -273,10 +273,21 @@ func CanonicalPatchURI(platform, owner, repo, id string) string {
 // stripping known prefixes, or if either segment contains characters
 // that aren't valid in a GitHub name.
 //
-// This is intentionally GitHub-specific — callers in
-// cmd/signatory/collectors.go (validateCloneOrigin, ensureCloneAtPath)
-// rely on the github-only contract to prove a clone's recorded
-// `remote get-url origin` matches the expected GitHub canonical URI.
+// This is intentionally GitHub-specific. Multi-forge call sites
+// (ResolveTarget, validateCloneOrigin, ensureCloneAtPath, the
+// cargo/gem/gopublish/npm/pypi resolvers) use NormalizeForgeRepoInput
+// instead — that path admits codeberg.org and gitlab.com via a
+// host-prefix table. NormalizeGitHubRepoInput is retained for the
+// remaining github-only sites:
+//
+//   - cmd/signatory/handoff.go: handoff's --network-precheck calls
+//     the github API directly and has no multi-forge equivalent yet.
+//   - internal/signal/openssf: OpenSSF Scorecard only ranks github
+//     repos, so the collector gates with isGitHubHost upstream and
+//     uses the github-only normalizer for owner/repo extraction.
+//   - internal/mcp/tools: target normalization for MCP-surface
+//     callers; multi-forge generalization is a planned follow-up.
+//
 // New code that wants multi-forge classification should call
 // NormalizeForgeRepoInput instead.
 func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error) {
@@ -330,7 +341,7 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 //
 // This table is the single source of truth NormalizeForgeRepoInput
 // dispatches on. Adding a forge means adding entries here AND opening
-// the URL gate (rejectNonGitHubURL + the matching is*URL helper) to
+// the URL gate (rejectUnrecognizedForgeURL + the matching is*URL helper) to
 // admit the host.
 var forgeHostPrefix = []struct {
 	prefix   string
@@ -362,7 +373,7 @@ var forgeHostPrefix = []struct {
 // shorthand (the original /analyze invocations were github-only).
 //
 // Unrecognized hosts must already have been rejected by the URL gate
-// (rejectNonGitHubURL); reaching this function with such input would
+// (rejectUnrecognizedForgeURL); reaching this function with such input would
 // fall through to the bare-shorthand branch and produce a misleading
 // repo:github/<host>/<owner> URI. The gate exists precisely to
 // prevent that regression.

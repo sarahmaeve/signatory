@@ -126,7 +126,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// gate, NormalizeGitHubRepoInput's prefix-strip would silently
 	// produce misleading repo:github/ URIs for gitlab/bitbucket/
 	// self-hosted inputs.
-	if err := rejectNonGitHubURL(s, raw); err != nil {
+	if err := rejectUnrecognizedForgeURL(s, raw); err != nil {
 		return nil, err
 	}
 
@@ -222,26 +222,23 @@ func tryRegistryURLs(s string) (canonicalURI string, ok bool) {
 	return "", false
 }
 
-// rejectNonGitHubURL fails inputs that look like URLs or SCP-form
-// references but don't target a recognized forge. Without this gate
-// NormalizeForgeRepoInput's host-prefix detection falls through and
-// the input ends up classified as a bare github-shorthand owner/repo,
-// silently producing a misleading repo:github/<host>/<owner> URI
-// (e.g. https://bitbucket.org/team/repo would become
+// rejectUnrecognizedForgeURL fails inputs that look like URLs or
+// SCP-form references but don't target a recognized forge. Without
+// this gate NormalizeForgeRepoInput's host-prefix detection falls
+// through and the input ends up classified as a bare github-shorthand
+// owner/repo, silently producing a misleading repo:github/<host>/<owner>
+// URI (e.g. https://bitbucket.org/team/repo would become
 // repo:github/bitbucket.org/team). Registry URLs (npmjs.com,
 // pypi.org, crates.io, ...) are recognized earlier in ResolveTarget
 // via tryRegistryURLs and never reach this gate.
 //
 // Recognized forges (URL form): github.com, codeberg.org, gitlab.com.
-// The function name is retained from the GitHub-only era; the
-// contract has generalized to "reject URLs that don't target a
-// recognized forge".
 //
 // SCP-form (git@host:owner/repo.git) is gated separately because
 // NormalizeForgeRepoInput strips `git@` unconditionally and would
 // misclassify `git@bitbucket.org:foo/bar.git` if the SCP host wasn't
 // also gated.
-func rejectNonGitHubURL(s, raw string) error {
+func rejectUnrecognizedForgeURL(s, raw string) error {
 	if strings.Contains(s, "://") &&
 		!isGitHubURL(s) && !isCodebergURL(s) && !isGitLabURL(s) {
 		return fmt.Errorf(
@@ -268,7 +265,7 @@ func rejectNonGitHubURL(s, raw string) error {
 //
 //   - SCP-form (git@github.com:...) is skipped — the @ there is
 //     part of the SSH user-host syntax, not a version separator.
-//     SCP-form was already gated by rejectNonGitHubURL; here we
+//     SCP-form was already gated by rejectUnrecognizedForgeURL; here we
 //     re-guard so we don't misread that @ as a version split.
 //   - The version separator @ must come AFTER any / — otherwise
 //     it's part of the host portion of a URL (URLs at this point
