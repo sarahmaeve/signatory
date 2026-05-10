@@ -170,29 +170,22 @@ func TestAnalyze_GitCollector_NoPath_WithInjectedCollectors(t *testing.T) {
 	assert.NotEmpty(t, signals, "mock signals should land even without --path")
 }
 
-// TestAnalyze_GitCollector_MissingPath_ProductionPath verifies the
-// inverse: when Globals.Collectors is empty, collectorsFor runs
-// and enforces the --path requirement, failing the run.
+// TestAnalyze_GitCollector_MissingPath_ProductionPath was removed
+// alongside the openssf ungate. Pre-ungate, this test pinned the
+// "no --path = ErrCloneRequired" contract for github-hosted
+// entities. After openssf moved out of the clone-gated dispatch
+// block (it's an API call, doesn't need a clone), the same
+// invocation now degrades gracefully: openssf-scorecard runs, the
+// clone-dependent collectors (git / repofiles / exfilwatch) are
+// skipped with a "pass --clone to also collect..." warning, and
+// the run succeeds with partial signals.
 //
-// This is the "fail loudly" side of the v0.1 Invariant 2 contract:
-// without --path and without --clone, analyze of a git-hosted
-// entity must error cleanly.
-func TestAnalyze_GitCollector_MissingPath_ProductionPath(t *testing.T) {
-	t.Parallel()
-
-	globals := testGlobals(t) // no collectors injected → collectorsFor runs
-
-	cmd := &AnalyzeCmd{
-		Target:  "https://github.com/acme/widget",
-		Refresh: true,
-		// Path and Clone both zero-value → collectorsFor returns
-		// ErrCloneRequired.
-	}
-	err := cmd.Run(globals)
-	require.Error(t, err, "analyze with no --path should fail loudly")
-	assert.ErrorIs(t, err, ErrCloneRequired,
-		"error should be the ErrCloneRequired sentinel")
-}
+// The new contract is pinned at the dispatcher layer by
+// TestCollectorsFor_MissingPath_DegradesToAPIOnlyCollectors and
+// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+// in collectors_test.go — closer to the code that owns the
+// decision and without the analyze.Run-level network-call
+// dependency that re-asserting the contract here would create.
 
 // initGitFixtureRepo creates a minimal git clone with one commit
 // and a synthetic `origin` matching originURL. Used by

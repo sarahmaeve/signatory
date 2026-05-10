@@ -97,6 +97,48 @@ func (r *CollectionResult) HasFailures() bool {
 	return len(r.Failures) > 0
 }
 
+// WorthNarrating reports whether the result has anything worth
+// emitting to a per-collector progress line. False (silent) when
+// the collector self-gated and produced zero collected entries
+// and zero failures — that's the "this collector didn't apply to
+// this entity" signature every forge self-gate produces (github
+// against codeberg URL, forgejo against github URL, openssf
+// against non-github URL, etc.). True (narrate) when the
+// collector produced any signal, any absence, or any failure;
+// each is real work the operator should see.
+//
+// The dispatcher in cmd/signatory/analyze.go's collectFreshSignals
+// uses this to suppress the "[name] Collected 0 signals" line for
+// self-gated cases. Without the suppression, every analyze run
+// would print one such line per cross-forge collector (currently
+// 2 per target, growing as Tier 2 lands more forges) — predictable
+// noise that scales linearly with the per-forge collector count.
+//
+// Edge cases:
+//
+//   - nil receiver returns false. Guards against a future collector
+//     returning nil instead of &CollectionResult{} on its self-gate
+//     branch — every current collector returns the non-nil empty
+//     value, but the method must be safe regardless. See
+//     TestCollectionResult_WorthNarrating_NilReceiverIsSilent.
+//   - Absence records (RecordAbsence) DO narrate. They live in
+//     Collected, not Failures, and they're real observations the
+//     collector worked to produce. "no signed commits in window"
+//     is information; "this collector didn't run" is not.
+//   - Failures DO narrate. RecordFailure populates both Collected
+//     (via an internal RecordAbsence) AND Failures, so the
+//     non-empty check catches them. The Failures-side check is
+//     kept as defense-in-depth: a future refactor that decouples
+//     RecordFailure from RecordAbsence (legitimate — they don't
+//     have to share an implementation) would otherwise silently
+//     start hiding failure-only results.
+func (r *CollectionResult) WorthNarrating() bool {
+	if r == nil {
+		return false
+	}
+	return len(r.Collected) > 0 || len(r.Failures) > 0
+}
+
 // Summary returns a human-readable summary of the collection result.
 //
 // Two enumerations live in the line: the collected signal types

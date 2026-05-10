@@ -80,17 +80,33 @@ func mustRunGitInTest(t *testing.T, repo string, args ...string) {
 	require.NoErrorf(t, cmd.Run(), "git %v: %s", args, stderr.String())
 }
 
-func TestCollectorsFor_MissingPath_ReturnsErrCloneRequired(t *testing.T) {
+// TestCollectorsFor_MissingPath_DegradesToAPIOnlyCollectors pins
+// the post-ungate behavior superseding the prior "missing path
+// returns ErrCloneRequired" pin. See
+// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+// for the full rationale; this is the parallel test that originally
+// pinned ErrCloneRequired for a github-shaped repo: entity.
+//
+// ErrCloneRequired still fires when there are NO collectors at all
+// to return — the entity has no URL, or the URL host isn't
+// recognized so even openssf would skip. That case is covered by
+// the pkg/cargo tests and a future bare-entity test if needed.
+func TestCollectorsFor_MissingPath_DegradesToAPIOnlyCollectors(t *testing.T) {
 	t.Parallel()
 
+	var stderr bytes.Buffer
 	entity := &profile.Entity{
 		ID:           "e1",
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrCloneRequired)
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{
+		Stderr: &stderr,
+	})
+	require.NoError(t, err,
+		"github repo: entity without --path/--clone must degrade gracefully — openssf is API-only and runs without a clone")
+	require.NotEmpty(t, collectors,
+		"API-only collectors must populate the dispatch list even when clone is absent")
 }
 
 func TestCollectorsFor_CloneWithoutPath_ReturnsErrPathMissing(t *testing.T) {
@@ -593,31 +609,66 @@ func TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation(t *t
 			})
 			require.NoError(t, err,
 				"pkg: entity with resolved URL but no clone must NOT return an error")
-			require.Len(t, collectors, 1,
-				"only the registry collector should fire when no clone is available")
-			assert.Equal(t, tc.wantName, collectors[0].Name())
+
+			names := make([]string, 0, len(collectors))
+			for _, c := range collectors {
+				names = append(names, c.Name())
+			}
+			assert.Contains(t, names, tc.wantName,
+				"registry collector for ecosystem %q must fire", tc.ecosystem)
+			assert.Contains(t, names, "openssf-scorecard",
+				"openssf is API-only and dispatches whenever entity.URL is set, regardless of clone state")
+			assert.NotContains(t, names, "git",
+				"clone-dependent git collector must NOT dispatch when no clone is available")
+			assert.NotContains(t, names, "repofiles",
+				"clone-dependent repofiles collector must NOT dispatch when no clone is available")
 			assert.Contains(t, stderr.String(), "pass --clone",
 				"should hint the user about --clone for additional signals")
 		})
 	}
 }
 
-// TestCollectorsFor_RepoEntity_NoPath_StillErrors confirms that
-// repo: entities (no registry collector) still fail loudly when
-// neither --path nor --clone is provided. The graceful degradation
-// only applies to pkg: entities that have registry collectors.
-func TestCollectorsFor_RepoEntity_NoPath_StillErrors(t *testing.T) {
+// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+// pins the post-ungate behavior for bare repo: targets without a
+// clone. Pre-ungate, repo: entities errored with ErrCloneRequired
+// because the only collectors that fired were clone-dependent;
+// after the openssf ungate (and any future API-only collectors
+// landing in the same pre-clone block), repo: entities degrade
+// gracefully — they still don't get git / repofiles / exfilwatch,
+// but the API-only collectors (openssf-scorecard) and the warning
+// surface so the operator knows what was skipped and why.
+//
+// Same intent as the pkg-entity degradation: "collect whatever
+// you can." The asymmetry that existed pre-ungate (pkg: degrades,
+// repo: errors) was an artifact of pre-ungate dispatcher shape,
+// not a deliberate design distinction.
+func TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors(t *testing.T) {
 	t.Parallel()
 
+	var stderr bytes.Buffer
 	entity := &profile.Entity{
 		ID:           "e1",
 		CanonicalURI: "repo:github/foo/bar",
 		URL:          "https://github.com/foo/bar",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrCloneRequired,
-		"repo: entities with no registry collector must still fail on missing clone")
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{
+		Stderr: &stderr,
+	})
+	require.NoError(t, err,
+		"repo: entity without --clone must NOT error — the API-only collectors (openssf) can still run")
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "openssf-scorecard",
+		"openssf is API-only and must dispatch even without a clone")
+	assert.NotContains(t, names, "git",
+		"git collector requires a clone — must NOT dispatch when --clone is absent")
+	assert.NotContains(t, names, "repofiles",
+		"repofiles collector requires a clone — must NOT dispatch when --clone is absent")
+	assert.Contains(t, stderr.String(), "pass --clone",
+		"warning must mention that --clone unlocks additional signals")
 }
 
 // TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll verifies

@@ -259,31 +259,62 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		}
 	}
 
-	// Git-hosted collectors. An entity qualifies when its URL is
-	// populated — either from a repo: scheme target at creation
-	// time, or from an npm package whose A.5 resolution found a
-	// github-hosted repository. Empty URL → no git origin → skip
-	// the github/git collector pair and do not require --path/--clone.
+	// API-only collectors that need entity.URL but NOT a local
+	// clone. These run regardless of --path/--clone state — landing
+	// them before the clone-gated block means a bare repo: target
+	// without --clone still gets the API-derived signals it can
+	// collect (openssf-scorecard today; expansion candidates noted
+	// at the call site).
 	//
-	// Graceful degradation: when registry collectors are already
-	// queued (pkg:<eco> targets) and the clone path can't be
-	// satisfied (no --path, no --clone), warn and skip git-hosted
-	// collectors rather than aborting the entire run. The user's
-	// `--refresh` intent is "collect whatever you can"; refusing
-	// all signals because a clone wasn't requested is hostile.
-	// Hard errors (origin mismatch, path not a clone) still fail
-	// loudly — those indicate user misconfiguration, not a missing
-	// optional flag.
+	// openssf-scorecard talks to api.securityscorecards.dev with
+	// just owner/repo extracted from entity.URL — no git operations,
+	// no filesystem reads. The collector's own host self-gate
+	// (extractOwnerRepo → isGitHubHost) keeps it from firing for
+	// non-github entities; the dispatch-time check below merely
+	// avoids adding it for entities with no URL at all (where
+	// extractOwnerRepo would return ok=false anyway, but the
+	// suppress-when-empty narration rule would then hide a perfectly
+	// predictable no-op line).
+	if isGitHostedEntity(entity) {
+		collectors = append(collectors,
+			openssfcollector.NewCollector(),
+		)
+	}
+
+	// Clone-required collectors. An entity qualifies for these when
+	// its URL is populated — either from a repo: scheme target at
+	// creation time, or from an npm package whose A.5 resolution
+	// found a github-hosted repository. Empty URL → no git origin →
+	// skip the github/git collector pair and do not require
+	// --path/--clone.
+	//
+	// Graceful degradation: when registry or API-only collectors are
+	// already queued and the clone path can't be satisfied (no
+	// --path, no --clone), warn and skip clone-required collectors
+	// rather than aborting the entire run. The user's `--refresh`
+	// intent is "collect whatever you can"; refusing all signals
+	// because a clone wasn't requested is hostile. Hard errors
+	// (origin mismatch, path not a clone) still fail loudly — those
+	// indicate user misconfiguration, not a missing optional flag.
+	//
+	// openssf in the queued-set is what lets a bare repo: target
+	// (e.g. `signatory analyze https://github.com/foo/bar` with no
+	// flags) succeed with API-derived signals instead of erroring.
+	// Pre-ungate, repo: targets had ONLY clone-required collectors
+	// and the len(collectors) > 0 check failed; ErrCloneRequired
+	// surfaced as the user-facing message. The new behavior is the
+	// natural extension of openssf no longer needing the clone.
 	if isGitHostedEntity(entity) {
 		clonePath, err := resolveClonePath(ctx, entity, opts)
 		if err != nil {
 			// If the ONLY problem is that --path/--clone wasn't
-			// passed, and we already have registry collectors, degrade
-			// gracefully: skip git-hosted collectors, warn the user.
+			// passed, and we already have registry / API-only
+			// collectors, degrade gracefully: skip clone-required
+			// collectors, warn the user.
 			if errors.Is(err, ErrCloneRequired) && len(collectors) > 0 {
 				if opts.Stderr != nil {
 					_, _ = fmt.Fprintf(opts.Stderr,
-						"note: pass --clone to also collect github + git + repofiles + openssf signals from %s\n",
+						"note: pass --clone to also collect github + git + repofiles signals from %s\n",
 						entity.URL)
 				}
 				return collectors, nil
@@ -335,13 +366,8 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// Mirrors the github / npm / pypi wiring pattern.
 			gitcollector.NewCollector(clonePath).WithEntityStore(opts.EntityStore),
 			repofilescollector.NewCollector(clonePath),
-			// OpenSSF Scorecard — additional hygiene signal for
-			// github-hosted entities. Caches the API response so
-			// dispatched analysts read scorecard data via
-			// signatory_signals instead of re-fetching from
-			// api.securityscorecards.dev each run (the cache-miss
-			// pattern flagged repeatedly in the dogfood reports).
-			openssfcollector.NewCollector(),
+			// openssf-scorecard moved out of this block — it's API-
+			// only and is dispatched above regardless of clone state.
 			// exfilwatch — literal scan of the clone tree for
 			// HTTP-capture-as-a-service hostnames. Cheap deterministic
 			// signal motivated by the BufferZoneCorp campaign (May 2026,
