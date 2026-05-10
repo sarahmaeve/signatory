@@ -124,7 +124,65 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	result.RecordSignal(entity.ID, "archived", sourceName, now, signalTTL,
 		map[string]any{"archived": r.Archived})
 
+	// owner_type (Tier 1.5): Forgejo's repo response doesn't carry
+	// the User/Organization discriminator, so probe /orgs/{name}.
+	// 200 → Organization; 404 → User; anything else (5xx, timeout,
+	// transport error) records a per-signal failure and leaves the
+	// Tier 1 signals above intact. Isolation property is load-
+	// bearing — pinned by
+	// TestCollector_OwnerType_ProbeFailure_DoesNotBreakOtherSignals.
+	c.emitOwnerType(ctx, &result, entity.ID, r.Owner.Login, now)
+
 	return &result, nil
+}
+
+// emitOwnerType performs the /orgs/{name} probe and records the
+// owner_type signal (or a failure on probe error). Split from
+// Collect so the probe-isolation invariant is local and easy to
+// audit: the Tier 1 emissions above this call are unaffected by
+// whatever happens here.
+//
+// "Organization" / "User" match github's canonical value alphabet
+// (Owner.Type is the literal string "Organization") so cross-forge
+// posture rules consume the same value regardless of which forge
+// produced the signal. See gitlab's normalizeOwnerType for the
+// same mapping going the other direction.
+func (c *Collector) emitOwnerType(ctx context.Context, result *signal.CollectionResult,
+	entityID, login string, now time.Time) {
+	isOrg, err := c.client.IsOrg(ctx, login)
+	if err != nil {
+		// Non-404 error — record as a per-signal failure. Retryable:
+		// 5xx and transport errors often clear on the next refresh.
+		// We could parse status codes to distinguish retryable from
+		// non-retryable here, but the upstream Client.get only
+		// returns a status-only string for non-200/non-404
+		// responses, so retryable=true is the conservative default.
+		result.RecordFailure(entityID, "owner_type", sourceName,
+			sanitizeOwnerTypeError(err), true, now)
+		return
+	}
+	ownerType := "User"
+	if isOrg {
+		ownerType = "Organization"
+	}
+	result.RecordSignal(entityID, "owner_type", sourceName, now, signalTTL,
+		map[string]any{"type": ownerType, "login": login})
+}
+
+// sanitizeOwnerTypeError trims the IsOrg error to a short reason
+// safe for the persisted CollectionError.Reason field. Forgejo's
+// Client.get builds error messages with the path included (e.g.
+// "forgejo API returned status 503"); the path is operator-known
+// and contains no secret, so passing the raw string is acceptable.
+// Bounded to avoid blowing up the persisted record on a pathological
+// wrap chain.
+func sanitizeOwnerTypeError(err error) string {
+	s := err.Error()
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…"
+	}
+	return s
 }
 
 // parseRepoURL extracts owner and repo name from a codeberg.org URL.

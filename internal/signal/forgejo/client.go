@@ -181,3 +181,31 @@ func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, er
 	}
 	return &r, nil
 }
+
+// IsOrg probes /api/v1/orgs/{name} to discriminate organization
+// owners from user-account owners. Returns (true, nil) on 200,
+// (false, nil) on 404 (== "not an org, must be a user"), and
+// (false, err) on any other status or transport error.
+//
+// This is the only way to derive owner_type for codeberg-hosted
+// entities: Forgejo's repo response carries owner.login but no
+// User/Organization discriminator on the embedded owner struct,
+// unlike github (owner.type) and gitlab (namespace.kind on the
+// same project call). The Tier 1.5 emission accepts the extra
+// round-trip rather than fragment owner_type across forges with
+// different value alphabets.
+//
+// The body of the org response is discarded — only the status
+// code matters for the user/org discrimination. The owner_profile
+// signal (Tier 2) would re-fetch the org to collect founding
+// date, member count, etc.; today's caller doesn't need the body.
+func (c *Client) IsOrg(ctx context.Context, name string) (bool, error) {
+	err := c.get(ctx, "/orgs/"+name, nil)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}

@@ -120,7 +120,38 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	result.RecordSignal(entity.ID, "archived", sourceName, now, signalTTL,
 		map[string]any{"archived": p.Archived})
 
+	// owner_type (Tier 1.5): namespace.kind is on the same /projects
+	// response, so this is free — no extra API call. GitLab's two
+	// namespace kinds ("user" / "group") map onto the
+	// forge-agnostic canonical values github's collector emits
+	// ("User" / "Organization") so posture rules consume the same
+	// "owner_type=Organization" string regardless of which forge
+	// produced the signal.
+	result.RecordSignal(entity.ID, "owner_type", sourceName, now, signalTTL,
+		map[string]any{
+			"type":  normalizeOwnerType(p.Namespace.Kind),
+			"login": p.Namespace.Path,
+		})
+
 	return &result, nil
+}
+
+// normalizeOwnerType maps gitlab's namespace.kind values onto the
+// canonical owner_type.type alphabet github uses. Anything other
+// than "group" maps to "User" — gitlab's documented kinds are
+// "user" and "group", and any future value (e.g. "subgroup")
+// would also be a non-org-shape so "User" is a safer default than
+// surfacing a third value that posture rules don't recognize.
+//
+// "Organization" instead of "Org": matches github's literal field
+// value (Owner.Type is the string "Organization", not "Org").
+// Cross-forge posture rules that match on the github form keep
+// working without per-forge branching.
+func normalizeOwnerType(gitlabKind string) string {
+	if gitlabKind == "group" {
+		return "Organization"
+	}
+	return "User"
 }
 
 // parseProjectPath extracts the namespace+project path from a

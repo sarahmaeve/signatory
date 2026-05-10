@@ -77,16 +77,37 @@ func mockForgejoAPI() http.Handler {
 		})
 	})
 
+	// /orgs/{name} probe for owner_type. 200 → organization;
+	// 404 → user. The collector treats anything else as a failure
+	// recorded against owner_type alone (other signals continue).
+	// mockForgejoAPI's "forgejo" owner is an organization; the
+	// user-account branch is exercised by a dedicated test below.
+	mux.HandleFunc("/orgs/forgejo", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          1,
+			"username":    "forgejo",
+			"full_name":   "Forgejo",
+			"description": "Forgejo organisation",
+			"visibility":  "public",
+		})
+	})
+
 	return mux
 }
 
-// TestCollector_HappyPath pins the Tier 1 signal set the forgejo
-// collector emits for a codeberg-hosted entity. Six signals: stars,
-// forks, open_issues, archived, repo_age, last_push — each derived
-// from a single GET against /api/v1/repos/{owner}/{repo}, no second
-// call needed. owner_type is deferred to a follow-up commit because
-// Forgejo's repo response doesn't carry a User/Organization
-// discriminator (needs /users/{u} or /orgs/{o} second call).
+// TestCollector_HappyPath pins the Tier 1 + Tier 1.5 signal set the
+// forgejo collector emits for a codeberg-hosted entity. Seven
+// signals: stars, forks, open_issues, archived, repo_age, last_push
+// (Tier 1, from /repos), plus owner_type (Tier 1.5, from /orgs probe).
+//
+// Forgejo's /repos response doesn't carry a User/Organization
+// discriminator on the owner, unlike github (Owner.Type) and gitlab
+// (namespace.kind on the same call). The forgejo collector probes
+// /api/v1/orgs/{name} for the owner: 200 means the owner is an
+// organization, 404 means it's a user account, anything else is a
+// failure recorded against owner_type without affecting the Tier 1
+// signals. mockForgejoAPI() returns 200 for the "forgejo" org probe,
+// so the happy path produces type="Organization".
 //
 // The signal types reuse the existing registry entries (stars, forks,
 // archived, etc. are forge-agnostic at the signal-type layer; Source
@@ -127,6 +148,146 @@ func TestCollector_HappyPath(t *testing.T) {
 	bySource(t, collected, "archived")
 	bySource(t, collected, "repo_age")
 	bySource(t, collected, "last_push")
+	bySource(t, collected, "owner_type")
+}
+
+// TestCollector_OwnerType_OrganizationProbe pins the owner_type
+// value when the /orgs/{name} probe returns 200. Maps onto the
+// github canonical alphabet ("Organization") so cross-forge posture
+// rules read the same value regardless of forge.
+func TestCollector_OwnerType_OrganizationProbe(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(t, mockForgejoAPI())
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "forgejo/forgejo",
+		URL:       "https://codeberg.org/forgejo/forgejo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_type" {
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "Organization", v["type"],
+			"200 from /orgs/{name} probe must map to \"Organization\" so posture rules align with github / gitlab")
+		assert.Equal(t, "forgejo", v["login"],
+			"owner login (from the repo's owner.login field) must round-trip into the signal value")
+		return
+	}
+	t.Fatalf("owner_type signal not emitted in the Organization-probe case")
+}
+
+// TestCollector_OwnerType_UserProbe pins the other branch: a 404
+// from /orgs/{name} means the owner isn't an organization, so it's
+// a user account. Codeberg's user repos take this path.
+//
+// The handler intentionally returns the repo metadata happily and
+// 404s the /orgs/{name} probe — the latter is the only signal of
+// "this is a user, not an org" we have without a second call.
+func TestCollector_OwnerType_UserProbe(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/alice/dotfiles", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(repo{
+			Name:            "dotfiles",
+			FullName:        "alice/dotfiles",
+			Owner:           repoOwner{Login: "alice"},
+			CreatedAt:       time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+			UpdatedAt:       time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			StarsCount:      1,
+			ForksCount:      0,
+			OpenIssuesCount: 0,
+		})
+	})
+	mux.HandleFunc("/orgs/alice", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	c := newTestCollector(t, mux)
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "alice/dotfiles",
+		URL:       "https://codeberg.org/alice/dotfiles",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_type" {
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "User", v["type"],
+			"404 from /orgs/{name} probe must map to \"User\" — the owner is a user account, not an organization")
+		assert.Equal(t, "alice", v["login"])
+		return
+	}
+	t.Fatalf("owner_type signal not emitted in the User-probe case")
+}
+
+// TestCollector_OwnerType_ProbeFailure_DoesNotBreakOtherSignals
+// pins the isolation property: a 5xx (or other non-200/non-404)
+// from /orgs/{name} must not poison the Tier 1 signal collection.
+// owner_type itself surfaces as a per-signal failure; stars, forks,
+// etc. all still emit cleanly. The test would fail RED if a future
+// refactor coupled the owner_type probe to the rest of Collect
+// (e.g., a single error path that aborts the whole method).
+func TestCollector_OwnerType_ProbeFailure_DoesNotBreakOtherSignals(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/forgejo/forgejo", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(repo{
+			Name:            "forgejo",
+			Owner:           repoOwner{Login: "forgejo"},
+			CreatedAt:       time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC),
+			UpdatedAt:       time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			StarsCount:      100,
+			ForksCount:      10,
+			OpenIssuesCount: 5,
+		})
+	})
+	mux.HandleFunc("/orgs/forgejo", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	c := newTestCollector(t, mux)
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "forgejo/forgejo",
+		URL:       "https://codeberg.org/forgejo/forgejo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err,
+		"a 5xx from /orgs/{name} must record as a per-signal failure, not abort the whole Collect")
+
+	// Tier 1 signals all present.
+	types := make(map[string]bool)
+	for _, s := range result.Signals() {
+		types[s.Type] = true
+	}
+	for _, want := range []string{"stars", "forks", "open_issues", "archived", "repo_age", "last_push"} {
+		assert.True(t, types[want],
+			"Tier 1 signal %q must still emit when the owner_type probe failed — coupling them would be a regression", want)
+	}
+
+	// owner_type recorded as a failure.
+	assert.NotEmpty(t, result.Failures, "5xx must surface as a CollectionError so the run summary shows it")
+	assert.Equal(t, "owner_type", result.Failures[0].SignalType)
+	assert.True(t, result.Failures[0].Retryable,
+		"5xx is retryable — the next analyze refresh might succeed")
 }
 
 // TestCollector_StarsValueRoundTrips pins the field-mapping discipline:

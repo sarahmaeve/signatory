@@ -83,6 +83,85 @@ func mockGitLabAPI(t *testing.T) http.Handler {
 	})
 }
 
+// TestCollector_HappyPath_EmitsOwnerType pins the Tier 1.5 addition:
+// owner_type is emitted from namespace.kind on the same /projects
+// call as the other Tier 1 signals — no extra API request. Maps
+// gitlab's per-forge values ("user"/"group") onto the canonical
+// per-forge-agnostic values github uses ("User"/"Organization") so
+// posture rules consume "owner_type=Organization" uniformly across
+// forges.
+func TestCollector_HappyPath_EmitsOwnerType(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(t, mockGitLabAPI(t))
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "gitlab-org/gitlab",
+		URL:       "https://gitlab.com/gitlab-org/gitlab",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_type" {
+			continue
+		}
+		assert.Equal(t, "gitlab", s.Source)
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "Organization", v["type"],
+			"gitlab namespace.kind=\"group\" must normalize to \"Organization\" so posture rules read the same value across forges")
+		assert.Equal(t, "gitlab-org", v["login"],
+			"namespace.path is the owner login on gitlab")
+		return
+	}
+	t.Fatalf("owner_type signal not emitted")
+}
+
+// TestCollector_UserNamespace_EmitsOwnerTypeUser pins the other half
+// of the kind mapping: namespace.kind="user" → owner_type.type="User".
+// Separate test because mockGitLabAPI returns a group-owned project;
+// a user-owned project needs its own handler.
+func TestCollector_UserNamespace_EmitsOwnerTypeUser(t *testing.T) {
+	t.Parallel()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(project{
+			ID:              1,
+			Name:            "dotfiles",
+			PathWithNS:      "alice/dotfiles",
+			Namespace:       projectNamespace{Path: "alice", Kind: "user"},
+			CreatedAt:       time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+			LastActivityAt:  time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			StarCount:       1,
+			ForksCount:      0,
+			OpenIssuesCount: 0,
+		})
+	})
+	c := newTestCollector(t, handler)
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "alice/dotfiles",
+		URL:       "https://gitlab.com/alice/dotfiles",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_type" {
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "User", v["type"],
+			"gitlab namespace.kind=\"user\" must normalize to \"User\"")
+		return
+	}
+	t.Fatalf("owner_type signal not emitted")
+}
+
 // TestCollector_HappyPath pins the Tier 1 signal set the gitlab
 // collector emits for a gitlab.com-hosted entity. Six signals: stars,
 // forks, open_issues, archived, repo_age, last_push — derived from
