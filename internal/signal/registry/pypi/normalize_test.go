@@ -41,14 +41,27 @@ func TestNormalizeDeclaredRepoURL(t *testing.T) {
 		{"https with commit fragment", "https://github.com/psf/requests#abc123", "https://github.com/psf/requests"},
 		{"www host", "https://www.github.com/psf/requests", "https://github.com/psf/requests"},
 
+		// Multi-forge sources: codeberg and gitlab now resolve as
+		// first-classed forges. PyPI packages declaring source URLs
+		// in info.project_urls or info.home_page on either forge
+		// produce a clone-able downstream URL.
+		{"codeberg https", "https://codeberg.org/forgejo/forgejo",
+			"https://codeberg.org/forgejo/forgejo"},
+		{"codeberg with .git", "https://codeberg.org/forgejo/forgejo.git",
+			"https://codeberg.org/forgejo/forgejo"},
+		{"gitlab https", "https://gitlab.com/foo/bar",
+			"https://gitlab.com/foo/bar"},
+		{"gitlab with .git", "https://gitlab.com/foo/bar.git",
+			"https://gitlab.com/foo/bar"},
+
 		// Rejected forms → empty string (caller treats as "no
-		// resolvable github source").
+		// resolvable source").
 		{"empty", "", ""},
 		{"whitespace only", "   ", ""},
 		{"git protocol (insecure)", "git://github.com/psf/requests", ""},
 		{"git+git protocol (insecure)", "git+git://github.com/psf/requests.git", ""},
-		{"gitlab host", "https://gitlab.com/foo/bar", ""},
 		{"bitbucket host", "https://bitbucket.org/foo/bar", ""},
+		{"self-hosted host", "https://git.example.com/foo/bar", ""},
 		{"docs site (Homepage typically)", "https://requests.readthedocs.io/", ""},
 		{"pypi self-link", "https://pypi.org/project/requests/", ""},
 		{"non-URL string", "not a url", ""},

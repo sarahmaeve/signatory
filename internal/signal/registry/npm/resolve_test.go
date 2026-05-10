@@ -41,16 +41,26 @@ func TestNormalizeDeclaredRepoURL(t *testing.T) {
 		{"git:// github upgraded to https", "git://github.com/image-size/image-size.git", "https://github.com/image-size/image-size"},
 		{"git:// github with fragment", "git://github.com/foo/bar.git#main", "https://github.com/foo/bar"},
 
+		// Multi-forge sources: codeberg and gitlab now resolve as
+		// first-classed forges. npm packages can declare
+		// repository.url against either and produce a clone-able
+		// downstream URL.
+		{"codeberg https", "https://codeberg.org/forgejo/forgejo.git",
+			"https://codeberg.org/forgejo/forgejo"},
+		{"gitlab https", "https://gitlab.com/foo/bar.git",
+			"https://gitlab.com/foo/bar"},
+
 		// Rejected forms → empty string.
 		{"empty", "", ""},
 		{"whitespace only", "   ", ""},
-		{"gitlab host", "https://gitlab.com/foo/bar.git", ""},
 		{"bitbucket host", "https://bitbucket.org/foo/bar.git", ""},
 		// git:// on a non-github host stays refused — the upgrade
 		// trick only works because we know github serves https on the
 		// same identity. We can't make that promise for arbitrary
-		// hosts.
-		{"git:// non-github still rejected", "git://gitlab.com/foo/bar.git", ""},
+		// hosts (including codeberg/gitlab — adding it would require
+		// per-forge plaintext-to-https policy).
+		{"git:// gitlab still rejected", "git://gitlab.com/foo/bar.git", ""},
+		{"git:// codeberg still rejected", "git://codeberg.org/foo/bar.git", ""},
 		{"unrecognized scheme", "svn+ssh://example.com/foo", ""},
 		{"garbage", "not a url at all", ""},
 	}
@@ -98,10 +108,13 @@ func TestClient_ResolveRepoURL_NoRepoDeclared(t *testing.T) {
 	assert.Empty(t, url)
 }
 
-// TestClient_ResolveRepoURL_NonGithubHost returns empty string: the
-// github + git collectors only know how to talk to github, so a
-// gitlab-hosted package has no downstream value at v0.1.
-func TestClient_ResolveRepoURL_NonGithubHost(t *testing.T) {
+// TestClient_ResolveRepoURL_GitLabHost pins multi-forge resolution
+// at the provider layer: an npm package declaring repository.url at
+// gitlab.com produces the canonical https URL, the same shape any
+// downstream collector that opens a clone (the git collector,
+// repofiles, exfilwatch) operates against. Pre-multi-forge this
+// returned empty.
+func TestClient_ResolveRepoURL_GitLabHost(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -112,8 +125,39 @@ func TestClient_ResolveRepoURL_NonGithubHost(t *testing.T) {
 
 	url, err := NewClientWithBaseURL(srv.URL).ResolveRepoURL(context.Background(), "gl")
 	require.NoError(t, err)
+	assert.Equal(t, "https://gitlab.com/foo/bar", url)
+}
+
+// TestClient_ResolveRepoURL_CodebergHost — same shape for Codeberg.
+func TestClient_ResolveRepoURL_CodebergHost(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"cb","repository":"https://codeberg.org/forgejo/forgejo.git"}`)
+	}))
+	defer srv.Close()
+
+	url, err := NewClientWithBaseURL(srv.URL).ResolveRepoURL(context.Background(), "cb")
+	require.NoError(t, err)
+	assert.Equal(t, "https://codeberg.org/forgejo/forgejo", url)
+}
+
+// TestClient_ResolveRepoURL_UnsupportedForge pins that forges NOT
+// yet first-classed still produce empty URL.
+func TestClient_ResolveRepoURL_UnsupportedForge(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"bb","repository":"https://bitbucket.org/team/repo.git"}`)
+	}))
+	defer srv.Close()
+
+	url, err := NewClientWithBaseURL(srv.URL).ResolveRepoURL(context.Background(), "bb")
+	require.NoError(t, err)
 	assert.Empty(t, url,
-		"non-github host should produce empty URL, not trigger github collector")
+		"unsupported forges (bitbucket, self-hosted) should produce empty URL")
 }
 
 // TestClient_ResolveRepoURL_UpstreamError propagates the client's

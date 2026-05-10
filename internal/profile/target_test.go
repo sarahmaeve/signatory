@@ -1023,19 +1023,43 @@ func TestResolveTarget_CanonicalRepoURICaseFolded(t *testing.T) {
 	}
 }
 
-func TestResolveTarget_NonGitHubPlatformInRepoURI(t *testing.T) {
-	// Non-github platforms in canonical form must resolve but
-	// carry an empty CloneURL — the CLI hasn't wired up clone for
-	// those platforms yet, and callers that check for non-empty
-	// CloneURL avoid hitting that gap.
+// TestResolveTarget_RepoURI_StampsCloneURL exercises the CloneURL
+// stamping for canonical-form repo: input across every recognized
+// forge. parseRepoBody must produce a clone URL whose host matches
+// the platform's canonical web host so downstream `git clone` reaches
+// the right server. An unrecognized platform leaves CloneURL empty
+// (the staged-build signal — clone-dispatch sites skip those targets
+// rather than invoking git against an unvalidated URL shape).
+func TestResolveTarget_RepoURI_StampsCloneURL(t *testing.T) {
 	t.Parallel()
 
-	got, err := ResolveTarget("repo:gitlab/foo/bar")
-	require.NoError(t, err)
-	assert.Equal(t, "gitlab", got.Platform)
-	assert.Equal(t, "bar", got.ShortName)
-	assert.Empty(t, got.CloneURL,
-		"CloneURL should be empty until the platform is first-classed")
+	cases := []struct {
+		name         string
+		input        string
+		wantPlatform string
+		wantClone    string
+	}{
+		{"github", "repo:github/alecthomas/kong",
+			PlatformGitHub, "https://github.com/alecthomas/kong"},
+		{"codeberg", "repo:codeberg/forgejo/forgejo",
+			PlatformCodeberg, "https://codeberg.org/forgejo/forgejo"},
+		{"gitlab", "repo:gitlab/gitlab-org/gitlab",
+			PlatformGitLab, "https://gitlab.com/gitlab-org/gitlab"},
+		// Unrecognized platforms still resolve as canonical URIs but
+		// leave CloneURL empty so clone-dispatch sites skip them.
+		{"unrecognized platform", "repo:bitbucket/team/repo",
+			"bitbucket", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(tc.input)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPlatform, got.Platform)
+			assert.Equal(t, tc.wantClone, got.CloneURL,
+				"CloneURL must match the platform's canonical web host (or be empty for unrecognized platforms)")
+		})
+	}
 }
 
 func TestResolveTarget_Rejects(t *testing.T) {
@@ -1051,32 +1075,40 @@ func TestResolveTarget_Rejects(t *testing.T) {
 	}{
 		{"empty string", "", "empty target"},
 		{"whitespace only", "   ", "empty target"},
-		{"bare name no slash", "thefuck", "does not parse as a github repo"},
+		// "forge repo" is the invariant phrasing: the wrapping error
+		// in ResolveTarget says "does not parse as a forge repo
+		// reference" since NormalizeForgeRepoInput multi-forge'd the
+		// shorthand parser. Pre-multi-forge it was "github repo".
+		{"bare name no slash", "thefuck", "does not parse as a forge repo"},
 		{"repo scheme empty body", "repo:", "empty body"},
 		{"pkg scheme missing name", "pkg:npm", "expected ecosystem/name"},
 		{"repo missing owner/name", "repo:github/onlyone", "expected platform/owner/name"},
 		{"patch missing id", "patch:github/foo/bar", "expected platform/owner/repo/id"},
-		{"unknown scheme", "weird:github/x", "does not parse as a github repo"},
+		{"unknown scheme", "weird:github/x", "does not parse as a forge repo"},
 		// "weird:github/x" doesn't start with a KNOWN scheme, so it
-		// falls through to GitHub-shorthand parsing, which correctly
+		// falls through to forge-shorthand parsing, which correctly
 		// rejects "weird:github/x" as not repo-shaped. The specific
 		// error cites both failure modes.
 
-		// Non-github URLs must reject. Previously
+		// URLs targeting unrecognized forges must reject. Previously
 		// NormalizeGitHubRepoInput's prefix-strip pipeline silently
-		// produced canonical URIs like "repo:github/gitlab.com/foo"
-		// from "https://gitlab.com/foo/bar" — wrong and invisible
-		// because no error fired. Now the URL-scheme form is gated
-		// behind an explicit github.com check.
-		// Non-github, non-npmjs URLs are still rejected. The wording
-		// changed to mention both accepted hosts when npmjs.com
-		// support was added; test substring is narrowed to the
-		// invariant portion ("not yet supported").
-		{"gitlab https URL", "https://gitlab.com/foo/bar", "not yet supported"},
-		{"gitlab http URL", "http://gitlab.com/foo/bar", "not yet supported"},
+		// produced canonical URIs like "repo:github/bitbucket.org/team"
+		// from "https://bitbucket.org/team/repo" — wrong and invisible
+		// because no error fired. The URL-scheme form is gated behind
+		// an explicit known-forge check.
+		//
+		// Recognized forges (URL form) currently: github.com,
+		// codeberg.org, gitlab.com — those have their own integration
+		// tests (TestResolveTarget_{GitHub,Codeberg,GitLab}Forms).
+		// Bitbucket and self-hosted instances remain on the reject
+		// side until first-classed.
 		{"bitbucket URL", "https://bitbucket.org/team/repo", "not yet supported"},
 		{"self-hosted URL", "https://git.example.com/foo/bar", "not yet supported"},
-		{"gitlab SCP form", "git@gitlab.com:foo/bar.git", "not a github.com host"},
+		// SCP-form rejection invariant: the message must identify the
+		// input as SCP-form. The accepted-host list (github.com,
+		// codeberg.org, gitlab.com today) is expected to grow; we
+		// don't pin its exact wording.
+		{"bitbucket SCP form", "git@bitbucket.org:team/repo.git", "SCP-form URL"},
 	}
 
 	for _, tc := range cases {
@@ -1266,6 +1298,198 @@ func TestSplitURIVersion_RepoURIs(t *testing.T) {
 			base, version := SplitURIVersion(tc.in)
 			assert.Equal(t, tc.wantBase, base)
 			assert.Equal(t, tc.wantVersion, version)
+		})
+	}
+}
+
+// TestIsCodebergURL pins isCodebergURL's scheme-strip + host-prefix
+// shape, mirroring isGitHubURL. Anchored on the literal "codeberg.org/"
+// (or bare "codeberg.org") so lookalike hosts like
+// "codeberg.org.attacker.example" do NOT match — the same anchoring
+// trick parseNpmjsURL / isGitHubURL use.
+//
+// Owner/name are not validated here; that's the caller's job via
+// downstream Normalize*RepoInput parsing. This helper only answers
+// "could this be a Codeberg URL?".
+func TestIsCodebergURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"https://codeberg.org/foo/bar", true},
+		{"http://codeberg.org/foo/bar", true},
+		{"https://www.codeberg.org/foo/bar", true},
+		{"codeberg.org/foo/bar", true},
+		{"codeberg.org", true},
+		// Lookalike host defense: prefix-match must require the slash
+		// (or end-of-string) so "codeberg.org.attacker.example" can't
+		// be admitted as a Codeberg URL.
+		{"https://codeberg.org.attacker.example/foo/bar", false},
+		{"https://codeberg.example/foo/bar", false},
+		{"https://github.com/foo/bar", false},
+		{"https://example.com/codeberg.org/foo", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isCodebergURL(tc.in),
+				"isCodebergURL(%q) should be %v", tc.in, tc.want)
+		})
+	}
+}
+
+// TestRejectNonGitHubURL_AdmitsCodeberg pins the URL gate's accept
+// shape after Codeberg is recognized as a known forge. Both http(s)
+// URL form and SCP form must pass; previously these rejected with
+// "not yet supported" / "not a github.com host". The complementary
+// rejection cases for genuinely-unsupported forges (bitbucket,
+// self-hosted) still hold and are exercised end-to-end in
+// TestResolveTarget_Rejects.
+func TestRejectNonGitHubURL_AdmitsCodeberg(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"https://codeberg.org/foo/bar",
+		"http://codeberg.org/foo/bar",
+		"https://www.codeberg.org/foo/bar",
+		"codeberg.org/foo/bar",
+		"git@codeberg.org:foo/bar.git",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			err := rejectNonGitHubURL(in, in)
+			assert.NoError(t, err,
+				"Codeberg URL %q must pass the URL gate", in)
+		})
+	}
+}
+
+// TestIsGitLabURL pins isGitLabURL — same shape as isGitHubURL and
+// isCodebergURL. Host-anchored on "gitlab.com" so lookalike hosts
+// like "gitlab.com.attacker.example" do NOT match.
+func TestIsGitLabURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"https://gitlab.com/foo/bar", true},
+		{"http://gitlab.com/foo/bar", true},
+		{"https://www.gitlab.com/foo/bar", true},
+		{"gitlab.com/foo/bar", true},
+		{"gitlab.com", true},
+		{"https://gitlab.com.attacker.example/foo/bar", false},
+		{"https://gitlab.example/foo/bar", false},
+		{"https://github.com/foo/bar", false},
+		{"https://example.com/gitlab.com/foo", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isGitLabURL(tc.in),
+				"isGitLabURL(%q) should be %v", tc.in, tc.want)
+		})
+	}
+}
+
+// TestRejectNonGitHubURL_AdmitsGitLab pins the URL gate's accept
+// shape for GitLab. Same rationale as TestRejectNonGitHubURL_AdmitsCodeberg.
+func TestRejectNonGitHubURL_AdmitsGitLab(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"https://gitlab.com/foo/bar",
+		"http://gitlab.com/foo/bar",
+		"https://www.gitlab.com/foo/bar",
+		"gitlab.com/foo/bar",
+		"git@gitlab.com:foo/bar.git",
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			err := rejectNonGitHubURL(in, in)
+			assert.NoError(t, err,
+				"GitLab URL %q must pass the URL gate", in)
+		})
+	}
+}
+
+// TestResolveTarget_CodebergForms is the integration counterpart to
+// TestResolveTarget_GitHubForms: every accepted Codeberg input shape
+// must collapse to the same canonical URI, with Platform set to
+// codeberg and CloneURL populated to the canonical Codeberg web URL.
+// Both ResolveTarget paths (shorthand-via-NormalizeForgeRepoInput and
+// canonical-via-parseRepoBody) must agree — the two-path equality is
+// load-bearing because callers reach either path depending on input
+// shape.
+func TestResolveTarget_CodebergForms(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantURI   = "repo:codeberg/forgejo/forgejo"
+		wantName  = "forgejo"
+		wantOwner = "forgejo"
+		wantClone = "https://codeberg.org/forgejo/forgejo"
+	)
+
+	inputs := []string{
+		"codeberg.org/forgejo/forgejo",
+		"https://codeberg.org/forgejo/forgejo",
+		"https://codeberg.org/forgejo/forgejo.git",
+		"http://codeberg.org/forgejo/forgejo",
+		"git@codeberg.org:forgejo/forgejo.git",
+		"repo:codeberg/forgejo/forgejo",
+	}
+
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(in)
+			require.NoError(t, err, "ResolveTarget(%q) should succeed", in)
+			assert.Equal(t, wantURI, got.CanonicalURI)
+			assert.Equal(t, wantName, got.ShortName)
+			assert.Equal(t, "repo", got.Scheme)
+			assert.Equal(t, PlatformCodeberg, got.Platform)
+			assert.Equal(t, wantOwner, got.Owner)
+			assert.Equal(t, wantClone, got.CloneURL)
+		})
+	}
+}
+
+// TestResolveTarget_GitLabForms is the integration counterpart for
+// GitLab. Same shape as TestResolveTarget_CodebergForms.
+func TestResolveTarget_GitLabForms(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantURI   = "repo:gitlab/gitlab-org/gitlab"
+		wantName  = "gitlab"
+		wantOwner = "gitlab-org"
+		wantClone = "https://gitlab.com/gitlab-org/gitlab"
+	)
+
+	inputs := []string{
+		"gitlab.com/gitlab-org/gitlab",
+		"https://gitlab.com/gitlab-org/gitlab",
+		"https://gitlab.com/gitlab-org/gitlab.git",
+		"http://gitlab.com/gitlab-org/gitlab",
+		"git@gitlab.com:gitlab-org/gitlab.git",
+		"repo:gitlab/gitlab-org/gitlab",
+	}
+
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveTarget(in)
+			require.NoError(t, err, "ResolveTarget(%q) should succeed", in)
+			assert.Equal(t, wantURI, got.CanonicalURI)
+			assert.Equal(t, wantName, got.ShortName)
+			assert.Equal(t, "repo", got.Scheme)
+			assert.Equal(t, PlatformGitLab, got.Platform)
+			assert.Equal(t, wantOwner, got.Owner)
+			assert.Equal(t, wantClone, got.CloneURL)
 		})
 	}
 }

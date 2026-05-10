@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +12,31 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 )
+
+// isGitHubHost reports whether rawURL points at github.com (with or
+// without scheme; with or without www. prefix). Cheap host check
+// sitting in front of ParseRepoURL so the permissive parser can't
+// be tricked into emitting non-github owner/repo pairs from
+// codeberg/gitlab/bitbucket-style URLs.
+//
+// Mirrors the helper of the same name in internal/signal/openssf.
+// The two collectors apply the same gate at the same call site
+// (Collect's first check); duplicating the helper keeps each
+// collector's package self-contained without forcing an
+// internal/signal/forge cross-cut for a 15-line predicate.
+func isGitHubHost(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := u.Host
+	if host == "" {
+		// Bare "github.com/owner/repo" path-only form.
+		host, _, _ = strings.Cut(u.Path, "/")
+	}
+	host = strings.TrimPrefix(host, "www.")
+	return host == "github.com"
+}
 
 // EntityStore is the narrow interface the github collector uses to
 // mint identity:/org: entity rows for the owners of repos it scans.
@@ -71,11 +97,31 @@ func (c *Collector) Name() string { return "github" }
 // the search API) does not prevent other signals from being collected.
 // Failed collections are recorded as absence signals.
 //
+// Self-gate: entities whose URL doesn't resolve to github.com receive
+// a non-nil empty CollectionResult with nil error. The orchestrator
+// (cmd/signatory/collectors.go) wires this collector unconditionally
+// for every git-hosted target — including codeberg/gitlab — so the
+// gate must live here. Symmetric with openssf's extractOwnerRepo
+// pattern and gopublish's non-Go-entity branch. Without the gate,
+// a codeberg URL parses through ParseRepoURL as owner="codeberg.org",
+// name="forgejo" and fires a 404 against api.github.com that fails
+// the entire analyze run.
+//
 // Signal Group and ForgeryResistance come from the signal type registry
 // (internal/signal/types.go) rather than being hardcoded at each call
 // site. If a type is unregistered, RecordSignal panics — that catches
 // collector additions that forgot to extend the registry.
 func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
+	// Self-gate: a non-empty URL whose host doesn't resolve to
+	// github.com is a non-GitHub entity (codeberg, gitlab, future
+	// forges). Return empty before any HTTP. Empty URL is NOT gated
+	// here — it falls through to ShortName fallback, preserving the
+	// legacy bare-shorthand path that TestCollector_NotFoundError
+	// and other ShortName-only callers depend on.
+	if entity.URL != "" && !isGitHubHost(entity.URL) {
+		return &signal.CollectionResult{}, nil
+	}
+
 	target := entity.URL
 	if target == "" {
 		target = entity.ShortName

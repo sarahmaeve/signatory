@@ -57,12 +57,13 @@ func TestPyPIResolver_ResolveSource_NoDeclaredRepo(t *testing.T) {
 	assert.True(t, got.SelfReported)
 }
 
-// TestPyPIResolver_ResolveSource_NonGithubRepo covers the case
-// where a project's only declared repo is on gitlab or another
-// non-github host. NormalizeDeclaredRepoURL returns empty for
-// non-github; the resolver propagates that as DeclaredSource{}
-// until other platforms are first-classed.
-func TestPyPIResolver_ResolveSource_NonGithubRepo(t *testing.T) {
+// TestPyPIResolver_ResolveSource_GitLabRepo pins multi-forge
+// resolution at the ecosystem-resolver layer: a project declaring a
+// gitlab repository in info.project_urls now produces a fully
+// populated DeclaredSource (canonical URI + clone URL), the same
+// shape a github source has produced since v0.1. Pre-multi-forge
+// this returned empty.
+func TestPyPIResolver_ResolveSource_GitLabRepo(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -74,8 +75,43 @@ func TestPyPIResolver_ResolveSource_NonGithubRepo(t *testing.T) {
 	r := NewPyPIResolverWithClient(pypi.NewClientWithBaseURL(srv.URL))
 	got, err := r.ResolveSource(context.Background(), "gitlabby")
 	require.NoError(t, err)
+	assert.Equal(t, "repo:gitlab/foo/bar", got.URI)
+	assert.Equal(t, "https://gitlab.com/foo/bar", got.URL)
+}
+
+// TestPyPIResolver_ResolveSource_CodebergRepo — same for Codeberg.
+func TestPyPIResolver_ResolveSource_CodebergRepo(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"info":{"project_urls":{"Repository":"https://codeberg.org/forgejo/forgejo"}}}`)
+	}))
+	defer srv.Close()
+
+	r := NewPyPIResolverWithClient(pypi.NewClientWithBaseURL(srv.URL))
+	got, err := r.ResolveSource(context.Background(), "cb")
+	require.NoError(t, err)
+	assert.Equal(t, "repo:codeberg/forgejo/forgejo", got.URI)
+	assert.Equal(t, "https://codeberg.org/forgejo/forgejo", got.URL)
+}
+
+// TestPyPIResolver_ResolveSource_UnsupportedForgeRepo keeps the
+// rejection invariant in place for forges NOT yet first-classed.
+func TestPyPIResolver_ResolveSource_UnsupportedForgeRepo(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"info":{"project_urls":{"Repository":"https://bitbucket.org/team/repo"}}}`)
+	}))
+	defer srv.Close()
+
+	r := NewPyPIResolverWithClient(pypi.NewClientWithBaseURL(srv.URL))
+	got, err := r.ResolveSource(context.Background(), "bb")
+	require.NoError(t, err)
 	assert.Empty(t, got.URI,
-		"non-github source is reported as no-source until we support other platforms")
+		"unsupported forges (bitbucket, self-hosted) still resolve to empty until first-classed")
 }
 
 // TestPyPIResolver_ResolveSource_HomePageFallback covers the

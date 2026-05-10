@@ -200,13 +200,20 @@ func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
 }
 
 // isGitHostURL checks whether a URL points to a known git hosting
-// service (GitHub, GitLab).
+// service (GitHub, Codeberg, GitLab). The substring check is
+// permissive — it doesn't host-anchor — which matches the rest of
+// the v0.1 gem resolver but is laxer than the host-anchored
+// rejectNonGitHubURL gate the other ecosystems' resolvers route
+// through. Hardening to host-anchored is tracked separately; for
+// now, expanding the recognized set keeps gem in step with the rest
+// of the multi-forge work.
 func isGitHostURL(u string) bool {
 	if u == "" {
 		return false
 	}
 	lower := strings.ToLower(u)
 	return strings.Contains(lower, "github.com/") ||
+		strings.Contains(lower, "codeberg.org/") ||
 		strings.Contains(lower, "gitlab.com/")
 }
 

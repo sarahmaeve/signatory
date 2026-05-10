@@ -156,6 +156,62 @@ go 1.20
 	return mux
 }
 
+// TestCollector_NonGitHubEntity_ReturnsEmpty pins the self-gate that
+// keeps the GitHub collector from hitting api.github.com when handed
+// a non-GitHub entity (codeberg, gitlab, or any other forge whose
+// URL doesn't resolve to github.com).
+//
+// Pre-self-gate, the collector ran ParseRepoURL — which strips
+// "https://" and treats whatever's next as owner/repo — producing
+// owner="codeberg.org", name="forgejo" for a codeberg URL, then
+// firing GET https://api.github.com/repos/codeberg.org/forgejo.
+// That returns 404 and surfaces as a Collect error, which would
+// fail any analyze run targeting a codeberg or gitlab repo.
+//
+// After the self-gate (mirror of openssf's extractOwnerRepo
+// pattern), Collect returns a non-nil empty CollectionResult with
+// nil error — symmetric with gopublish's non-Go-entity branch.
+// The test handler fails if hit; reaching it would prove the
+// self-gate has regressed.
+func TestCollector_NonGitHubEntity_ReturnsEmpty(t *testing.T) {
+	// Empty URL is NOT covered here: the collector keeps its legacy
+	// fallback to entity.ShortName for bare-shorthand input, so the
+	// gate intentionally fires only when a non-empty URL points at a
+	// non-github host. TestCollector_NotFoundError exercises the
+	// empty-URL ShortName-fallback path.
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"codeberg URL", "https://codeberg.org/forgejo/forgejo"},
+		{"http codeberg URL", "http://codeberg.org/forgejo/forgejo"},
+		{"gitlab URL", "https://gitlab.com/gitlab-org/gitlab"},
+		{"bitbucket URL", "https://bitbucket.org/team/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("non-GitHub entity must short-circuit; "+
+					"handler was unexpectedly reached for %s (%s)", tc.name, r.URL.Path)
+			})
+			c := newTestCollector(t, handler)
+			entity := &profile.Entity{
+				ID:        "test-entity",
+				Type:      profile.EntityPackage,
+				ShortName: "forgejo",
+				URL:       tc.url,
+			}
+			result, err := c.Collect(context.Background(), entity)
+			require.NoError(t, err,
+				"non-GitHub entity must NOT surface an error — symmetric with openssf")
+			require.NotNil(t, result,
+				"Collect must return a non-nil CollectionResult so callers iterate without nil-guards")
+			assert.Empty(t, result.Signals(),
+				"non-GitHub entity must produce zero signals (collector self-gates out)")
+		})
+	}
+}
+
 func TestCollector_Name(t *testing.T) {
 	c := NewCollector()
 	assert.Equal(t, "github", c.Name())

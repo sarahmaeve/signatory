@@ -174,6 +174,25 @@ var (
 	// The --clone branch's ensureCloneAtPath does NOT return this — it
 	// remediates the shallow state by issuing `git fetch --unshallow`.
 	ErrShallowClone = errors.New("clone at --path is shallow; re-run with --clone to unshallow")
+	// ErrCloneAuthRequiredOrMissing classifies the failure mode where
+	// the forge returns an HTTP 401 and our discipline (credential.helper=
+	// in gitenv.safeOverrides + GIT_TERMINAL_PROMPT=0 in gitenv.SafeEnv)
+	// correctly refuses to supply or prompt for credentials. The
+	// underlying git message ("could not read Username ...: terminal
+	// prompts disabled") is technically accurate but operator-misleading:
+	// it points at our termination of prompts, not at the actual cause —
+	// the repo does not exist, is private to the operator's account, or
+	// has moved. classifyGitCloneError detects the stderr pattern and
+	// rewrites the error with this sentinel + an actionable explanation.
+	//
+	// Security invariant: this sentinel is a UX classification, not a
+	// security control. The rewrite happens AFTER the subprocess has
+	// exited; argv, env, safeOverrides, and SafeEnv remain unmodified.
+	// "Fixing the error message" must not become a path to admitting
+	// credentials or enabling prompts — see classifyGitCloneError's
+	// godoc for the full design rationale.
+	ErrCloneAuthRequiredOrMissing = errors.New(
+		"forge returned an authentication challenge; repository does not exist, is private, or has moved")
 )
 
 // collectorsFor returns the collectors appropriate for an entity,
@@ -449,16 +468,22 @@ func resolveClonePath(ctx context.Context, entity *profile.Entity, opts CollectO
 		return isolatedClonePath(ctx, absPath, opts)
 	}
 
-	// --path-only branch: entity.URL must be a github-parseable URI so
+	// --path-only branch: entity.URL must be a forge-parseable URI so
 	// validateExistingClone can compare origins. For repo-scheme entities
 	// the entity's CanonicalURI is already that form; for pkg-scheme
 	// entities (npm/pypi packages whose source has been resolved to a
 	// github repo), CanonicalURI is pkg:<eco>/<name> — not what we need.
 	// Derive expectedURI from entity.URL instead, which is the declared
-	// github source regardless of entity type.
-	expectedURI, _, _, err := profile.NormalizeGitHubRepoInput(entity.URL)
+	// source regardless of entity type.
+	//
+	// NormalizeForgeRepoInput accepts URL and SCP forms across the
+	// recognized forges (github, codeberg, gitlab); the github-only
+	// NormalizeGitHubRepoInput it replaces left the host segment in
+	// owner ("codeberg.org:forgejo") and rejected SCP-form codeberg/
+	// gitlab origins via validPathSegment.
+	expectedURI, _, _, _, err := profile.NormalizeForgeRepoInput(entity.URL)
 	if err != nil {
-		return "", fmt.Errorf("entity URL %q not parseable as a github target: %w", entity.URL, err)
+		return "", fmt.Errorf("entity URL %q not parseable as a forge target: %w", entity.URL, err)
 	}
 	if err := validateExistingClone(ctx, absPath, expectedURI); err != nil {
 		return "", err
@@ -652,9 +677,9 @@ func validateCloneOrigin(ctx context.Context, path, expectedURI string) error {
 	}
 
 	originRaw := strings.TrimSpace(stdout.String())
-	originURI, _, _, err := profile.NormalizeGitHubRepoInput(originRaw)
+	originURI, _, _, _, err := profile.NormalizeForgeRepoInput(originRaw)
 	if err != nil {
-		return fmt.Errorf("clone origin URL %q not parseable as a github target: %w",
+		return fmt.Errorf("clone origin URL %q not parseable as a forge target: %w",
 			originRaw, err)
 	}
 
@@ -786,13 +811,13 @@ func ensureCloneAtPath(
 		return runner(ctx, "", "clone", cloneURL, absPath)
 	}
 
-	// Path exists with content. We need a github-parseable cloneURL to
+	// Path exists with content. We need a forge-parseable cloneURL to
 	// compare origins. Filesystem-path cloneURLs (test fixtures) get
 	// rejected here, which is the right outcome — a real existing clone
-	// can only have a real github origin under signatory's threat model.
-	expectedURI, _, _, err := profile.NormalizeGitHubRepoInput(cloneURL)
+	// can only have a real forge origin under signatory's threat model.
+	expectedURI, _, _, _, err := profile.NormalizeForgeRepoInput(cloneURL)
 	if err != nil {
-		return fmt.Errorf("entity URL %q not parseable as a github target: %w", cloneURL, err)
+		return fmt.Errorf("entity URL %q not parseable as a forge target: %w", cloneURL, err)
 	}
 	if err := validateCloneOrigin(ctx, absPath, expectedURI); err != nil {
 		return err
@@ -825,6 +850,13 @@ func ensureCloneAtPath(
 // subcommand operates against an existing clone without an
 // os.Chdir() race. workdir empty means args already carry the
 // destination (the clone case: `clone <url> <dest>`).
+//
+// Errors are routed through classifyGitCloneError before the existing
+// "git %v: %w: %s" wrap fires — this rewrites the misleading
+// "could not read Username … terminal prompts disabled" stderr into
+// an operator-actionable "repo does not exist, is private, or has
+// moved" message without altering the no-credentials discipline.
+// See classifyGitCloneError and ErrCloneAuthRequiredOrMissing.
 func defaultRunGit(ctx context.Context, workdir string, args ...string) error {
 	full := args
 	if workdir != "" {
@@ -834,9 +866,63 @@ func defaultRunGit(ctx context.Context, workdir string, args ...string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if classified := classifyGitCloneError(args, err, stderr.String()); classified != nil {
+			return classified
+		}
 		return fmt.Errorf("git %v: %w: %s", args, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// classifyGitCloneError detects the "could not read Username" +
+// "terminal prompts disabled" stderr pair git emits when the forge
+// returns HTTP 401 and our credential discipline (credential.helper=
+// in gitenv.safeOverrides + GIT_TERMINAL_PROMPT=0 in gitenv.SafeEnv)
+// correctly refuses to supply or prompt for credentials. Returns a
+// wrapped error tagged with ErrCloneAuthRequiredOrMissing and an
+// operator-facing explanation; returns nil when the stderr does not
+// match this pattern, leaving the caller's existing wrap in place.
+//
+// Both phrases must be present: each alone has innocent causes —
+// "could not read Username" appears in unrelated SSH-helper failures,
+// "terminal prompts disabled" appears in any GIT_TERMINAL_PROMPT=0
+// stderr — but the pair is unambiguous because git emits them
+// together exactly when 401 meets disabled-prompts.
+//
+// # Security invariant
+//
+// This helper does NOT alter argv, env, or the subprocess in any
+// way. It only inspects stderr after the subprocess has exited and
+// rewrites the Go error string. Reviewers must reject any change
+// here that:
+//
+//   - touches gitenv (SafeEnv / safeOverrides / NewCloneCmd)
+//   - supplies credentials (via netrc, GIT_ASKPASS, env vars, etc.)
+//   - enables terminal prompts (clearing GIT_TERMINAL_PROMPT)
+//   - admits a credential.helper override
+//
+// "Fixing the error message" must not become a path to weakening
+// the env-vector / file-vector defenses gitenv enforces. The
+// classification is a UX layer over the security primitive; the
+// primitive stays intact.
+//
+// # Wrap shape
+//
+// The returned error chains both ErrCloneAuthRequiredOrMissing
+// (sentinel for errors.Is) and runErr (sentinel for callers that
+// match exit-status-shaped failures), and includes the original
+// stderr verbatim so debugging is unaffected. A future patch that
+// drops the original stderr "for cleanliness" would silently
+// degrade incident response and is rejected by the test suite.
+func classifyGitCloneError(args []string, runErr error, stderr string) error {
+	if !strings.Contains(stderr, "could not read Username") ||
+		!strings.Contains(stderr, "terminal prompts disabled") {
+		return nil
+	}
+	return fmt.Errorf(
+		"git %v: %w (signatory deliberately does not pass credentials to forge servers; "+
+			"verify the URL with 'git ls-remote <url>' using your normal credential setup, then re-run): %w: %s",
+		args, ErrCloneAuthRequiredOrMissing, runErr, strings.TrimSpace(stderr))
 }
 
 // gitCloneFull performs `git clone <url> <dest>` with full history
@@ -865,10 +951,19 @@ func defaultRunGit(ctx context.Context, workdir string, args ...string) error {
 // is scoped to clone-shaped sites only. Symmetric with
 // defaultGitClone in handoff.go.
 func gitCloneFull(ctx context.Context, url, dest string) error {
-	cmd := gitenv.NewCloneCmd(ctx, "clone", url, dest)
+	args := []string{"clone", url, dest}
+	cmd := gitenv.NewCloneCmd(ctx, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Same auth-required classification as defaultRunGit so the
+		// two near-identical helpers don't drift on operator-facing
+		// error shape. See classifyGitCloneError for the pattern and
+		// the security invariant (this is a UX rewrite, not a
+		// security relaxation).
+		if classified := classifyGitCloneError(args, err, stderr.String()); classified != nil {
+			return classified
+		}
 		return fmt.Errorf("git clone %q into %q: %w: %s",
 			url, dest, err, strings.TrimSpace(stderr.String()))
 	}

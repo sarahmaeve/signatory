@@ -43,9 +43,18 @@ const (
 )
 
 // Platform is the host/namespace that backs a non-package entity.
+//
+// PlatformCodeberg names the Forgejo-based Codeberg instance. Forgejo
+// is a soft-fork of Gitea, and codeberg.org is its largest public
+// deployment. The constant is added ahead of full Codeberg URL-input
+// parsing (see Normalize*RepoInput) so the canonical URI shape
+// (repo:codeberg/<owner>/<name>) and the Platform field on
+// ResolvedTarget have a single source of truth before downstream
+// dispatch is wired up.
 const (
-	PlatformGitHub = "github"
-	PlatformGitLab = "gitlab"
+	PlatformGitHub   = "github"
+	PlatformGitLab   = "gitlab"
+	PlatformCodeberg = "codeberg"
 )
 
 // validPathSegment restricts the owner/name/user portion of a URI to
@@ -176,9 +185,9 @@ func CanonicalPackageURI(ecosystem, name string) string {
 // "repo:github/alecthomas/kong".
 //
 // Platform, owner, and name are all lowercased. The platforms we
-// support today (GitHub, GitLab) are case-insensitive on owner+repo
-// path segments at both the API and git-clone layer, so equivalent
-// real-world references (BurntSushi/toml, burntsushi/toml,
+// support today (GitHub, GitLab, Codeberg) are case-insensitive on
+// owner+repo path segments at both the API and git-clone layer, so
+// equivalent real-world references (BurntSushi/toml, burntsushi/toml,
 // BURNTSUSHI/TOML) must collapse to one canonical URI to prevent
 // fragmenting one entity across multiple store rows. If a future
 // supported platform is genuinely case-sensitive on owner/name,
@@ -186,6 +195,37 @@ func CanonicalPackageURI(ecosystem, name string) string {
 func CanonicalRepoURI(platform, owner, name string) string {
 	return URISchemeRepo + strings.ToLower(platform) + "/" +
 		strings.ToLower(owner) + "/" + strings.ToLower(name)
+}
+
+// CloneURLForRepoPlatform returns the canonical https clone URL for a
+// recognized forge platform, or "" when the platform is not yet
+// first-classed at the clone layer. Empty CloneURL is the staged-
+// build signal: clone-dispatch sites (cmd/signatory's
+// resolveClonePath, ensureCloneAtPath, isGitHostedEntity) skip
+// targets whose platform hasn't been wired rather than invoke
+// `git clone` against an unvalidated URL shape.
+//
+// owner and name are lowercased to match CanonicalRepoURI, keeping
+// the two paths that emit ResolvedTarget.CloneURL — parseRepoBody
+// for canonical-URI input, ResolveTarget's shorthand branch for
+// URL/SCP input — in agreement on the URL string for any given
+// target.
+//
+// Adding a forge means adding a case here AND opening the URL gate
+// (rejectNonGitHubURL + the matching is*URL helper) AND adding
+// host-prefix entries to forgeHostPrefix.
+func CloneURLForRepoPlatform(platform, owner, name string) string {
+	owner = strings.ToLower(owner)
+	name = strings.ToLower(name)
+	switch strings.ToLower(platform) {
+	case PlatformGitHub:
+		return "https://github.com/" + owner + "/" + name
+	case PlatformCodeberg:
+		return "https://codeberg.org/" + owner + "/" + name
+	case PlatformGitLab:
+		return "https://gitlab.com/" + owner + "/" + name
+	}
+	return ""
 }
 
 // CanonicalIdentityURI returns the canonical URI for a contributor
@@ -233,8 +273,12 @@ func CanonicalPatchURI(platform, owner, repo, id string) string {
 // stripping known prefixes, or if either segment contains characters
 // that aren't valid in a GitHub name.
 //
-// This is intentionally GitHub-specific — other platforms will get
-// their own Normalize*Input functions as they're added.
+// This is intentionally GitHub-specific — callers in
+// cmd/signatory/collectors.go (validateCloneOrigin, ensureCloneAtPath)
+// rely on the github-only contract to prove a clone's recorded
+// `remote get-url origin` matches the expected GitHub canonical URI.
+// New code that wants multi-forge classification should call
+// NormalizeForgeRepoInput instead.
 func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error) {
 	s := strings.TrimSpace(input)
 	if s == "" {
@@ -276,6 +320,112 @@ func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error)
 	}
 
 	return CanonicalRepoURI(PlatformGitHub, owner, name), owner, name, nil
+}
+
+// forgeHostPrefix maps a recognized forge host prefix (path or SCP
+// form, terminated by '/' or ':') to the canonical platform identifier
+// CanonicalRepoURI expects. Listed in the order the gate uses; the
+// path form appears before the SCP form per host so the path-form
+// strip wins for inputs that lack a `git@` scheme prefix.
+//
+// This table is the single source of truth NormalizeForgeRepoInput
+// dispatches on. Adding a forge means adding entries here AND opening
+// the URL gate (rejectNonGitHubURL + the matching is*URL helper) to
+// admit the host.
+var forgeHostPrefix = []struct {
+	prefix   string
+	platform string
+}{
+	{"github.com/", PlatformGitHub},
+	{"github.com:", PlatformGitHub},
+	{"codeberg.org/", PlatformCodeberg},
+	{"codeberg.org:", PlatformCodeberg},
+	{"gitlab.com/", PlatformGitLab},
+	{"gitlab.com:", PlatformGitLab},
+}
+
+// NormalizeForgeRepoInput parses user-supplied input that refers to a
+// repository on a recognized forge (GitHub, Codeberg, GitLab) and
+// returns its canonical URI plus the detected platform, owner, and
+// repo name. Generalizes NormalizeGitHubRepoInput across forges:
+//
+//	alecthomas/kong                          → repo:github/alecthomas/kong (default)
+//	github.com/alecthomas/kong               → repo:github/alecthomas/kong
+//	https://github.com/alecthomas/kong       → repo:github/alecthomas/kong
+//	https://codeberg.org/forgejo/forgejo     → repo:codeberg/forgejo/forgejo
+//	https://gitlab.com/gitlab-org/gitlab     → repo:gitlab/gitlab-org/gitlab
+//	git@codeberg.org:forgejo/forgejo.git     → repo:codeberg/forgejo/forgejo
+//
+// Platform detection is host-anchored against the forgeHostPrefix
+// table. Bare "owner/repo" with no host defaults to PlatformGitHub
+// for backward compatibility with signatory's long-standing CLI
+// shorthand (the original /analyze invocations were github-only).
+//
+// Unrecognized hosts must already have been rejected by the URL gate
+// (rejectNonGitHubURL); reaching this function with such input would
+// fall through to the bare-shorthand branch and produce a misleading
+// repo:github/<host>/<owner> URI. The gate exists precisely to
+// prevent that regression.
+//
+// Returns owner and name in the user-typed casing; the canonical URI
+// is already case-folded via CanonicalRepoURI. Callers that need the
+// canonical form use the URI; callers that want to surface the
+// user-typed casing in error messages or display use the raw fields.
+func NormalizeForgeRepoInput(input string) (uri, platform, owner, name string, err error) {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return "", "", "", "", fmt.Errorf("empty input")
+	}
+
+	// Strip scheme/auth prefixes. Order is irrelevant in practice —
+	// "git@" and "https://" / "http://" are mutually exclusive shapes
+	// — but keeping the strip order matches NormalizeGitHubRepoInput
+	// so divergence between the two functions stays cosmetic rather
+	// than behavioral.
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "git@")
+	s = strings.TrimPrefix(s, "www.")
+
+	// Detect host via prefix-table lookup. The first match wins;
+	// ordering in forgeHostPrefix is significant only between path
+	// and SCP form per host, where either may legitimately match
+	// after the scheme strip above.
+	platform = PlatformGitHub
+	for _, h := range forgeHostPrefix {
+		if strings.HasPrefix(s, h.prefix) {
+			s = s[len(h.prefix):]
+			platform = h.platform
+			break
+		}
+	}
+
+	// Strip `.git` suffix and any trailing slash.
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 {
+		return "", "", "", "", fmt.Errorf("cannot parse forge repo from %q: expected owner/repo form", input)
+	}
+
+	// Take the first two path segments — allow trailing segments
+	// (e.g. .../owner/repo/pull/42).
+	owner = parts[0]
+	name = parts[1]
+
+	if owner == "" || name == "" {
+		return "", "", "", "", fmt.Errorf("cannot parse forge repo from %q: empty owner or name", input)
+	}
+	if !validPathSegment.MatchString(owner) {
+		return "", "", "", "", fmt.Errorf("invalid forge owner %q in input %q", owner, input)
+	}
+	if !validPathSegment.MatchString(name) {
+		return "", "", "", "", fmt.Errorf("invalid forge repo name %q in input %q", name, input)
+	}
+
+	return CanonicalRepoURI(platform, owner, name), platform, owner, name, nil
 }
 
 // SplitURIVersion splits a canonical URI into (base, version). The

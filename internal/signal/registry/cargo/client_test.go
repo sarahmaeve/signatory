@@ -128,7 +128,11 @@ func TestResolveRepoURL_Success(t *testing.T) {
 	client := NewClientWithBaseURL(srv.URL)
 	repoURL, err := client.ResolveRepoURL(context.Background(), "ripgrep")
 	require.NoError(t, err)
-	assert.Equal(t, "https://github.com/BurntSushi/ripgrep", repoURL)
+	// CloneURL is lowercased per profile.CloneURLForRepoPlatform —
+	// case-insensitive forge hosts (github, codeberg, gitlab)
+	// canonicalize owner+repo to lowercase to keep store entities
+	// from fragmenting across casing variants (issue #53).
+	assert.Equal(t, "https://github.com/burntsushi/ripgrep", repoURL)
 }
 
 func TestResolveRepoURL_NoRepository(t *testing.T) {
@@ -152,7 +156,12 @@ func TestResolveRepoURL_NoRepository(t *testing.T) {
 	assert.Empty(t, repoURL)
 }
 
-func TestResolveRepoURL_NonGithubRepository(t *testing.T) {
+// TestResolveRepoURL_GitLabRepository pins multi-forge resolution:
+// crates.io declarations pointing at gitlab.com (the second-largest
+// open-source git forge after github) now resolve to the canonical
+// https URL the downstream git collector clones from. Pre-multi-forge,
+// this returned empty.
+func TestResolveRepoURL_GitLabRepository(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -170,5 +179,52 @@ func TestResolveRepoURL_NonGithubRepository(t *testing.T) {
 	client := NewClientWithBaseURL(srv.URL)
 	repoURL, err := client.ResolveRepoURL(context.Background(), "gitlab-crate")
 	require.NoError(t, err)
-	assert.Empty(t, repoURL, "non-github repos normalize to empty in v0.1")
+	assert.Equal(t, "https://gitlab.com/some/project", repoURL)
+}
+
+// TestResolveRepoURL_CodebergRepository — same shape for Codeberg.
+func TestResolveRepoURL_CodebergRepository(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := CrateResponse{
+			Crate: Crate{
+				Name:       "codeberg-crate",
+				Repository: "https://codeberg.org/forgejo/runner",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	repoURL, err := client.ResolveRepoURL(context.Background(), "codeberg-crate")
+	require.NoError(t, err)
+	assert.Equal(t, "https://codeberg.org/forgejo/runner", repoURL)
+}
+
+// TestResolveRepoURL_UnsupportedForgeRepository pins that forges NOT
+// yet first-classed (bitbucket, self-hosted) still resolve to empty.
+// The URL gate (rejectNonGitHubURL) is the source of truth for which
+// forges are accepted; CloneURLForRepoPlatform returns "" for the rest.
+func TestResolveRepoURL_UnsupportedForgeRepository(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := CrateResponse{
+			Crate: Crate{
+				Name:       "bitbucket-crate",
+				Repository: "https://bitbucket.org/team/project",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	repoURL, err := client.ResolveRepoURL(context.Background(), "bitbucket-crate")
+	require.NoError(t, err)
+	assert.Empty(t, repoURL, "unsupported forges still resolve to empty")
 }

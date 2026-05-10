@@ -194,6 +194,51 @@ func TestClient_ResolveRepoURL_FallsBackToHomepage(t *testing.T) {
 	assert.Equal(t, "https://github.com/org/oldgem", url)
 }
 
+// TestClient_ResolveRepoURL_Codeberg pins multi-forge resolution for
+// gems: a rubygems.org metadata response declaring source_code_uri
+// at codeberg.org normalizes to a clone-able https URL. gem's
+// resolver (isGitHostURL) recognizes github.com and gitlab.com today;
+// this test pins the codeberg.org addition.
+func TestClient_ResolveRepoURL_Codeberg(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GemResponse{
+			Name:          "codeberg-gem",
+			SourceCodeURI: "https://codeberg.org/forgejo/runner",
+		}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(), "codeberg-gem")
+	require.NoError(t, err)
+	assert.Equal(t, "https://codeberg.org/forgejo/runner", url)
+}
+
+// TestClient_ResolveRepoURL_GitLab pins gitlab resolution — the
+// existing isGitHostURL has supported gitlab.com since gem-resolver
+// inception; this test makes the support explicit so a future
+// refactor can't silently regress it.
+func TestClient_ResolveRepoURL_GitLab(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GemResponse{
+			Name:          "gitlab-gem",
+			SourceCodeURI: "https://gitlab.com/foo/bar",
+		}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	url, err := client.ResolveRepoURL(context.Background(), "gitlab-gem")
+	require.NoError(t, err)
+	assert.Equal(t, "https://gitlab.com/foo/bar", url)
+}
+
 func TestClient_ResolveRepoURL_NoSource(t *testing.T) {
 	t.Parallel()
 

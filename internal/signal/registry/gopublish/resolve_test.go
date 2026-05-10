@@ -77,17 +77,12 @@ func TestResolveRepoURL_ProxyHasOrigin(t *testing.T) {
 	}
 }
 
-// TestResolveRepoURL_ProxyOriginNonGitHub guards the v0.1 scope:
-// signatory only consumes github-hosted sources for its github + git
-// + repofiles + openssf collectors, so a proxy Origin pointing at
-// gitlab.com / bitbucket.org / a private GitHub Enterprise instance
-// is treated as "not resolvable to a github URL" — empty string,
-// not an error. The user gets registry-only signals (publish
-// integrity, transparency log) and a posture decision based on those.
-//
-// Future: if/when signatory grows non-github source support, this
-// test flips to assert the gitlab URL resolves directly.
-func TestResolveRepoURL_ProxyOriginNonGitHub(t *testing.T) {
+// TestResolveRepoURL_ProxyOriginGitLab pins multi-forge resolution:
+// a proxy Origin URL pointing at gitlab.com (a first-classed forge
+// alongside github and codeberg) resolves to the canonical https URL
+// the downstream git collector clones from. Pre-multi-forge this
+// returned empty.
+func TestResolveRepoURL_ProxyOriginGitLab(t *testing.T) {
 	t.Parallel()
 	fs := newFakeServer(t)
 	fs.mux.HandleFunc("/example.org/foo/@latest", func(w http.ResponseWriter, _ *http.Request) {
@@ -109,10 +104,76 @@ func TestResolveRepoURL_ProxyOriginNonGitHub(t *testing.T) {
 	c := NewClientWithBaseURL(fs.URL(), fs.URL())
 	got, err := c.ResolveRepoURL(context.Background(), "example.org/foo")
 	if err != nil {
-		t.Fatalf("ResolveRepoURL returned %v; want nil for non-github resolvable", err)
+		t.Fatalf("ResolveRepoURL returned %v; want nil", err)
+	}
+	const want = "https://gitlab.com/foo/bar"
+	if got != want {
+		t.Errorf("ResolveRepoURL = %q; want %q", got, want)
+	}
+}
+
+// TestResolveRepoURL_ProxyOriginCodeberg — same shape for Codeberg.
+func TestResolveRepoURL_ProxyOriginCodeberg(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t)
+	fs.mux.HandleFunc("/example.org/foo/@latest", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)
+	})
+	fs.mux.HandleFunc("/example.org/foo/@v/v1.0.0.info", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+            "Version":"v1.0.0",
+            "Time":"2026-01-01T00:00:00Z",
+            "Origin":{
+                "VCS":"git",
+                "URL":"https://codeberg.org/forgejo/forgejo"
+            }
+        }`)
+	})
+
+	c := NewClientWithBaseURL(fs.URL(), fs.URL())
+	got, err := c.ResolveRepoURL(context.Background(), "example.org/foo")
+	if err != nil {
+		t.Fatalf("ResolveRepoURL returned %v; want nil", err)
+	}
+	const want = "https://codeberg.org/forgejo/forgejo"
+	if got != want {
+		t.Errorf("ResolveRepoURL = %q; want %q", got, want)
+	}
+}
+
+// TestResolveRepoURL_ProxyOriginUnsupportedForge guards that forges
+// NOT yet first-classed (bitbucket, self-hosted, GitHub Enterprise)
+// still resolve to empty string. Maintains the rejection invariant
+// that protected the github-only era; widens it to first-classed
+// forges, but holds the line on the rest.
+func TestResolveRepoURL_ProxyOriginUnsupportedForge(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t)
+	fs.mux.HandleFunc("/example.org/foo/@latest", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)
+	})
+	fs.mux.HandleFunc("/example.org/foo/@v/v1.0.0.info", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+            "Version":"v1.0.0",
+            "Time":"2026-01-01T00:00:00Z",
+            "Origin":{
+                "VCS":"git",
+                "URL":"https://bitbucket.org/team/repo"
+            }
+        }`)
+	})
+
+	c := NewClientWithBaseURL(fs.URL(), fs.URL())
+	got, err := c.ResolveRepoURL(context.Background(), "example.org/foo")
+	if err != nil {
+		t.Fatalf("ResolveRepoURL returned %v; want nil", err)
 	}
 	if got != "" {
-		t.Errorf("ResolveRepoURL = %q; want empty string for non-github source", got)
+		t.Errorf("ResolveRepoURL = %q; want empty for unsupported forge", got)
 	}
 }
 
@@ -223,11 +284,12 @@ func TestResolveRepoURL_NoMetaTagFallback_WhenProxy5xx(t *testing.T) {
 	}
 }
 
-// TestResolveRepoURL_RejectsNonGitHubMetaRoot guards the v0.1 scope
-// at the meta-tag layer too: a vanity host serving a go-import
-// meta tag pointing at gitlab.com (or any non-github VCS host)
-// must NOT be stamped on the entity. Returns empty with no error.
-func TestResolveRepoURL_RejectsNonGitHubMetaRoot(t *testing.T) {
+// TestResolveRepoURL_AcceptsGitLabMetaRoot pins the multi-forge
+// generalization at the meta-tag layer: a vanity host serving a
+// go-import meta tag pointing at a first-classed forge (gitlab.com
+// here, codeberg.org symmetric) is stamped on the entity. Pre-
+// multi-forge this returned empty.
+func TestResolveRepoURL_AcceptsGitLabMetaRoot(t *testing.T) {
 	t.Parallel()
 	fs := newFakeServer(t)
 	vanity := newVanityServer(t, `<meta name="go-import" content="modernc.org/sqlite git https://gitlab.com/cznic/sqlite">`)
@@ -237,8 +299,29 @@ func TestResolveRepoURL_RejectsNonGitHubMetaRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRepoURL returned %v; want nil", err)
 	}
+	const want = "https://gitlab.com/cznic/sqlite"
+	if got != want {
+		t.Errorf("ResolveRepoURL = %q; want %q", got, want)
+	}
+}
+
+// TestResolveRepoURL_RejectsUnsupportedForgeMetaRoot keeps the
+// rejection invariant in place for forges NOT yet first-classed
+// (bitbucket, self-hosted, GitHub Enterprise). Same contract as
+// TestResolveRepoURL_ProxyOriginUnsupportedForge but at the
+// meta-tag layer.
+func TestResolveRepoURL_RejectsUnsupportedForgeMetaRoot(t *testing.T) {
+	t.Parallel()
+	fs := newFakeServer(t)
+	vanity := newVanityServer(t, `<meta name="go-import" content="example.com/foo git https://bitbucket.org/team/repo">`)
+
+	c := NewClientWithBaseURLs(fs.URL(), fs.URL(), vanity.URL)
+	got, err := c.ResolveRepoURL(context.Background(), "example.com/foo")
+	if err != nil {
+		t.Fatalf("ResolveRepoURL returned %v; want nil", err)
+	}
 	if got != "" {
-		t.Errorf("ResolveRepoURL = %q; want empty for non-github meta root (signatory v0.1 only stamps github sources)", got)
+		t.Errorf("ResolveRepoURL = %q; want empty for unsupported forge meta root", got)
 	}
 }
 

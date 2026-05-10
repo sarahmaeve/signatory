@@ -207,6 +207,79 @@ func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
 	assert.NoError(t, err, "ssh-form origin should normalize to same canonical URI")
 }
 
+// TestCollectorsFor_CodebergOriginMatches_SshForm pins the multi-forge
+// generalization: a Codeberg target validated against an SCP-form
+// `git@codeberg.org:owner/repo.git` origin must normalize to the same
+// canonical URI on both sides. Pre-NormalizeForgeRepoInput, the
+// normalizer left the colon in the owner segment ("codeberg.org:owner")
+// and rejected it via validPathSegment — so origin validation errored
+// for every codeberg-with-SSH-clone target.
+func TestCollectorsFor_CodebergOriginMatches_SshForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "git@codeberg.org:forgejo/forgejo.git")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err, "ssh-form codeberg origin should normalize to same canonical URI")
+}
+
+// TestCollectorsFor_GitLabOriginMatches_SshForm — same shape as the
+// Codeberg SSH-form test, for GitLab.
+func TestCollectorsFor_GitLabOriginMatches_SshForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "git@gitlab.com:gitlab-org/gitlab.git")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err, "ssh-form gitlab origin should normalize to same canonical URI")
+}
+
+// TestCollectorsFor_CodebergOriginMatches_HTTPSForm pins the happy
+// HTTPS-form path for Codeberg. The pre-NormalizeForgeRepoInput
+// behavior accidentally validated this case (both sides went through
+// the broken github-only normalizer and produced the same wrong URI,
+// e.g. "repo:github/codeberg.org/forgejo"), so this test wasn't RED
+// before the refactor — but it's a permanent invariant that the
+// switch must preserve.
+func TestCollectorsFor_CodebergOriginMatches_HTTPSForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://codeberg.org/forgejo/forgejo")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err)
+}
+
+// TestCollectorsFor_GitLabOriginMatches_HTTPSForm — same shape for GitLab.
+func TestCollectorsFor_GitLabOriginMatches_HTTPSForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://gitlab.com/gitlab-org/gitlab")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err)
+}
+
 func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 	// Create a "remote" source repo, then clone from its filesystem
 	// path into a new destination. Asserts the clone actually happened
@@ -974,3 +1047,95 @@ func assertCarriesOverride(t *testing.T, args []string, want, msg string) {
 	}
 	t.Errorf("%s: expected `-c %s` pair in child argv but did not find it; argv=%v", msg, want, args)
 }
+
+// --- classifyGitCloneError tests ---------------------------------------------
+//
+// classifyGitCloneError detects the "could not read Username … terminal
+// prompts disabled" stderr pair git emits when the forge returns 401
+// and our discipline (credential.helper= in gitenv.safeOverrides +
+// GIT_TERMINAL_PROMPT=0 in gitenv.SafeEnv) correctly refuses to supply
+// or prompt for credentials. The classifier rewrites the error message
+// so operators see the actual cause (missing/private/moved repo) rather
+// than git's misleading "terminal prompts disabled" surface text.
+//
+// Security invariant tested below: the helper does NOT touch argv, env,
+// or the subprocess. It only inspects stderr after the fact and rewrites
+// the Go error string. Tests assert the original git stderr is preserved
+// in the wrapped error so a future "let's clean up the message" patch
+// that drops the original stderr fails loudly here. See the godoc on
+// classifyGitCloneError in collectors.go for the full design rationale.
+
+// TestClassifyGitCloneError_AuthRequiredPattern pins the rewrite of
+// git's "could not read Username … terminal prompts disabled" stderr
+// into an operator-facing message that names the actual cause (repo
+// missing, private, or moved) without weakening the no-credentials
+// posture. Drives the helper's existence (red before
+// classifyGitCloneError exists; green after).
+func TestClassifyGitCloneError_AuthRequiredPattern(t *testing.T) {
+	t.Parallel()
+
+	stderr := "Cloning into '/tmp/x'...\n" +
+		"fatal: could not read Username for 'https://codeberg.org': terminal prompts disabled\n"
+	args := []string{"clone", "https://codeberg.org/missing/repo", "/tmp/x"}
+	runErr := fmt.Errorf("exit status 128")
+
+	err := classifyGitCloneError(args, runErr, stderr)
+	require.Error(t, err, "auth-prompt pattern must classify, not pass through")
+	assert.ErrorIs(t, err, ErrCloneAuthRequiredOrMissing,
+		"sentinel must be reachable via errors.Is so callers/tests can differentiate auth failures from other clone errors")
+	assert.ErrorIs(t, err, runErr,
+		"underlying exec error must remain reachable via errors.Is so callers can match exit-status-shaped failures")
+	assert.Contains(t, err.Error(), "does not pass credentials",
+		"operator-facing message must explain WHY git couldn't authenticate (signatory's no-credentials discipline, not a git bug)")
+	assert.Contains(t, err.Error(), "git ls-remote",
+		"message must point at the diagnostic command operators can run with their own credential setup")
+	assert.Contains(t, err.Error(), "terminal prompts disabled",
+		"original git stderr must be preserved in the wrapped error for debugging — a future patch that drops the underlying stderr would silently degrade incident response")
+}
+
+// TestClassifyGitCloneError_NonAuthErrorPassesThrough pins the gate:
+// only the "could not read Username" + "terminal prompts disabled"
+// pair triggers the rewrite. Network failures, missing-host errors,
+// and other clone-time stderrs must fall through (return nil) so
+// the caller's existing wrap handles them — we don't want to claim
+// every clone failure is an auth issue.
+func TestClassifyGitCloneError_NonAuthErrorPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"DNS failure", "fatal: unable to access 'https://example.com/': Could not resolve host"},
+		{"connection refused", "fatal: unable to access 'https://example.com/': Failed to connect"},
+		{"prompt-disabled phrase alone", "warning: terminal prompts disabled\n"},
+		{"username-error phrase alone", "fatal: could not read Username for some unrelated reason\n"},
+		{"empty stderr", ""},
+		{"unrelated 128", "fatal: destination path '/tmp/x' already exists and is not an empty directory.\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyGitCloneError(
+				[]string{"clone", "https://example.com/foo", "/tmp/x"},
+				fmt.Errorf("exit status 128"),
+				tc.stderr,
+			)
+			assert.Nil(t, err,
+				"non-auth pattern must return nil; defaultRunGit's existing wrap handles the error")
+		})
+	}
+}
+
+// TestDefaultRunGit_AuthRequired_ReturnsClassifiedError pins the wiring
+// of classifyGitCloneError into defaultRunGit. Uses a synthetic git
+// substitute (not the real git binary) to drive the auth-prompt stderr
+// pattern deterministically without a network round-trip. Confirms the
+// classified error reaches the caller, not the raw "git %v: ..." wrap
+// that pre-existed.
+//
+// We can't directly inject a fake binary into defaultRunGit (it always
+// invokes "git" via gitenv.NewCloneCmd), so this test stays at the
+// classifier-helper layer. The integration is covered by
+// TestClassifyGitCloneError_* plus a manual walk of defaultRunGit's
+// six new lines — keeping the test surface honest about what it
+// actually exercises.
