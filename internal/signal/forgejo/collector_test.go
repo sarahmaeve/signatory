@@ -92,6 +92,24 @@ func mockForgejoAPI() http.Handler {
 		})
 	})
 
+	// /users/{name} carries owner_profile metadata (created /
+	// account_age_days / followers / full_name). In Gitea/Forgejo's
+	// data model, organizations are stored as users-with-type-org,
+	// so /users/{name} works for BOTH user-account owners and
+	// organization owners — same endpoint, same response shape. The
+	// /orgs/{name} probe above is only the discriminator; /users/
+	// here supplies the metadata.
+	mux.HandleFunc("/users/forgejo", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":              1,
+			"username":        "forgejo",
+			"login":           "forgejo",
+			"full_name":       "Forgejo",
+			"created":         "2022-10-20T20:00:00Z",
+			"followers_count": 0,
+		})
+	})
+
 	return mux
 }
 
@@ -149,6 +167,61 @@ func TestCollector_HappyPath(t *testing.T) {
 	bySource(t, collected, "repo_age")
 	bySource(t, collected, "last_push")
 	bySource(t, collected, "owner_type")
+	bySource(t, collected, "owner_profile")
+}
+
+// TestCollector_OwnerProfile_FromUsersEndpoint pins the owner_profile
+// signal value: the fields come from /users/{name}, mapped onto the
+// canonical owner_profile shape github uses (login, name, created,
+// account_age_days, followers, type). Same alphabet ensures cross-
+// forge posture rules that key on owner_profile read the same fields
+// regardless of which forge produced the signal.
+//
+// Missing fields (Forgejo's /users response doesn't carry these):
+//
+//   - public_repos: not in the basic response; would need
+//     /users/{name}/repos count
+//   - company: github's "company" field; Forgejo's analog is
+//     "organization" or "description" but neither maps cleanly
+//
+// These are emitted as zero-valued so the signal shape stays
+// consistent; downstream consumers can detect 0 and ignore.
+func TestCollector_OwnerProfile_FromUsersEndpoint(t *testing.T) {
+	t.Parallel()
+	c := newTestCollector(t, mockForgejoAPI())
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "forgejo/forgejo",
+		URL:       "https://codeberg.org/forgejo/forgejo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_profile" {
+			continue
+		}
+		assert.Equal(t, "forgejo", s.Source)
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "forgejo", v["login"])
+		assert.Equal(t, "Forgejo", v["name"])
+		assert.Equal(t, "2022-10-20T20:00:00Z", v["created"])
+		// account_age_days is computed against time.Now(); just
+		// assert it's present and positive rather than pinning an
+		// exact value the test clock can't stabilize.
+		age, ok := v["account_age_days"].(float64)
+		require.True(t, ok, "account_age_days must be a number")
+		assert.Greater(t, age, float64(0),
+			"account_age_days must be positive when created < now")
+		assert.Equal(t, float64(0), v["followers"])
+		assert.Equal(t, "Organization", v["type"],
+			"owner_profile.type echoes owner_type.type — same forge-agnostic alphabet")
+		return
+	}
+	t.Fatalf("owner_profile signal not emitted")
 }
 
 // TestCollector_OwnerType_OrganizationProbe pins the owner_type
@@ -209,6 +282,18 @@ func TestCollector_OwnerType_UserProbe(t *testing.T) {
 	mux.HandleFunc("/orgs/alice", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
+	// /users/{name} for the owner_profile metadata. Forgejo returns
+	// followers_count for actual user accounts (orgs typically 0).
+	mux.HandleFunc("/users/alice", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":              42,
+			"username":        "alice",
+			"login":           "alice",
+			"full_name":       "Alice Example",
+			"created":         "2021-06-15T12:00:00Z",
+			"followers_count": 7,
+		})
+	})
 
 	c := newTestCollector(t, mux)
 	entity := &profile.Entity{
@@ -221,18 +306,31 @@ func TestCollector_OwnerType_UserProbe(t *testing.T) {
 	result, err := c.Collect(context.Background(), entity)
 	require.NoError(t, err)
 
+	types := make(map[string]profile.Signal)
 	for _, s := range result.Signals() {
-		if s.Type != "owner_type" {
-			continue
-		}
-		var v map[string]any
-		require.NoError(t, json.Unmarshal(s.Value, &v))
-		assert.Equal(t, "User", v["type"],
-			"404 from /orgs/{name} probe must map to \"User\" — the owner is a user account, not an organization")
-		assert.Equal(t, "alice", v["login"])
-		return
+		types[s.Type] = s
 	}
-	t.Fatalf("owner_type signal not emitted in the User-probe case")
+
+	// owner_type assertion (the pre-Tier-2 contract).
+	var ot map[string]any
+	require.Contains(t, types, "owner_type", "owner_type must emit on the user-probe branch")
+	require.NoError(t, json.Unmarshal(types["owner_type"].Value, &ot))
+	assert.Equal(t, "User", ot["type"],
+		"404 from /orgs/{name} probe must map to \"User\" — the owner is a user account, not an organization")
+	assert.Equal(t, "alice", ot["login"])
+
+	// owner_profile assertion (Tier 2): /users/alice metadata maps
+	// onto the canonical fields.
+	var op map[string]any
+	require.Contains(t, types, "owner_profile", "owner_profile must emit on the user-probe branch")
+	require.NoError(t, json.Unmarshal(types["owner_profile"].Value, &op))
+	assert.Equal(t, "alice", op["login"])
+	assert.Equal(t, "Alice Example", op["name"])
+	assert.Equal(t, "2021-06-15T12:00:00Z", op["created"])
+	assert.Equal(t, float64(7), op["followers"],
+		"user accounts emit followers_count from /users response")
+	assert.Equal(t, "User", op["type"],
+		"owner_profile.type echoes the owner_type discriminator")
 }
 
 // TestCollector_OwnerType_ProbeFailure_DoesNotBreakOtherSignals

@@ -187,18 +187,15 @@ func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, er
 // (false, nil) on 404 (== "not an org, must be a user"), and
 // (false, err) on any other status or transport error.
 //
-// This is the only way to derive owner_type for codeberg-hosted
-// entities: Forgejo's repo response carries owner.login but no
-// User/Organization discriminator on the embedded owner struct,
-// unlike github (owner.type) and gitlab (namespace.kind on the
-// same project call). The Tier 1.5 emission accepts the extra
-// round-trip rather than fragment owner_type across forges with
-// different value alphabets.
-//
-// The body of the org response is discarded — only the status
-// code matters for the user/org discrimination. The owner_profile
-// signal (Tier 2) would re-fetch the org to collect founding
-// date, member count, etc.; today's caller doesn't need the body.
+// This is the discriminator for owner_type (Tier 1.5): Forgejo's
+// repo response carries owner.login but no User/Organization
+// discriminator on the embedded owner struct, unlike github
+// (owner.type) and gitlab (namespace.kind on the same project
+// call). The body of the org response is discarded here — only
+// the status code matters for the user/org discrimination.
+// owner_profile metadata comes from a separate /users/{name}
+// call (see GetUser below), which works for both user accounts
+// and organizations in Forgejo's data model.
 func (c *Client) IsOrg(ctx context.Context, name string) (bool, error) {
 	err := c.get(ctx, "/orgs/"+name, nil)
 	if err == nil {
@@ -208,4 +205,43 @@ func (c *Client) IsOrg(ctx context.Context, name string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// userProfile is the subset of /api/v1/users/{name} fields the
+// owner_profile signal consumes. Forgejo's User schema includes a
+// dozen-plus fields; only the ones that map onto the canonical
+// owner_profile shape github's collector emits are decoded.
+//
+// Field-name notes vs. github's user struct:
+//
+//   - Username maps to JSON "username" (github: "login"). Both
+//     fields semantically represent the login handle; the signal
+//     value uses the canonical name "login".
+//   - FullName maps to "full_name" (github: "name").
+//   - Created maps to "created" (github: "created_at").
+//   - FollowersCount maps to "followers_count" (github: "followers").
+//
+// Public-repo count and "company" don't appear in Forgejo's basic
+// /users response — emitted as zero / empty in the signal value.
+type userProfile struct {
+	Username       string    `json:"username"`
+	FullName       string    `json:"full_name"`
+	Created        time.Time `json:"created"`
+	FollowersCount int       `json:"followers_count"`
+}
+
+// GetUser fetches /api/v1/users/{name}. Works for BOTH user
+// accounts and organization owners in Forgejo's data model
+// (organizations are users-with-type-org and the same endpoint
+// serves both record kinds). owner_profile callers route every
+// owner through this call regardless of the IsOrg probe result.
+//
+// Returns ErrNotFound (wrapped) on 404. Other non-200 statuses
+// surface as status-only errors per the client convention.
+func (c *Client) GetUser(ctx context.Context, name string) (*userProfile, error) {
+	var u userProfile
+	if err := c.get(ctx, "/users/"+name, &u); err != nil {
+		return nil, err
+	}
+	return &u, nil
 }

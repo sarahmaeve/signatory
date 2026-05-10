@@ -136,11 +136,28 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	return &result, nil
 }
 
-// emitOwnerType performs the /orgs/{name} probe and records the
-// owner_type signal (or a failure on probe error). Split from
-// Collect so the probe-isolation invariant is local and easy to
-// audit: the Tier 1 emissions above this call are unaffected by
-// whatever happens here.
+// emitOwnerType performs the /orgs/{name} probe AND the
+// /users/{name} fetch and records owner_type + owner_profile
+// signals (or per-signal failures on probe / fetch errors).
+//
+// Two API calls, intentionally paired:
+//
+//   - /orgs/{name} is the User/Organization discriminator. Body
+//     ignored — only the status code matters.
+//   - /users/{name} carries the owner_profile metadata. Works for
+//     BOTH user accounts and organization owners in Forgejo's
+//     data model (orgs are users-with-type-org and the same
+//     endpoint serves both record kinds).
+//
+// Isolation properties pinned by tests:
+//
+//   - Tier 1 emissions above this call are unaffected by anything
+//     here (pinned by
+//     TestCollector_OwnerType_ProbeFailure_DoesNotBreakOtherSignals).
+//   - owner_type and owner_profile fail independently: a
+//     /users/{name} fetch failure records as an owner_profile
+//     failure without disturbing the owner_type signal (which
+//     succeeded from the /orgs/{name} probe).
 //
 // "Organization" / "User" match github's canonical value alphabet
 // (Owner.Type is the literal string "Organization") so cross-forge
@@ -151,14 +168,13 @@ func (c *Collector) emitOwnerType(ctx context.Context, result *signal.Collection
 	entityID, login string, now time.Time) {
 	isOrg, err := c.client.IsOrg(ctx, login)
 	if err != nil {
-		// Non-404 error — record as a per-signal failure. Retryable:
-		// 5xx and transport errors often clear on the next refresh.
-		// We could parse status codes to distinguish retryable from
-		// non-retryable here, but the upstream Client.get only
-		// returns a status-only string for non-200/non-404
-		// responses, so retryable=true is the conservative default.
-		result.RecordFailure(entityID, "owner_type", sourceName,
-			sanitizeOwnerTypeError(err), true, now)
+		// Non-404 error on the probe — both owner_type and
+		// owner_profile fail (we don't know the discriminator and
+		// can't classify the owner). 5xx / transport-error class is
+		// retryable; next refresh might succeed.
+		reason := sanitizeOwnerEndpointError(err)
+		result.RecordFailure(entityID, "owner_type", sourceName, reason, true, now)
+		result.RecordFailure(entityID, "owner_profile", sourceName, reason, true, now)
 		return
 	}
 	ownerType := "User"
@@ -167,16 +183,35 @@ func (c *Collector) emitOwnerType(ctx context.Context, result *signal.Collection
 	}
 	result.RecordSignal(entityID, "owner_type", sourceName, now, signalTTL,
 		map[string]any{"type": ownerType, "login": login})
+
+	// Fetch metadata for owner_profile. owner_type was already
+	// emitted above, so a /users/{name} failure here only affects
+	// owner_profile. Independent failure paths.
+	u, err := c.client.GetUser(ctx, login)
+	if err != nil {
+		result.RecordFailure(entityID, "owner_profile", sourceName,
+			sanitizeOwnerEndpointError(err), true, now)
+		return
+	}
+	result.RecordSignal(entityID, "owner_profile", sourceName, now, signalTTL,
+		map[string]any{
+			"login":            u.Username,
+			"name":             u.FullName,
+			"created":          u.Created.Format(time.RFC3339),
+			"account_age_days": int(now.Sub(u.Created).Hours() / 24),
+			"followers":        u.FollowersCount,
+			"type":             ownerType,
+		})
 }
 
-// sanitizeOwnerTypeError trims the IsOrg error to a short reason
-// safe for the persisted CollectionError.Reason field. Forgejo's
-// Client.get builds error messages with the path included (e.g.
-// "forgejo API returned status 503"); the path is operator-known
-// and contains no secret, so passing the raw string is acceptable.
-// Bounded to avoid blowing up the persisted record on a pathological
-// wrap chain.
-func sanitizeOwnerTypeError(err error) string {
+// sanitizeOwnerEndpointError trims an IsOrg or GetUser error to a
+// short reason safe for the persisted CollectionError.Reason field.
+// Forgejo's Client.get builds error messages with the path included
+// (e.g. "forgejo API returned status 503"); the path is
+// operator-known and contains no secret, so passing the raw string
+// is acceptable. Bounded to avoid blowing up the persisted record
+// on a pathological wrap chain.
+func sanitizeOwnerEndpointError(err error) string {
 	s := err.Error()
 	const maxLen = 200
 	if len(s) > maxLen {

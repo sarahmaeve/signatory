@@ -219,3 +219,71 @@ func (c *Client) GetProject(ctx context.Context, namespacePath string) (*project
 	}
 	return &p, nil
 }
+
+// group is the subset of /api/v4/groups/{path} response fields the
+// owner_profile signal consumes when namespace.kind="group" on the
+// project response. GitLab's full Group schema is 30+ fields; only
+// the ones that map onto the canonical owner_profile shape (login,
+// name, created) are decoded.
+//
+// Field-name notes vs. github's user struct:
+//
+//   - Path maps to "path" (github user: "login"). Both fields are
+//     the URL-safe handle.
+//   - Name maps to "name" (same field name as github's user.name).
+//   - CreatedAt maps to "created_at".
+//
+// public_repos and followers don't appear in gitlab's basic
+// /groups response — those would need separate /groups/<id>/projects
+// counts and a member-count call respectively. Emitted as zero in
+// the signal value so the shape stays consistent.
+type group struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Path      string    `json:"path"`
+	FullPath  string    `json:"full_path"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// GetGroup fetches /api/v4/groups/{path_url_encoded}. namespacePath
+// is the gitlab group full path (e.g. "gitlab-org" or nested-group
+// "gitlab-org/security"); same URL-encoding rule as GetProject.
+// Returns ErrNotFound (wrapped) on 404.
+func (c *Client) GetGroup(ctx context.Context, namespacePath string) (*group, error) {
+	var g group
+	if err := c.get(ctx, "/groups/"+projectIDPath(namespacePath), &g); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
+// user is the subset of /api/v4/users response fields the
+// owner_profile signal consumes when namespace.kind="user" on the
+// project response.
+type user struct {
+	ID        int       `json:"id"`
+	Username  string    `json:"username"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	State     string    `json:"state"`
+}
+
+// GetUserByUsername fetches /api/v4/users?username=<name> and
+// returns the first matching user. GitLab's users API doesn't
+// expose a /users/<username> form for unauthenticated clients —
+// the search endpoint is the public lookup. Returns ErrNotFound
+// (wrapped) when the search returns an empty array OR when the
+// HTTP response is 404. Distinguishes the two: the array-empty
+// case is a legitimate "no such user" and folds into ErrNotFound
+// so callers can errors.Is against the single sentinel.
+func (c *Client) GetUserByUsername(ctx context.Context, username string) (*user, error) {
+	var users []user
+	path := "/users?username=" + url.QueryEscape(username)
+	if err := c.get(ctx, path, &users); err != nil {
+		return nil, err
+	}
+	if len(users) == 0 {
+		return nil, fmt.Errorf("%w: /users?username=%s (no matching user)", ErrNotFound, username)
+	}
+	return &users[0], nil
+}

@@ -127,13 +127,88 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ("User" / "Organization") so posture rules consume the same
 	// "owner_type=Organization" string regardless of which forge
 	// produced the signal.
+	ownerType := normalizeOwnerType(p.Namespace.Kind)
 	result.RecordSignal(entity.ID, "owner_type", sourceName, now, signalTTL,
 		map[string]any{
-			"type":  normalizeOwnerType(p.Namespace.Kind),
+			"type":  ownerType,
 			"login": p.Namespace.Path,
 		})
 
+	// owner_profile (Tier 2): one extra API call routed by
+	// namespace.kind. Groups → /groups/<path>; users →
+	// /users?username=<login>. The two endpoints have different
+	// response shapes but map onto the same canonical owner_profile
+	// fields (login, name, created, account_age_days, type) that
+	// github and forgejo emit. Cross-forge posture rules read the
+	// signal without per-forge branching.
+	//
+	// Independent failure path: an owner_profile lookup error
+	// records as a per-signal failure on owner_profile alone; the
+	// Tier 1 signals above and owner_type are unaffected.
+	c.emitOwnerProfile(ctx, &result, entity.ID, p.Namespace, ownerType, now)
+
 	return &result, nil
+}
+
+// emitOwnerProfile fetches the owner record from the appropriate
+// gitlab endpoint and records the owner_profile signal (or a
+// failure on lookup error). Branch driven by namespace.kind from
+// the project response so this never makes an extra round-trip on
+// the discriminator — that's already known.
+func (c *Collector) emitOwnerProfile(ctx context.Context, result *signal.CollectionResult,
+	entityID string, ns projectNamespace, ownerType string, now time.Time) {
+
+	switch ns.Kind {
+	case "group":
+		g, err := c.client.GetGroup(ctx, ns.Path)
+		if err != nil {
+			result.RecordFailure(entityID, "owner_profile", sourceName,
+				sanitizeOwnerEndpointError(err), true, now)
+			return
+		}
+		result.RecordSignal(entityID, "owner_profile", sourceName, now, signalTTL,
+			map[string]any{
+				"login":            g.Path,
+				"name":             g.Name,
+				"created":          g.CreatedAt.Format(time.RFC3339),
+				"account_age_days": int(now.Sub(g.CreatedAt).Hours() / 24),
+				"type":             ownerType,
+			})
+	case "user":
+		u, err := c.client.GetUserByUsername(ctx, ns.Path)
+		if err != nil {
+			result.RecordFailure(entityID, "owner_profile", sourceName,
+				sanitizeOwnerEndpointError(err), true, now)
+			return
+		}
+		result.RecordSignal(entityID, "owner_profile", sourceName, now, signalTTL,
+			map[string]any{
+				"login":            u.Username,
+				"name":             u.Name,
+				"created":          u.CreatedAt.Format(time.RFC3339),
+				"account_age_days": int(now.Sub(u.CreatedAt).Hours() / 24),
+				"type":             ownerType,
+			})
+	default:
+		// Unknown namespace.kind. GitLab's documented values are
+		// "user" and "group"; anything else is novel API behavior.
+		// Record a non-retryable failure so the operator sees the
+		// unexpected value rather than getting a silent miss.
+		result.RecordFailure(entityID, "owner_profile", sourceName,
+			"unknown namespace.kind="+ns.Kind, false, now)
+	}
+}
+
+// sanitizeOwnerEndpointError trims a GetGroup or GetUserByUsername
+// error to a short reason safe for the persisted CollectionError.
+// Same convention as forgejo's sanitizeOwnerEndpointError.
+func sanitizeOwnerEndpointError(err error) string {
+	s := err.Error()
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…"
+	}
+	return s
 }
 
 // normalizeOwnerType maps gitlab's namespace.kind values onto the

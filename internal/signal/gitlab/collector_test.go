@@ -59,7 +59,8 @@ func newTestCollector(t *testing.T, handler http.Handler) *Collector {
 // helpers around path-vs-query escaping are easy to mix up).
 func mockGitLabAPI(t *testing.T) http.Handler {
 	t.Helper()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/projects/gitlab-org%2Fgitlab", func(w http.ResponseWriter, r *http.Request) {
 		const wantPath = "/projects/gitlab-org%2Fgitlab"
 		if r.URL.EscapedPath() != wantPath {
 			t.Errorf("expected encoded path %q, got %q (raw path %q) — slash MUST be %%2F-encoded",
@@ -81,6 +82,161 @@ func mockGitLabAPI(t *testing.T) http.Handler {
 			Archived:        false,
 		})
 	})
+	// /groups/<path> for owner_profile metadata when
+	// namespace.kind="group". The two API tests that drive this
+	// mock (TestCollector_HappyPath / _EmitsOwnerType) own a
+	// project under the "gitlab-org" group; this handler covers
+	// their group lookup so the owner_profile emission has data.
+	mux.HandleFunc("/groups/gitlab-org", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(group{
+			ID:        9970,
+			Name:      "GitLab.org",
+			Path:      "gitlab-org",
+			FullPath:  "gitlab-org",
+			CreatedAt: time.Date(2015, 8, 25, 0, 0, 0, 0, time.UTC),
+		})
+	})
+	return mux
+}
+
+// TestCollector_HappyPath_EmitsOwnerProfile pins the Tier 2
+// addition: owner_profile carries account-age + follower-context
+// metadata derived from /groups/<path> when the owner is a group,
+// or /users?username=<login> when the owner is a user. The
+// branching is driven by namespace.kind which Tier 1 already
+// captured.
+//
+// Canonical field shape matches github's owner_profile so cross-
+// forge posture rules read uniform fields:
+//
+//   - login, name, created, account_age_days, type
+//
+// Fields not in gitlab's basic responses (public_repos, followers
+// for groups) are emitted as zero so the signal shape stays
+// consistent. Downstream consumers can detect 0 and skip.
+func TestCollector_HappyPath_EmitsOwnerProfile(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	// /projects/{id} for Tier 1
+	mux.HandleFunc("/projects/gitlab-org%2Fgitlab", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(project{
+			ID:              278964,
+			Name:            "GitLab",
+			PathWithNS:      "gitlab-org/gitlab",
+			Namespace:       projectNamespace{Path: "gitlab-org", Kind: "group"},
+			CreatedAt:       time.Date(2017, 11, 27, 0, 42, 45, 0, time.UTC),
+			LastActivityAt:  time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+			StarCount:       23000,
+			ForksCount:      5800,
+			OpenIssuesCount: 32000,
+		})
+	})
+	// /groups/<path> — namespace.kind="group" routes here
+	mux.HandleFunc("/groups/gitlab-org", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          9970,
+			"name":        "GitLab.org",
+			"path":        "gitlab-org",
+			"full_path":   "gitlab-org",
+			"description": "Open source software to collaborate on code",
+			"created_at":  "2015-08-25T00:00:00Z",
+		})
+	})
+
+	c := newTestCollector(t, mux)
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "gitlab-org/gitlab",
+		URL:       "https://gitlab.com/gitlab-org/gitlab",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_profile" {
+			continue
+		}
+		assert.Equal(t, "gitlab", s.Source)
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "gitlab-org", v["login"],
+			"group path becomes the login on gitlab")
+		assert.Equal(t, "GitLab.org", v["name"],
+			"group name maps to the canonical name field")
+		assert.Equal(t, "2015-08-25T00:00:00Z", v["created"])
+		age, ok := v["account_age_days"].(float64)
+		require.True(t, ok)
+		assert.Greater(t, age, float64(0))
+		assert.Equal(t, "Organization", v["type"],
+			"namespace.kind=group → owner_profile.type=Organization")
+		return
+	}
+	t.Fatalf("owner_profile signal not emitted for group namespace")
+}
+
+// TestCollector_UserNamespace_EmitsOwnerProfile pins the parallel
+// branch: namespace.kind="user" routes through /users?username= to
+// fetch user metadata. Different gitlab endpoint shape than
+// /groups, so the collector's branching must produce the same
+// canonical signal value either way.
+func TestCollector_UserNamespace_EmitsOwnerProfile(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/projects/alice%2Fdotfiles", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(project{
+			ID:             1,
+			Name:           "dotfiles",
+			PathWithNS:     "alice/dotfiles",
+			Namespace:      projectNamespace{Path: "alice", Kind: "user"},
+			CreatedAt:      time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+			LastActivityAt: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			StarCount:      1,
+		})
+	})
+	// /users?username=alice — array response, first matching user.
+	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("username") != "alice" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":         42,
+				"username":   "alice",
+				"name":       "Alice Example",
+				"created_at": "2018-03-15T08:00:00Z",
+				"state":      "active",
+			},
+		})
+	})
+
+	c := newTestCollector(t, mux)
+	entity := &profile.Entity{
+		ID:        "e1",
+		Type:      profile.EntityProject,
+		ShortName: "alice/dotfiles",
+		URL:       "https://gitlab.com/alice/dotfiles",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		if s.Type != "owner_profile" {
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(s.Value, &v))
+		assert.Equal(t, "alice", v["login"])
+		assert.Equal(t, "Alice Example", v["name"])
+		assert.Equal(t, "2018-03-15T08:00:00Z", v["created"])
+		assert.Equal(t, "User", v["type"],
+			"namespace.kind=user → owner_profile.type=User")
+		return
+	}
+	t.Fatalf("owner_profile signal not emitted for user namespace")
 }
 
 // TestCollector_HappyPath_EmitsOwnerType pins the Tier 1.5 addition:
@@ -327,9 +483,13 @@ func TestCollector_Name(t *testing.T) {
 func TestCollector_NestedNamespace_EncodesEveryslash(t *testing.T) {
 	t.Parallel()
 
-	var sawPath string
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawPath = r.URL.EscapedPath()
+	// Capture the encoded paths each endpoint sees. Both /projects
+	// AND /groups need every slash %2F-encoded — the same nested
+	// namespace path flows through projectIDPath for both endpoints.
+	var sawProjectPath, sawGroupPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/projects/", func(w http.ResponseWriter, r *http.Request) {
+		sawProjectPath = r.URL.EscapedPath()
 		_ = json.NewEncoder(w).Encode(project{
 			ID:              1,
 			Name:            "foo",
@@ -342,7 +502,18 @@ func TestCollector_NestedNamespace_EncodesEveryslash(t *testing.T) {
 			OpenIssuesCount: 0,
 		})
 	})
-	c := newTestCollector(t, handler)
+	mux.HandleFunc("/groups/", func(w http.ResponseWriter, r *http.Request) {
+		sawGroupPath = r.URL.EscapedPath()
+		_ = json.NewEncoder(w).Encode(group{
+			ID:        9,
+			Name:      "security",
+			Path:      "security",
+			FullPath:  "gitlab-org/security",
+			CreatedAt: time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC),
+		})
+	})
+
+	c := newTestCollector(t, mux)
 	entity := &profile.Entity{
 		ID:        "e1",
 		Type:      profile.EntityProject,
@@ -352,12 +523,28 @@ func TestCollector_NestedNamespace_EncodesEveryslash(t *testing.T) {
 	_, err := c.Collect(context.Background(), entity)
 	require.NoError(t, err)
 
-	const wantPath = "/projects/gitlab-org%2Fsecurity%2Ffoo"
-	assert.Equal(t, wantPath, sawPath,
-		"nested namespace must encode EVERY slash; partial encoding would route to a different gitlab path or 404")
+	// /projects path: full nested namespace + project name encoded.
+	const wantProjectPath = "/projects/gitlab-org%2Fsecurity%2Ffoo"
+	assert.Equal(t, wantProjectPath, sawProjectPath,
+		"nested namespace must encode EVERY slash on /projects; partial encoding would route to a different gitlab path or 404")
+
+	// /groups path: namespace.Path is "gitlab-org/security" (parent
+	// group of the project). Same encoding rule — every slash must
+	// be %2F. owner_profile emission depends on this encoding being
+	// correct for nested groups; a regression here would 404 the
+	// owner_profile lookup silently and surface as a per-signal
+	// failure rather than a clean group fetch.
+	const wantGroupPath = "/groups/gitlab-org%2Fsecurity"
+	assert.Equal(t, wantGroupPath, sawGroupPath,
+		"nested-group owner_profile lookup must encode every slash in namespace.path; otherwise the /groups fetch 404s and owner_profile lands as a failure rather than a signal")
+
 	// Defense against a future regression that drops the wantPath
-	// variable: explicitly check no raw slashes survive the project ID.
-	pathPart, _, _ := strings.Cut(strings.TrimPrefix(sawPath, "/projects/"), "?")
-	assert.NotContains(t, pathPart, "/",
-		"the project-ID portion of the path must contain ZERO raw slashes")
+	// constants: explicitly check no raw slashes survive in the
+	// id-portion of either path.
+	idPart, _, _ := strings.Cut(strings.TrimPrefix(sawProjectPath, "/projects/"), "?")
+	assert.NotContains(t, idPart, "/",
+		"the project-ID portion of /projects must contain ZERO raw slashes")
+	idPart, _, _ = strings.Cut(strings.TrimPrefix(sawGroupPath, "/groups/"), "?")
+	assert.NotContains(t, idPart, "/",
+		"the group-ID portion of /groups must contain ZERO raw slashes")
 }
