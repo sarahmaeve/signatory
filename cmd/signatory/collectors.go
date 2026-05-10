@@ -262,21 +262,40 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 	// API-only collectors that need entity.URL but NOT a local
 	// clone. These run regardless of --path/--clone state — landing
 	// them before the clone-gated block means a bare repo: target
-	// without --clone still gets the API-derived signals it can
-	// collect (openssf-scorecard today; expansion candidates noted
-	// at the call site).
+	// without --clone still gets every API-derived signal that can
+	// be collected.
 	//
-	// openssf-scorecard talks to api.securityscorecards.dev with
-	// just owner/repo extracted from entity.URL — no git operations,
-	// no filesystem reads. The collector's own host self-gate
-	// (extractOwnerRepo → isGitHubHost) keeps it from firing for
-	// non-github entities; the dispatch-time check below merely
-	// avoids adding it for entities with no URL at all (where
-	// extractOwnerRepo would return ok=false anyway, but the
-	// suppress-when-empty narration rule would then hide a perfectly
-	// predictable no-op line).
+	// Membership: every collector here makes HTTP requests against
+	// a forge or third-party API and reads nothing from the local
+	// filesystem.
+	//
+	//   - github             api.github.com           (forge metadata)
+	//   - forgejo            codeberg.org/api/v1      (forge metadata)
+	//   - gitlab             gitlab.com/api/v4        (forge metadata)
+	//   - adoption           api.github.com search    (cross-ecosystem)
+	//   - openssf-scorecard  api.securityscorecards.dev
+	//
+	// Each collector owns its own host self-gate — github skips
+	// non-github URLs, forgejo skips non-codeberg, gitlab skips
+	// non-gitlab, adoption skips non-Go-shaped entities, openssf
+	// skips non-github. The dispatcher stays host-agnostic; the
+	// "[name] Collected 0 signals" noise from a fired self-gate is
+	// suppressed at the narration layer by
+	// signal.CollectionResult.WorthNarrating.
+	//
+	// Adoption's WithInRun is load-bearing: it reads "stars" from
+	// the in-run accumulator emitted by whichever forge metadata
+	// collector ran first. Dispatch order here puts the three
+	// per-forge collectors BEFORE adoption so the stars signal is
+	// available when adoption.Collect runs. Reordering would break
+	// the refs_to_stars ratio (silently zero) — pinned by adoption
+	// package's TestCollector_NoStarsInRun_StillEmits.
 	if isGitHostedEntity(entity) {
 		collectors = append(collectors,
+			ghcollector.NewCollector().WithEntityStore(opts.EntityStore),
+			forgejocollector.NewCollector(),
+			gitlabcollector.NewCollector(),
+			adoptioncollector.NewCollector().WithInRun(opts.InRunResult),
 			openssfcollector.NewCollector(),
 		)
 	}
@@ -285,8 +304,21 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 	// its URL is populated — either from a repo: scheme target at
 	// creation time, or from an npm package whose A.5 resolution
 	// found a github-hosted repository. Empty URL → no git origin →
-	// skip the github/git collector pair and do not require
+	// skip every clone-required collector and do not require
 	// --path/--clone.
+	//
+	// Membership: each collector reads from the local clone (.git/
+	// directory or the worktree filesystem).
+	//
+	//   - git         reads .git/ for commit history / signing / tags
+	//   - repofiles   reads filesystem for governance files
+	//   - exfilwatch  scans worktree for HTTP-capture hostnames
+	//   - source      reads .git/ for tag-shaped source evolution
+	//   - artifact    diffs clone tree against registry tarball
+	//
+	// All forge-agnostic: a clone from github / codeberg / gitlab
+	// (or a local-path test fixture, validated as a forge clone by
+	// validateExistingClone) reads identically.
 	//
 	// Graceful degradation: when registry or API-only collectors are
 	// already queued and the clone path can't be satisfied (no
@@ -296,14 +328,6 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 	// because a clone wasn't requested is hostile. Hard errors
 	// (origin mismatch, path not a clone) still fail loudly — those
 	// indicate user misconfiguration, not a missing optional flag.
-	//
-	// openssf in the queued-set is what lets a bare repo: target
-	// (e.g. `signatory analyze https://github.com/foo/bar` with no
-	// flags) succeed with API-derived signals instead of erroring.
-	// Pre-ungate, repo: targets had ONLY clone-required collectors
-	// and the len(collectors) > 0 check failed; ErrCloneRequired
-	// surfaced as the user-facing message. The new behavior is the
-	// natural extension of openssf no longer needing the clone.
 	if isGitHostedEntity(entity) {
 		clonePath, err := resolveClonePath(ctx, entity, opts)
 		if err != nil {
@@ -314,7 +338,7 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			if errors.Is(err, ErrCloneRequired) && len(collectors) > 0 {
 				if opts.Stderr != nil {
 					_, _ = fmt.Fprintf(opts.Stderr,
-						"note: pass --clone to also collect github + git + repofiles signals from %s\n",
+						"note: pass --clone to also collect git + repofiles + exfilwatch signals from %s\n",
 						entity.URL)
 				}
 				return collectors, nil
@@ -322,52 +346,12 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			return nil, err
 		}
 		collectors = append(collectors,
-			ghcollector.NewCollector().WithEntityStore(opts.EntityStore),
-			// Forgejo (codeberg.org) collector — Tier 1 metadata
-			// signals (stars/forks/archived/open_issues/repo_age/
-			// last_push) for codeberg-hosted entities. Self-gates on
-			// entity.URL host: github / gitlab / bitbucket URLs land
-			// in the dispatch but emit zero signals because the
-			// internal isForgejoHost check returns false. Same
-			// dispatch-shape discipline as the github / openssf
-			// collectors — every git-hosted entity walks the full
-			// collector list, each collector owns the host check for
-			// its own forge. The orchestrator stays host-agnostic.
-			forgejocollector.NewCollector(),
-			// GitLab (gitlab.com) collector — Tier 1 metadata signals
-			// for gitlab-hosted entities. Same shape and discipline as
-			// the forgejo collector entry above; self-gates on
-			// entity.URL host (isGitLabHost: gitlab.com only in v0.1).
-			// Self-hosted GitLab needs an explicit allow-list mechanism
-			// — same threat-model deferral as self-hosted Forgejo.
-			gitlabcollector.NewCollector(),
-			// Adoption collector — emits the "adoption" signal
-			// (inbound go.mod-ref count from GitHub code search,
-			// paired with stars for the refs_to_stars ratio) for any
-			// Go-ecosystem entity on github / codeberg / gitlab. Used
-			// to live inside the github collector as collectAdoption;
-			// lifted out so codeberg- and gitlab-hosted Go modules
-			// also receive the signal (the search backend stays
-			// GitHub-only, but the queried module path is forge-
-			// agnostic). Self-gates on ecosystem + URL host.
-			//
-			// WithInRun threads the orchestrator's in-run accumulator
-			// so the adoption emission can read whichever per-forge
-			// metadata collector emitted "stars" earlier in this same
-			// dispatch — github, forgejo, or gitlab. Dispatch order
-			// matters here: this collector is appended AFTER the three
-			// per-forge metadata collectors. Reordering would break
-			// the ratio (stars=0, refs_to_stars=0) — pinned by
-			// adoption package's TestCollector_NoStarsInRun_StillEmits.
-			adoptioncollector.NewCollector().WithInRun(opts.InRunResult),
 			// WithEntityStore wires the GPG signer-entity minting
 			// branch in the git collector (Path F). nil-safe — when
 			// opts.EntityStore is nil the branch silently skips.
 			// Mirrors the github / npm / pypi wiring pattern.
 			gitcollector.NewCollector(clonePath).WithEntityStore(opts.EntityStore),
 			repofilescollector.NewCollector(clonePath),
-			// openssf-scorecard moved out of this block — it's API-
-			// only and is dispatched above regardless of clone state.
 			// exfilwatch — literal scan of the clone tree for
 			// HTTP-capture-as-a-service hostnames. Cheap deterministic
 			// signal motivated by the BufferZoneCorp campaign (May 2026,

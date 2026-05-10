@@ -616,12 +616,20 @@ func TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation(t *t
 			}
 			assert.Contains(t, names, tc.wantName,
 				"registry collector for ecosystem %q must fire", tc.ecosystem)
-			assert.Contains(t, names, "openssf-scorecard",
-				"openssf is API-only and dispatches whenever entity.URL is set, regardless of clone state")
+			// Every API-only collector dispatches whenever
+			// entity.URL is set, regardless of clone state. See
+			// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+			// for the full API-only set rationale.
+			for _, want := range []string{"github", "forgejo", "gitlab", "adoption", "openssf-scorecard"} {
+				assert.Contains(t, names, want,
+					"API-only collector %q must dispatch even when no clone is available", want)
+			}
 			assert.NotContains(t, names, "git",
 				"clone-dependent git collector must NOT dispatch when no clone is available")
 			assert.NotContains(t, names, "repofiles",
 				"clone-dependent repofiles collector must NOT dispatch when no clone is available")
+			assert.NotContains(t, names, "exfilwatch",
+				"clone-dependent exfilwatch collector must NOT dispatch when no clone is available")
 			assert.Contains(t, stderr.String(), "pass --clone",
 				"should hint the user about --clone for additional signals")
 		})
@@ -632,16 +640,30 @@ func TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation(t *t
 // pins the post-ungate behavior for bare repo: targets without a
 // clone. Pre-ungate, repo: entities errored with ErrCloneRequired
 // because the only collectors that fired were clone-dependent;
-// after the openssf ungate (and any future API-only collectors
-// landing in the same pre-clone block), repo: entities degrade
-// gracefully — they still don't get git / repofiles / exfilwatch,
-// but the API-only collectors (openssf-scorecard) and the warning
-// surface so the operator knows what was skipped and why.
+// after the API-only collectors moved out of the clone-gated block,
+// repo: entities degrade gracefully — they still don't get the
+// clone-dependent set (git / repofiles / exfilwatch), but every
+// API-only collector that can run does.
 //
-// Same intent as the pkg-entity degradation: "collect whatever
-// you can." The asymmetry that existed pre-ungate (pkg: degrades,
-// repo: errors) was an artifact of pre-ungate dispatcher shape,
-// not a deliberate design distinction.
+// API-only set (this test pins the full membership):
+//
+//   - github          — calls api.github.com, reads owner/repo from URL
+//   - forgejo         — calls codeberg.org/api/v1, host-self-gates
+//   - gitlab          — calls gitlab.com/api/v4, host-self-gates
+//   - adoption        — calls GitHub code-search, derives module path
+//   - openssf-scorecard — calls api.securityscorecards.dev
+//
+// Clone-dependent set (must be absent here):
+//
+//   - git, repofiles, exfilwatch (all read the local clone)
+//   - source, source-golang (read .git for tag history)
+//   - artifact (compares clone tree against registry tarball)
+//
+// Same intent as the pkg-entity degradation: "collect whatever you
+// can." The asymmetry that existed pre-broader-ungate (pkg: degrades
+// minimally, repo: errors) was an artifact of which collectors had
+// been hardwired into the clone-gated block, not a deliberate design
+// distinction.
 func TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors(t *testing.T) {
 	t.Parallel()
 
@@ -655,20 +677,24 @@ func TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors(t *testing.
 		Stderr: &stderr,
 	})
 	require.NoError(t, err,
-		"repo: entity without --clone must NOT error — the API-only collectors (openssf) can still run")
+		"repo: entity without --clone must NOT error — every API-only collector still has work to do")
 
 	names := make([]string, 0, len(collectors))
 	for _, c := range collectors {
 		names = append(names, c.Name())
 	}
-	assert.Contains(t, names, "openssf-scorecard",
-		"openssf is API-only and must dispatch even without a clone")
-	assert.NotContains(t, names, "git",
-		"git collector requires a clone — must NOT dispatch when --clone is absent")
-	assert.NotContains(t, names, "repofiles",
-		"repofiles collector requires a clone — must NOT dispatch when --clone is absent")
+	// API-only set: all five must be dispatched.
+	for _, want := range []string{"github", "forgejo", "gitlab", "adoption", "openssf-scorecard"} {
+		assert.Contains(t, names, want,
+			"API-only collector %q must dispatch even without --clone (no git operations, no filesystem reads)", want)
+	}
+	// Clone-dependent set: all must be absent.
+	for _, mustSkip := range []string{"git", "repofiles", "exfilwatch"} {
+		assert.NotContains(t, names, mustSkip,
+			"clone-dependent collector %q must NOT dispatch when --clone is absent — it reads the local clone", mustSkip)
+	}
 	assert.Contains(t, stderr.String(), "pass --clone",
-		"warning must mention that --clone unlocks additional signals")
+		"warning must surface what --clone unlocks (the clone-dependent collectors)")
 }
 
 // TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll verifies
