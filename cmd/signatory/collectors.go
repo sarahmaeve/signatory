@@ -19,6 +19,7 @@ import (
 	forgejocollector "github.com/sarahmaeve/signatory/internal/signal/forgejo"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
+	gitlabcollector "github.com/sarahmaeve/signatory/internal/signal/gitlab"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
@@ -301,6 +302,13 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// collector list, each collector owns the host check for
 			// its own forge. The orchestrator stays host-agnostic.
 			forgejocollector.NewCollector(),
+			// GitLab (gitlab.com) collector — Tier 1 metadata signals
+			// for gitlab-hosted entities. Same shape and discipline as
+			// the forgejo collector entry above; self-gates on
+			// entity.URL host (isGitLabHost: gitlab.com only in v0.1).
+			// Self-hosted GitLab needs an explicit allow-list mechanism
+			// — same threat-model deferral as self-hosted Forgejo.
+			gitlabcollector.NewCollector(),
 			// WithEntityStore wires the GPG signer-entity minting
 			// branch in the git collector (Path F). nil-safe — when
 			// opts.EntityStore is nil the branch silently skips.

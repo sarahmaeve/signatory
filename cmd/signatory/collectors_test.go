@@ -297,6 +297,34 @@ func TestCollectorsFor_CodebergEntity_IncludesForgejoCollector(t *testing.T) {
 		"codeberg-hosted entity must dispatch the forgejo collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for codeberg targets")
 }
 
+// TestCollectorsFor_GitLabEntity_IncludesGitLabCollector pins the
+// gitlab Tier 1 wiring symmetric to the codeberg/forgejo pairing:
+// every git-hosted entity walks the full collector list, each with
+// its own host-side self-gate. A gitlab entity must reach the
+// gitlab collector at dispatch time (the collector then emits
+// signals because its self-gate accepts gitlab.com URLs). Same
+// dispatch-shape discipline that landed for forgejo.
+func TestCollectorsFor_GitLabEntity_IncludesGitLabCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://gitlab.com/gitlab-org/gitlab")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "gitlab",
+		"gitlab-hosted entity must dispatch the gitlab collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for gitlab targets")
+}
+
 // TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime
 // pins the inverse: a github entity routes through the forgejo
 // collector's dispatch, but the collector self-gates and emits zero
@@ -330,6 +358,8 @@ func TestCollectorsFor_GitHubEntity_OmitsForgejoCollectorAtCollectTime(t *testin
 	// orchestrator stays host-agnostic.
 	assert.Contains(t, names, "forgejo",
 		"forgejo collector must be dispatched for every git-hosted entity; the self-gate decides whether to emit signals")
+	assert.Contains(t, names, "gitlab",
+		"gitlab collector must be dispatched for every git-hosted entity; the self-gate decides whether to emit signals (proven empty by TestCollector_NonGitLabEntity_ReturnsEmpty in the gitlab package)")
 }
 
 // TestCollectorsFor_GitLabOriginMatches_HTTPSForm — same shape for GitLab.
@@ -364,7 +394,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 6, "github + forgejo + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
+	assert.Len(t, collectors, 7, "github + forgejo + gitlab + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)
