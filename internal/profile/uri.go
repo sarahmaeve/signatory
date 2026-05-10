@@ -275,21 +275,22 @@ func CanonicalPatchURI(platform, owner, repo, id string) string {
 //
 // This is intentionally GitHub-specific. Multi-forge call sites
 // (ResolveTarget, validateCloneOrigin, ensureCloneAtPath, the
-// cargo/gem/gopublish/npm/pypi resolvers) use NormalizeForgeRepoInput
-// instead — that path admits codeberg.org and gitlab.com via a
-// host-prefix table. NormalizeGitHubRepoInput is retained for the
-// remaining github-only sites:
+// cargo/gem/gopublish/npm/pypi resolvers, the MCP read tools) use
+// ResolveTarget or NormalizeForgeRepoInput instead — those paths
+// admit codeberg.org and gitlab.com via a host-prefix table.
+// NormalizeGitHubRepoInput is retained for the remaining github-only
+// sites:
 //
 //   - cmd/signatory/handoff.go: handoff's --network-precheck calls
 //     the github API directly and has no multi-forge equivalent yet.
 //   - internal/signal/openssf: OpenSSF Scorecard only ranks github
 //     repos, so the collector gates with isGitHubHost upstream and
 //     uses the github-only normalizer for owner/repo extraction.
-//   - internal/mcp/tools: target normalization for MCP-surface
-//     callers; multi-forge generalization is a planned follow-up.
 //
 // New code that wants multi-forge classification should call
-// NormalizeForgeRepoInput instead.
+// ResolveTarget (for full target normalization including pkg: URIs
+// and registry URLs) or NormalizeForgeRepoInput (for forge-shorthand
+// only) instead.
 func NormalizeGitHubRepoInput(input string) (uri, owner, name string, err error) {
 	s := strings.TrimSpace(input)
 	if s == "" {

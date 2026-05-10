@@ -280,3 +280,49 @@ func TestDominantForgeryResistance(t *testing.T) {
 // JSON or doesn't set additionalProperties:false, so any tool that
 // successfully wires into the production server has already passed
 // both checks — re-asserting them per-tool was tautological.
+
+// TestAnalyzeTool_CodebergURL_ResolvesToCanonical pins the multi-forge
+// generalization for the analyze tool. Same rationale as
+// TestSignalsTool_CodebergURL_ResolvesToCanonical — pre-fix, codeberg
+// URLs reaching this tool went through NormalizeGitHubRepoInput's
+// permissive prefix-strip and produced repo:github/codeberg.org/<owner>;
+// the lookup missed the real codeberg entity and returned
+// CodeCacheMissRequiresRefresh even when the analysis existed.
+//
+// Post-fix, profile.ResolveTarget produces repo:codeberg/<owner>/<name>
+// and the lookup hits.
+func TestAnalyzeTool_CodebergURL_ResolvesToCanonical(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:codeberg/forgejo/forgejo", "forgejo/forgejo")
+	seedSignal(t, s, e.ID)
+
+	tool := &AnalyzeTool{Store: s}
+	resp := tool.Handle(context.Background(),
+		json.RawMessage(`{"target":"https://codeberg.org/forgejo/forgejo"}`))
+
+	require.Equal(t, "ok", resp.Status,
+		"codeberg URL must resolve to the canonical codeberg URI rather than the buggy repo:github/codeberg.org/<owner> rendering NormalizeGitHubRepoInput produced")
+	data, ok := resp.Data.(analyzeData)
+	require.True(t, ok, "expected analyzeData, got %T", resp.Data)
+	assert.Equal(t, "repo:codeberg/forgejo/forgejo", data.Entity.CanonicalURI,
+		"canonical URI in the response must reflect the correct platform=codeberg classification")
+}
+
+// TestAnalyzeTool_MalformedTarget_SchemaViolation — same contract shift
+// as TestSignalsTool_MalformedTarget_SchemaViolation. The pre-fix
+// NormalizeGitHubRepoInput failure-falls-through-to-raw-target pattern
+// would have produced CodeCacheMissRequiresRefresh on a synthesized
+// invalid URI; the post-fix ResolveTarget path classifies it as a
+// schema violation, which is what the LLM caller actually needs to
+// hear ("input was malformed", not "no analysis on file").
+func TestAnalyzeTool_MalformedTarget_SchemaViolation(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &AnalyzeTool{Store: s}
+
+	resp := tool.Handle(context.Background(),
+		json.RawMessage(`{"target":"not a valid target"}`))
+	assert.Equal(t, "error", resp.Status)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
+}
