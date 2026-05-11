@@ -163,7 +163,7 @@ type PruneCmd struct {
 // shorthand, versioned or not — so the UX matches every other
 // target-taking verb (posture, burn, analyze).
 type PruneEntityCmd struct {
-	Target      string `arg:"" help:"Entity to delete. Accepts canonical URIs (pkg:/repo:/identity:/org:/patch:), GitHub shorthand (owner/repo), and entity UUIDs. Versioned URIs look up the UNVERSIONED entity under Plan A — pass the UUID if you want the versioned row specifically."`
+	Target      string `arg:"" help:"Entity to delete. Accepts canonical URIs (pkg:/repo:/identity:/org:/patch:), GitHub shorthand (owner/repo), forge URLs (github.com/, gitlab.com/, codeberg.org/), and entity UUIDs. Versioned URIs look up the UNVERSIONED entity under Plan A — pass the UUID if you want the versioned row specifically."`
 	Destructive bool   `help:"Reveal the plan AND prompt for confirmation before applying. Without this flag the command runs in inform-only (dry-run) mode and exits without writes. Even with the flag, the interactive [y/N] prompt must be answered affirmatively."`
 }
 

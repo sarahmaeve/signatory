@@ -80,19 +80,25 @@ type ResolvedTarget struct {
 //
 // Accepts:
 //
-//   - GitHub shorthand:   owner/repo
-//   - GitHub hostname:    github.com/owner/repo
-//   - GitHub URL:         https://github.com/owner/repo
-//   - GitHub .git suffix: https://github.com/owner/repo.git
-//   - SSH form:           git@github.com:owner/repo.git
-//   - Canonical repo:     repo:github/owner/repo
+//   - GitHub shorthand:   owner/repo (back-compat default; bare
+//     shorthand with no host resolves to GitHub)
+//   - Forge hostname:     github.com/owner/repo,
+//     gitlab.com/owner/repo,
+//     codeberg.org/owner/repo
+//   - Forge URL:          https://{github.com|gitlab.com|codeberg.org}/
+//     owner/repo (optional .git suffix)
+//   - SSH form:           git@<host>:owner/repo.git for each
+//     first-classed forge
+//   - Canonical repo:     repo:<forge>/owner/repo (forge ∈ github,
+//     gitlab, codeberg)
 //   - Canonical pkg:      pkg:cargo/atuin (and other ecosystems)
-//   - Canonical identity: identity:github/alecthomas
-//   - Canonical org:      org:github/stretchr
-//   - Canonical patch:    patch:github/owner/repo/42
+//   - Canonical identity: identity:<forge>/<user>
+//   - Canonical org:      org:<forge>/<name>
+//   - Canonical patch:    patch:<forge>/owner/repo/42
 //
 // Returns an error for empty input, malformed canonical URIs, or
-// non-URI strings that don't parse as a GitHub shorthand.
+// non-URI strings that don't parse as a GitHub shorthand or
+// recognized forge URL.
 //
 // Design principle: this helper is the single source of truth for
 // CLI target acceptance. If it accepts a form, every signatory

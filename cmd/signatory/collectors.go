@@ -458,16 +458,17 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 }
 
 // isGitHostedEntity reports whether an entity has a git origin the
-// github + git-local-clone collectors can operate against.
+// forge + git-local-clone collectors can operate against.
 //
 // Non-empty URL is the gate: upstream code sets URL only after
-// validation — resolved.CloneURL for repo: entities is github-only
-// (other platforms yield an error before reaching this point); the
-// npm provider's github-allowlist check gates pkg: entities in A.5;
+// validation — resolved.CloneURL for repo: entities is populated by
+// the recognized forges (github, gitlab, codeberg) and unsupported
+// platforms yield an error before reaching this point; the npm
+// provider's github-allowlist check gates pkg: entities in A.5;
 // tests inject filesystem paths for local-clone-without-network
 // scenarios. An empty URL is the unambiguous "nothing to clone"
-// signal — unresolved npm packages, gitlab repos before the
-// collector lands, etc.
+// signal — unresolved npm packages, repos whose source could not be
+// resolved, etc.
 func isGitHostedEntity(entity *profile.Entity) bool {
 	return entity != nil && entity.URL != ""
 }

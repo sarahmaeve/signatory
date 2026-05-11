@@ -86,18 +86,20 @@ func (c *Client) resolveViaProxy(ctx context.Context, modulePath string) (string
 		return "", false, nil // inconclusive — fall back
 	}
 
-	// Reduce the Origin URL to the canonical github form via the
-	// CLI-wide target parser. Non-github URLs (gitlab, bitbucket,
-	// self-hosted GHE) get rejected here — signatory v0.1's
-	// downstream collectors are github-only, and stamping a non-
-	// github URL would trip isGitHostedEntity into a false positive
-	// followed by a github-API call against the wrong host.
+	// Reduce the Origin URL to the canonical https://<host>/<owner>/<repo>
+	// form via the CLI-wide target parser. First-classed forges
+	// (github, gitlab, codeberg) pass; non-first-classed origins
+	// (bitbucket, self-hosted GHE, unparseable URLs) get rejected
+	// here, because stamping an unsupported URL would trip
+	// isGitHostedEntity into a false positive followed by a
+	// forge-API call against a host we have no collector for.
 	url, ok := canonicalForgeURL(info.Origin.URL)
 	if !ok {
-		// Origin URL is non-github (or unparseable). The proxy was
-		// authoritative; we don't fall back to the meta tag in this
-		// case because the proxy already named the repo and saying
-		// "not github" — the meta tag wouldn't change that answer.
+		// Origin URL is on a forge signatory hasn't first-classed yet
+		// (or is unparseable). The proxy was authoritative; we don't
+		// fall back to the meta tag in this case because the proxy
+		// already named the repo and saying "not a supported forge" —
+		// the meta tag wouldn't change that answer.
 		return "", true, nil
 	}
 	return url, true, nil

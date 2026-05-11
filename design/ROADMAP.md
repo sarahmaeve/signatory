@@ -1,6 +1,6 @@
 # Signatory: Roadmap
 
-Last updated: 2026-05-04
+Last updated: 2026-05-11
 
 ## V0.1 — Remaining
 
@@ -37,7 +37,7 @@ These are nice-to-have and may slip to v0.1.1 if the contract milestones take lo
 ## V0.2 — Planned
 
 - Federated burn list subscription/sync protocol
-- GitLab signal collector (non-GitHub platform support)
+- Authenticated GitLab / Codeberg collectors (v0.1 added unauthenticated GitLab and Forgejo/Codeberg signal collectors; tokens land in v0.2 when survey-side usage emerges)
 - Dependency graph visualization
 - Cross-ecosystem correlation (detect coordinated campaigns)
 - Scan repos / directories for policy violations (what's already in your local db)

@@ -7,7 +7,7 @@ Clone signatory, evaluate `golang.org/x/mod`, and record a posture decision.
 - Go 1.25+
 - Git in PATH
 - [Claude Code](https://claude.com/claude-code) or another MCP-capable client
-- `GITHUB_TOKEN` in your environment — highly recommended; without it many GitHub signals come back empty
+- `GITHUB_TOKEN` in your environment — highly recommended for GitHub targets; without it many GitHub signals come back empty. GitLab and Codeberg collectors run unauthenticated in v0.1 against the public API rate limits.
 - macOS or Linux (Windows is not yet supported)
 
 ## 1. Clone and build

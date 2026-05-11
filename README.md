@@ -27,11 +27,11 @@ and fraud investigation: gather evidence on projects and the teams
 behind them, weigh each signal by how hard it is to forge, and decide
 whether something is worth trusting, worth forking, or worth replacing.
 
-Signatory aggregates trust signals from GitHub, git history, and
-package registries. High-quality LLM-generated code and comments are
-now cheap, so signatory emphasizes more durable signals: institutional
-tenure, cryptographic signatures, and your own organization's signed
-attestations.
+Signatory aggregates trust signals from source forges (GitHub, GitLab,
+and Codeberg), git history, and package registries. High-quality
+LLM-generated code and comments are now cheap, so signatory emphasizes
+more durable signals: institutional tenure, cryptographic signatures,
+and your own organization's signed attestations.
 
 Your *own* decisions are the highest-value signals in the system.
 

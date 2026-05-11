@@ -419,7 +419,7 @@ func ensureEntity(ctx context.Context, s store.Store, target string) (*profile.E
 	// need to build the stub row.
 	resolved, rerr := profile.ResolveTarget(target)
 	if rerr != nil {
-		return nil, fmt.Errorf("cannot resolve %q: not a recognized target form (expected GitHub shorthand / URL or one of pkg:<ecosystem>/<name>[@<version>], repo:<platform>/<owner>/<name>, identity:<platform>/<user>, org:<platform>/<name>, patch:<platform>/<owner>/<repo>/<id>): %w", target, rerr)
+		return nil, fmt.Errorf("cannot resolve %q: not a recognized target form (expected forge URL (github.com / gitlab.com / codeberg.org), GitHub shorthand (owner/repo), or canonical URI: pkg:<ecosystem>/<name>[@<version>], repo:<platform>/<owner>/<name>, identity:<platform>/<user>, org:<platform>/<name>, patch:<platform>/<owner>/<repo>/<id>): %w", target, rerr)
 	}
 
 	entity := &profile.Entity{

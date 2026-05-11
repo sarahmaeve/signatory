@@ -2,10 +2,10 @@
 
 ## Premise
 
-Signatory collects trust signals from platforms — primarily GitHub
-today, eventually GitLab, npm registry, PyPI, and others. We treat
-these signals as evidence about the trustworthiness of code, projects,
-and people.
+Signatory collects trust signals from platforms — source forges
+(GitHub, GitLab, Codeberg) and package registries (npm, PyPI, Go module
+proxy, and others). We treat these signals as evidence about the
+trustworthiness of code, projects, and people.
 
 But how trustworthy is the evidence itself?
 
