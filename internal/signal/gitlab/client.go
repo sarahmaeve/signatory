@@ -297,3 +297,98 @@ func (c *Client) GetUserByUsername(ctx context.Context, username string) (*user,
 	}
 	return &users[0], nil
 }
+
+// treeEntry is the subset of /api/v4/projects/{id}/repository/tree
+// entries this client reads. GitLab tree entries carry Type ∈
+// {"blob" (file), "tree" (directory), "commit" (submodule)}. Only
+// "blob" entries inform ecosystem manifest detection — directories
+// and submodules are dropped by ListRootFilenames.
+//
+// Field names are project-internal: the ecosystem.Source contract
+// returns []string of file names, so the decoded shape stays per-forge
+// rather than being lifted into a shared type.
+type treeEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// namespacePathFromOwnerRepo joins (owner, repoName) into the GitLab
+// namespace path GetProject expects. NormalizeForgeRepoInput collapses
+// gitlab inputs to two segments (owner, repo) — same shape as github/
+// forgejo — so the ecosystem.Source contract takes only owner+name and
+// we synthesize the namespace path here. Nested-group projects on
+// gitlab.com (e.g., gitlab-org/security/foo) need a richer
+// representation that the precheck path does not yet support; this is
+// a known follow-up shared with NormalizeForgeRepoInput. Until then,
+// the precheck addresses top-level projects only, which covers the
+// common case (gitlab-org/gitlab, gitlab-org/cli, etc.).
+func namespacePathFromOwnerRepo(owner, repoName string) string {
+	return owner + "/" + repoName
+}
+
+// ListRootFilenames returns the names of regular files at the project
+// root. Implements the ecosystem.Source contract so --network-precheck
+// can detect ecosystems (go.mod, package.json, Cargo.toml, ...) on
+// gitlab.com targets the same way it does on github.com / codeberg.org.
+//
+// Returns (nil, nil) for a missing or private project (ErrNotFound) so
+// the detector can degrade to its language-only path instead of
+// surfacing a hard error. Matches the github/forgejo Source shapes for
+// the same reason.
+//
+// One API call against /repository/tree (root path by default).
+// Directories and submodules are filtered out client-side; ecosystem
+// detection only cares about files.
+func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) ([]string, error) {
+	var entries []treeEntry
+	path := "/projects/" + projectIDPath(namespacePathFromOwnerRepo(owner, repoName)) + "/repository/tree"
+	if err := c.get(ctx, path, &entries); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "blob" {
+			names = append(names, e.Name)
+		}
+	}
+	return names, nil
+}
+
+// GetRepoLanguage returns GitLab's primary-language guess for a project
+// — defined as the language with the highest percentage in
+// /api/v4/projects/{id}/languages. GitLab computes per-language
+// percentages from the project tree and exposes them as a JSON object
+// {"Ruby": 80.5, "JavaScript": 12.3, ...}; we project to the single
+// max-percentage language so the result matches github/forgejo's
+// "primary language" semantic.
+//
+// Returns the empty string (not an error) when:
+//   - The languages endpoint responds 404 (project doesn't exist or
+//     is private to the unauthenticated client).
+//   - The languages object is empty (docs-only / empty project).
+//
+// Aligns with github/forgejo's "empty when absent" handling so the
+// ecosystem detector can apply the same "language=” → fall back to
+// manifest" reasoning across forges.
+func (c *Client) GetRepoLanguage(ctx context.Context, owner, repoName string) (string, error) {
+	var languages map[string]float64
+	path := "/projects/" + projectIDPath(namespacePathFromOwnerRepo(owner, repoName)) + "/languages"
+	if err := c.get(ctx, path, &languages); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	var topLang string
+	var topPct float64
+	for lang, pct := range languages {
+		if pct > topPct {
+			topPct = pct
+			topLang = lang
+		}
+	}
+	return topLang, nil
+}

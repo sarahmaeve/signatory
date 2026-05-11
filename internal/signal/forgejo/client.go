@@ -264,3 +264,87 @@ func (c *Client) GetUser(ctx context.Context, name string) (*userProfile, error)
 	}
 	return &u, nil
 }
+
+// repoContent is the subset of /api/v1/repos/{owner}/{repo}/contents
+// entries this client reads. Forgejo's content endpoint mirrors
+// github's: each entry carries Name and Type ∈ {"file", "dir",
+// "symlink", "submodule"}. Only "file" entries inform ecosystem
+// manifest detection — directories, symlinks, and submodules are
+// dropped by ListRootFilenames.
+//
+// Field-name alignment with github.repoContent is deliberate: the
+// ecosystem.Source contract (ListRootFilenames) returns []string of
+// file names, so the per-forge decoded shape is internal to each
+// client. Keeping the field names parallel makes the two
+// implementations cheap to read side-by-side.
+type repoContent struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// ListRootFilenames returns the names of regular files at the repo
+// root. Implements the ecosystem.Source contract so --network-precheck
+// can detect ecosystems (go.mod, package.json, Cargo.toml, ...) on
+// codeberg.org targets the same way it does on github.com.
+//
+// Returns (nil, nil) for a missing or private repo (ErrNotFound), so
+// the detector can degrade to its language-only path instead of
+// surfacing a hard error. Matches github.Client.ListRootFilenames's
+// shape for the same reason — the ecosystem detector reads from a
+// single uniform interface across forges.
+//
+// One API call. Directories, symlinks, and submodules are filtered
+// out client-side; ecosystem detection only cares about files.
+func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) ([]string, error) {
+	var entries []repoContent
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName) + "/contents"
+	if err := c.get(ctx, path, &entries); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "file" {
+			names = append(names, e.Name)
+		}
+	}
+	return names, nil
+}
+
+// GetRepoLanguage returns Forgejo's primary-language guess for a
+// repo — defined as the language with the highest byte count in
+// /api/v1/repos/{owner}/{repo}/languages. Forgejo, like Gitea,
+// computes per-language byte counts from the repo tree and exposes
+// them as a JSON object {"Go": 12345, "JavaScript": 678, ...}; we
+// project to the single max-byte language so the result matches
+// github's "primary language" semantic.
+//
+// Returns the empty string (not an error) when:
+//   - The languages endpoint responds 404 (repo doesn't exist or
+//     is private to the unauthenticated client).
+//   - The languages object is empty (docs-only / empty repo).
+//
+// These align with github.GetRepoLanguage's "empty when absent"
+// handling so the ecosystem detector can apply the same
+// "language=” → fall back to manifest" reasoning across forges.
+func (c *Client) GetRepoLanguage(ctx context.Context, owner, repoName string) (string, error) {
+	var languages map[string]int64
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName) + "/languages"
+	if err := c.get(ctx, path, &languages); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	var topLang string
+	var topBytes int64
+	for lang, bytes := range languages {
+		if bytes > topBytes {
+			topBytes = bytes
+			topLang = lang
+		}
+	}
+	return topLang, nil
+}
