@@ -18,7 +18,9 @@ import (
 	"github.com/sarahmaeve/signatory/internal/ecosystem/resolver"
 	"github.com/sarahmaeve/signatory/internal/pipeline"
 	"github.com/sarahmaeve/signatory/internal/profile"
+	forgejoclient "github.com/sarahmaeve/signatory/internal/signal/forgejo"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
+	gitlabclient "github.com/sarahmaeve/signatory/internal/signal/gitlab"
 	"github.com/sarahmaeve/signatory/internal/store"
 	"github.com/sarahmaeve/signatory/internal/synthesis"
 )
@@ -48,9 +50,10 @@ import (
 //
 // Network behavior: this command is offline by default. Language and
 // ecosystem auto-detection from a remote repo is available via the
-// --network-precheck flag, which probes the GitHub API for the
-// target's primary language and ecosystem markers. Without it, pass
-// --language and --ecosystem explicitly.
+// --network-precheck flag, which probes the API of the detected forge
+// (github.com, codeberg.org, or gitlab.com) for the target's primary
+// language and ecosystem markers. Without it, pass --language and
+// --ecosystem explicitly.
 type HandoffCmd struct {
 	Role   string `arg:"" enum:"security,provenance,synthesist" help:"Analyst role: security, provenance, or synthesist."`
 	Target string `arg:"" help:"Target repository URL or local path (e.g., https://github.com/foo/bar or /Users/me/code/foo)."`
@@ -59,14 +62,14 @@ type HandoffCmd struct {
 	URL        string `help:"Override TARGET_URL (default: target when target is a URL)."`
 	Path       string `help:"Override TARGET_PATH (default: target when target is a local path)."`
 	TargetRole string `name:"target-role" default:"" help:"Dependency role for TARGET_ROLE (runtime|validation|build-only|development)." enum:"runtime,validation,build-only,development,"`
-	Ecosystem  string `default:"" help:"ECOSYSTEM value for provenance role (pypi|npm|crates|go). Auto-detected with --network-precheck." enum:"pypi,npm,crates,go,"`
+	Ecosystem  string `default:"" help:"ECOSYSTEM value for provenance role (pypi|npm|crates|go). Auto-detected with --network-precheck against the target's forge (github, codeberg, gitlab)." enum:"pypi,npm,crates,go,"`
 	// Language default is "" — kong would otherwise make it
 	// impossible to distinguish "user passed --language=python" from
 	// "user omitted it and kong filled in the default", and the
 	// --network-precheck path needs that distinction to know whether
 	// to apply a detected language. Resolved to "python" in Run if
 	// still empty after precheck.
-	Language   string `help:"Language flavor for security role (python|go). Auto-detected with --network-precheck; falls back to python." default:"" enum:"python,go,"`
+	Language   string `help:"Language flavor for security role (python|go). Auto-detected with --network-precheck against the target's forge (github, codeberg, gitlab); falls back to python." default:"" enum:"python,go,"`
 	Intake     string `help:"INTAKE_QUESTION body; the user's specific question for this engagement (one-line)."`
 	IntakeFile string `name:"intake-file" help:"Path to a file containing the INTAKE_QUESTION (or '-' for stdin). Use this for multi-line briefs that would otherwise need heredoc gymnastics."`
 	Template   string `help:"Explicit template name (e.g., handoffs/security-review-v1.md). Bypasses --role/--language inference."`
@@ -76,7 +79,7 @@ type HandoffCmd struct {
 	ConfigFile   string   `name:"config" help:"Path to signatory.config.toml. If unset, discovered from --project-dir." type:"existingfile"`
 	ProjectDir   string   `name:"project-dir" help:"Project root used to locate ./templates/, ./filestore/, and signatory.config.toml." default:"." type:"path"`
 
-	NetworkPrecheck bool   `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the GitHub API (requires a github.com target). Offline by default; this is the opt-in that authorizes network calls."`
+	NetworkPrecheck bool   `name:"network-precheck" help:"Fill unset --language and --ecosystem by calling the API of the target's forge (github.com, codeberg.org, or gitlab.com). Offline by default; this is the opt-in that authorizes network calls."`
 	CloneDir        string `name:"clone-dir" help:"Clone the target URL into CLONE_DIR/<repo-name>/ with full history and use that path for TARGET_PATH. Skipped if the destination already exists. Requires target to be a URL." type:"path"`
 
 	AnalysisSessionID string `name:"analysis-session-id" help:"Link the handoff (and the analyst's resulting ingest) to an analysis_sessions.id. Get the id from 'signatory analysis begin'. Validated before render — unknown or already-terminal ids fail here rather than being discovered by the dispatched subagent."`
@@ -88,12 +91,17 @@ type HandoffCmd struct {
 	DepositTo   string `name:"deposit-to" help:"Deposit the rendered handoff into the named pipeline session (UUID from 'signatory pipeline session create'). Conflicts with --output — deposit replaces file/stdout as the destination."`
 	PipelineURL string `name:"pipeline-url" help:"Override the pipeline service base URL used by --deposit-to. Ignored when --deposit-to is not set." default:"${pipelineURL}"`
 
-	// PrecheckSource overrides the GitHub-backed ecosystem.Source used
-	// by --network-precheck. nil → fall through to
-	// ghclient.NewClient(GITHUB_TOKEN) at call time. Exists as a
-	// struct-field seam (not a package-level var) so parallel tests
-	// can't race each other's injection, and so the dependency graph
-	// is visible from HandoffCmd's type definition.
+	// PrecheckSource overrides the ecosystem.Source used by
+	// --network-precheck. nil → fall through to
+	// precheckSourceForPlatform at call time, which dispatches on the
+	// detected forge (github / codeberg / gitlab) to the right API
+	// client. Exists as a struct-field seam (not a package-level var)
+	// so parallel tests can't race each other's injection, and so the
+	// dependency graph is visible from HandoffCmd's type definition.
+	//
+	// The seam is a single Source rather than a per-platform map: tests
+	// inject one fake that stands in regardless of target platform,
+	// keeping the test shape identical across forges.
 	//
 	// kong:"-" excludes the field from the CLI surface — it's a
 	// programmatic seam, not a user-tunable flag.
@@ -567,18 +575,21 @@ func (cmd *HandoffCmd) assembleSynthesisEvidence(ctx context.Context, globals *G
 	return string(raw), nil
 }
 
-// applyNetworkPrecheck resolves the target to a GitHub owner/name,
+// applyNetworkPrecheck resolves the target to a forge owner/name,
 // calls the ecosystem detector, and fills cmd.Language / cmd.Ecosystem
 // for any field the user left empty. Returns a short stderr-report
 // string describing what was detected (or "" when nothing is worth
 // reporting, e.g. the user had already set everything).
 //
 // Behavior:
-//   - Target must be a github.com URL (scheme + host checked against
-//     whitelisted forms). Other hosts error immediately — we have no
-//     detection code for them yet.
-//   - Token comes from GITHUB_TOKEN if set; unauthenticated otherwise
-//     (60/hour quota, but two calls per run fits comfortably).
+//   - Target must resolve to a recognized forge (github.com,
+//     codeberg.org, or gitlab.com). The platform is selected by
+//     profile.NormalizeForgeRepoInput; the corresponding API client
+//     is wired by precheckSourceForPlatform. Other hosts error
+//     immediately — we have no detection code for them yet.
+//   - For github targets, GITHUB_TOKEN authenticates the API client;
+//     codeberg and gitlab are unauthenticated in v0.1 (their public
+//     rate limits cover a single-target analyze).
 //   - A detected ecosystem like "go" overrides an empty --ecosystem;
 //     it never clobbers a user-provided value.
 //   - A detected language of "Go" maps to --language=go; anything
@@ -589,15 +600,16 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 	// Pkg-target pre-resolution: if the caller passed a pkg:<eco>/
 	// URI (or an npmjs.com URL that ResolveTarget canonicalized to
 	// one), consult the ecosystem resolver registry to find its
-	// declared source repository. Precheck is GitHub-only; this
-	// bridge lets users paste a pkg URI without hand-translating
-	// to the source repo first. Works for any registered ecosystem
-	// (npm, go, future pypi/cargo) — the registry dispatches.
+	// declared source repository. The declared source must land on
+	// a recognized forge (github, codeberg, or gitlab); this bridge
+	// lets users paste a pkg URI without hand-translating to the
+	// source repo first. Works for any registered ecosystem (npm,
+	// go, future pypi/cargo) — the registry dispatches.
 	//
 	// Security note: for most ecosystems (npm, Go via vanity URLs)
 	// the declared source is self-reported by the publisher and
 	// not cryptographically bound. A malicious package could
-	// declare a famous GitHub URL as its "source." The precheck
+	// declare a famous forge URL as its "source." The precheck
 	// report below discloses DeclaredSource.SelfReported verbatim
 	// so a human skimming the output can sanity-check before
 	// trusting the downstream analysis.
@@ -632,8 +644,8 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 		if source.URL == "" {
 			return "", fmt.Errorf("%s package %q declares no resolvable source repository; pass the source URL explicitly", resolved.Ecosystem, name)
 		}
-		if !looksLikeGitHubURL(source.URL) {
-			return "", fmt.Errorf("%s package %q declares source %q; only github.com sources are supported by --network-precheck", resolved.Ecosystem, name, source.URL)
+		if !looksLikeSupportedForgeURL(source.URL) {
+			return "", fmt.Errorf("%s package %q declares source %q; --network-precheck only supports github.com, codeberg.org, and gitlab.com sources", resolved.Ecosystem, name, source.URL)
 		}
 		verifiedNote := "self-reported in registry metadata, not cryptographically verified"
 		if !source.SelfReported && source.VerifiedBy != "" {
@@ -643,7 +655,7 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 			resolved.Ecosystem, name, source.URL, verifiedNote)
 
 		// Rewrite the target so downstream steps (substitution,
-		// clone, ecosystem detector) see the github URL. Mirror the
+		// clone, ecosystem detector) see the forge URL. Mirror the
 		// Run-level pre-population: fill cmd.URL if empty so the
 		// TARGET_URL substitution picks up the resolved source.
 		cmd.Target = source.URL
@@ -652,37 +664,44 @@ func (cmd *HandoffCmd) applyNetworkPrecheck(ctx context.Context) (string, error)
 		}
 	}
 
-	// Reject non-GitHub URLs early. NormalizeGitHubRepoInput is
-	// lenient — it accepts any URL with 2+ path segments and
-	// would happily parse gitlab.com/foo/bar as owner="gitlab.com"
-	// name="foo". The precheck only works with GitHub's API, so
-	// we guard URL-form targets with the stricter host check.
-	// Bare owner/repo shorthand (no scheme) is allowed through —
-	// NormalizeGitHubRepoInput assumes GitHub for those.
-	if strings.Contains(cmd.Target, "://") && !looksLikeGitHubURL(cmd.Target) {
-		return "", fmt.Errorf("--network-precheck requires a github.com URL; got %q", cmd.Target)
+	// Reject unrecognized-forge URLs early. NormalizeForgeRepoInput is
+	// lenient — bare "owner/repo" with no host defaults to github for
+	// backward compatibility with signatory's long-standing CLI
+	// shorthand. So a URL-form target still needs a stricter host
+	// check before we hand it to the parser, otherwise an unknown host
+	// like https://bitbucket.org/foo/bar would slip through the
+	// shorthand-default branch and be treated as a github target. The
+	// URL guard fires only when the input carries a scheme; shorthand
+	// flows are admitted unconditionally.
+	if strings.Contains(cmd.Target, "://") && !looksLikeSupportedForgeURL(cmd.Target) {
+		return "", fmt.Errorf("--network-precheck requires a github.com, codeberg.org, or gitlab.com URL; got %q", cmd.Target)
 	}
 
-	// Accept both full GitHub URLs and owner/repo shorthand. The
-	// NormalizeGitHubRepoInput function handles all forms:
-	//   https://github.com/owner/repo
-	//   github.com/owner/repo
-	//   owner/repo
-	//   git@github.com:owner/repo
-	// If it can extract owner+name, the target is GitHub-resolvable.
-	_, owner, name, err := profile.NormalizeGitHubRepoInput(cmd.Target)
+	// Accept full URLs and bare owner/repo shorthand across the
+	// recognized forges. NormalizeForgeRepoInput dispatches on host
+	// prefix and returns the detected platform alongside owner/name:
+	//   https://github.com/owner/repo            → github
+	//   https://codeberg.org/owner/repo          → codeberg
+	//   https://gitlab.com/owner/repo            → gitlab
+	//   git@github.com:owner/repo                → github
+	//   owner/repo (no host)                     → github (default)
+	// The platform string drives precheckSourceForPlatform below.
+	_, platform, owner, name, err := profile.NormalizeForgeRepoInput(cmd.Target)
 	if err != nil {
-		return "", fmt.Errorf("target %q is not a recognizable GitHub reference (expected https://github.com/owner/repo or owner/repo): %w", cmd.Target, err)
+		return "", fmt.Errorf("target %q is not a recognizable forge reference (expected https://<github.com|codeberg.org|gitlab.com>/owner/repo or owner/repo): %w", cmd.Target, err)
 	}
 
 	source := cmd.PrecheckSource
 	if source == nil {
-		// Production path: construct a real github client. Reading the
-		// env here (rather than inside the swap-able factory) means
-		// tests that don't inject PrecheckSource exercise this exact
-		// code, and env-var behavior is discoverable from go-to-definition
-		// on applyNetworkPrecheck.
-		source = ghclient.NewClient(os.Getenv("GITHUB_TOKEN"))
+		// Production path: dispatch on detected platform to the right
+		// per-forge API client. Reading any env (GITHUB_TOKEN) happens
+		// inside the factory rather than at struct-construction time so
+		// the env-var behavior stays discoverable from go-to-definition
+		// on applyNetworkPrecheck, matching the pre-multi-forge shape.
+		source, err = precheckSourceForPlatform(platform)
+		if err != nil {
+			return "", err
+		}
 	}
 	detector := ecosystem.NewDetector(source)
 
@@ -1057,15 +1076,63 @@ func (cmd *HandoffCmd) applyClone(ctx context.Context) (clonedPath, report strin
 	return destClean, report, nil
 }
 
-// looksLikeGitHubURL returns true when the target string starts with
-// an http(s) scheme whose host is github.com. Bare "owner/repo"
-// inputs are rejected here because the classifier in
-// internal/config treats them as TargetUnknown — we want to force
-// URL-form explicitness when the user opts into network calls.
-func looksLikeGitHubURL(target string) bool {
+// looksLikeSupportedForgeURL returns true when the target string starts
+// with an http(s) scheme whose host is one of the forges --network-
+// precheck can drive (github.com, codeberg.org, gitlab.com). Bare
+// "owner/repo" inputs return false here — the call sites that consume
+// this helper want to admit shorthand only on a separate code path so
+// the URL form stays explicit when the user opts into network calls.
+//
+// This is the URL gate: NormalizeForgeRepoInput downstream defaults
+// unknown hosts to github (preserving CLI shorthand semantics), so
+// without this gate https://bitbucket.org/foo/bar would slip through
+// as owner=bitbucket.org, name=foo and be addressed against the github
+// API. Keep this list aligned with forgeHostPrefix in
+// internal/profile/uri.go — every supported host appears in both.
+func looksLikeSupportedForgeURL(target string) bool {
 	lower := strings.ToLower(target)
-	return strings.HasPrefix(lower, "https://github.com/") ||
-		strings.HasPrefix(lower, "http://github.com/")
+	for _, host := range []string{"github.com", "codeberg.org", "gitlab.com"} {
+		if strings.HasPrefix(lower, "https://"+host+"/") ||
+			strings.HasPrefix(lower, "http://"+host+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// precheckSourceForPlatform returns the ecosystem.Source implementation
+// for a platform string emitted by profile.NormalizeForgeRepoInput. The
+// returned Source is wired against the production API root for each
+// forge:
+//
+//   - github   → ghclient.NewClient(GITHUB_TOKEN env var, if set)
+//   - codeberg → forgejoclient.NewClient() (unauthenticated v0.1)
+//   - gitlab   → gitlabclient.NewClient() (unauthenticated v0.1)
+//
+// Authentication asymmetry is intentional. github.com's unauthenticated
+// rate limit (60 req/hour) is the lowest of the three and prechecks
+// burn two requests per run, so honoring GITHUB_TOKEN materially helps
+// reachable throughput. codeberg (1000 req/hour) and gitlab.com (600
+// req/minute) both clear a single-target analyze comfortably without
+// auth; bringing in *_TOKEN env vars there is a follow-up when
+// survey-side usage emerges (same deferral noted in each client's
+// NewClient docstring).
+//
+// Unknown platform values are a programmer error — NormalizeForgeRepoInput
+// only emits the three strings handled here — but return an error rather
+// than panic so a future forge addition that lands the URI helper before
+// the precheck wiring fails loud at runtime.
+func precheckSourceForPlatform(platform string) (ecosystem.Source, error) {
+	switch platform {
+	case profile.PlatformGitHub:
+		return ghclient.NewClient(os.Getenv("GITHUB_TOKEN")), nil
+	case profile.PlatformCodeberg:
+		return forgejoclient.NewClient(), nil
+	case profile.PlatformGitLab:
+		return gitlabclient.NewClient(), nil
+	default:
+		return nil, fmt.Errorf("--network-precheck has no API client for forge platform %q; supported: github, codeberg, gitlab", platform)
+	}
 }
 
 // allowedCloneSchemes is the scheme whitelist safeGitCloneURL enforces.

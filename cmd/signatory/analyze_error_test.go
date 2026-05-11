@@ -1159,7 +1159,10 @@ func TestFunctional_AnalyzeRefresh_CargoResolvesSource(t *testing.T) {
 	defer s.Close()
 	entity, err := s.FindEntityByURI(t.Context(), "pkg:cargo/ripgrep")
 	require.NoError(t, err)
-	assert.Equal(t, "https://github.com/BurntSushi/ripgrep", entity.URL,
+	// CloneURL canonicalizes owner+repo to lowercase for case-
+	// insensitive forge hosts; resolveCargoRepo flows through
+	// profile.ResolveTarget which applies CloneURLForRepoPlatform.
+	assert.Equal(t, "https://github.com/burntsushi/ripgrep", entity.URL,
 		"resolveCargoRepo must stamp the entity's URL from the registry-declared repository")
 }
 

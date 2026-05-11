@@ -71,10 +71,23 @@ func (t *SignalsTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 		return mcp.Err(mcp.CodeSchemaViolation, "target is required", nil)
 	}
 
-	canonicalURI, _, _, normErr := profile.NormalizeGitHubRepoInput(in.Target)
-	if normErr != nil {
-		canonicalURI = in.Target
+	// Multi-forge target resolution. ResolveTarget handles every
+	// canonical URI scheme (pkg:, repo:, identity:, org:, patch:),
+	// every recognized forge URL (github / codeberg / gitlab), every
+	// recognized registry URL (npmjs.com, pypi.org, crates.io, …),
+	// and bare github shorthand. Replaces the pre-2026-05-10
+	// NormalizeGitHubRepoInput call which permissively prefix-stripped
+	// any URL and silently misclassified codeberg/gitlab targets as
+	// repo:github/<host>/<owner> — same misclassification
+	// rejectUnrecognizedForgeURL guards against on the analyze path.
+	// Mirrors summary.go:64-69.
+	resolved, resolveErr := profile.ResolveTarget(in.Target)
+	if resolveErr != nil {
+		return mcp.Err(mcp.CodeSchemaViolation,
+			"target "+in.Target+" does not resolve to a canonical URI: "+resolveErr.Error(),
+			map[string]string{"target": in.Target, "phase": "resolve"})
 	}
+	canonicalURI := resolved.CanonicalURI
 
 	entity, err := t.Store.FindEntityByURI(ctx, canonicalURI)
 	if errors.Is(err, store.ErrNotFound) {

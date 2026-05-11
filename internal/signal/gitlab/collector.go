@@ -1,0 +1,265 @@
+package gitlab
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/signal"
+)
+
+// sourceName is the value stamped on every emitted signal. "gitlab"
+// names the API contract; same layering choice as github / forgejo.
+const sourceName = "gitlab"
+
+// signalTTL is the cache lifetime stamped on each emitted signal.
+// 24h matches github / forgejo TTLs — same forge-API metadata shape,
+// same staleness tolerance.
+const signalTTL = 24 * time.Hour
+
+// isGitLabHost reports whether rawURL points at a recognized GitLab
+// deployment. v0.1 recognizes only gitlab.com; self-hosted GitLab
+// instances need an explicit allow-list (same threat-model deferral
+// as self-hosted Forgejo, called out in profile/target.go's
+// isGitLabURL doc).
+//
+// Mirror of github's isGitHubHost and forgejo's isForgejoHost — the
+// orchestrator wires this collector unconditionally for every
+// git-hosted entity, so the gate must live here. Without it, a
+// github / codeberg URL would route to gitlab.com/api/v4 and either
+// 404 or hit the wrong project.
+func isGitLabHost(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := u.Host
+	if host == "" {
+		host, _, _ = strings.Cut(u.Path, "/")
+	}
+	host = strings.TrimPrefix(host, "www.")
+	return host == "gitlab.com"
+}
+
+// Collector emits Tier 1 metadata signals from the GitLab API for
+// gitlab.com-hosted entities. See the package doc for the signal
+// catalog and Tier 2 deferral.
+type Collector struct {
+	client *Client
+}
+
+// NewCollector creates a GitLab collector pointed at gitlab.com's
+// public API root.
+func NewCollector() *Collector {
+	return &Collector{client: NewClient()}
+}
+
+// NewCollectorWithClient creates a Collector with a caller-provided
+// Client. Test injection point — production code uses NewCollector.
+func NewCollectorWithClient(c *Client) *Collector {
+	return &Collector{client: c}
+}
+
+// Name returns the collector identifier the orchestrator's progress
+// narration keys on ("[gitlab] Collected N signals").
+func (c *Collector) Name() string { return sourceName }
+
+// Collect gathers Tier 1 metadata signals for a gitlab.com-hosted
+// entity. Self-gates on entity.URL host: non-gitlab URLs (and empty
+// URLs) return a non-nil empty CollectionResult with nil error.
+// Symmetric with github / forgejo / openssf collector self-gates.
+//
+// API calls:
+//   - GET /api/v4/projects/{namespace_url_encoded} — Tier 1 (six
+//     signals) plus owner_type (Tier 1.5, free from namespace.kind on
+//     the same response).
+//   - GET /api/v4/groups/{path} OR /api/v4/users?username=<login> —
+//     Tier 2 owner_profile, routed by namespace.kind. Independent
+//     failure path: an owner_profile lookup error records as a
+//     per-signal failure without disturbing Tier 1 or owner_type.
+//
+// 404 on the /projects call surfaces as a Collect error so the
+// orchestrator records the per-collector failure but continues.
+//
+// Still deferred: contributors, license.
+func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signal.CollectionResult, error) {
+	if entity == nil || entity.URL == "" || !isGitLabHost(entity.URL) {
+		return &signal.CollectionResult{}, nil
+	}
+
+	namespacePath, err := parseProjectPath(entity.URL)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab collector: %w", err)
+	}
+
+	now := time.Now().UTC()
+	var result signal.CollectionResult
+
+	p, err := c.client.GetProject(ctx, namespacePath)
+	if err != nil {
+		return nil, fmt.Errorf("get project: %w", err)
+	}
+
+	// last_push: GitLab doesn't carry a distinct pushed_at;
+	// last_activity_at is the closest analog. Same canonical signal
+	// type as github's PushedAt-derived emission and forgejo's
+	// UpdatedAt-derived emission.
+	result.RecordSignal(entity.ID, "last_push", sourceName, now, signalTTL,
+		map[string]any{
+			"date": p.LastActivityAt.Format(time.RFC3339),
+			"era":  string(profile.ClassifyEra(p.LastActivityAt)),
+		})
+	result.RecordSignal(entity.ID, "repo_age", sourceName, now, signalTTL,
+		map[string]any{
+			"created":  p.CreatedAt.Format(time.RFC3339),
+			"age_days": int(now.Sub(p.CreatedAt).Hours() / 24),
+		})
+	result.RecordSignal(entity.ID, "stars", sourceName, now, signalTTL,
+		map[string]any{"count": p.StarCount})
+	result.RecordSignal(entity.ID, "forks", sourceName, now, signalTTL,
+		map[string]any{"count": p.ForksCount})
+	result.RecordSignal(entity.ID, "open_issues", sourceName, now, signalTTL,
+		map[string]any{"count": p.OpenIssuesCount})
+	result.RecordSignal(entity.ID, "archived", sourceName, now, signalTTL,
+		map[string]any{"archived": p.Archived})
+
+	// owner_type (Tier 1.5): namespace.kind is on the same /projects
+	// response, so this is free — no extra API call. GitLab's two
+	// namespace kinds ("user" / "group") map onto the
+	// forge-agnostic canonical values github's collector emits
+	// ("User" / "Organization") so posture rules consume the same
+	// "owner_type=Organization" string regardless of which forge
+	// produced the signal.
+	ownerType := normalizeOwnerType(p.Namespace.Kind)
+	result.RecordSignal(entity.ID, "owner_type", sourceName, now, signalTTL,
+		map[string]any{
+			"type":  ownerType,
+			"login": p.Namespace.Path,
+		})
+
+	// owner_profile (Tier 2): one extra API call routed by
+	// namespace.kind. Groups → /groups/<path>; users →
+	// /users?username=<login>. The two endpoints have different
+	// response shapes but map onto the same canonical owner_profile
+	// fields (login, name, created, account_age_days, type) that
+	// github and forgejo emit. Cross-forge posture rules read the
+	// signal without per-forge branching.
+	//
+	// Independent failure path: an owner_profile lookup error
+	// records as a per-signal failure on owner_profile alone; the
+	// Tier 1 signals above and owner_type are unaffected.
+	c.emitOwnerProfile(ctx, &result, entity.ID, p.Namespace, ownerType, now)
+
+	return &result, nil
+}
+
+// emitOwnerProfile fetches the owner record from the appropriate
+// gitlab endpoint and records the owner_profile signal (or a
+// failure on lookup error). Branch driven by namespace.kind from
+// the project response so this never makes an extra round-trip on
+// the discriminator — that's already known.
+func (c *Collector) emitOwnerProfile(ctx context.Context, result *signal.CollectionResult,
+	entityID string, ns projectNamespace, ownerType string, now time.Time) {
+
+	switch ns.Kind {
+	case "group":
+		g, err := c.client.GetGroup(ctx, ns.Path)
+		if err != nil {
+			result.RecordFailure(entityID, "owner_profile", sourceName,
+				sanitizeOwnerEndpointError(err), true, now)
+			return
+		}
+		result.RecordSignal(entityID, "owner_profile", sourceName, now, signalTTL,
+			map[string]any{
+				"login":            g.Path,
+				"name":             g.Name,
+				"created":          g.CreatedAt.Format(time.RFC3339),
+				"account_age_days": int(now.Sub(g.CreatedAt).Hours() / 24),
+				"type":             ownerType,
+			})
+	case "user":
+		u, err := c.client.GetUserByUsername(ctx, ns.Path)
+		if err != nil {
+			result.RecordFailure(entityID, "owner_profile", sourceName,
+				sanitizeOwnerEndpointError(err), true, now)
+			return
+		}
+		result.RecordSignal(entityID, "owner_profile", sourceName, now, signalTTL,
+			map[string]any{
+				"login":            u.Username,
+				"name":             u.Name,
+				"created":          u.CreatedAt.Format(time.RFC3339),
+				"account_age_days": int(now.Sub(u.CreatedAt).Hours() / 24),
+				"type":             ownerType,
+			})
+	default:
+		// Unknown namespace.kind. GitLab's documented values are
+		// "user" and "group"; anything else is novel API behavior.
+		// Record a non-retryable failure so the operator sees the
+		// unexpected value rather than getting a silent miss.
+		result.RecordFailure(entityID, "owner_profile", sourceName,
+			"unknown namespace.kind="+ns.Kind, false, now)
+	}
+}
+
+// sanitizeOwnerEndpointError trims a GetGroup or GetUserByUsername
+// error to a short reason safe for the persisted CollectionError.
+// Same convention as forgejo's sanitizeOwnerEndpointError.
+func sanitizeOwnerEndpointError(err error) string {
+	s := err.Error()
+	const maxLen = 200
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…"
+	}
+	return s
+}
+
+// normalizeOwnerType maps gitlab's namespace.kind values onto the
+// canonical owner_type.type alphabet github uses. Anything other
+// than "group" maps to "User" — gitlab's documented kinds are
+// "user" and "group", and any future value (e.g. "subgroup")
+// would also be a non-org-shape so "User" is a safer default than
+// surfacing a third value that posture rules don't recognize.
+//
+// "Organization" instead of "Org": matches github's literal field
+// value (Owner.Type is the string "Organization", not "Org").
+// Cross-forge posture rules that match on the github form keep
+// working without per-forge branching.
+func normalizeOwnerType(gitlabKind string) string {
+	if gitlabKind == "group" {
+		return "Organization"
+	}
+	return "User"
+}
+
+// parseProjectPath extracts the namespace+project path from a
+// gitlab.com URL. Accepts every shape upstream profile resolution
+// produces (https/http with trailing /, .git suffix, deeper nested
+// groups). Returns the un-encoded path (gitlab-org/gitlab,
+// gitlab-org/security/foo) — the caller's GetProject handles URL
+// encoding via projectIDPath.
+//
+// Does NOT validate against GitLab's project-name grammar; upstream
+// profile.NormalizeForgeRepoInput already gated valid forge shape
+// before the entity reached this collector.
+func parseProjectPath(rawURL string) (string, error) {
+	s := strings.TrimSpace(rawURL)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+	s = strings.TrimPrefix(s, "gitlab.com/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+
+	if s == "" {
+		return "", fmt.Errorf("cannot parse gitlab project path from %q", rawURL)
+	}
+	// Need at least owner/repo.
+	if !strings.ContainsRune(s, '/') {
+		return "", fmt.Errorf("cannot parse gitlab project path from %q: expected at least owner/repo", rawURL)
+	}
+	return s, nil
+}

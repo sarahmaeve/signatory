@@ -92,7 +92,7 @@ func (c *Client) resolveViaProxy(ctx context.Context, modulePath string) (string
 	// downstream collectors are github-only, and stamping a non-
 	// github URL would trip isGitHostedEntity into a false positive
 	// followed by a github-API call against the wrong host.
-	url, ok := canonicalGitHubURL(info.Origin.URL)
+	url, ok := canonicalForgeURL(info.Origin.URL)
 	if !ok {
 		// Origin URL is non-github (or unparseable). The proxy was
 		// authoritative; we don't fall back to the meta tag in this
@@ -156,7 +156,7 @@ func (c *Client) resolveViaMetaTag(ctx context.Context, modulePath string) (stri
 		if !modulePathMatchesPrefix(modulePath, importPrefix) {
 			return "", nil
 		}
-		if u, ok := canonicalGitHubURL(repoRoot); ok {
+		if u, ok := canonicalForgeURL(repoRoot); ok {
 			return u, nil
 		}
 		// go-import's repoRoot isn't github (e.g., gopkg.in proxies
@@ -204,18 +204,24 @@ func (c *Client) metaTagURL(modulePath string) string {
 	return "https://" + modulePath + "?go-get=1"
 }
 
-// canonicalGitHubURL returns the canonical https://github.com/<owner>/<repo>
-// form if raw resolves as a github target via profile.ResolveTarget,
-// or ("", false) if it doesn't (non-github host, malformed URL).
+// canonicalForgeURL returns the canonical https://<host>/<owner>/<repo>
+// form if raw resolves to a first-classed forge (github / codeberg /
+// gitlab) via profile.ResolveTarget, or ("", false) if it doesn't
+// (forge not first-classed, malformed URL).
 //
 // Used by both the proxy and meta-tag resolution paths so they
 // produce identical canonical output for the same upstream URL.
-func canonicalGitHubURL(raw string) (string, bool) {
+//
+// Empty CloneURL is the canonical "not first-classed" signal —
+// profile.CloneURLForRepoPlatform stamps non-empty only for the
+// recognized forges, so a single CloneURL == "" check captures both
+// "URL gate rejected" and "platform not yet wired."
+func canonicalForgeURL(raw string) (string, bool) {
 	resolved, err := profile.ResolveTarget(raw)
 	if err != nil {
 		return "", false
 	}
-	if resolved.Platform != profile.PlatformGitHub || resolved.CloneURL == "" {
+	if resolved.CloneURL == "" {
 		return "", false
 	}
 	return resolved.CloneURL, true

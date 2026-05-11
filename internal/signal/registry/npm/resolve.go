@@ -99,15 +99,19 @@ func NormalizeDeclaredRepoURL(raw string) string {
 		s = "https://github.com" + rest
 	}
 
-	// Delegate to ResolveTarget for the actual github-URL grammar
+	// Delegate to ResolveTarget for the actual forge-URL grammar
 	// (handles https://, http://, www., .git suffix, git@... and
-	// shorthand). Non-github hosts get rejected with a clear error
-	// we map to "return empty string."
+	// shorthand for github / codeberg / gitlab). Forges not yet
+	// first-classed (bitbucket, self-hosted) reject at the URL gate
+	// and surface as an error we map to "return empty string." The
+	// CloneURL == "" guard is the same rejection signal in canonical-
+	// URI form, when the gate let the input through but the platform
+	// isn't yet wired (defensive — currently unreachable).
 	resolved, err := profile.ResolveTarget(s)
 	if err != nil {
 		return ""
 	}
-	if resolved.CloneURL == "" || resolved.Platform != profile.PlatformGitHub {
+	if resolved.CloneURL == "" {
 		return ""
 	}
 	return resolved.CloneURL

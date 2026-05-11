@@ -130,3 +130,49 @@ func TestDetailTool_AllValidGroups(t *testing.T) {
 		assert.Equal(t, "ok", resp.Status, "group %s should return ok", grp)
 	}
 }
+
+// TestDetailTool_CodebergURL_ResolvesToCanonical pins the multi-forge
+// generalization for detail. Same rationale as
+// TestSignalsTool_CodebergURL_ResolvesToCanonical — a codeberg URL
+// reaching this tool used to misclassify through
+// NormalizeGitHubRepoInput as repo:github/codeberg.org/forgejo and
+// miss the actual entity at repo:codeberg/forgejo/forgejo.
+func TestDetailTool_CodebergURL_ResolvesToCanonical(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:codeberg/forgejo/forgejo", "forgejo/forgejo")
+	sig := profile.Signal{
+		ID:                "test-detail-cb-" + e.ID[:8],
+		EntityID:          e.ID,
+		Type:              "stars",
+		Group:             profile.SignalGroupCriticality,
+		Source:            "github",
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Value:             json.RawMessage(`{"count": 42}`),
+		CollectedAt:       time.Now().UTC(),
+		ExpiresAt:         time.Now().Add(24 * time.Hour).UTC(),
+	}
+	require.NoError(t, s.AppendSignals(context.Background(), []profile.Signal{sig}))
+
+	tool := &DetailTool{Store: s}
+	resp := tool.Handle(context.Background(),
+		json.RawMessage(`{"target":"https://codeberg.org/forgejo/forgejo","signal_group":"criticality"}`))
+
+	require.Equal(t, "ok", resp.Status,
+		"codeberg URL must resolve to repo:codeberg/forgejo/forgejo, not the buggy NormalizeGitHubRepoInput rendering")
+}
+
+// TestDetailTool_MalformedTarget_SchemaViolation — same contract shift
+// as TestSignalsTool_MalformedTarget_SchemaViolation. After the
+// ResolveTarget switch, unparseable input is a schema violation rather
+// than a confusing CodeNotFound on a synthesized-from-garbage URI.
+func TestDetailTool_MalformedTarget_SchemaViolation(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &DetailTool{Store: s}
+
+	resp := tool.Handle(context.Background(),
+		json.RawMessage(`{"target":"not a valid target","signal_group":"criticality"}`))
+	assert.Equal(t, "error", resp.Status)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
+}

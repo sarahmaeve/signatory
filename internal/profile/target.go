@@ -126,7 +126,7 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 	// gate, NormalizeGitHubRepoInput's prefix-strip would silently
 	// produce misleading repo:github/ URIs for gitlab/bitbucket/
 	// self-hosted inputs.
-	if err := rejectNonGitHubURL(s, raw); err != nil {
+	if err := rejectUnrecognizedForgeURL(s, raw); err != nil {
 		return nil, err
 	}
 
@@ -150,23 +150,29 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		return r, err
 	}
 
-	// Fall through to GitHub-shorthand parsing. Any form
-	// NormalizeGitHubRepoInput accepts gets promoted to a
-	// canonical repo: URI.
-	canonicalURI, owner, name, err := NormalizeGitHubRepoInput(bareInput)
+	// Fall through to forge-shorthand parsing. Any form
+	// NormalizeForgeRepoInput accepts gets promoted to a canonical
+	// repo: URI; the platform field comes from host detection inside
+	// the normalizer, with bare "owner/repo" defaulting to GitHub.
+	canonicalURI, platform, owner, name, err := NormalizeForgeRepoInput(bareInput)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"target %q is not a canonical URI (repo:/pkg:/identity:/org:/patch:) and does not parse as a github repo reference: %w",
+			"target %q is not a canonical URI (repo:/pkg:/identity:/org:/patch:) and does not parse as a forge repo reference: %w",
 			raw, err)
 	}
 	return &ResolvedTarget{
 		CanonicalURI: appendVersion(canonicalURI, requestedVersion),
 		ShortName:    name,
 		Scheme:       "repo",
-		Platform:     PlatformGitHub,
+		Platform:     platform,
 		Owner:        owner,
-		CloneURL:     "https://github.com/" + owner + "/" + name,
-		Version:      requestedVersion,
+		// CloneURLForRepoPlatform returns "" for platforms that aren't
+		// yet first-classed at the clone layer; the canonical-URI path
+		// (parseRepoBody) applies the same rule. The two paths must
+		// agree, otherwise the same target reached through different
+		// input shapes would carry different CloneURL values.
+		CloneURL: CloneURLForRepoPlatform(platform, owner, name),
+		Version:  requestedVersion,
 	}, nil
 }
 
@@ -216,27 +222,35 @@ func tryRegistryURLs(s string) (canonicalURI string, ok bool) {
 	return "", false
 }
 
-// rejectNonGitHubURL fails inputs that look like URLs or SCP-form
-// references but don't target github.com. Without this gate
-// NormalizeGitHubRepoInput's prefix-strip would silently produce a
-// misleading repo:github/ URI for gitlab/bitbucket/self-hosted
-// inputs (e.g. https://gitlab.com/foo/bar would become
-// repo:github/gitlab.com/foo). Registry URLs (npmjs.com, pypi.org,
-// crates.io, ...) are recognized earlier in ResolveTarget via
-// tryRegistryURLs and never reach this gate.
+// rejectUnrecognizedForgeURL fails inputs that look like URLs or
+// SCP-form references but don't target a recognized forge. Without
+// this gate NormalizeForgeRepoInput's host-prefix detection falls
+// through and the input ends up classified as a bare github-shorthand
+// owner/repo, silently producing a misleading repo:github/<host>/<owner>
+// URI (e.g. https://bitbucket.org/team/repo would become
+// repo:github/bitbucket.org/team). Registry URLs (npmjs.com,
+// pypi.org, crates.io, ...) are recognized earlier in ResolveTarget
+// via tryRegistryURLs and never reach this gate.
+//
+// Recognized forges (URL form): github.com, codeberg.org, gitlab.com.
 //
 // SCP-form (git@host:owner/repo.git) is gated separately because
-// NormalizeGitHubRepoInput strips `git@` unconditionally and would
-// misclassify `git@gitlab.com:foo/bar.git`.
-func rejectNonGitHubURL(s, raw string) error {
-	if strings.Contains(s, "://") && !isGitHubURL(s) {
+// NormalizeForgeRepoInput strips `git@` unconditionally and would
+// misclassify `git@bitbucket.org:foo/bar.git` if the SCP host wasn't
+// also gated.
+func rejectUnrecognizedForgeURL(s, raw string) error {
+	if strings.Contains(s, "://") &&
+		!isGitHubURL(s) && !isCodebergURL(s) && !isGitLabURL(s) {
 		return fmt.Errorf(
-			"target %q is a URL but not a github.com, npmjs.com, pypi.org, crates.io, rubygems.org, or Maven Central URL; other hosting platforms are not yet supported by signatory",
+			"target %q is a URL but not a github.com, codeberg.org, gitlab.com, npmjs.com, pypi.org, crates.io, rubygems.org, or Maven Central URL; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
-	if strings.HasPrefix(s, "git@") && !strings.HasPrefix(s, "git@github.com:") {
+	if strings.HasPrefix(s, "git@") &&
+		!strings.HasPrefix(s, "git@github.com:") &&
+		!strings.HasPrefix(s, "git@codeberg.org:") &&
+		!strings.HasPrefix(s, "git@gitlab.com:") {
 		return fmt.Errorf(
-			"target %q is an SCP-form URL but not a github.com host; other hosting platforms are not yet supported by signatory",
+			"target %q is an SCP-form URL but not a github.com, codeberg.org, or gitlab.com host; other hosting platforms are not yet supported by signatory",
 			raw)
 	}
 	return nil
@@ -251,7 +265,7 @@ func rejectNonGitHubURL(s, raw string) error {
 //
 //   - SCP-form (git@github.com:...) is skipped — the @ there is
 //     part of the SSH user-host syntax, not a version separator.
-//     SCP-form was already gated by rejectNonGitHubURL; here we
+//     SCP-form was already gated by rejectUnrecognizedForgeURL; here we
 //     re-guard so we don't misread that @ as a version split.
 //   - The version separator @ must come AFTER any / — otherwise
 //     it's part of the host portion of a URL (URLs at this point
@@ -296,14 +310,15 @@ func extractVersionSuffix(s, raw string) (bare, version string, err error) {
 // Returns (resolved, true, err) on a match (err comes from
 // resolveCanonicalURI's parsing of the synthesized pkg:go/<path>
 // URI; ok stays true even when err is non-nil so the caller doesn't
-// fall through to GitHub-shorthand). Returns (nil, false, nil)
-// when the input doesn't look like a vanity path; the caller falls
-// through to GitHub-shorthand parsing.
+// fall through to forge-shorthand). Returns (nil, false, nil) when
+// the input doesn't look like a vanity path; the caller falls
+// through to forge-shorthand parsing.
 //
-// "github.com/" prefix is intentionally NOT excluded here — by the
-// time we reach this branch any github.com/ prefix has already been
-// removed by upstream parsing, leaving owner/repo where owner is
-// bare.
+// Known forge hosts (github.com, codeberg.org, gitlab.com) are
+// excluded from vanity classification — bare "codeberg.org/foo/bar"
+// has a dot in its first segment but is unambiguously a Codeberg
+// repo reference, not a Go vanity path. The exclusion list mirrors
+// the host table NormalizeForgeRepoInput dispatches on.
 //
 // Output mirrors what the gomod parser produces for the same
 // import path (pkg:go/<full-path>), keeping ResolveTarget and the
@@ -316,8 +331,18 @@ func resolveVanityImportPath(bareInput, requestedVersion string) (*ResolvedTarge
 	if !ok || firstSeg == "" {
 		return nil, false, nil
 	}
-	if strings.HasPrefix(bareInput, "github.com/") {
-		return nil, false, nil
+	// Exclude every known forge host from the vanity branch. The
+	// path-form prefixes (host + "/") are sufficient here — SCP-form
+	// "git@" inputs are excluded by the dedicated check below, and
+	// scheme-prefixed URL inputs (https://...) are excluded because
+	// firstSeg lacks a dot in their case ("https:" vs the host).
+	for _, h := range forgeHostPrefix {
+		if !strings.HasSuffix(h.prefix, "/") {
+			continue
+		}
+		if strings.HasPrefix(bareInput, h.prefix) {
+			return nil, false, nil
+		}
 	}
 	if strings.HasPrefix(bareInput, "git@") {
 		return nil, false, nil
@@ -762,6 +787,39 @@ func isGitHubURL(input string) bool {
 	return strings.HasPrefix(s, "github.com/") || s == "github.com"
 }
 
+// isCodebergURL returns true when input is an http(s) URL whose host
+// (after scheme strip) is "codeberg.org". Mirrors isGitHubURL — same
+// scheme/www strip, same host-anchored prefix check that requires
+// either an exact host match or a trailing slash so lookalike hosts
+// like `codeberg.org.attacker.example` are rejected.
+//
+// Codeberg is a Forgejo deployment; this helper only answers "could
+// this be a Codeberg URL?" — owner/name validation and clone-URL
+// construction live in NormalizeForgeRepoInput.
+func isCodebergURL(input string) bool {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+	return strings.HasPrefix(s, "codeberg.org/") || s == "codeberg.org"
+}
+
+// isGitLabURL returns true when input is an http(s) URL whose host
+// (after scheme strip) is "gitlab.com". Mirrors isGitHubURL and
+// isCodebergURL — same scheme/www strip, same host-anchored prefix
+// check.
+//
+// Recognizes only the public gitlab.com instance; self-hosted GitLab
+// (gitlab.<company>.com, etc.) remains rejected because we have no
+// way to validate it doesn't aim at an internal-only host the
+// operator didn't intend to query. Adding self-hosted support requires
+// an explicit allow-list mechanism, deferred to a follow-up.
+func isGitLabURL(input string) bool {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+	return strings.HasPrefix(s, "gitlab.com/") || s == "gitlab.com"
+}
+
 // resolveCanonicalURI handles an input already in canonical form
 // (matched by one of the known scheme prefixes). Validates,
 // decomposes into per-scheme fields, and populates CloneURL for
@@ -856,11 +914,14 @@ func parseLastSegmentAtVersion(lastSeg, schemeLabel, uri string) (name, version 
 // then fragment against entities the constructor created at the
 // lowercased URI.
 //
-// CloneURL is populated for github platform only; other platforms
-// (gitlab, bitbucket) intentionally leave it empty until each is
-// first-classed, so callers that check for non-empty CloneURL
-// before clone-dir actions don't silently invoke `git clone`
-// against a URL shape the CLI hasn't validated.
+// CloneURL is populated for first-classed platforms (github,
+// codeberg, gitlab) via CloneURLForRepoPlatform; other platforms
+// intentionally leave it empty so callers that check for non-empty
+// CloneURL before clone-dir actions don't silently invoke
+// `git clone` against a URL shape the CLI hasn't validated. The
+// shorthand branch in ResolveTarget applies the same helper, so
+// canonical-URI input and shorthand URL input produce the same
+// CloneURL for any given target.
 func parseRepoBody(parts []string, uri string) (*ResolvedTarget, error) {
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("repo URI %q: expected platform/owner/name, got %d segment(s)", uri, len(parts))
@@ -872,18 +933,15 @@ func parseRepoBody(parts []string, uri string) (*ResolvedTarget, error) {
 	platform := strings.ToLower(parts[0])
 	owner := strings.ToLower(parts[1])
 	short := strings.ToLower(name)
-	out := &ResolvedTarget{
+	return &ResolvedTarget{
 		CanonicalURI: appendVersion(CanonicalRepoURI(platform, owner, short), version),
 		Scheme:       "repo",
 		Platform:     platform,
 		Owner:        owner,
 		ShortName:    short,
 		Version:      version,
-	}
-	if platform == PlatformGitHub {
-		out.CloneURL = "https://github.com/" + owner + "/" + short
-	}
-	return out, nil
+		CloneURL:     CloneURLForRepoPlatform(platform, owner, short),
+	}, nil
 }
 
 // parsePkgBody extracts the ecosystem/name (+ optional version)

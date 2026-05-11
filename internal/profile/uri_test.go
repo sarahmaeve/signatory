@@ -75,6 +75,23 @@ func TestCanonicalRepoURI(t *testing.T) {
 		CanonicalRepoURI("gitlab", "acme", "secret"))
 }
 
+// TestPlatformCodeberg pins the canonical platform string for
+// Codeberg-hosted repos and confirms CanonicalRepoURI emits the
+// expected repo:codeberg/<owner>/<name> shape. Keeping the constant
+// in lockstep with the literal value the canonical URI uses prevents
+// drift between the two sites callers reach for: code that
+// pattern-matches on Platform via the constant, and code that
+// constructs canonical URIs via CanonicalRepoURI.
+func TestPlatformCodeberg(t *testing.T) {
+	assert.Equal(t, "codeberg", PlatformCodeberg,
+		"PlatformCodeberg must be the lowercased canonical-URI segment")
+	assert.Equal(t, "repo:codeberg/owner/repo",
+		CanonicalRepoURI(PlatformCodeberg, "owner", "repo"))
+	assert.Equal(t, "repo:codeberg/burntsushi/toml",
+		CanonicalRepoURI(PlatformCodeberg, "BurntSushi", "TOML"),
+		"owner and name must case-fold like other platforms")
+}
+
 // TestCanonicalRepoURI_LowercasesOwnerAndName documents that owner
 // and name are case-folded for case-insensitive platforms (GitHub
 // and GitLab both treat these path components as case-insensitive
@@ -284,6 +301,103 @@ func TestNormalizeGitHubRepoInput_Rejects(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, _, err := NormalizeGitHubRepoInput(tt.input)
+			assert.Error(t, err)
+		})
+	}
+}
+
+// TestNormalizeForgeRepoInput exercises the multi-forge generalization
+// of NormalizeGitHubRepoInput. Detects platform from host prefix
+// (github.com / codeberg.org / gitlab.com) for URL and SCP forms;
+// bare "owner/repo" with no host defaults to PlatformGitHub for
+// backward compatibility with the long-standing CLI shorthand.
+//
+// The legacy NormalizeGitHubRepoInput remains a sibling that returns
+// only the github-specific 4-tuple, used by validateCloneOrigin and
+// ensureCloneAtPath where a github-specific check is the contract;
+// this function is the entry point ResolveTarget calls.
+func TestNormalizeForgeRepoInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		uri      string
+		platform string
+		owner    string
+		repo     string
+	}{
+		// GitHub: every shape NormalizeGitHubRepoInput accepts must
+		// continue to resolve identically here.
+		{"bare owner/repo defaults to github", "alecthomas/kong",
+			"repo:github/alecthomas/kong", PlatformGitHub, "alecthomas", "kong"},
+		{"github.com/owner/repo", "github.com/alecthomas/kong",
+			"repo:github/alecthomas/kong", PlatformGitHub, "alecthomas", "kong"},
+		{"github https URL", "https://github.com/alecthomas/kong",
+			"repo:github/alecthomas/kong", PlatformGitHub, "alecthomas", "kong"},
+		{"github https URL with .git", "https://github.com/alecthomas/kong.git",
+			"repo:github/alecthomas/kong", PlatformGitHub, "alecthomas", "kong"},
+		{"github SCP form", "git@github.com:alecthomas/kong.git",
+			"repo:github/alecthomas/kong", PlatformGitHub, "alecthomas", "kong"},
+
+		// Codeberg.
+		{"codeberg https URL", "https://codeberg.org/forgejo/forgejo",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "forgejo", "forgejo"},
+		{"codeberg http URL", "http://codeberg.org/forgejo/forgejo",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "forgejo", "forgejo"},
+		{"codeberg.org/owner/repo", "codeberg.org/forgejo/forgejo",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "forgejo", "forgejo"},
+		{"codeberg https URL with .git", "https://codeberg.org/forgejo/forgejo.git",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "forgejo", "forgejo"},
+		{"codeberg SCP form", "git@codeberg.org:forgejo/forgejo.git",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "forgejo", "forgejo"},
+		{"codeberg case-folded", "https://codeberg.org/Forgejo/Forgejo",
+			"repo:codeberg/forgejo/forgejo", PlatformCodeberg, "Forgejo", "Forgejo"},
+
+		// GitLab.
+		{"gitlab https URL", "https://gitlab.com/gitlab-org/gitlab",
+			"repo:gitlab/gitlab-org/gitlab", PlatformGitLab, "gitlab-org", "gitlab"},
+		{"gitlab http URL", "http://gitlab.com/gitlab-org/gitlab",
+			"repo:gitlab/gitlab-org/gitlab", PlatformGitLab, "gitlab-org", "gitlab"},
+		{"gitlab.com/owner/repo", "gitlab.com/gitlab-org/gitlab",
+			"repo:gitlab/gitlab-org/gitlab", PlatformGitLab, "gitlab-org", "gitlab"},
+		{"gitlab SCP form", "git@gitlab.com:gitlab-org/gitlab.git",
+			"repo:gitlab/gitlab-org/gitlab", PlatformGitLab, "gitlab-org", "gitlab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uri, platform, owner, repo, err := NormalizeForgeRepoInput(tt.input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.uri, uri, "canonical URI")
+			assert.Equal(t, tt.platform, platform, "platform")
+			// owner/repo are returned in their pre-canonicalization
+			// form (the canonical URI is already lowercased; raw
+			// owner/repo lets the caller decide whether to surface
+			// the user-typed casing in error messages, etc.).
+			assert.Equal(t, tt.owner, owner, "owner")
+			assert.Equal(t, tt.repo, repo, "repo")
+		})
+	}
+}
+
+// TestNormalizeForgeRepoInput_Rejects covers malformed input across
+// all forges. The grammar is the same as NormalizeGitHubRepoInput's;
+// we re-test with each forge to make sure platform detection doesn't
+// accidentally widen the accepted character set.
+func TestNormalizeForgeRepoInput_Rejects(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"just whitespace", "   "},
+		{"single segment", "justoneword"},
+		{"codeberg empty owner", "https://codeberg.org//bar"},
+		{"codeberg empty repo", "https://codeberg.org/foo/"},
+		{"gitlab null byte", "https://gitlab.com/foo\x00/bar"},
+		{"gitlab space in repo", "https://gitlab.com/foo/my repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, err := NormalizeForgeRepoInput(tt.input)
 			assert.Error(t, err)
 		})
 	}

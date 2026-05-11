@@ -93,10 +93,18 @@ func (t *DetailTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Respo
 			})
 	}
 
-	canonicalURI, _, _, normErr := profile.NormalizeGitHubRepoInput(in.Target)
-	if normErr != nil {
-		canonicalURI = in.Target
+	// Multi-forge target resolution. See signals.go for the full
+	// rationale; same dispatch through profile.ResolveTarget so codeberg
+	// and gitlab URLs land on the right canonical URI rather than the
+	// repo:github/<host>/<owner> misclassification NormalizeGitHubRepoInput
+	// produced.
+	resolved, resolveErr := profile.ResolveTarget(in.Target)
+	if resolveErr != nil {
+		return mcp.Err(mcp.CodeSchemaViolation,
+			"target "+in.Target+" does not resolve to a canonical URI: "+resolveErr.Error(),
+			map[string]string{"target": in.Target, "phase": "resolve"})
 	}
+	canonicalURI := resolved.CanonicalURI
 
 	entity, err := t.Store.FindEntityByURI(ctx, canonicalURI)
 	if errors.Is(err, store.ErrNotFound) {

@@ -80,17 +80,33 @@ func mustRunGitInTest(t *testing.T, repo string, args ...string) {
 	require.NoErrorf(t, cmd.Run(), "git %v: %s", args, stderr.String())
 }
 
-func TestCollectorsFor_MissingPath_ReturnsErrCloneRequired(t *testing.T) {
+// TestCollectorsFor_MissingPath_DegradesToAPIOnlyCollectors pins
+// the post-ungate behavior superseding the prior "missing path
+// returns ErrCloneRequired" pin. See
+// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+// for the full rationale; this is the parallel test that originally
+// pinned ErrCloneRequired for a github-shaped repo: entity.
+//
+// ErrCloneRequired still fires when there are NO collectors at all
+// to return — the entity has no URL, or the URL host isn't
+// recognized so even openssf would skip. That case is covered by
+// the pkg/cargo tests and a future bare-entity test if needed.
+func TestCollectorsFor_MissingPath_DegradesToAPIOnlyCollectors(t *testing.T) {
 	t.Parallel()
 
+	var stderr bytes.Buffer
 	entity := &profile.Entity{
 		ID:           "e1",
 		CanonicalURI: "repo:github/alecthomas/kong",
 		URL:          "https://github.com/alecthomas/kong",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrCloneRequired)
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{
+		Stderr: &stderr,
+	})
+	require.NoError(t, err,
+		"github repo: entity without --path/--clone must degrade gracefully — openssf is API-only and runs without a clone")
+	require.NotEmpty(t, collectors,
+		"API-only collectors must populate the dispatch list even when clone is absent")
 }
 
 func TestCollectorsFor_CloneWithoutPath_ReturnsErrPathMissing(t *testing.T) {
@@ -207,6 +223,215 @@ func TestCollectorsFor_OriginMatches_SshForm(t *testing.T) {
 	assert.NoError(t, err, "ssh-form origin should normalize to same canonical URI")
 }
 
+// TestCollectorsFor_CodebergOriginMatches_SshForm pins the multi-forge
+// generalization: a Codeberg target validated against an SCP-form
+// `git@codeberg.org:owner/repo.git` origin must normalize to the same
+// canonical URI on both sides. Pre-NormalizeForgeRepoInput, the
+// normalizer left the colon in the owner segment ("codeberg.org:owner")
+// and rejected it via validPathSegment — so origin validation errored
+// for every codeberg-with-SSH-clone target.
+func TestCollectorsFor_CodebergOriginMatches_SshForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "git@codeberg.org:forgejo/forgejo.git")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err, "ssh-form codeberg origin should normalize to same canonical URI")
+}
+
+// TestCollectorsFor_GitLabOriginMatches_SshForm — same shape as the
+// Codeberg SSH-form test, for GitLab.
+func TestCollectorsFor_GitLabOriginMatches_SshForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "git@gitlab.com:gitlab-org/gitlab.git")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err, "ssh-form gitlab origin should normalize to same canonical URI")
+}
+
+// TestCollectorsFor_CodebergOriginMatches_HTTPSForm pins the happy
+// HTTPS-form path for Codeberg. The pre-NormalizeForgeRepoInput
+// behavior accidentally validated this case (both sides went through
+// the broken github-only normalizer and produced the same wrong URI,
+// e.g. "repo:github/codeberg.org/forgejo"), so this test wasn't RED
+// before the refactor — but it's a permanent invariant that the
+// switch must preserve.
+func TestCollectorsFor_CodebergOriginMatches_HTTPSForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://codeberg.org/forgejo/forgejo")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err)
+}
+
+// TestCollectorsFor_CodebergEntity_IncludesForgejoCollector pins the
+// Tier 1 wiring: a codeberg entity must get the forgejo collector in
+// its dispatched set. Without this, the new internal/signal/forgejo
+// package would land but never run — the github collector self-gates
+// on non-github URLs (correct) and there'd be nothing else collecting
+// the API-only metadata (stars, forks, archived, repo_age, etc.) for
+// codeberg targets.
+//
+// Asserts on collector names rather than instances so the test
+// remains decoupled from the exact construction shape (with/without
+// EntityStore, etc.). Same idiom the github wiring uses elsewhere.
+func TestCollectorsFor_CodebergEntity_IncludesForgejoCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://codeberg.org/forgejo/forgejo")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:codeberg/forgejo/forgejo",
+		URL:          "https://codeberg.org/forgejo/forgejo",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "forgejo",
+		"codeberg-hosted entity must dispatch the forgejo collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for codeberg targets")
+}
+
+// TestCollectorsFor_GitHostedEntity_IncludesAdoptionCollector pins
+// the adoption-lift wiring. After the github collector's
+// collectAdoption was lifted to internal/signal/adoption, the
+// standalone collector must be in the dispatch list for every
+// git-hosted entity (Go-ecosystem ones in particular). Without it,
+// the github lift-out would have silently dropped adoption from
+// every analyze run because no collector emits the signal anymore.
+//
+// Asserts on collector identity only — the adoption collector's
+// own package tests cover the ecosystem self-gate, the per-forge
+// module path derivation, and the stars-from-inRunResult ratio
+// computation.
+func TestCollectorsFor_GitHostedEntity_IncludesAdoptionCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:github/alecthomas/kong",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "adoption",
+		"adoption collector must be dispatched for every git-hosted entity; without it, the github collector's pre-lift adoption emission is gone and nothing replaces it")
+}
+
+// TestCollectorsFor_GitLabEntity_IncludesGitLabCollector pins the
+// gitlab Tier 1 wiring symmetric to the codeberg/forgejo pairing:
+// every git-hosted entity walks the full collector list, each with
+// its own host-side self-gate. A gitlab entity must reach the
+// gitlab collector at dispatch time (the collector then emits
+// signals because its self-gate accepts gitlab.com URLs). Same
+// dispatch-shape discipline that landed for forgejo.
+func TestCollectorsFor_GitLabEntity_IncludesGitLabCollector(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://gitlab.com/gitlab-org/gitlab")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "gitlab",
+		"gitlab-hosted entity must dispatch the gitlab collector — without it, API-only metadata signals (stars/forks/archived/repo_age/last_push/open_issues) are never collected for gitlab targets")
+}
+
+// TestCollectorsFor_GitHubEntity_DispatchesForgejoAndGitLab_SelfGateAtCollectTime
+// pins the dispatch contract: a github entity routes through the
+// forgejo AND gitlab collectors in the dispatched list, and each
+// collector self-gates at Collect time and emits zero signals for the
+// non-matching host. The dispatch is unconditional (same shape as
+// github / openssf — every git-hosted entity goes through the full
+// collector list, each with its own self-gate); this test guards
+// against a future "let's only wire forgejo for codeberg URLs"
+// optimization that would silently break the symmetry and require
+// host-aware dispatch knowledge to leak into collectorsFor.
+//
+// Renamed from OmitsForgejoCollectorAtCollectTime: the prior name
+// described the surface as "omits forgejo," but the body asserts the
+// opposite — forgejo IS dispatched and the self-gate decides emission.
+// The old name primed refactors to flip the assertion to NotContains.
+func TestCollectorsFor_GitHubEntity_DispatchesForgejoAndGitLab_SelfGateAtCollectTime(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/alecthomas/kong")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:github/alecthomas/kong",
+		URL:          "https://github.com/alecthomas/kong",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	// forgejo IS in the dispatched list; the self-gate fires at Collect
+	// time and emits zero signals for non-codeberg URLs (proven by
+	// TestCollector_NonCodebergEntity_ReturnsEmpty in the forgejo
+	// package). The dispatch list itself is unconditional so the
+	// orchestrator stays host-agnostic.
+	assert.Contains(t, names, "forgejo",
+		"forgejo collector must be dispatched for every git-hosted entity; the self-gate decides whether to emit signals")
+	assert.Contains(t, names, "gitlab",
+		"gitlab collector must be dispatched for every git-hosted entity; the self-gate decides whether to emit signals (proven empty by TestCollector_NonGitLabEntity_ReturnsEmpty in the gitlab package)")
+}
+
+// TestCollectorsFor_GitLabOriginMatches_HTTPSForm — same shape for GitLab.
+func TestCollectorsFor_GitLabOriginMatches_HTTPSForm(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://gitlab.com/gitlab-org/gitlab")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "repo:gitlab/gitlab-org/gitlab",
+		URL:          "https://gitlab.com/gitlab-org/gitlab",
+	}
+	_, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	assert.NoError(t, err)
+}
+
 func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 	// Create a "remote" source repo, then clone from its filesystem
 	// path into a new destination. Asserts the clone actually happened
@@ -224,7 +449,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 5, "github + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
+	assert.Len(t, collectors, 8, "github + forgejo + gitlab + adoption + git + repofiles + openssf-scorecard + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)
@@ -390,31 +615,92 @@ func TestCollectorsFor_PkgEntityWithResolvedURL_NoClone_GracefulDegradation(t *t
 			})
 			require.NoError(t, err,
 				"pkg: entity with resolved URL but no clone must NOT return an error")
-			require.Len(t, collectors, 1,
-				"only the registry collector should fire when no clone is available")
-			assert.Equal(t, tc.wantName, collectors[0].Name())
+
+			names := make([]string, 0, len(collectors))
+			for _, c := range collectors {
+				names = append(names, c.Name())
+			}
+			assert.Contains(t, names, tc.wantName,
+				"registry collector for ecosystem %q must fire", tc.ecosystem)
+			// Every API-only collector dispatches whenever
+			// entity.URL is set, regardless of clone state. See
+			// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+			// for the full API-only set rationale.
+			for _, want := range []string{"github", "forgejo", "gitlab", "adoption", "openssf-scorecard"} {
+				assert.Contains(t, names, want,
+					"API-only collector %q must dispatch even when no clone is available", want)
+			}
+			assert.NotContains(t, names, "git",
+				"clone-dependent git collector must NOT dispatch when no clone is available")
+			assert.NotContains(t, names, "repofiles",
+				"clone-dependent repofiles collector must NOT dispatch when no clone is available")
+			assert.NotContains(t, names, "exfilwatch",
+				"clone-dependent exfilwatch collector must NOT dispatch when no clone is available")
 			assert.Contains(t, stderr.String(), "pass --clone",
 				"should hint the user about --clone for additional signals")
 		})
 	}
 }
 
-// TestCollectorsFor_RepoEntity_NoPath_StillErrors confirms that
-// repo: entities (no registry collector) still fail loudly when
-// neither --path nor --clone is provided. The graceful degradation
-// only applies to pkg: entities that have registry collectors.
-func TestCollectorsFor_RepoEntity_NoPath_StillErrors(t *testing.T) {
+// TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors
+// pins the post-ungate behavior for bare repo: targets without a
+// clone. Pre-ungate, repo: entities errored with ErrCloneRequired
+// because the only collectors that fired were clone-dependent;
+// after the API-only collectors moved out of the clone-gated block,
+// repo: entities degrade gracefully — they still don't get the
+// clone-dependent set (git / repofiles / exfilwatch), but every
+// API-only collector that can run does.
+//
+// API-only set (this test pins the full membership):
+//
+//   - github          — calls api.github.com, reads owner/repo from URL
+//   - forgejo         — calls codeberg.org/api/v1, host-self-gates
+//   - gitlab          — calls gitlab.com/api/v4, host-self-gates
+//   - adoption        — calls GitHub code-search, derives module path
+//   - openssf-scorecard — calls api.securityscorecards.dev
+//
+// Clone-dependent set (must be absent here):
+//
+//   - git, repofiles, exfilwatch (all read the local clone)
+//   - source, source-golang (read .git for tag history)
+//   - artifact (compares clone tree against registry tarball)
+//
+// Same intent as the pkg-entity degradation: "collect whatever you
+// can." The asymmetry that existed pre-broader-ungate (pkg: degrades
+// minimally, repo: errors) was an artifact of which collectors had
+// been hardwired into the clone-gated block, not a deliberate design
+// distinction.
+func TestCollectorsFor_RepoEntity_NoPath_DegradesToAPIOnlyCollectors(t *testing.T) {
 	t.Parallel()
 
+	var stderr bytes.Buffer
 	entity := &profile.Entity{
 		ID:           "e1",
 		CanonicalURI: "repo:github/foo/bar",
 		URL:          "https://github.com/foo/bar",
 	}
-	_, err := collectorsFor(context.Background(), entity, CollectOpts{})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrCloneRequired,
-		"repo: entities with no registry collector must still fail on missing clone")
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{
+		Stderr: &stderr,
+	})
+	require.NoError(t, err,
+		"repo: entity without --clone must NOT error — every API-only collector still has work to do")
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	// API-only set: all five must be dispatched.
+	for _, want := range []string{"github", "forgejo", "gitlab", "adoption", "openssf-scorecard"} {
+		assert.Contains(t, names, want,
+			"API-only collector %q must dispatch even without --clone (no git operations, no filesystem reads)", want)
+	}
+	// Clone-dependent set: all must be absent.
+	for _, mustSkip := range []string{"git", "repofiles", "exfilwatch"} {
+		assert.NotContains(t, names, mustSkip,
+			"clone-dependent collector %q must NOT dispatch when --clone is absent — it reads the local clone", mustSkip)
+	}
+	assert.Contains(t, stderr.String(), "pass --clone",
+		"warning must surface what --clone unlocks (the clone-dependent collectors)")
 }
 
 // TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll verifies
@@ -974,3 +1260,95 @@ func assertCarriesOverride(t *testing.T, args []string, want, msg string) {
 	}
 	t.Errorf("%s: expected `-c %s` pair in child argv but did not find it; argv=%v", msg, want, args)
 }
+
+// --- classifyGitCloneError tests ---------------------------------------------
+//
+// classifyGitCloneError detects the "could not read Username … terminal
+// prompts disabled" stderr pair git emits when the forge returns 401
+// and our discipline (credential.helper= in gitenv.safeOverrides +
+// GIT_TERMINAL_PROMPT=0 in gitenv.SafeEnv) correctly refuses to supply
+// or prompt for credentials. The classifier rewrites the error message
+// so operators see the actual cause (missing/private/moved repo) rather
+// than git's misleading "terminal prompts disabled" surface text.
+//
+// Security invariant tested below: the helper does NOT touch argv, env,
+// or the subprocess. It only inspects stderr after the fact and rewrites
+// the Go error string. Tests assert the original git stderr is preserved
+// in the wrapped error so a future "let's clean up the message" patch
+// that drops the original stderr fails loudly here. See the godoc on
+// classifyGitCloneError in collectors.go for the full design rationale.
+
+// TestClassifyGitCloneError_AuthRequiredPattern pins the rewrite of
+// git's "could not read Username … terminal prompts disabled" stderr
+// into an operator-facing message that names the actual cause (repo
+// missing, private, or moved) without weakening the no-credentials
+// posture. Drives the helper's existence (red before
+// classifyGitCloneError exists; green after).
+func TestClassifyGitCloneError_AuthRequiredPattern(t *testing.T) {
+	t.Parallel()
+
+	stderr := "Cloning into '/tmp/x'...\n" +
+		"fatal: could not read Username for 'https://codeberg.org': terminal prompts disabled\n"
+	args := []string{"clone", "https://codeberg.org/missing/repo", "/tmp/x"}
+	runErr := fmt.Errorf("exit status 128")
+
+	err := classifyGitCloneError(args, runErr, stderr)
+	require.Error(t, err, "auth-prompt pattern must classify, not pass through")
+	assert.ErrorIs(t, err, ErrCloneAuthRequiredOrMissing,
+		"sentinel must be reachable via errors.Is so callers/tests can differentiate auth failures from other clone errors")
+	assert.ErrorIs(t, err, runErr,
+		"underlying exec error must remain reachable via errors.Is so callers can match exit-status-shaped failures")
+	assert.Contains(t, err.Error(), "does not pass credentials",
+		"operator-facing message must explain WHY git couldn't authenticate (signatory's no-credentials discipline, not a git bug)")
+	assert.Contains(t, err.Error(), "git ls-remote",
+		"message must point at the diagnostic command operators can run with their own credential setup")
+	assert.Contains(t, err.Error(), "terminal prompts disabled",
+		"original git stderr must be preserved in the wrapped error for debugging — a future patch that drops the underlying stderr would silently degrade incident response")
+}
+
+// TestClassifyGitCloneError_NonAuthErrorPassesThrough pins the gate:
+// only the "could not read Username" + "terminal prompts disabled"
+// pair triggers the rewrite. Network failures, missing-host errors,
+// and other clone-time stderrs must fall through (return nil) so
+// the caller's existing wrap handles them — we don't want to claim
+// every clone failure is an auth issue.
+func TestClassifyGitCloneError_NonAuthErrorPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"DNS failure", "fatal: unable to access 'https://example.com/': Could not resolve host"},
+		{"connection refused", "fatal: unable to access 'https://example.com/': Failed to connect"},
+		{"prompt-disabled phrase alone", "warning: terminal prompts disabled\n"},
+		{"username-error phrase alone", "fatal: could not read Username for some unrelated reason\n"},
+		{"empty stderr", ""},
+		{"unrelated 128", "fatal: destination path '/tmp/x' already exists and is not an empty directory.\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyGitCloneError(
+				[]string{"clone", "https://example.com/foo", "/tmp/x"},
+				fmt.Errorf("exit status 128"),
+				tc.stderr,
+			)
+			assert.Nil(t, err,
+				"non-auth pattern must return nil; defaultRunGit's existing wrap handles the error")
+		})
+	}
+}
+
+// TestDefaultRunGit_AuthRequired_ReturnsClassifiedError pins the wiring
+// of classifyGitCloneError into defaultRunGit. Uses a synthetic git
+// substitute (not the real git binary) to drive the auth-prompt stderr
+// pattern deterministically without a network round-trip. Confirms the
+// classified error reaches the caller, not the raw "git %v: ..." wrap
+// that pre-existed.
+//
+// We can't directly inject a fake binary into defaultRunGit (it always
+// invokes "git" via gitenv.NewCloneCmd), so this test stays at the
+// classifier-helper layer. The integration is covered by
+// TestClassifyGitCloneError_* plus a manual walk of defaultRunGit's
+// six new lines — keeping the test surface honest about what it
+// actually exercises.

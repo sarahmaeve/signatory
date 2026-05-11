@@ -94,3 +94,74 @@ func TestSignalsTool_MissingTarget(t *testing.T) {
 	assert.Equal(t, "error", resp.Status)
 	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code)
 }
+
+// TestSignalsTool_CodebergURL_ResolvesToCanonical pins the multi-forge
+// generalization of the target normalizer. Pre-fix, the tool ran
+// profile.NormalizeGitHubRepoInput on the input — that function's
+// permissive prefix-strip ate the "https://" and produced
+// owner="codeberg.org", name="forgejo", canonical URI
+// "repo:github/codeberg.org/forgejo". The downstream FindEntityByURI
+// then missed the codeberg entity (stored at the correct
+// "repo:codeberg/forgejo/forgejo") and returned CodeNotFound — even
+// when the entity existed. Same misclassification ResolveTarget's
+// rejectUnrecognizedForgeURL gate already prevents on the analyze path.
+//
+// Post-fix, the tool uses profile.ResolveTarget which dispatches off
+// the forgeHostPrefix table and produces the correct canonical URI;
+// the lookup hits the seeded entity and the response is OK.
+func TestSignalsTool_CodebergURL_ResolvesToCanonical(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:codeberg/forgejo/forgejo", "forgejo/forgejo")
+	seedSignal(t, s, e.ID)
+
+	tool := &SignalsTool{Store: s}
+	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"https://codeberg.org/forgejo/forgejo"}`))
+
+	require.Equal(t, "ok", resp.Status,
+		"codeberg URL must resolve to the canonical codeberg URI; old NormalizeGitHubRepoInput path produced repo:github/codeberg.org/forgejo and missed the entity")
+	data, ok := resp.Data.(map[string]any)
+	require.True(t, ok)
+	signals, ok := data["signals"].([]signalRecord)
+	require.True(t, ok)
+	assert.Len(t, signals, 1)
+}
+
+// TestSignalsTool_GitLabURL_ResolvesToCanonical — same shape for
+// GitLab. A second forge proves the fix is generic, not codeberg-only.
+func TestSignalsTool_GitLabURL_ResolvesToCanonical(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	e := seedEntity(t, s, "repo:gitlab/gitlab-org/gitlab", "gitlab-org/gitlab")
+	seedSignal(t, s, e.ID)
+
+	tool := &SignalsTool{Store: s}
+	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"https://gitlab.com/gitlab-org/gitlab"}`))
+
+	require.Equal(t, "ok", resp.Status)
+	data, ok := resp.Data.(map[string]any)
+	require.True(t, ok)
+	signals, ok := data["signals"].([]signalRecord)
+	require.True(t, ok)
+	assert.Len(t, signals, 1)
+}
+
+// TestSignalsTool_MalformedTarget_SchemaViolation pins the contract
+// shift the ResolveTarget switch introduces: input that doesn't
+// resolve as ANY known canonical URI form (registry URL, forge
+// shorthand, vanity import path, scheme-prefixed canonical URI)
+// returns CodeSchemaViolation, not CodeNotFound. Pre-fix the
+// NormalizeGitHubRepoInput failure fell through to "use raw target
+// as canonical URI" and the lookup miss produced CodeNotFound —
+// conflating malformed-input with absent-data. Matches summary tool's
+// existing precedent (summary.go:64-68).
+func TestSignalsTool_MalformedTarget_SchemaViolation(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	tool := &SignalsTool{Store: s}
+
+	resp := tool.Handle(context.Background(), json.RawMessage(`{"target":"not a valid target"}`))
+	assert.Equal(t, "error", resp.Status)
+	assert.Equal(t, mcp.CodeSchemaViolation, resp.Error.Code,
+		"unparseable target must classify as schema violation so the LLM caller knows the input shape was wrong, not the data was missing")
+}

@@ -87,14 +87,17 @@ func NormalizeDeclaredRepoURL(raw string) string {
 		s = "https://github.com" + rest
 	}
 
-	// Delegate to ResolveTarget for the actual github-URL grammar.
-	// Non-github hosts and malformed inputs surface as errors that
-	// we map to "return empty string."
+	// Delegate to ResolveTarget for the actual forge-URL grammar.
+	// First-classed forges (github / codeberg / gitlab) get a
+	// non-empty CloneURL via profile.CloneURLForRepoPlatform; any
+	// other host either rejects at the URL gate (rejectUnrecognizedForgeURL)
+	// or surfaces with an empty CloneURL — both routes map to
+	// "return empty string" here.
 	resolved, err := profile.ResolveTarget(s)
 	if err != nil {
 		return ""
 	}
-	if resolved.CloneURL == "" || resolved.Platform != profile.PlatformGitHub {
+	if resolved.CloneURL == "" {
 		return ""
 	}
 	return resolved.CloneURL

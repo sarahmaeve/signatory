@@ -690,7 +690,19 @@ func (cmd *AnalyzeCmd) collectFreshSignals(
 		}
 		inRunResult.Collected = append(inRunResult.Collected, result.Collected...)
 		allSignals = append(allSignals, result.Signals()...)
-		_, _ = fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
+		// Suppress per-collector narration when the result is empty
+		// AND there were no failures — that's the unambiguous "this
+		// collector self-gated, didn't apply to this entity"
+		// signature (every forge collector's host-mismatch branch
+		// produces it). Without the suppression, multi-forge dispatch
+		// surfaces N-1 noise lines per target ("[github] Collected
+		// 0 signals" on codeberg targets, etc.). See
+		// signal.CollectionResult.WorthNarrating godoc for the full
+		// rule and the edge cases (absence records narrate; failures
+		// narrate; only fully-empty results suppress).
+		if result.WorthNarrating() {
+			_, _ = fmt.Fprintf(stderr, "[%s] %s\n", collector.Name(), result.Summary())
+		}
 	}
 	return allSignals, nil
 }

@@ -35,9 +35,10 @@ func (f stubNpmResolverFunc) ResolveSource(ctx context.Context, name string) (re
 	if url == "" {
 		return resolver.DeclaredSource{SelfReported: true}, nil
 	}
-	// Populate URI only when the URL resolves to a github target;
-	// non-github URLs flow through as URL-only so the handoff-level
-	// non-github test case still exercises the downstream error path.
+	// Populate URI only when the URL resolves to a recognized forge
+	// target; URLs ResolveTarget can't classify flow through as
+	// URL-only so the handoff-level unsupported-forge test case
+	// still exercises the downstream error path.
 	uri := ""
 	cloneURL := url
 	if res, perr := profile.ResolveTarget(url); perr == nil {
@@ -473,42 +474,50 @@ func TestHandoff_RoleEnumRejected(t *testing.T) {
 
 // --- --network-precheck path: pure-unit tests -----------------------------
 //
-// The applyNetworkPrecheck method constructs ghclient.NewClient(...) directly
-// with a hardcoded baseURL (https://api.github.com) — there is no env var
-// or other seam to redirect it at an httptest.Server from outside the
-// github package, and the Client struct's baseURL field is unexported.
-// End-to-end integration tests for applyNetworkPrecheck would require
-// either restructuring it to accept an injectable Source (an API change
-// the task explicitly forbids) or exporting a baseURL seam on the github
-// Client (out of scope for this test file). So we exercise only the pure
-// helper functions here: looksLikeGitHubURL, languageToFlavor, and
-// formatPrecheckReport. Detector-level behavior is already covered in
-// internal/ecosystem/detect_test.go and internal/signal/github/
-// detection_helpers_test.go, so the missing coverage is just the wiring
-// inside applyNetworkPrecheck — small, and best left for a future
-// refactor that introduces an injectable seam.
+// The applyNetworkPrecheck method constructs API clients directly with
+// hardcoded baseURLs (api.github.com, codeberg.org/api/v1, gitlab.com/api/v4)
+// — there is no env var or other seam to redirect them at an httptest.Server
+// from outside each forge's package, and the Client struct's baseURL field
+// is unexported. End-to-end integration tests for applyNetworkPrecheck use
+// the HandoffCmd.PrecheckSource seam (injecting a fake Source); the helpers
+// below cover the pure host-classification and language-mapping logic.
 
-func TestLooksLikeGitHubURL_HTTPS(t *testing.T) {
+func TestLooksLikeSupportedForgeURL_HTTPS(t *testing.T) {
 	t.Parallel()
-	assert.True(t, looksLikeGitHubURL("https://github.com/foo/bar"))
+	for _, host := range []string{"github.com", "codeberg.org", "gitlab.com"} {
+		t.Run(host, func(t *testing.T) {
+			assert.True(t, looksLikeSupportedForgeURL("https://"+host+"/foo/bar"))
+		})
+	}
 }
 
-func TestLooksLikeGitHubURL_HTTP(t *testing.T) {
+func TestLooksLikeSupportedForgeURL_HTTP(t *testing.T) {
 	t.Parallel()
-	assert.True(t, looksLikeGitHubURL("http://github.com/foo/bar"))
+	for _, host := range []string{"github.com", "codeberg.org", "gitlab.com"} {
+		t.Run(host, func(t *testing.T) {
+			assert.True(t, looksLikeSupportedForgeURL("http://"+host+"/foo/bar"))
+		})
+	}
 }
 
-func TestLooksLikeGitHubURL_CaseInsensitive(t *testing.T) {
+func TestLooksLikeSupportedForgeURL_CaseInsensitive(t *testing.T) {
 	t.Parallel()
-	assert.True(t, looksLikeGitHubURL("HTTPS://GITHUB.COM/foo/bar"))
+	for _, input := range []string{
+		"HTTPS://GITHUB.COM/foo/bar",
+		"HTTPS://CODEBERG.ORG/foo/bar",
+		"HTTPS://GITLAB.COM/foo/bar",
+	} {
+		t.Run(input, func(t *testing.T) {
+			assert.True(t, looksLikeSupportedForgeURL(input))
+		})
+	}
 }
 
-func TestLooksLikeGitHubURL_RejectsOtherHosts(t *testing.T) {
+func TestLooksLikeSupportedForgeURL_RejectsOtherHosts(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name, input string
 	}{
-		{"gitlab", "https://gitlab.com/foo/bar"},
 		{"bitbucket", "https://bitbucket.org/foo/bar"},
 		{"sourcehut", "https://sourcehut.org/foo/bar"},
 		{"example", "https://example.com/foo/bar"},
@@ -516,16 +525,59 @@ func TestLooksLikeGitHubURL_RejectsOtherHosts(t *testing.T) {
 		{"absolute-path", "/Users/me/code/foo"},
 		{"relative-path", "./foo"},
 		{"empty", ""},
-		// Subdomain spoof: a host that merely contains "github.com"
-		// as a substring shouldn't pass. Today's prefix check correctly
-		// rejects this because the scheme prefix doesn't match.
-		{"subdomain-spoof", "https://evil.com/github.com/foo/bar"},
+		// Subdomain spoof: a host that merely contains a recognized
+		// forge name as a substring shouldn't pass. The prefix check
+		// correctly rejects these because the scheme prefix doesn't
+		// match the canonical host.
+		{"github-subdomain-spoof", "https://evil.com/github.com/foo/bar"},
+		{"gitlab-subdomain-spoof", "https://evil.com/gitlab.com/foo/bar"},
+		// Self-hosted instances of the same forge software (e.g.,
+		// custom Forgejo, self-hosted GitLab) are deliberately rejected
+		// — v0.1 hardcodes the public-instance hostnames and self-host
+		// support is a follow-up requiring an explicit allow-list.
+		{"self-hosted-forgejo", "https://forge.example.com/foo/bar"},
+		{"self-hosted-gitlab", "https://gitlab.example.com/foo/bar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.False(t, looksLikeGitHubURL(tc.input), "input %q should not look like a github URL", tc.input)
+			assert.False(t, looksLikeSupportedForgeURL(tc.input), "input %q should not look like a supported-forge URL", tc.input)
 		})
 	}
+}
+
+// TestPrecheckSourceForPlatform_Dispatches confirms the platform → Source
+// factory wires the right concrete client per forge. The %T-formatted
+// type name carries just the package's local identifier (Go reflection
+// doesn't surface the full import path), so the test asserts on the
+// per-forge local name — sufficient to catch a future rename or
+// accidentally returning the wrong forge's client.
+func TestPrecheckSourceForPlatform_Dispatches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		platform string
+		want     string // local %T name of the expected Client type
+	}{
+		{profile.PlatformGitHub, "*github.Client"},
+		{profile.PlatformCodeberg, "*forgejo.Client"},
+		{profile.PlatformGitLab, "*gitlab.Client"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.platform, func(t *testing.T) {
+			got, err := precheckSourceForPlatform(tc.platform)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.want, fmt.Sprintf("%T", got),
+				"platform %q must route to %s", tc.platform, tc.want)
+		})
+	}
+}
+
+func TestPrecheckSourceForPlatform_UnknownPlatform(t *testing.T) {
+	t.Parallel()
+	got, err := precheckSourceForPlatform("bitbucket")
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "bitbucket")
 }
 
 func TestLanguageToFlavor_KnownLanguages(t *testing.T) {
@@ -732,15 +784,69 @@ func TestHandoff_NetworkPrecheck_AppliesLanguage(t *testing.T) {
 	assert.Contains(t, string(body), "cgo")
 }
 
-func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
-	// Even with precheck enabled, non-GitHub hosts aren't supported
-	// yet — we should error before attempting any network call. The
+func TestHandoff_NetworkPrecheck_AcceptsGitLab(t *testing.T) {
+	// gitlab.com targets must flow through precheck the same way
+	// github.com does — the multi-forge dispatch should pick the
+	// gitlab Source factory in production, and tests inject a
+	// fakePrecheckSource that stands in regardless of platform.
+	// Asserts the inversion of the pre-multi-forge "reject non-github"
+	// behavior: precheck succeeds and the detected ecosystem lands on
+	// the command struct.
+	outPath := filepath.Join(t.TempDir(), "out.md")
+	cmd := &HandoffCmd{
+		Role:            "provenance",
+		Target:          "https://gitlab.com/gitlab-org/gitlab",
+		Path:            "/tmp/gitlab",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"Gemfile"},
+			Language: "Ruby",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	// Gemfile maps to no listed Ecosystem in ecosystem.detect today
+	// for provenance flag-fill purposes (Gem is registered but only
+	// in priorityOrder); the assertion that matters is that we
+	// reached the Source and did not reject on host. Concretely:
+	// the precheck must not have errored on the gitlab.com URL.
+	assert.NotEqual(t, "", cmd.Ecosystem+cmd.Language,
+		"precheck must have produced at least one of ecosystem/language for a gitlab.com target")
+}
+
+func TestHandoff_NetworkPrecheck_AcceptsCodeberg(t *testing.T) {
+	// codeberg.org (Forgejo) targets must flow through precheck. Same
+	// shape as the gitlab acceptance test — the dispatch wires the
+	// forgejo Source factory in production; the injected fake stands
+	// in for tests.
+	outPath := filepath.Join(t.TempDir(), "out.md")
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "https://codeberg.org/forgejo/forgejo",
+		Path:            "/tmp/forgejo",
+		NetworkPrecheck: true,
+		Output:          outPath,
+		Quiet:           true,
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"go.mod"},
+			Language: "Go",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "go", cmd.Language,
+		"precheck must apply Go language flavor for a codeberg.org target with a Go primary language")
+}
+
+func TestHandoff_NetworkPrecheck_RejectsUnsupportedForge(t *testing.T) {
+	// Hosts outside the recognized forge set (github, codeberg, gitlab)
+	// are still rejected — we have no Source factory for them. The
 	// inspectSource below records whether its methods were reached;
 	// they must not be.
 	src := &inspectSource{}
 	cmd := &HandoffCmd{
 		Role:            "security",
-		Target:          "https://gitlab.com/foo/bar",
+		Target:          "https://bitbucket.org/foo/bar",
 		Path:            "/tmp/bar",
 		NetworkPrecheck: true,
 		Output:          filepath.Join(t.TempDir(), "out.md"),
@@ -749,8 +855,9 @@ func TestHandoff_NetworkPrecheck_RejectsNonGitHub(t *testing.T) {
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "github.com URL")
-	assert.Zero(t, src.calls, "Source methods must not be invoked for non-GitHub targets")
+	assert.Contains(t, err.Error(), "bitbucket.org",
+		"error must name the offending host so the user knows what's wrong")
+	assert.Zero(t, src.calls, "Source methods must not be invoked for unsupported forges")
 }
 
 // TestHandoff_NetworkPrecheck_RejectsNonGitHubSchemeOnly verifies that
@@ -982,27 +1089,54 @@ func TestHandoff_NetworkPrecheck_NpmNoDeclaredSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "no resolvable source")
 }
 
-// TestHandoff_NetworkPrecheck_NpmNonGitHubSource covers a package that
-// declares its source on a non-github host. We can't do GitHub-API
-// precheck on gitlab, so the command errors — but must surface the
-// declared URL verbatim so the user can inspect before re-running.
-func TestHandoff_NetworkPrecheck_NpmNonGitHubSource(t *testing.T) {
+// TestHandoff_NetworkPrecheck_NpmGitLabSource covers a package that
+// declares its source on gitlab.com. With multi-forge precheck, the
+// declared URL is accepted, cmd.Target is rewritten to the gitlab URL,
+// and detection proceeds via the gitlab Source. Mirrors the github
+// flow in TestHandoff_NetworkPrecheck_NpmjsURL_ResolvesToGitHub.
+func TestHandoff_NetworkPrecheck_NpmGitLabSource(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "out.md")
 	cmd := &HandoffCmd{
 		Role:            "security",
 		Target:          "pkg:npm/gitlabby",
 		Path:            "/tmp/gitlabby",
 		NetworkPrecheck: true,
-		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Output:          outPath,
 		Quiet:           true,
 		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
 			return "https://gitlab.com/foo/bar", nil
 		}),
+		PrecheckSource: &fakePrecheckSource{
+			Files:    []string{"package.json"},
+			Language: "JavaScript",
+		},
+	}
+	require.NoError(t, cmd.Run(&Globals{}))
+	assert.Equal(t, "https://gitlab.com/foo/bar", cmd.Target,
+		"cmd.Target must be rewritten to the resolved gitlab URL so downstream steps see a clone-able target")
+}
+
+// TestHandoff_NetworkPrecheck_NpmUnsupportedForgeSource covers a
+// package that declares its source on a forge we still don't support
+// (bitbucket, sourcehut, custom self-hosted gitea, etc.). The command
+// errors and surfaces the declared URL verbatim so the user can
+// inspect before re-running with --ecosystem/--language explicitly.
+func TestHandoff_NetworkPrecheck_NpmUnsupportedForgeSource(t *testing.T) {
+	cmd := &HandoffCmd{
+		Role:            "security",
+		Target:          "pkg:npm/bitbucketty",
+		Path:            "/tmp/bitbucketty",
+		NetworkPrecheck: true,
+		Output:          filepath.Join(t.TempDir(), "out.md"),
+		Quiet:           true,
+		EcosystemRegistry: stubNpmRegistry(func(_ context.Context, _ string) (string, error) {
+			return "https://bitbucket.org/foo/bar", nil
+		}),
 	}
 	err := cmd.Run(&Globals{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "https://gitlab.com/foo/bar",
-		"error must show the declared non-github URL so the user can investigate")
-	assert.Contains(t, err.Error(), "only github.com")
+	assert.Contains(t, err.Error(), "https://bitbucket.org/foo/bar",
+		"error must show the declared unsupported-forge URL so the user can investigate")
 }
 
 // TestHandoff_NetworkPrecheck_NpmResolverError covers transient

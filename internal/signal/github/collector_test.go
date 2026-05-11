@@ -116,9 +116,10 @@ func mockGitHubAPI() http.Handler {
 		})
 	})
 
-	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(searchResult{TotalCount: 2008})
-	})
+	// /search/code handler removed alongside the lift of adoption to
+	// internal/signal/adoption. The github collector no longer calls
+	// GetGoModRefCount; the standalone adoption collector owns the
+	// search endpoint now and is covered by its own package's tests.
 
 	mux.HandleFunc("/repos/alecthomas/kong/contents/.github/workflows", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]repoContent{
@@ -156,6 +157,62 @@ go 1.20
 	return mux
 }
 
+// TestCollector_NonGitHubEntity_ReturnsEmpty pins the self-gate that
+// keeps the GitHub collector from hitting api.github.com when handed
+// a non-GitHub entity (codeberg, gitlab, or any other forge whose
+// URL doesn't resolve to github.com).
+//
+// Pre-self-gate, the collector ran ParseRepoURL — which strips
+// "https://" and treats whatever's next as owner/repo — producing
+// owner="codeberg.org", name="forgejo" for a codeberg URL, then
+// firing GET https://api.github.com/repos/codeberg.org/forgejo.
+// That returns 404 and surfaces as a Collect error, which would
+// fail any analyze run targeting a codeberg or gitlab repo.
+//
+// After the self-gate (mirror of openssf's extractOwnerRepo
+// pattern), Collect returns a non-nil empty CollectionResult with
+// nil error — symmetric with gopublish's non-Go-entity branch.
+// The test handler fails if hit; reaching it would prove the
+// self-gate has regressed.
+func TestCollector_NonGitHubEntity_ReturnsEmpty(t *testing.T) {
+	// Empty URL is NOT covered here: the collector keeps its legacy
+	// fallback to entity.ShortName for bare-shorthand input, so the
+	// gate intentionally fires only when a non-empty URL points at a
+	// non-github host. TestCollector_NotFoundError exercises the
+	// empty-URL ShortName-fallback path.
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"codeberg URL", "https://codeberg.org/forgejo/forgejo"},
+		{"http codeberg URL", "http://codeberg.org/forgejo/forgejo"},
+		{"gitlab URL", "https://gitlab.com/gitlab-org/gitlab"},
+		{"bitbucket URL", "https://bitbucket.org/team/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("non-GitHub entity must short-circuit; "+
+					"handler was unexpectedly reached for %s (%s)", tc.name, r.URL.Path)
+			})
+			c := newTestCollector(t, handler)
+			entity := &profile.Entity{
+				ID:        "test-entity",
+				Type:      profile.EntityPackage,
+				ShortName: "forgejo",
+				URL:       tc.url,
+			}
+			result, err := c.Collect(context.Background(), entity)
+			require.NoError(t, err,
+				"non-GitHub entity must NOT surface an error — symmetric with openssf")
+			require.NotNil(t, result,
+				"Collect must return a non-nil CollectionResult so callers iterate without nil-guards")
+			assert.Empty(t, result.Signals(),
+				"non-GitHub entity must produce zero signals (collector self-gates out)")
+		})
+	}
+}
+
 func TestCollector_Name(t *testing.T) {
 	c := NewCollector()
 	assert.Equal(t, "github", c.Name())
@@ -183,12 +240,14 @@ func TestCollector_Collect(t *testing.T) {
 		byType[s.Type] = s
 	}
 
-	// Verify signal types are present.
+	// Verify signal types are present. "adoption" lives in
+	// internal/signal/adoption as of the lift-out commit and is no
+	// longer emitted by the github collector.
 	expectedTypes := []string{
 		"last_push", "repo_age", "stars", "forks", "open_issues",
 		"archived", "owner_type", "license", "contributors",
 		"last_commit", "commit_signing", "total_commits", "tags",
-		"owner_profile", "adoption", "ci_cd", "go_dependencies",
+		"owner_profile", "ci_cd", "go_dependencies",
 	}
 	for _, st := range expectedTypes {
 		assert.Contains(t, byType, st, "missing signal type: %s", st)
@@ -247,13 +306,9 @@ func TestCollector_SignalValues(t *testing.T) {
 	require.NoError(t, json.Unmarshal(byType["contributors"].Value, &contribVal))
 	assert.Equal(t, float64(3), contribVal["count"])
 
-	// Adoption and refs-to-stars ratio.
-	var adoptionVal map[string]any
-	require.NoError(t, json.Unmarshal(byType["adoption"].Value, &adoptionVal))
-	assert.Equal(t, float64(2008), adoptionVal["go_mod_refs"])
-	assert.Equal(t, float64(3023), adoptionVal["stars"])
-	assert.InDelta(t, 0.66, adoptionVal["refs_to_stars"], 0.01)
-	assert.Equal(t, "direct", adoptionVal["adoption_type"])
+	// Adoption value-assertion block removed: the signal now lives
+	// in internal/signal/adoption and is covered by that package's
+	// TestCollector_GitHubModule_EmitsAdoption.
 
 	// CI/CD presence.
 	var ciVal map[string]any
@@ -402,11 +457,9 @@ func TestCollector_PartialCollection(t *testing.T) {
 		json.NewEncoder(w).Encode(user{Login: "owner", CreatedAt: time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)})
 	})
 
-	// Search API rate-limited.
-	mux.HandleFunc("/search/code", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-RateLimit-Reset", "1712700000")
-		w.WriteHeader(http.StatusForbidden)
-	})
+	// /search/code rate-limit handler removed alongside the adoption
+	// lift-out: that path now lives in internal/signal/adoption and
+	// is covered by its own rate-limit test.
 
 	// Contents API rate-limited (CI and go.mod checks).
 	mux.HandleFunc("/repos/owner/repo/contents/", func(w http.ResponseWriter, r *http.Request) {

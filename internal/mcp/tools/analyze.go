@@ -101,12 +101,19 @@ func (t *AnalyzeTool) Handle(ctx context.Context, raw json.RawMessage) *mcp.Resp
 		return mcp.Err(mcp.CodeSchemaViolation, `depth must be "provenance" or "signals"`, map[string]string{"field": "depth"})
 	}
 
-	// Normalize the target to a canonical URI.
-	canonicalURI, _, _, normErr := profile.NormalizeGitHubRepoInput(in.Target)
-	if normErr != nil {
-		// Fall back to raw target in case it is already a canonical URI.
-		canonicalURI = in.Target
+	// Multi-forge target resolution. See signals.go for the full
+	// rationale; same dispatch through profile.ResolveTarget so the
+	// analyze tool admits codeberg / gitlab URLs and registry-package
+	// URLs (npmjs.com, pypi.org, …) without falling through the
+	// pre-2026-05-10 NormalizeGitHubRepoInput permissive prefix-strip
+	// that misclassified non-github URLs as repo:github/<host>/<owner>.
+	resolved, resolveErr := profile.ResolveTarget(in.Target)
+	if resolveErr != nil {
+		return mcp.Err(mcp.CodeSchemaViolation,
+			"target "+in.Target+" does not resolve to a canonical URI: "+resolveErr.Error(),
+			map[string]string{"target": in.Target, "phase": "resolve"})
 	}
+	canonicalURI := resolved.CanonicalURI
 
 	entity, err := t.Store.FindEntityByURI(ctx, canonicalURI)
 	if errors.Is(err, store.ErrNotFound) {
