@@ -168,6 +168,18 @@ Per capture:
    6 found the docs claim it should — see design/agent-otel.md).
    The wrapper works regardless of how that resolves.
 
+   **Order matters.** The OTEL env vars are snapshotted into
+   the `claude` process at exec time. If the receiver was down
+   when you launched, restarting the receiver mid-session
+   doesn't reattach the existing claude — its export endpoint
+   is whatever it captured at start. Hooks keep firing (those
+   re-read `.claude/settings.json` per invocation), so the
+   report's hook-fed sections will populate even though OTEL
+   spans are silently dropped. If you see a session report
+   with hook data but empty span sections, that's the
+   signature — start the receiver first, then launch a fresh
+   wrapper.
+
 3. **Run any /analyze (or just use Claude as normal).** Hook
    events land in `raw/hooks-<session>.jsonl` per tool call;
    OTEL traces land in `raw/traces.jsonl`.
