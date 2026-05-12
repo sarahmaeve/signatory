@@ -2,17 +2,26 @@
 
 ## Source
 
-Socket Threat Research, "TanStack npm packages compromised in Mini
-Shai-Hulud supply chain attack"
-(`socket.dev/blog/tanstack-npm-packages-compromised-mini-shai-hulud-supply-chain-attack`,
-fetched 2026-05-12). Reports compromise of 84 npm artifacts under the
-`@tanstack` namespace, including `@tanstack/react-router` (12M+ weekly
-downloads), with concurrent propagation to OpenSearch (npm), `mistralai`
-and `guardrails-ai` (PyPI), and Squawk packages. Attribution signed
-"With Love TeamPCP" in the attacker's compromised GitHub account
-(`voicproducoes`): "We've been online over 2 hours now stealing creds."
-Socket's AI Scanner flagged the artifacts within six minutes of
-publication.
+Two sources, both fetched 2026-05-12:
+
+- Socket Threat Research, "TanStack npm packages compromised in Mini
+  Shai-Hulud supply chain attack"
+  (`socket.dev/blog/tanstack-npm-packages-compromised-mini-shai-hulud-supply-chain-attack`).
+  Campaign-wide writeup covering 84 npm artifacts under the `@tanstack`
+  namespace, including `@tanstack/react-router` (12M+ weekly downloads),
+  with concurrent propagation to OpenSearch (npm), `mistralai` and
+  `guardrails-ai` (PyPI), and Squawk packages. Attributes the campaign
+  to TeamPCP via attacker-controlled GitHub account `voicproducoes`
+  (which hosted a repository titled "A Mini Shai-Hulud has Appeared"
+  signed "With Love TeamPCP": "We've been online over 2 hours now
+  stealing creds"). Socket's AI Scanner flagged the artifacts within
+  six minutes of publication.
+- TanStack maintainers' own postmortem, "npm Supply Chain Compromise:
+  A Postmortem" (`tanstack.com/blog/npm-supply-chain-compromise-postmortem`).
+  TanStack-specific details on the exploited workflow, the OIDC
+  extraction technique, the detection timeline, and post-incident
+  hardening. Disambiguates Socket's campaign-wide observations from
+  what was actually done against TanStack.
 
 This entry pairs with the existing TeamPCP coverage in
 [`example-litellm-attack.md`](example-litellm-attack.md) and
@@ -41,18 +50,22 @@ registers `build_provenance_attestation` with the caveat that
 *"attestation alone is not trust — a verifier must check it against a
 known-good build configuration."*
 
-TanStack is the operational test of that caveat. The malicious versions
-were published **with** valid OIDC trusted-publisher binding and
-**with** a Sigstore provenance attestation submitted to the public
-transparency log. The attacker executed code inside the legitimate
-publishing workflow's runtime environment (via `pull_request_target`
-"Pwn Request" + GitHub Actions cache poisoning across the fork-to-base
-trust boundary), extracted the OIDC JWT from
-`ACTIONS_ID_TOKEN_REQUEST_URL`, exchanged it for an npm publish token
-via federation, validated the token at
-`https://registry.npmjs.org/-/npm/v1/tokens`, and republished. The
-attestation chain is intact end-to-end. The current
-`publish_provenance_continuity` signal would record **zero**
+TanStack is the operational test of that caveat. The malicious
+publishes were authenticated against the project's valid OIDC
+trusted-publisher binding (`release.yml@refs/heads/main`). The attacker
+executed code inside the legitimate publishing workflow's runtime
+environment — via `pull_request_target` "Pwn Request" on
+`bundle-size.yml` plus GitHub Actions cache poisoning across the
+fork-to-base trust boundary — and scraped the OIDC token that the
+legitimate workflow had already minted, by reading the
+`Runner.Worker` process's memory directly (`/proc/<pid>/maps` +
+`/proc/<pid>/mem`). The malicious code never made an
+`ACTIONS_ID_TOKEN_REQUEST_URL` request of its own; it lifted the
+token the runner had already obtained for the legitimate publish step.
+It then posted directly to `registry.npmjs.org` with the scraped
+token, bypassing the workflow's own Publish Packages step entirely.
+From the registry's perspective the binding was satisfied. The
+current `publish_provenance_continuity` signal would record **zero**
 attestation transitions across these versions.
 
 The existing v0.1 instrumentation answers *"did this package keep its
@@ -70,44 +83,82 @@ downstream conclusion can name a discrepancy in it.
 
 ## The attack shape
 
-Reconstructed from the Socket writeup:
+Reconstructed from the Socket writeup and the TanStack postmortem
+(facts attributed to one source or the other where they disagree or
+where only one source has the detail):
 
 1. Target a repository with a `pull_request_target`-triggered workflow
-   that reads fork-controlled input (PR head ref, fork-supplied
-   artifacts, or fork-writable GHA cache keys). The `pull_request_target`
-   misconfiguration is the same one
-   [`example-prtscan-attack.md`](example-prtscan-attack.md) documented;
-   the difference is the consequence — prt-scan used it to dump secrets,
-   TanStack used it to acquire OIDC.
-2. Inject code that runs inside the workflow runner. Cache poisoning
-   across the fork-to-base trust boundary lets a fork PR plant content
-   that the base-branch workflow restores from cache and executes,
-   without the base workflow ever explicitly trusting fork input.
-3. Read `ACTIONS_ID_TOKEN_REQUEST_TOKEN` and
-   `ACTIONS_ID_TOKEN_REQUEST_URL` from the runner environment. Mint an
-   OIDC JWT.
-4. Exchange the JWT for an npm publish token via the trusted-publisher
-   federation binding. Validate the token at
-   `https://registry.npmjs.org/-/npm/v1/tokens` to confirm the
-   federation path worked.
+   that reads fork-controlled input. TanStack's exploited workflow was
+   `bundle-size.yml`, triggered on
+   `pull_request_target.paths: ['packages/**', 'benchmarks/**']` and
+   checking out `ref: refs/pull/<pr-number>/merge` — fork code, run
+   with base-repo context. The `pull_request_target` misconfiguration
+   is the same one
+   [`example-prtscan-attack.md`](example-prtscan-attack.md)
+   documented; the difference is the consequence — prt-scan used it
+   to dump secrets, TanStack used it to seed a poisoned cache.
+2. Plant content into a GHA cache key that the base-branch publishing
+   workflow will later restore. TanStack's poisoned key was
+   `Linux-pnpm-store-<hash>` keyed on `hashFiles('**/pnpm-lock.yaml')`,
+   restored by `release.yml`'s Setup Tools step on the next push to
+   main. The trust-boundary leak is mechanical and named:
+   `actions/cache@v5`'s post-job save uses a runner-internal token,
+   not `GITHUB_TOKEN`, so PR runs write to base-repo cache scope
+   without needing elevated permissions. The cache-poisoning step
+   does not require the fork PR to do anything that looks like
+   privileged access from the workflow's perspective.
+3. Wait for the legitimate `release.yml` to run on main. When it
+   restores the poisoned pnpm store, attacker binaries execute during
+   the build step. They locate the GitHub Actions `Runner.Worker`
+   process via `/proc/*/cmdline`, then read `/proc/<pid>/maps` and
+   `/proc/<pid>/mem` to scrape the OIDC token the runner already
+   minted for the legitimate publish step. The malicious code makes
+   **no** `ACTIONS_ID_TOKEN_REQUEST_URL` request of its own — the
+   token is lifted from another process's memory. The `/proc`-based
+   memory-scrape primitive is verbatim from the March 2025
+   `tj-actions/changed-files` compromise (CVE-2025-30066); see
+   [`2025-03-14-tj-actions-changed-files.md`](2025-03-14-tj-actions-changed-files.md)
+   for the primary-source payload and the
+   `"…","isSecret":true` regex the script greps against the dump.
+   The **use** differs: tj-actions printed scraped secrets to
+   workflow stdout (a passive log-exfil model that worked only
+   against public repos with readable logs); TanStack used the
+   scraped OIDC token actively to publish, which works against
+   private repos and needs no attacker-side log-scraping pipeline.
+   Primitive: 14 months old. Use: new this incident.
+4. Post directly to `registry.npmjs.org` with the scraped token,
+   bypassing the workflow's own Publish Packages step entirely. The
+   publish is authenticated against the project's
+   `release.yml@refs/heads/main` trusted-publisher binding; the
+   registry has no view that the binding was satisfied by an
+   out-of-band write rather than the workflow's defined publish step.
+   None of the malicious publishes used a maintainer's npm token (per
+   the postmortem).
 5. Identify maintainer-owned packages via `npms.io` search. Bundle the
-   payload (`router_init.js`, ~2.3 MB, single-line obfuscated;
-   `tanstack_runner.js` injected via git-based optional dependency
-   pointing to the attacker's repo) into the publish tarball.
-6. Publish under the `latest` dist-tag using the federated token. **The
-   Sigstore provenance attestation is generated as a normal artifact of
-   the legitimate publishing workflow** and submitted to the
-   transparency log. From the registry's perspective, the publish is
-   indistinguishable from the project's normal CI-backed pattern.
-7. Concurrently, use the stolen GitHub token plus the GraphQL
-   `createCommitOnBranch` mutation (no local clone) to commit malware
-   directly into `.github/workflows/`, `.claude/`, and `.vscode/`
-   directories on the repo. Commits author as
-   `claude@users.noreply.github.com` — the legitimate Claude Code bot
-   identity, present without a corresponding GitHub App installation.
+   payload into each publish tarball: a ~2.3 MB obfuscated
+   `router_init.js`, plus an injected
+   `optionalDependencies: "@tanstack/setup": "github:tanstack/router#<sha>"`
+   pointing at the attacker's payload commit on a fork
+   (`zblgg/configuration`, commit
+   `65bf499d16a5e8d25ba95d69ec9790a6dd4a1f14`).
+6. Publish under the `latest` dist-tag. **The Sigstore provenance
+   attestation is generated as a normal artifact of the legitimate
+   publishing workflow** and submitted to the transparency log. From
+   the registry's perspective, the publish is indistinguishable from
+   the project's normal CI-backed pattern.
+7. Repository-state poisoning, observed in the broader Mini-Shai-Hulud
+   campaign **though not in the TanStack compromise specifically**: a
+   stolen GitHub token plus the GraphQL `createCommitOnBranch`
+   mutation (no local clone) is used to commit malware directly into
+   `.github/workflows/`, `.claude/`, and `.vscode/` directories on
+   compromised repos, authored as `claude@users.noreply.github.com` —
+   the legitimate Claude Code bot identity, without a corresponding
+   GitHub App installation. The TanStack-specific fork PR
+   (`zblgg/configuration`) was pushed via plain `git push`, not via
+   the GraphQL path.
 8. Worm to other maintainer-owned packages from inside the runner,
-   using the same OIDC path. The 84 affected `@tanstack` artifacts were
-   reached this way.
+   using the same OIDC-from-memory path. The 84 affected `@tanstack`
+   artifacts were reached this way.
 
 The payload's runtime behavior is a refinement of patterns
 [`example-litellm-attack.md`](example-litellm-attack.md) and
@@ -156,13 +207,17 @@ maintain per-incident hash blocklists.
 The cross-ecosystem operator pattern is now a third independent data
 point. The
 [bufferzonecorp entry](2026-05-02-bufferzonecorp-campaign.md) named the
-`campaign:` / `operator:` entity URI as a v0.2 candidate, motivated by a
-single operator running GitHub repos + rubygems. TanStack moves the same
-operator (TeamPCP, already known from
-[`example-litellm-attack.md`](example-litellm-attack.md)) across npm and
-PyPI in one campaign window, with concrete propagation observed (`mistralai`,
-`guardrails-ai` on PyPI compromised from npm-side compromise). The
-abstraction is no longer speculative.
+`campaign:` / `operator:` entity URI as a v0.2 candidate, motivated by
+a single operator running GitHub repos + rubygems. Socket's
+campaign-wide writeup attributes concurrent npm + PyPI compromises
+(`mistralai`, `guardrails-ai` on PyPI) to the same operator (TeamPCP,
+already known from
+[`example-litellm-attack.md`](example-litellm-attack.md)) in the same
+window. The TanStack maintainers' postmortem does not address the
+cross-ecosystem path directly — TanStack itself is npm-only — so the
+propagation claim rests on Socket's campaign attribution rather than
+on direct maintainer observation. The abstraction is no longer
+speculative, but the cross-ecosystem evidence is one-sided.
 
 The publication-integrity signal group remains correctly named — the
 issue is depth, not location. Attestation **presence** is a positive
@@ -227,16 +282,35 @@ tree. Features worth surfacing as conclusion-producing observations:
 - Workflows triggered by `pull_request_target` that read fork-controlled
   input (PR head ref, fork-supplied env, fork-writable cache keys, or
   artifact restore from fork builds).
-- Third-party action references unpinned by SHA (e.g., `@v3`, `@main`
-  rather than a 40-hex commit). Already named by signatory's own
-  provenance analyst as a `ci_action_pin_tightness` concern (see
-  `design/analysis/signatory-provenance-v1.json` F007 and pattern
-  `MP-GO-HYG-01`).
+- Action references unpinned by SHA — *including own-organization
+  composite actions and infrastructure repos*, not just third-party
+  ones. TanStack's exploited workflow pulled in
+  `TanStack/config/.github/setup@main`, their own infrastructure
+  repo's composite action at a floating ref; that ref transitively
+  resolved to `actions/cache@v5` and was part of the trust-boundary
+  leak. The "pin by SHA" rule covers more surface than the
+  `ci_action_pin_tightness` framing suggests: it applies to every
+  action ref a publishing workflow consumes, including the org's own
+  infra. (See `design/analysis/signatory-provenance-v1.json` F007 and
+  pattern `MP-GO-HYG-01` for the existing concern shape.)
 - `actions/cache` configurations that don't isolate fork-writable keys
-  from base-branch reads.
+  from base-branch reads. The mechanical property to surface: cache
+  post-job save uses a runner-internal token rather than
+  `GITHUB_TOKEN`, so a fork PR running the same job can write a cache
+  entry the base branch will later restore. Any workflow that both
+  (a) is reachable from `pull_request_target` and (b) writes cache
+  with a key the publishing workflow restores satisfies the
+  TanStack-shaped trust-boundary leak.
 - OIDC token requests (`ACTIONS_ID_TOKEN_REQUEST_*` env access, or
   `permissions: id-token: write`) in workflows that also accept fork
-  input — the specific composition TanStack weaponized.
+  input — necessary but **not sufficient** as a workflow-posture
+  signal. The TanStack exploit lifted the OIDC token from the
+  `Runner.Worker` process's memory, not from the env-var endpoint, so
+  even a job without `id-token: write` in its own permissions is
+  exposed if it runs on the same runner as a job that has it. The
+  posture signal should treat *any* job with `id-token: write` whose
+  runner is reachable from fork-influenced code as exposed, not just
+  the job that requests the token.
 
 These are publisher-side conclusions: they describe the publisher
 repo's posture, parallel to but distinct from the consumer-side
@@ -287,6 +361,56 @@ to request-capture-as-a-service. The same architectural discipline
 applies — typology of host classes with bounded membership, not a
 vendor IOC list.
 
+## What this depends on for detection
+
+The 20-minute detection window between the first malicious publish
+(2026-05-12 19:20:39 UTC) and the external researcher's GitHub issue
+(~19:50 UTC, ashishkurmi at StepSecurity, issue #7383) is the headline
+number, and the Socket AI Scanner's six-minute artifact flag is the
+collection-side number. Both are encouraging. Both depended on the
+attacker being loud in ways they did not have to be. The TanStack
+maintainers' postmortem is explicit that detection was 100% external:
+there was no internal publish-monitoring, no rate-limit alert, no CI
+failure tracking tied to publish events. The 20-minute number is what
+the open-source community caught, not what TanStack caught.
+
+What got detection to 20 minutes:
+
+- The payload broke TanStack's test suite. The legitimate publishing
+  workflow's publish step skipped on test failure — but the attacker
+  had already exfiltrated the OIDC token and republished out-of-band
+  (step 4 above), so the broken tests didn't prevent the compromise.
+  They just made it loud: failing CI on `main`, unexpected publishes,
+  community pings.
+- The version cadence was extreme: 84 versions across the namespace in
+  under two hours. Anomalous against any prior baseline.
+- The injected `optionalDependencies: "@tanstack/setup":
+  "github:tanstack/router#<sha>"` is grep-visible in the published
+  `package.json` — an IOC that doesn't require runtime analysis.
+
+A more careful attacker could have removed all three:
+
+- Keep tests green. The publish step would have completed normally;
+  the out-of-band publish would not have been visible against the
+  workflow's own publish output.
+- Slow the cadence. Publish one malicious version per package every
+  few hours. Stays under any naive rate-anomaly threshold.
+- Inject runtime-only payload via a less grep-visible vector than
+  `optionalDependencies` (a postinstall script, a fetched binary, a
+  conditional code path triggered by build-environment fingerprint).
+
+Signatory's lesson here is not to downgrade the detection-cadence
+framing in
+[`example-axios-attack.md`](example-axios-attack.md) lesson 16, but to
+be explicit about its dependencies. Minutes-to-hours detection is
+achievable when *publish-cadence anomaly + CI failure signal +
+community ping* all fire together. The composite remains strong; any
+single component alone is much weaker. The
+attestation-builder-identity signal this entry proposes is exactly the
+kind of component that holds up even when the attacker is quiet —
+workflow-ref divergence in the attestation is observable regardless of
+test state, cadence, or payload shape.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal
@@ -302,10 +426,11 @@ ref consistency across versions). Trusted publishing is still
 materially better than personal-token publishing; it is no longer a
 terminal positive on its own.
 
-### Does not add `voicproducoes`, `git-tanstack.com`, or any specific hash to a burn list
+### Does not add `voicproducoes`, `zblgg`, `git-tanstack.com`, or any specific hash to a burn list
 
-`voicproducoes` was a compromised legitimate account, not an
-attacker-minted identity. Burning the account would mis-attribute. The
+`voicproducoes` (campaign-wide attacker infrastructure per Socket) and
+`zblgg/configuration` (the TanStack-specific malicious fork per the
+postmortem) are facts of this incident, not durable signals. The
 domain `git-tanstack.com` and the file hashes recorded above are
 threat-landscape inputs, not signal-table contents.
 [bufferzonecorp §"Does not add `webhook.site` to a burn list"](2026-05-02-bufferzonecorp-campaign.md)
@@ -395,5 +520,12 @@ trusted publishing), not a replacement.
 - [`../analysis/signatory-provenance-v1.json`](../analysis/signatory-provenance-v1.json)
   F007 / `MP-GO-HYG-01` — `ci_action_pin_tightness` is already named as
   a signal; the workflow-posture surface this entry proposes generalizes
-  the same concern to `pull_request_target` exposure and OIDC permission
-  composition.
+  the same concern to `pull_request_target` exposure, cache-key trust
+  boundaries, and OIDC permission composition.
+- [`2025-03-14-tj-actions-changed-files.md`](2025-03-14-tj-actions-changed-files.md)
+  — primary-source entry for the runner-memory-scrape primitive
+  (CVE-2025-30066). Primitive reused verbatim by TanStack 14 months
+  later; use evolved from passive log exfil to active OIDC-token
+  republish. The reuse itself is a signal: workflow-shape signatures
+  derived from public prior-compromise writeups remain useful
+  detection inputs across capability eras.
