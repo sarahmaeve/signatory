@@ -574,6 +574,90 @@ target — the cross-ecosystem `operator:` entity URI that
 proposed would group all three under the same campaign attribution
 even though the per-target vectors differ.
 
+## Follow-up: implementing `git_url_dep_introduced`
+
+The second proposed signal in the brainstorm to land in code.
+Catches the TanStack injection vector verbatim: a dep whose
+specifier is a git URL appears in the latest version where prior
+versions had no git-URL deps. Direction-agnostic transition
+detection mirrors `postinstall_introduced`'s framing.
+
+The TanStack-specific injection (cited in §"The attack shape" step
+5) — `optionalDependencies: "@tanstack/setup":
+"github:tanstack/router#79ac49e..."` — is exactly the shape the
+signal observes. Short-form prefixes (`github:`/`gitlab:`/
+`bitbucket:`) and URL forms (`git+https://`, `git+ssh://`, `git://`,
+`git+http://`) are both parsed; the 40-hex SHA pin populates
+`pinned_sha` (branch / tag / semver refs leave it empty).
+
+### What the dogfood shows
+
+Against post-cleanup `@tanstack/react-router` 1.169.2:
+`present_in_latest=false`, `introduced_recently=false`,
+`git_url_deps_in_latest=[]`, `prior_versions_without=9`,
+`versions_checked=10`. The healthy state — because the malicious
+1.169.5 and 1.169.8 (which carried the `@tanstack/setup` git-URL
+dep) have been pulled server-side. **The signal cannot fire
+positive in the wild against this incident today.** It would have
+fired in real time on 2026-05-11 if it had existed then, on each of
+the 84 malicious `@tanstack/*` versions during the publish window.
+
+### Limit acknowledged
+
+This signal — like the `version_unpublish_observed` signal it
+pairs with for cleanup-aware analysis — depends on the registry's
+state at observation time. The signal model can detect the
+injection vector when the malicious versions are in the registry;
+once npm Security has pulled them, the surviving versions look
+clean. The complementary signals (`version_unpublish_observed`
+catching the unpublish gap, `commit_publish_cadence_divergence`
+catching the publish-pause shape) are the post-cleanup detectors;
+this one is the during-incident detector. Together they bracket
+the incident's temporal life.
+
+## Follow-up: implementing `commit_publish_cadence_divergence`
+
+The third proposed signal in the brainstorm to land in code.
+Recall this section's first observation that the entry did not
+anticipate: a `last_commit` (today) vs `last_publish` (six days
+ago) gap as the post-incident-investigation fingerprint. The
+brainstorm sketch named the derived signal that would make this
+fingerprint visible directly; this section records its landing.
+
+### What the dogfood shows
+
+Against post-incident `@tanstack/react-router` after the cadence
+collector landed: the signal emits with `commit_days_ago=0,
+publish_days_ago=6, divergence_days=6, shape=active-repo-paused-
+publishes`. Exact match to the prediction in §"Empirical: what the
+current signal model says at T+~21h" above. The fingerprint that
+previously required a human to cross-reference two separate signal
+values is now one classified Layer-1 signal.
+
+### Architectural correction
+
+The brainstorm sketch
+([`/tmp/signal-sketch.md`](../../../../../tmp/signal-sketch.md))
+claimed implementation would require a new "Phase C" derived-signal
+facility, and named the design question of whether to build it
+generically as an open question. **The claim was wrong.** The
+existing `CollectOpts.InRunResult` / `WithInRun` pattern — already
+used by the `adoption` collector to read `stars` from prior forge
+metadata collectors — was the exact composition mechanism. The
+cadence collector is a fourth `WithInRun` consumer
+(`adoption`, `source-evolution`, `artifact-vs-repo`, now
+`cadence`); no new architectural layer was needed.
+
+This is worth recording because the sketch's incorrect architectural
+claim is a generalizable lesson: when a sketch identifies a "this
+needs new infrastructure" cost, the first move should be to look
+for an existing pattern that already does the same thing under
+another name. In this case the pattern was discoverable from
+`cmd/signatory/analyze.go:643`'s `inRunResult` field and the
+adoption collector's `WithInRun` setter — both already in code,
+both already documented as the orchestrator's "in-run accumulator"
+mechanism.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal
