@@ -1493,3 +1493,454 @@ func TestCollector_Collect_ArtifactURL_GitHeadFromAttestation(t *testing.T) {
 			"artifact-vs-repo collector falls back to tag_match instead of "+
 			"using the publisher-stamped commit at exact_gitHead confidence")
 }
+
+// TestCollector_Collect_LatestAttestationBuilder_Present pins the
+// sketch-4 contract: when a PEP 740 attestation exists for the
+// latest version, the latest_attestation_builder signal emits with
+// publisher identity fields (builder_kind / source_repository /
+// workflow) parsed off the attestation's first bundle. Mirrors
+// trusted_publishing's publisher_* fields under the latest_
+// attestation_builder namespace so sketch 5 (workflow_ref_
+// transitions) and future composites can consume builder identity
+// without merging data from two sibling signals.
+func TestCollector_Collect_LatestAttestationBuilder_Present(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		&AttestationResponse{
+			Version: 1,
+			Bundles: []AttestationBundle{
+				{
+					Publisher: AttestationPublisher{
+						Kind:        "GitHub",
+						Repository:  "octocat/pkg",
+						Workflow:    "release.yml",
+						Environment: "release",
+					},
+				},
+			},
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "latest_attestation_builder"),
+		"package with attestation must emit latest_attestation_builder")
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, true, lab["present"])
+	assert.Equal(t, "2.0.0", lab["version_checked"])
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "octocat/pkg", lab["source_repository"])
+	assert.Equal(t, "release.yml", lab["workflow"])
+	assert.Equal(t, "release", lab["environment"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+	// No certificate in this fixture → source_revision absent.
+	_, hasSrcRev := lab["source_revision"]
+	assert.False(t, hasSrcRev,
+		"source_revision should be omitted when no Fulcio cert is present in the bundle")
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_Absent: 404 from
+// the Integrity API → signal still emits, with present=false and
+// extraction_status=no_attestation. Mirrors trusted_publishing's
+// absent-emission discipline (the package's "not on trusted
+// publishing" state is itself informative).
+func TestCollector_Collect_LatestAttestationBuilder_Absent(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "old-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("old"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "latest_attestation_builder"),
+		"package without attestation must still emit latest_attestation_builder")
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, false, lab["present"])
+	assert.Equal(t, "2.0.0", lab["version_checked"])
+	assert.Equal(t, "no_attestation", lab["extraction_status"])
+	// When attestation is absent, the builder-identity fields don't
+	// apply — they should be omitted, not emitted as empty strings.
+	for _, field := range []string{"builder_kind", "source_repository", "workflow", "environment", "source_revision"} {
+		_, has := lab[field]
+		assert.False(t, has, "field %q must be omitted on absent attestation", field)
+	}
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted
+// pins the empty-environment shape: per PEP 740 environment is
+// optional, so a publisher block with only kind/repo/workflow must
+// emit those three (and extraction_status=ok) without an
+// environment key. Avoids surfacing meaningless empty-string
+// values to downstream consumers.
+func TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		&AttestationResponse{
+			Version: 1,
+			Bundles: []AttestationBundle{
+				{
+					Publisher: AttestationPublisher{
+						Kind:       "GitHub",
+						Repository: "octocat/pkg",
+						Workflow:   "release.yml",
+						// Environment intentionally empty.
+					},
+				},
+			},
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "octocat/pkg", lab["source_repository"])
+	assert.Equal(t, "release.yml", lab["workflow"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+	_, hasEnv := lab["environment"]
+	assert.False(t, hasEnv,
+		"environment must be omitted (not empty-string) when the publisher block doesn't set it")
+}
+
+// TestCollector_PublisherAccountClass_AllHuman pins the
+// healthy-baseline case: all extracted publisher logins classify as
+// human, non_human_count is 0, total_count equals the maintainer
+// count. Mirrors maintainer_count's emission pattern.
+func TestCollector_PublisherAccountClass_AllHuman(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "alice, bob"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "publisher_account_class"))
+	pac := getSignalValue(t, result, "publisher_account_class")
+	assert.EqualValues(t, 2, pac["total_count"])
+	assert.EqualValues(t, 0, pac["non_human_count"])
+
+	logins, ok := pac["logins"].([]any)
+	require.True(t, ok, "logins must be a list")
+	require.Len(t, logins, 2)
+	for _, l := range logins {
+		m, ok := l.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "human", m["class"])
+	}
+}
+
+// TestCollector_PublisherAccountClass_MixedShape models the
+// tj-actions case: a service-account-shaped publisher (`@tj-actions-bot`)
+// alongside a human maintainer. Pins per-login classification and
+// the non_human_count summary.
+func TestCollector_PublisherAccountClass_MixedShape(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "alice, tj-actions-bot"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	pac := getSignalValue(t, result, "publisher_account_class")
+	assert.EqualValues(t, 2, pac["total_count"])
+	assert.EqualValues(t, 1, pac["non_human_count"],
+		"exactly one of two publishers should classify as non-human (the -bot suffix one)")
+
+	logins, ok := pac["logins"].([]any)
+	require.True(t, ok)
+	byLogin := map[string]map[string]any{}
+	for _, l := range logins {
+		m := l.(map[string]any)
+		byLogin[m["login"].(string)] = m
+	}
+	assert.Equal(t, "human", byLogin["alice"]["class"])
+	assert.Equal(t, "service-account", byLogin["tj-actions-bot"]["class"])
+	assert.Equal(t, "-bot", byLogin["tj-actions-bot"]["matched_pattern"])
+}
+
+// TestCollector_PublisherAccountClass_NoLogins_RecordsAbsence:
+// when no login-shaped publisher is extractable, mirror
+// maintainer_count's absence-recording discipline. The signal does
+// not apply when there's nothing to classify.
+func TestCollector_PublisherAccountClass_NoLogins_RecordsAbsence(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		// Display-name-shaped values that extractPyPILogins rejects.
+		Info: Info{Maintainer: "John Smith <john@example.com>"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	assert.False(t, hasSignal(result, "publisher_account_class"),
+		"no extractable logins → no publisher_account_class signal")
+	assert.True(t, hasAbsence(result, "publisher_account_class"),
+		"absence must be recorded for downstream visibility, mirroring maintainer_count")
+}
+
+// TestCollector_AttestationConsistency_WorkflowRefStable pins the
+// sketch-5 healthy case: all versions in the window are attested
+// by the same workflow. No transitions in attesting workflow
+// identity → workflow_ref_transitions=0, unique_workflow_refs=1,
+// workflow_refs lists the same workflow on each checked version.
+func TestCollector_AttestationConsistency_WorkflowRefStable(t *testing.T) {
+	t.Parallel()
+	att := makeAttestation("GitHub", "pallets/flask", "publish.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"3.0.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.0.0-py3-none-any.whl"}},
+				"3.1.0": {{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.1.0-py3-none-any.whl"}},
+				"3.2.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.2.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"3.0.0": att,
+			"3.1.0": att,
+			"3.2.0": att,
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("flask"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, "publish.yml", val["latest_workflow_ref"],
+		"latest_workflow_ref must surface the workflow from the latest version's attestation")
+	assert.EqualValues(t, 1, val["unique_workflow_refs"],
+		"all three versions attested by publish.yml → exactly one distinct workflow")
+	assert.EqualValues(t, 0, val["workflow_ref_transitions"],
+		"identical workflow across the window → zero adjacent transitions")
+	refs, ok := val["workflow_refs"].([]any)
+	require.True(t, ok, "workflow_refs must be a list")
+	assert.Equal(t, []any{"publish.yml", "publish.yml", "publish.yml"}, refs)
+}
+
+// TestCollector_AttestationConsistency_WorkflowRefChange models the
+// TanStack-shape careful-variant: every version is attested (no
+// presence transition the existing transition_detected fires on),
+// but the attesting workflow ref differs between the latest and the
+// prior versions. workflow_ref_transitions=1 surfaces the change
+// that publish_origin_consistency / attestation_consistency would
+// otherwise miss.
+func TestCollector_AttestationConsistency_WorkflowRefChange(t *testing.T) {
+	t.Parallel()
+	old := makeAttestation("GitHub", "pallets/flask", "publish.yml")
+	new := makeAttestation("GitHub", "pallets/flask", "release-v2.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"3.0.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.0.0-py3-none-any.whl"}},
+				"3.1.0": {{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.1.0-py3-none-any.whl"}},
+				"3.2.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.2.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"3.0.0": old,
+			"3.1.0": old,
+			"3.2.0": new, // latest published with a different workflow.
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("flask"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, "release-v2.yml", val["latest_workflow_ref"])
+	assert.EqualValues(t, 2, val["unique_workflow_refs"],
+		"two distinct workflows seen across the window")
+	assert.EqualValues(t, 1, val["workflow_ref_transitions"],
+		"exactly one adjacent transition: 3.2.0 (release-v2.yml) → 3.1.0 (publish.yml)")
+	// Existing transition_detected stays false — presence didn't change,
+	// only the workflow ref did. This is the gap the new fields close.
+	assert.Equal(t, false, val["transition_detected"],
+		"workflow-ref-only changes leave the existing presence-transition flag untouched")
+}
+
+// TestCollector_AttestationConsistency_WorkflowRefMultipleTransitions
+// is a stress case: alternating workflows across four versions
+// (latest checked + first prior + 2 more from the sweep) produces
+// three adjacent transitions. Pins the count is "adjacent pair
+// differences" not "distinct workflows minus one."
+func TestCollector_AttestationConsistency_WorkflowRefMultipleTransitions(t *testing.T) {
+	t.Parallel()
+	a := makeAttestation("GitHub", "owner/pkg", "a.yml")
+	b := makeAttestation("GitHub", "owner/pkg", "b.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+				"1.1.0": {{UploadTimeISO: "2025-04-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.1.0-py3-none-any.whl"}},
+				"1.2.0": {{UploadTimeISO: "2025-08-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.2.0-py3-none-any.whl"}},
+				"1.3.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.3.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.0.0": b,
+			"1.1.0": a,
+			"1.2.0": b,
+			"1.3.0": a, // latest
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.EqualValues(t, 2, val["unique_workflow_refs"])
+	assert.EqualValues(t, 3, val["workflow_ref_transitions"],
+		"four versions alternating a/b/a/b → three adjacent transitions")
+	refs, ok := val["workflow_refs"].([]any)
+	require.True(t, ok)
+	// checked[] is newest-first: 1.3.0 (a), 1.2.0 (b), 1.1.0 (a), 1.0.0 (b).
+	assert.Equal(t, []any{"a.yml", "b.yml", "a.yml", "b.yml"}, refs)
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision
+// pins the cert-extraction path: when the attestation's first
+// bundle carries a Sigstore cert with the source-repo-digest OID
+// extension, source_revision must surface the recovered SHA. Same
+// fixture construction as TestCollector_Collect_ArtifactURL_GitHeadFromAttestation;
+// the same Fulcio extraction feeds two consumers (artifact_url.git_head
+// and now latest_attestation_builder.source_revision).
+func TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision(t *testing.T) {
+	t.Parallel()
+
+	const wantSHA = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+
+	oidValue, err := asn1.MarshalWithParams(wantSHA, "utf8")
+	require.NoError(t, err)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: fulcioSourceRepoDigestOID, Value: oidValue},
+		},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	certB64 := base64.StdEncoding.EncodeToString(certDER)
+
+	attestBody, err := json.Marshal(AttestationResponse{
+		Version: 1,
+		Bundles: []AttestationBundle{
+			{
+				Publisher: AttestationPublisher{
+					Kind: "GitHub", Repository: "pallets/click",
+					Workflow: "publish.yaml", Environment: "publish",
+				},
+				Attestations: []SigstoreAttestation{
+					{VerificationMaterial: VerificationMaterial{Certificate: certB64}},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.2.3": {
+				{
+					UploadTimeISO: "2026-04-01T00:00:00Z",
+					PackageType:   "sdist",
+					Filename:      "hatch-1.2.3.tar.gz",
+					URL:           "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+					Digests:       Digests{SHA256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/pypi/"):
+			_, _ = w.Write(projBody)
+		case strings.HasPrefix(r.URL.Path, "/integrity/"):
+			_, _ = w.Write(attestBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, wantSHA, lab["source_revision"],
+		"source_revision must carry the SHA the Fulcio cert's source-repo-digest extension stamps")
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "pallets/click", lab["source_repository"])
+	assert.Equal(t, "publish.yaml", lab["workflow"])
+	assert.Equal(t, "publish", lab["environment"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+}

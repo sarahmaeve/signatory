@@ -389,29 +389,32 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"build_provenance_attestation": {
 		Type:              "build_provenance_attestation",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Presence of Sigstore/SLSA build provenance attestations on published artifacts.",
 		Caveats: []string{
 			"attestation alone is not trust — a verifier must check it against a known-good build configuration",
+			"forgery resistance reflects 'requires CI pipeline compromise' (High), not 'requires cryptographic key compromise' (Very High). Sigstore's cryptographic primitives are Very High, but signal-presence is achievable via workflow-runtime exfiltration without breaking those primitives — TanStack 2026-05-11 is the demonstrated case. See design/threat-landscape/2026-05-12-tanstack-mini-shai-hulud.md",
 		},
 	},
 	"registry_publish_origin": {
 		Type:              "registry_publish_origin",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Origin of registry publishing — oidc_ci, long_lived_token_ci, local_maintainer_machine, or unknown.",
 		Caveats: []string{
 			"oidc_ci is the hardened posture; local_maintainer_machine is the lowest trust tier",
 			"CI-based publishing is only as trustworthy as the CI workflow's action-pin tightness",
+			"forgery resistance is High, not Very High: oidc_ci classification is derived from attestation presence; a CI-pipeline-compromise attack (TanStack 2026-05-11) produces oidc_ci classification while signing malicious content with the legitimate workflow's identity. The classification is correct about what the publisher uses; it's not a verdict about runtime integrity",
 		},
 	},
 	"crates_io_trusted_publishing": {
 		Type:              "crates_io_trusted_publishing",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Whether crates.io trusted-publishing (OIDC) is configured for the crate.",
 		Caveats: []string{
 			"status is visible only after a first publish that used it — absence on a new crate is not automatically negative",
+			"forgery resistance is High, not Very High: the same TanStack-shape exposure as npm trusted_publishing — OIDC binding doesn't guarantee runtime integrity. A CI-pipeline-compromise attack produces a valid attestation with the project's normal builder identity while signing malicious content",
 		},
 	},
 	"postinstall_present": {
@@ -428,12 +431,13 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"trusted_publishing": {
 		Type:              "trusted_publishing",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Presence of an OIDC trusted-publishing attestation on the latest published package version (npm's dist.attestations).",
 		Caveats: []string{
-			"present-and-valid is a very high-quality provenance signal — the attestation cryptographically binds the published version to a source repo and commit SHA",
+			"present-and-valid cryptographically binds the published version to a source repo and commit SHA — strong provenance evidence but not a verdict on artifact safety",
 			"absence is not automatically negative — older published versions predate trusted publishing, and the maintainer may have not opted in yet",
 			"absence on a package that previously used trusted publishing IS strongly negative — the axios attack pattern — but detecting the transition requires comparing across versions; publish_origin_consistency is the cross-version complement to this snapshot signal",
+			"forgery resistance is High, not Very High: the OIDC binding cryptographically guarantees the attestation chain but doesn't guarantee the workflow's runtime memory was integrity-bounded at token issuance. TanStack 2026-05-11 produced valid attestations with the project's normal release.yml@refs/heads/main builder identity by extracting the runner's OIDC token from /proc memory after pull_request_target + cache-poisoning compromise. The signal correctly observes 'publisher uses trusted publishing'; readers should not transitively conclude 'artifact is safe'",
 		},
 	},
 	"postinstall_introduced": {
@@ -450,25 +454,28 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"publish_origin_consistency": {
 		Type:              "publish_origin_consistency",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Consistency of publish provenance across recent versions: presence-transitions on OIDC attestations plus count of distinct publisher accounts.",
 		Caveats: []string{
 			"a single publisher across many versions with consistent attestation presence is the healthy pattern — transitions are anomaly signals, not verdicts",
 			"legitimate reasons to transition include maintainer handoff, CI pipeline migration, or a first adoption of trusted publishing — these produce false positives worth investigating, not dismissing",
 			"the axios 2026 forensic specifically called out the broken attestation chain as the detection-relevant fingerprint — this signal captures that shape across versions",
 			"the _npmUser.name field is the registry's publisher stamp and cannot be rewritten post-publish; it's higher-forgery-resistance than maintainer lists which are self-declared",
+			"forgery resistance is High, not Very High: presence-transitions and publisher consistency are observable, but a CI-pipeline-compromise attack (TanStack 2026-05-11) preserves both — it rides the legitimate workflow and signs the malicious tarball with the project's normal attesting identity, leaving attestation_transitions=0 and unique_publishers=1. The PyPI sibling attestation_consistency has added workflow_ref_transitions to close the careful-variant gap; the npm side awaits the same extension (deferred behind the Rekor-vs-attestations-URL question)",
 		},
 	},
 	"attestation_consistency": {
 		Type:              "attestation_consistency",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
-		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects transitions from attested to unattested publishing — the PyPI fingerprint of credential-theft attacks that bypass CI pipelines.",
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects two dimensions of break: transitions from attested to unattested publishing (the axios fingerprint of credential-theft attacks that bypass CI), and changes in the attesting workflow ref across attested versions (the TanStack-shape careful-variant where every version is attested but the builder identity changed).",
 		Caveats: []string{
 			"a transition from unattested to attested is positive (adoption) not negative",
 			"publisher_changed=true across attested versions may indicate legitimate CI migration or may indicate account takeover — the analyst disambiguates",
 			"bounded to last N versions; a gap farther back is invisible",
 			"not emitted for packages that never adopted trusted publishing (progressive probe: latest + first prior both unattested → early exit)",
+			"workflow_ref_transitions counts adjacent workflow-string differences across checked[] in newest-first order; presence transitions (e.g., '' → 'release.yml') count toward it because the strings differ — pair with transition_detected to disambiguate presence-change from workflow-change",
+			"forgery resistance is High, not Very High: a TanStack-shape attack that rides the legitimate workflow preserves attestation chain consistency on every axis except workflow-ref content. workflow_ref_transitions catches the careful-variant where the workflow IDENTITY changes; presence-consistency and publisher-consistency alone are not sufficient verdicts on artifact safety",
 		},
 	},
 	"transparency_log_present": {
@@ -884,6 +891,66 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"initial releases of a new gem legitimately publish several versions in rapid succession (0.1.0, 0.1.1, 0.2.0 in a week as the API stabilizes)",
 			"the signal is strongest when combined with young account age and low download counts",
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
+		},
+	},
+	"publisher_account_class": {
+		Type:              "publisher_account_class",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Heuristic classification of each extracted publisher login as human / bot / service-account / unknown, plus summary counts. Surfaces bot and service-account publishers as a distinct risk class — credential surfaces on automation accounts are operationally different from human-maintainer accounts (long-lived PATs, often without 2FA, credentials stored in CI configs rather than personal vaults).",
+		Caveats: []string{
+			"forgery resistance is medium-declining: an attacker can rename their account to bypass any pattern; the signal is heuristic risk-stratification, not a verdict",
+			"v1 uses name-pattern matching only — no GitHub type:Bot lookups, no activity-shape analysis, no allowlist of known automation accounts",
+			"v1 patterns are hyphen-strict: '-bot' / '-ci' / '-deploy' / '-svc' / '-release' / '-publisher' / '-automation' suffixes plus GitHub's '[bot]' suffix. Logins without a hyphen separator (e.g., 'deploybot', 'npmbot') fall through to 'human' — accepted false-negative tradeoff for low false-positive rate",
+			"false positives are possible — a human named with a coincidentally-matching pattern would misclassify. The matched_pattern field makes the classification auditable; analyst layer disambiguates",
+			"the signal describes publishers but emits on the package entity (login field links to the corresponding identity:pypi/<login> entity which is minted separately via Path E). Mirrors owner_type's emission convention",
+		},
+	},
+	"latest_attestation_builder": {
+		Type:              "latest_attestation_builder",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Publisher identity the latest version's Sigstore provenance attestation binds to: builder_kind, source_repository, workflow, environment, and source_revision (the SHA stamped in the Fulcio cert's source-repo-digest extension). Consolidating contract over data the publication-integrity collectors already extract — provides a stable namespace for sketch 5 (workflow_ref_transitions) and future composites to consume without merging fields from sibling signals.",
+		Caveats: []string{
+			"forgery resistance is contingent on the attesting workflow being integrity-bounded at attestation time; the TanStack 2026-05-11 compromise rode a legitimate workflow and produced a valid attestation with the project's normal builder identity",
+			"PEP 740 on PyPI carries the publisher block (kind/repository/workflow/environment) directly; the npm side surfaces only an attestations URL marker in the inline registry block and would require a follow-up fetch to populate the same shape",
+			"workflow is the workflow path (e.g., 'release.yml' or '.github/workflows/release.yml') without the ref/branch suffix — the @ref portion is on a separate Fulcio extension OID not currently extracted",
+			"extraction_status reports ok (full publisher block parsed) or no_attestation (Integrity API returned 404); fetch errors record as retryable absence instead of an extraction_status value",
+		},
+	},
+	"commit_publish_cadence_divergence": {
+		Type:              "commit_publish_cadence_divergence",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Temporal gap between most-recent push to the source repo and most-recent publish to the registry. Four shapes: synchronized, active-repo-paused-publishes, active-publishes-fallow-repo, and both-fallow. Derived signal — reads sibling collectors' last_commit (or last_push) and last_publish emissions via the in-run accumulator.",
+		Caveats: []string{
+			"cadence is observable but not cryptographic — an attacker controlling both source and publish paths can fake either timestamp",
+			"the 'synchronized' threshold (|divergence| <= 2 days) and the 'fallow' threshold (60 days) are arbitrary defaults; values close to either edge are weak signal on their own",
+			"partial inputs (no commit-side signal, or no last_publish) produce no emission rather than an absence — the collector treats partial data as 'doesn't apply' to the entity, not 'failed'",
+			"both-fallow trumps the divergence shapes — a 200-day commit + 201-day publish is reported as both-fallow, not synchronized, because divergence is only meaningful when at least one side is recent",
+		},
+	},
+	"git_url_dep_introduced": {
+		Type:              "git_url_dep_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published version introduces a dependency whose specifier points at a git source (github:/gitlab:/bitbucket: short form, or git+https://, git+ssh://, git://, git+http:// URL forms) where prior versions in the window had no git-URL deps. The transition is the anomaly — consistent presence and consistent absence are both healthy.",
+		Caveats: []string{
+			"a git-URL dep is not by itself malicious — legitimate uses include prerelease testing against an upstream PR or temporarily pinning to a fork waiting on a merge",
+			"the pinned_sha field on each emitted dep entry is non-empty only when the ref is a 40-hex SHA-1; tag-pinned and branch-pinned refs leave it empty (tags are mutable on GitHub by default and branches are mutable by design)",
+			"tarball URLs (https:// to .tgz/.tar.gz) are a separate non-registry vector not covered here — this signal is git-fetch-specific",
+		},
+	},
+	"version_unpublish_observed": {
+		Type:              "version_unpublish_observed",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Versions present in the registry's publish-event log but absent from the current versions map — the gap that signals a version was published and subsequently unpublished. The signal is direction-agnostic on cause (maintainer cleanup, registry-security takedown, or both at once); cleanup-after-compromise is the case where this signal carries information not derivable from the surviving registry state alone.",
+		Caveats: []string{
+			"does not distinguish causes — maintainer cleanup and registry takedowns produce the same gap; both can coexist in one package",
+			"recency reflects when the now-unpublished version was originally published, not when it was removed — the registry does not expose unpublish timestamps",
+			"the unpublished_versions list is capped at 10 most-recent by publish time; list_capped=true indicates more exist",
+			"a compromise burst lives inside this signal's unpublished_versions list (those versions are gone from pkg.Versions); version_publish_burst sees only the surviving cadence. Tight clusters of recent unpublishes in the per-version timestamps are the discrimination mechanism",
 		},
 	},
 	"gpg_signature_present": {

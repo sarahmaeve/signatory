@@ -487,6 +487,441 @@ The raw JSON carries the full 38-signal cross-section for any future
 analysis that wants to audit a specific signal value rather than rely
 on this summary.
 
+## Follow-up: dogfood after adding `version_unpublish_observed`
+
+Same day, later. The session that produced this entry enumerated five
+Tier-1 easy-win signal additions; the first to land in code is the
+one the empirical section above named directly — detect the unpublish
+gap that post-cleanup registry state leaves behind. Three packages
+were analyzed with the new signal in place, chosen for spectrum
+coverage: this entry's flagship target, a small unscoped campaign
+target, and a mixed-history package by the same compromised publisher
+as the second.
+
+### `@tanstack/react-router`
+
+`unpublished_count = 2`, two versions on 2026-05-11 — 1.169.5 at
+19:20:42 and 1.169.8 at 19:26:17. Exact-matches the
+raw-data CSV. The previously-invisible compromise is now a Layer-1
+signal.
+
+### `cross-stitch` (npm, publisher `neilcochran`)
+
+`unpublished_count = 5`, all five within 1h35m on 2026-05-11
+(versions 1.1.3 – 1.1.7, 22:17 – 23:52 UTC). cross-stitch had no
+other unpublish history; the five compromise publishes are all the
+signal reports. `version_publish_burst` separately fires on the
+*legitimate* 2024 five-version release cluster
+(`window_hours = 27`) — unrelated to the compromise. The two signals
+report on different events on the same package.
+
+### `ts-dna` (npm, also `neilcochran`)
+
+`unpublished_count = 13, list_capped = true`. The
+`unpublished_versions` list splits into two temporal clusters: five
+compromise publishes 3.0.1 – 3.0.5 in 1h35m on 2026-05-11, plus eight
+or more legacy unpublishes (0.0.4 – 0.0.8 visible, three more implied
+by the count and the cap) across June 2 – 3, 2020 — probably
+maintainer cleanup of an abandoned 0.0.x line.
+`version_publish_burst.burst_detected = false` on this target: the
+ten surviving versions span 78 hours, no burst on the surviving
+state.
+
+### What the dogfood validates
+
+The signal does what the empirical-addendum gap argued it should: it
+makes the post-cleanup registry state legible. On three different
+packages — large-scope OIDC-published, small unscoped,
+mid-size single-maintainer — it correctly identified the compromise
+publishes as unpublished entries.
+
+### What the dogfood exposed that the brainstorm did not anticipate
+
+The brainstorm sketch and the initial signal-type caveats claimed the
+new signal pairs strongly with `version_publish_burst`
+("burst-followed-by-unpublishes is the compromise-cleanup shape").
+The three runs falsify that:
+
+- The compromise burst is *inside* the unpublish signal's
+  `unpublished_versions` list, because those versions are removed
+  from `pkg.Versions`. `version_publish_burst` cannot see it.
+- A package can have a *legitimate* burst (cross-stitch 2024 release
+  cluster) that fires `version_publish_burst` while a *separate*
+  compromise fires `version_unpublish_observed`. The two signals
+  point at different events on the same package.
+- A package can mix compromise unpublishes and legacy unpublishes in
+  the same `unpublished_versions` list (ts-dna). The signal counts
+  them together; cluster-analysis on the per-version publish
+  timestamps in the list is what distinguishes them.
+
+The right discrimination mechanism for cleanup-after-compromise is
+**timestamp clustering inside the `unpublished_versions` list**, not
+pairing with `version_publish_burst`. The signal-type caveats in
+`internal/signal/types.go` should reflect that as durable guidance;
+the dated package-specific observations above belong here, in the
+threat-landscape record.
+
+### Incidental publisher-pattern observation
+
+`cross-stitch` and `ts-dna` share publisher `neilcochran`. Both
+packages were swept up in the Mini-Shai-Hulud campaign through the
+same identity. This is the maintainer-token-theft pattern distinct
+from TanStack's OIDC-runner-memory-scrape: one credential compromise
+→ multiple packages republished by that identity. The campaign hits
+packages across the criticality spectrum with different vectors per
+target — the cross-ecosystem `operator:` entity URI that
+[`2026-05-02-bufferzonecorp-campaign.md`](2026-05-02-bufferzonecorp-campaign.md)
+proposed would group all three under the same campaign attribution
+even though the per-target vectors differ.
+
+## Follow-up: implementing `git_url_dep_introduced`
+
+The second proposed signal in the brainstorm to land in code.
+Catches the TanStack injection vector verbatim: a dep whose
+specifier is a git URL appears in the latest version where prior
+versions had no git-URL deps. Direction-agnostic transition
+detection mirrors `postinstall_introduced`'s framing.
+
+The TanStack-specific injection (cited in §"The attack shape" step
+5) — `optionalDependencies: "@tanstack/setup":
+"github:tanstack/router#79ac49e..."` — is exactly the shape the
+signal observes. Short-form prefixes (`github:`/`gitlab:`/
+`bitbucket:`) and URL forms (`git+https://`, `git+ssh://`, `git://`,
+`git+http://`) are both parsed; the 40-hex SHA pin populates
+`pinned_sha` (branch / tag / semver refs leave it empty).
+
+### What the dogfood shows
+
+Against post-cleanup `@tanstack/react-router` 1.169.2:
+`present_in_latest=false`, `introduced_recently=false`,
+`git_url_deps_in_latest=[]`, `prior_versions_without=9`,
+`versions_checked=10`. The healthy state — because the malicious
+1.169.5 and 1.169.8 (which carried the `@tanstack/setup` git-URL
+dep) have been pulled server-side. **The signal cannot fire
+positive in the wild against this incident today.** It would have
+fired in real time on 2026-05-11 if it had existed then, on each of
+the 84 malicious `@tanstack/*` versions during the publish window.
+
+### Limit acknowledged
+
+This signal — like the `version_unpublish_observed` signal it
+pairs with for cleanup-aware analysis — depends on the registry's
+state at observation time. The signal model can detect the
+injection vector when the malicious versions are in the registry;
+once npm Security has pulled them, the surviving versions look
+clean. The complementary signals (`version_unpublish_observed`
+catching the unpublish gap, `commit_publish_cadence_divergence`
+catching the publish-pause shape) are the post-cleanup detectors;
+this one is the during-incident detector. Together they bracket
+the incident's temporal life.
+
+## Follow-up: implementing `commit_publish_cadence_divergence`
+
+The third proposed signal in the brainstorm to land in code.
+Recall this section's first observation that the entry did not
+anticipate: a `last_commit` (today) vs `last_publish` (six days
+ago) gap as the post-incident-investigation fingerprint. The
+brainstorm sketch named the derived signal that would make this
+fingerprint visible directly; this section records its landing.
+
+### What the dogfood shows
+
+Against post-incident `@tanstack/react-router` after the cadence
+collector landed: the signal emits with `commit_days_ago=0,
+publish_days_ago=6, divergence_days=6, shape=active-repo-paused-
+publishes`. Exact match to the prediction in §"Empirical: what the
+current signal model says at T+~21h" above. The fingerprint that
+previously required a human to cross-reference two separate signal
+values is now one classified Layer-1 signal.
+
+### Architectural correction
+
+The brainstorm sketch
+([`/tmp/signal-sketch.md`](../../../../../tmp/signal-sketch.md))
+claimed implementation would require a new "Phase C" derived-signal
+facility, and named the design question of whether to build it
+generically as an open question. **The claim was wrong.** The
+existing `CollectOpts.InRunResult` / `WithInRun` pattern — already
+used by the `adoption` collector to read `stars` from prior forge
+metadata collectors — was the exact composition mechanism. The
+cadence collector is a fourth `WithInRun` consumer
+(`adoption`, `source-evolution`, `artifact-vs-repo`, now
+`cadence`); no new architectural layer was needed.
+
+This is worth recording because the sketch's incorrect architectural
+claim is a generalizable lesson: when a sketch identifies a "this
+needs new infrastructure" cost, the first move should be to look
+for an existing pattern that already does the same thing under
+another name. In this case the pattern was discoverable from
+`cmd/signatory/analyze.go:643`'s `inRunResult` field and the
+adoption collector's `WithInRun` setter — both already in code,
+both already documented as the orchestrator's "in-run accumulator"
+mechanism.
+
+## Follow-up: implementing `latest_attestation_builder` (sketch 4, PyPI)
+
+The fourth proposed signal to land in code — sketched as a
+"typed parse of currently-RawMessage attestations" on npm in the
+brainstorm. Two corrections emerged when the implementation actually
+started:
+
+1. **The mental model was wrong, not the design decision.** The
+   brainstorm's premise was that npm's `dist.attestations` field
+   carries the full SLSA provenance and the `json.RawMessage` type
+   choice was the obstacle to extracting `workflow_ref` etc. The
+   in-repo fixture at
+   `internal/signal/registry/npm/collector_test.go:297-300` shows
+   what the inline block actually contains: a `url` pointer and a
+   `predicateType` string — nothing else. The full SLSA predicate
+   lives at the URL the marker points to. The RawMessage choice is
+   correct for what the inline data carries; the workflow_ref isn't
+   reachable by a typed parse of the inline data alone.
+2. **The data is already extracted on PyPI, just split across
+   sibling signals.** `trusted_publishing` already emits
+   `publisher_kind` / `source_repository` / `workflow` /
+   `environment` from the PEP 740 publisher block. `artifact_url`
+   already emits the Fulcio-cert-extracted source-repo SHA on
+   `git_head`. The sketch's contribution on PyPI is consolidating —
+   exposing them coherently under one signal namespace so sketch 5
+   and future composites have a stable contract without merging
+   fields from two emitters.
+
+Scoped to PyPI in this round (commit `c40d9bc`). The npm parity
+question — fetch the npm attestations URL or query Sigstore Rekor —
+is deferred behind that scoping. Either path is one additional HTTP
+request when present; the decision is which endpoint owns the
+contract.
+
+### What the dogfood shows
+
+Two-target dogfood for spectrum coverage:
+
+- **`pkg:pypi/mistralai`** (Mini-Shai-Hulud campaign target): the
+  signal emits `present=false, extraction_status=no_attestation` —
+  mistralai 2.4.5 isn't on PyPI trusted publishing at all. The
+  malicious 2.4.6 was yanked, not deleted (more on this below).
+- **`pkg:pypi/cryptography`** (PyCA, early trusted-publishing
+  adopter, version 48.0.0): the signal emits `present=true,
+  builder_kind=GitHub, source_repository=pyca/cryptography,
+  workflow=pypi-publish.yml, source_revision=622d672e..., extraction_status=ok`.
+  Full contract realized. The Fulcio-cert-extracted `source_revision`
+  populates correctly; the publisher block round-trips through the
+  signal value.
+
+### Incidental observation: PyPI's `yanked_release_count` is the parallel to npm's `version_unpublish_observed`
+
+PyPI doesn't allow unpublishing versions with downloads (similar to
+npm's no-unpublish-if-dependents policy the TanStack postmortem
+documented), but it offers **yank** — a soft delete that marks the
+version not-installable-by-default while keeping the bytes
+accessible for explicit-version pins. The existing
+`yanked_release_count` signal already counts these. On `mistralai`
+that signal reports `count=1, total_versions=87` — the yanked 2.4.6
+is the only one. Yank and unpublish are different registry
+primitives, but on the *current* registry state they produce the
+same observable shape: a version is in the publish history but not
+in the current versions map.
+[`2025-03-14-tj-actions-changed-files.md`](2025-03-14-tj-actions-changed-files.md)
+§"Recommendation" and the
+[bufferzonecorp entry](2026-05-02-bufferzonecorp-campaign.md)'s
+host-class typology discipline both apply: yank-vs-unpublish is a
+host-platform-specific *mechanism* difference; the *signal* is the
+gap, normalized across platforms.
+
+### Incidental observation: mistralai's recovery pattern differs from TanStack's
+
+Running `commit_publish_cadence_divergence` on mistralai reports
+`shape=synchronized, divergence_days=0` — the package's commits and
+publishes are in step, no post-incident pause. TanStack reported
+`shape=active-repo-paused-publishes, divergence_days=6`. Two
+different recovery patterns from the same campaign window:
+
+- TanStack: stopped publishing, kept committing (hardening cycle
+  before next release). Pause shows as cadence divergence.
+- Mistral: kept publishing post-cleanup (the next release rolled
+  through the normal cadence). No cadence divergence.
+
+Neither pattern is wrong; they reflect different maintainer
+operational choices. The signal observes the pattern; cause
+attribution belongs at the analyst layer.
+
+## Follow-up: extending `attestation_consistency` with workflow-ref tracking (sketch 5, PyPI)
+
+The fifth and final Tier-1 proposed signal — sketched as
+`workflow_ref_transitions` extending `publish_origin_consistency`
+on npm. The PyPI parallel is `attestation_consistency`, which
+already walks the recent-versions window and extracts the publisher
+block per-version. Sketch 5 lands (commit `57f1bf8`) as field
+additions to that signal rather than a new signal type — the
+brainstorm's "extend or split?" guidance picked extend, and the
+per-version workflow data is already collected inside the sweep
+loop. Four new fields:
+
+- `workflow_refs`: per-version list, newest-first, empty when
+  unattested.
+- `latest_workflow_ref`: workflow on the latest version.
+- `unique_workflow_refs`: count of distinct non-empty workflows.
+- `workflow_ref_transitions`: adjacent-pair workflow-string
+  differences in the per-version list.
+
+The detection axis this closes: every version is attested (no
+presence transition the existing `transition_detected` boolean
+fires on), but the attesting workflow ref changes between versions.
+The TanStack-shape careful-variant. The sketch-4 + sketch-5
+composition: sketch 4 made latest-version builder identity a stable
+contract; sketch 5 added the cross-version composition that detects
+builder-identity changes across versions.
+
+### What the dogfood shows
+
+Same PyPI target as sketch 4 (`pkg:pypi/cryptography`): five
+versions checked, all attested by `pypi-publish.yml`, zero
+transitions. The healthy-state shape. Cannot fire positive against
+the TanStack incident itself because TanStack is npm (this sketch
+is PyPI-only in this round) and because the malicious versions
+have been pulled — the same fundamental constraint that bracketed
+sketch 3.
+
+### npm parity stays deferred
+
+`publish_origin_consistency` on npm is the parallel signal to
+`attestation_consistency` on PyPI. Extending it with
+workflow-ref-transitions would close the npm-side detection axis
+for the TanStack shape — but it depends on first solving the
+sketch-4 npm parity question (where to fetch the SLSA provenance
+from). The two npm signals would land together once that decision
+is made.
+
+## Reflection: Sigstore as a layer, not a verdict
+
+Surfacing here so the implementation work doesn't bury the
+architectural realization: **Sigstore attestation signals are not
+"is this artifact safe" signals**, and the trust-model entry
+already prices this correctly — the audit pass recorded below
+brings the in-code signal-type registry into alignment with what
+the trust-model entry has said all along.
+
+### What Sigstore actually binds
+
+The Fulcio + Rekor + bundle system cryptographically binds:
+
+1. An artifact hash to a signing identity (Fulcio-issued cert).
+2. A signing identity to an OIDC issuer claim — e.g., "this cert
+   was issued to a GitHub Actions runner that, at issuance time,
+   claimed to be running workflow X on repo Y at commit Z."
+3. A timestamp in an append-only public log (Rekor).
+4. A workflow runtime environment that requested the OIDC token.
+
+These bindings are real. Forging them would require breaking
+Fulcio's CA, the OIDC issuer, or Sigstore's signing infrastructure.
+Very high cryptographic forgery resistance.
+
+### What Sigstore does not bind
+
+The system does *not* bind:
+
+1. That the workflow's runtime memory was uncompromised at the
+   moment of token issuance.
+2. That the code that ran in the workflow matches what the source
+   repo says it should run.
+3. That the artifact being signed is what the workflow *intended*
+   to produce, rather than what the runtime *actually* produced.
+4. That no other process on the same runner observed the OIDC
+   token after issuance.
+
+TanStack exploited the fourth gap precisely. The cryptographic
+chain that signed the malicious tarball was complete and correct:
+Fulcio cert issued to a real GHA runner, OIDC claim naming
+`tanstack/router`'s `release.yml@refs/heads/main`, source commit
+the legitimate one. Everything was real. What's missing from the
+chain: "the tarball whose hash got signed is what the workflow
+would have produced from this commit if the runtime had been
+clean." Sigstore can't see inside the runtime; it signs what the
+runner asks it to sign.
+
+### Why the trust-model tier-table is right
+
+`design/trust-model.md` §"Signals must be weighted by forgery
+resistance" has the table:
+
+| Forgery resistance | Signal type | Why |
+|---|---|---|
+| Very high | Cryptographic signatures (GPG/SSH/OIDC) | Requires key compromise |
+| High | Publication metadata / trusted publishing | Requires CI pipeline compromise |
+
+TanStack didn't compromise keys. It compromised the CI pipeline —
+specifically the runner's runtime. The attack succeeded at the
+**High** tier, exactly where the table predicts it would. The
+table's tiering is correctly placed; "CI pipeline compromise" is
+what TanStack did, and the table already prices that risk at High
+rather than Very High.
+
+The thing that was wrong wasn't the tier — it was the casual
+reading of "High" as "trustworthy." High forgery resistance does
+not mean "this artifact is safe." It means "forging this requires
+CI pipeline compromise," and TanStack demonstrates that CI
+pipeline compromise is achievable. The signal is correctly valued;
+the interpretation gap was in how downstream readers — including
+this codebase's own signal-type registry — were treating the tier
+label.
+
+### Audit-pass outcome (2026-05-12)
+
+Six signals in `internal/signal/types.go` had been tagged
+`ForgeryVeryHigh` while reflecting CI-pipeline-compromisable
+properties. Re-tagged to `ForgeryHigh` with caveats explaining
+the contingency:
+
+- `build_provenance_attestation`
+- `registry_publish_origin`
+- `crates_io_trusted_publishing`
+- `trusted_publishing`
+- `publish_origin_consistency`
+- `attestation_consistency`
+
+Signals that stay at `ForgeryVeryHigh` because their forgery
+threshold is *not* CI-pipeline-compromise:
+
+- `commit_signing` / `commit_signing_keys` — actual GPG/SSH
+  signing keys; cryptographic compromise required.
+- `transparency_log_present` — `sum.golang.org` records module
+  hashes, not workflow claims; the immutable Merkle-log binding
+  doesn't depend on workflow runtime integrity.
+- `artifact_repo_divergence` — diffs published tarball against
+  source tree; both sides observable, no runtime gap.
+- `version_pin_table`, `source_evolution_matrix`,
+  `source_evolution_anomaly` — sourceforge-side observations of
+  Go module proxy state.
+- Identity-graph signals (`repo_age`, `owner_profile`,
+  `identity_graph_depth`) — long-tenure observations, not
+  cryptographic claims about artifacts.
+
+### What this implies for the sketches just landed
+
+Three implications worth stating plainly:
+
+- **Sketches 4 + 5 are more important after this realization, not
+  less.** The TanStack-shape detection — "did the attesting
+  workflow change?" — is exactly what turns the cryptographic
+  binding into actionable trust. Without those signals, all we
+  know is "signed by something via Sigstore."
+- **Tier 2 `repo_workflow_posture` becomes load-bearing.** Sigstore's
+  "this workflow signed this artifact" only translates to trust if
+  the workflow itself was integrity-bounded at sign time. That's
+  what workflow-posture observation answers, and Sigstore can't
+  answer it.
+- **The signal model values composition, not single-signal verdicts.**
+  Trust verdict = Sigstore-binds-artifact-to-builder (cryptographic
+  primitive) ∧ builder-is-the-project's-canonical-builder
+  (sketches 4 + 5) ∧ builder's-runtime-was-integrity-bounded
+  (Tier 2 `repo_workflow_posture`) ∧ other signals. Each predicate
+  is independently load-bearing; none alone is sufficient.
+
+The marketing of trusted publishing has often blurred the
+distinction between cryptographic primitive and operational trust.
+Signatory's signal model values the operational property; the
+audit pass records the codebase's alignment with that view.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal

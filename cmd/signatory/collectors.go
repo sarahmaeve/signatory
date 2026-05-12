@@ -16,6 +16,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	adoptioncollector "github.com/sarahmaeve/signatory/internal/signal/adoption"
 	artifactcollector "github.com/sarahmaeve/signatory/internal/signal/artifact"
+	cadencecollector "github.com/sarahmaeve/signatory/internal/signal/cadence"
 	exfilwatchcollector "github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 	forgejocollector "github.com/sarahmaeve/signatory/internal/signal/forgejo"
 	gitcollector "github.com/sarahmaeve/signatory/internal/signal/git"
@@ -297,6 +298,14 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			gitlabcollector.NewCollector(),
 			adoptioncollector.NewCollector().WithInRun(opts.InRunResult),
 			openssfcollector.NewCollector(),
+			// cadence is a derived collector — reads sibling collectors'
+			// last_commit (or last_push) and last_publish emissions from
+			// opts.InRunResult and emits one signal per entity. Appended
+			// LAST in the API-only block so it runs after the forge and
+			// registry collectors have populated inRun. Internal gate:
+			// emits nothing when either side is missing, so repo-only
+			// and registry-only entities skip silently.
+			cadencecollector.NewCollector().WithInRun(opts.InRunResult),
 		)
 	}
 

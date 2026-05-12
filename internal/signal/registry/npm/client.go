@@ -182,12 +182,18 @@ type Maintainer struct {
 // signals add NpmUser for cross-version publisher-continuity analysis.
 // GitHead carries the publisher-stamped commit SHA (npm v≥5) the
 // artifact-vs-repo collector uses for exact-pair confidence.
+// Dependencies and OptionalDependencies feed git_url_dep_introduced
+// (TanStack/Mini-Shai-Hulud 2026-05-11 injected
+// `optionalDependencies: "@tanstack/setup": "github:tanstack/router#<sha>"`
+// — a git-URL dep with a hardcoded SHA pointing at attacker content).
 // Other fields on the wire are not modelled.
 type PackageVersion struct {
-	Scripts Scripts `json:"scripts"`
-	Dist    Dist    `json:"dist"`
-	NpmUser NpmUser `json:"_npmUser"`
-	GitHead string  `json:"gitHead"`
+	Scripts              Scripts           `json:"scripts"`
+	Dist                 Dist              `json:"dist"`
+	NpmUser              NpmUser           `json:"_npmUser"`
+	GitHead              string            `json:"gitHead"`
+	Dependencies         map[string]string `json:"dependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
 // NpmUser identifies who ran `npm publish` for a given version.

@@ -140,11 +140,13 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	// ----- maintainer_count + publisher-entity minting -----
+	// ----- maintainer_count + publisher-entity minting + publisher_account_class -----
 	logins := extractPyPILogins(&proj.Info)
 	if len(logins) == 0 {
 		reason := "no login-shaped value in info.maintainer / info.author / info.maintainers"
 		result.RecordAbsence(entity.ID, "maintainer_count", source,
+			reason, false, collectedAt)
+		result.RecordAbsence(entity.ID, "publisher_account_class", source,
 			reason, false, collectedAt)
 	} else {
 		c.ensurePublisherEntities(ctx, logins)
@@ -153,6 +155,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 				"count":  len(logins),
 				"logins": logins,
 			})
+		recordPublisherAccountClass(result, entity.ID, logins, collectedAt)
 	}
 
 	// ----- version_count (vitality) -----
@@ -614,17 +617,26 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	if err != nil {
 		// Integrity API failure — record as retryable absence so the
 		// next analyze run re-attempts without failing the whole collection.
-		result.RecordAbsence(entityID, "trusted_publishing", source,
-			sanitizeFetchReason(err), true, collectedAt)
+		reason := sanitizeFetchReason(err)
+		result.RecordAbsence(entityID, "trusted_publishing", source, reason, true, collectedAt)
+		result.RecordAbsence(entityID, "latest_attestation_builder", source, reason, true, collectedAt)
 		return nil, false
 	}
 
 	if attest == nil {
-		// 404 — no attestation exists. Emit present=false.
+		// 404 — no attestation exists. Emit present=false on both
+		// signals; their absent-shape is informative (the package
+		// isn't on trusted publishing).
 		result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL,
 			map[string]any{
 				"present":         false,
 				"version_checked": latest.version,
+			})
+		result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL,
+			map[string]any{
+				"present":           false,
+				"version_checked":   latest.version,
+				"extraction_status": "no_attestation",
 			})
 		return nil, true // state is known: definitively absent
 	}
@@ -645,7 +657,48 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	}
 
 	result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL, value)
+	recordLatestAttestationBuilder(result, entityID, latest.version, attest, collectedAt)
 	return attest, true
+}
+
+// recordLatestAttestationBuilder emits the latest_attestation_builder
+// signal — a consolidating contract over the publisher identity the
+// attestation binds to. Provides a stable, single-signal view of
+// (builder_kind, source_repository, workflow, environment,
+// source_revision) for sketch 5 (workflow_ref_transitions) and
+// future composites to consume without merging fields from
+// trusted_publishing (publisher block) and artifact_url (Fulcio-
+// extracted git_head).
+//
+// The data is largely already on trusted_publishing; this signal
+// re-emits it under a stable namespace and adds extraction_status
+// reporting. source_revision is the hex SHA the Fulcio cert's
+// source-repo-digest extension stamps — extracted via the same
+// extractGitHeadFromAttestation helper artifact_url uses.
+//
+// Caller guarantees attest is non-nil. The 404 and fetch-error
+// paths are handled at the recordTrustedPublishing dispatch site.
+func recordLatestAttestationBuilder(result *signal.CollectionResult,
+	entityID, latestVersion string, attest *AttestationResponse, collectedAt time.Time) {
+
+	value := map[string]any{
+		"present":           true,
+		"version_checked":   latestVersion,
+		"extraction_status": "ok",
+	}
+	if len(attest.Bundles) > 0 {
+		pub := attest.Bundles[0].Publisher
+		value["builder_kind"] = pub.Kind
+		value["source_repository"] = pub.Repository
+		value["workflow"] = pub.Workflow
+		if pub.Environment != "" {
+			value["environment"] = pub.Environment
+		}
+	}
+	if sha, ok := extractGitHeadFromAttestation(attest); ok {
+		value["source_revision"] = sha
+	}
+	result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL, value)
 }
 
 // attestationWindow bounds the number of prior versions checked for
@@ -804,22 +857,103 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 		}
 	}
 
+	// Workflow-ref tracking (sketch 5): captures attesting-workflow
+	// identity changes across the window. The existing
+	// transition_detected boolean covers attestation PRESENCE
+	// transitions (axios shape: attestation lost or gained). It
+	// misses the TanStack-shape careful-variant where every version
+	// is attested but the attesting workflow ref changes. The new
+	// fields close that gap:
+	//
+	//   - workflow_refs:           per-version list (newest-first),
+	//                              empty string when unattested
+	//   - latest_workflow_ref:     workflow on the latest version
+	//   - unique_workflow_refs:    count of distinct non-empty
+	//                              workflows seen in the window
+	//   - workflow_ref_transitions: adjacent-pair workflow differences
+	//                              (counts both presence- and
+	//                              workflow-changes, since
+	//                              "" → "X" is an adjacent diff)
+	workflowRefs := make([]string, len(checked))
+	uniqueWorkflows := map[string]struct{}{}
+	for i, r := range checked {
+		workflowRefs[i] = r.publisher.workflow
+		if r.publisher.workflow != "" {
+			uniqueWorkflows[r.publisher.workflow] = struct{}{}
+		}
+	}
+	workflowRefTransitions := 0
+	for i := 1; i < len(workflowRefs); i++ {
+		if workflowRefs[i] != workflowRefs[i-1] {
+			workflowRefTransitions++
+		}
+	}
+
 	value := map[string]any{
-		"consistent":            consistent,
-		"versions_checked":      len(checked),
-		"versions_attested":     versionsAttested,
-		"versions_unattested":   versionsUnattested,
-		"versions_skipped":      versionsSkipped,
-		"transition_detected":   transitionDetected,
-		"transition_direction":  transitionDirection,
-		"transition_at_version": transitionAtVersion,
-		"publisher_changed":     publisherChanged,
+		"consistent":               consistent,
+		"versions_checked":         len(checked),
+		"versions_attested":        versionsAttested,
+		"versions_unattested":      versionsUnattested,
+		"versions_skipped":         versionsSkipped,
+		"transition_detected":      transitionDetected,
+		"transition_direction":     transitionDirection,
+		"transition_at_version":    transitionAtVersion,
+		"publisher_changed":        publisherChanged,
+		"workflow_refs":            workflowRefs,
+		"latest_workflow_ref":      workflowRefs[0],
+		"unique_workflow_refs":     len(uniqueWorkflows),
+		"workflow_ref_transitions": workflowRefTransitions,
 	}
 	if priorPublisher != nil {
 		value["prior_publisher"] = priorPublisher
 	}
 
 	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL, value)
+}
+
+// recordPublisherAccountClass emits a per-package classification of
+// each extracted publisher login. Heuristic name-pattern matching
+// (see classify.go) — surfaces bot/service-account naming as
+// risk-stratification input. Forgery resistance is medium-declining
+// by design: an attacker can rename their account to bypass any
+// pattern; the signal is heuristic, not a verdict.
+//
+// Mirrors owner_type's emission convention: describe an identity
+// from the project entity, not from the identity entity itself.
+// The identity entities are minted separately by
+// ensurePublisherEntities (Path E); this signal links to them via
+// the login field on each entry.
+//
+// Tier 2 sketch — see /tmp/signal-sketch.md.
+func recordPublisherAccountClass(result *signal.CollectionResult, entityID string,
+	logins []string, collectedAt time.Time) {
+
+	classified := make([]map[string]any, 0, len(logins))
+	nonHumanCount := 0
+	for _, login := range logins {
+		c := classifyPublisherLogin(login)
+		m := map[string]any{
+			"login": c.Login,
+			"class": c.Class,
+		}
+		if c.MatchedPattern != "" {
+			m["matched_pattern"] = c.MatchedPattern
+		}
+		if c.Reason != "" {
+			m["reason"] = c.Reason
+		}
+		classified = append(classified, m)
+		if c.Class == "bot" || c.Class == "service-account" {
+			nonHumanCount++
+		}
+	}
+
+	result.RecordSignal(entityID, "publisher_account_class", source, collectedAt, defaultTTL,
+		map[string]any{
+			"logins":          classified,
+			"total_count":     len(logins),
+			"non_human_count": nonHumanCount,
+		})
 }
 
 // ensurePublisherEntities mints identity:pypi/<login> rows for each
