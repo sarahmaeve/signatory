@@ -411,6 +411,82 @@ kind of component that holds up even when the attacker is quiet —
 workflow-ref divergence in the attestation is observable regardless of
 test state, cadence, or payload shape.
 
+## Empirical: what the current signal model says at T+~21h
+
+A `signatory analyze pkg:npm/@tanstack/react-router --refresh --clone`
+run on 2026-05-12 at 15:55 UTC, approximately 21 hours after the
+first malicious publish at 2026-05-11T19:20:39 UTC. The full
+38-signal cross-section is preserved at
+[`raw-data/2026-05-12-tanstack-react-router-signals.json`](raw-data/2026-05-12-tanstack-react-router-signals.json);
+the Socket campaign package list (417 rows) is at
+[`raw-data/2026-05-12-mini-shai-hulud-socket-packages.csv`](raw-data/2026-05-12-mini-shai-hulud-socket-packages.csv).
+
+### Registry state at run-time
+
+`latest = 1.169.2` (published 2026-05-05T20:37:38Z) — the
+**pre-compromise** version. The malicious 1.169.5 and 1.169.8 (per
+the CSV, both published 2026-05-11T19:20+ UTC) had been pulled
+server-side by npm Security in the intervening day. signatory queried
+a post-incident *cleaned* registry state.
+
+### The verdict the current signal model produced
+
+38 signals across 8 collectors (npm-registry, github, git, repofiles,
+openssf-scorecard, exfilwatch, artifact-vs-repo). **Zero indicated
+compromise.** Headline values:
+
+- `publish_origin_consistency = very-high`, `attestation_transitions = 0`
+- `trusted_publishing = very-high`, `present = true`
+- `version_publish_burst.burst_detected = false` — the 84-version
+  flash on 2026-05-11T19:20–19:26 is invisible because npm Security
+  removed those versions from the registry; the burst signal is
+  structurally backward-looking against the registry's current state
+- `exfilwatch.exfil_capture_host = []` — bufferzonecorp's
+  host-class-corpus signal is wired up and returns no matches against
+  the post-cleanup tarball
+- `artifact-vs-repo.artifact_repo_divergence = absent`, reason
+  *"tarball-to-commit pairing unresolved"* — the collector ran, the
+  data path isn't complete (the npm-registry `git_head` field is
+  empty in the artifact_url signal, and the Sigstore-log fallback
+  isn't being chased)
+
+### What this confirms; what this exposes
+
+Confirms the entry's central argument: attestation presence and
+zero-transition consistency are not sufficient as a terminal
+positive. The signal model labels a package that was actively
+serving malware ~21 hours earlier as **very-high
+publish_origin_consistency**, because the post-incident registry
+state is structurally pristine.
+
+Exposes three observations the entry did not anticipate:
+
+- A cadence-gap signal between repo activity and publish activity.
+  `last_commit = 2026-05-12T13:32` (today, post-incident hardening
+  work) vs `last_publish = 2026-05-05T20:37:38Z` (six days ago,
+  pre-compromise) is the post-incident-investigation fingerprint
+  — distinct from during-incident burst detection. Not currently
+  composed into a derived signal.
+- `github.commit_signing` (ratio 0.9, 10 commits sampled,
+  web-flow-included) and `git.per_developer_commit_signing_ratio`
+  (ratio 0, 1000 commits, web-flow-excluded) produce contradictory
+  answers on the same nominal axis. Already named as a
+  methodological issue in
+  [`../analysis/signatory-provenance-v1.json`](../analysis/signatory-provenance-v1.json)
+  F002 when signatory analyzed itself; confirmed general on an
+  external target here.
+- TanStack's 2950 tags include zero signed (2943 annotated unsigned,
+  7 lightweight). Per
+  [`2025-03-14-tj-actions-changed-files.md`](2025-03-14-tj-actions-changed-files.md)
+  §"GHA tag mutability is a structural platform property," any tag
+  rewrite would be undetectable from tag metadata alone. This
+  package is structurally exposed on the tag→SHA-anomaly axis the
+  tj-actions entry promotes from "needed" to "confirmed class."
+
+The raw JSON carries the full 38-signal cross-section for any future
+analysis that wants to audit a specific signal value rather than rely
+on this summary.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal

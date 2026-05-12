@@ -1,0 +1,774 @@
+{
+  "entity": {
+    "id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+    "canonical_uri": "pkg:npm/@tanstack/react-router",
+    "type": "package",
+    "short_name": "@tanstack/react-router",
+    "ecosystem": "npm",
+    "url": "https://github.com/TanStack/router",
+    "created_at": "2026-05-12T15:52:10Z",
+    "updated_at": "2026-05-12T15:55:21.207058Z"
+  },
+  "signals": [
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:adoption:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "adoption",
+      "group": "criticality",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "adoption_type": "direct",
+        "go_mod_refs": 0,
+        "refs_to_stars": 0,
+        "stars": 14376
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:forks:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "forks",
+      "group": "criticality",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "count": 1674
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:stars:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "stars",
+      "group": "criticality",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "count": 14376
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:weekly_downloads:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "weekly_downloads",
+      "group": "criticality",
+      "source": "npm-registry",
+      "forgery_resistance": "low-declining",
+      "value": {
+        "count": 13646561,
+        "window": "last-week"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:absence:commit_signing_keys:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "absence:commit_signing_keys",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "high",
+      "value": {
+        "absent": true,
+        "reason": "no per-developer GPG-signed commits in window (web-flow excluded)",
+        "retryable": false
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-12T16:55:14Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:absence:identity_graph_depth:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "absence:identity_graph_depth",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "high",
+      "value": {
+        "absent": true,
+        "reason": "no .mailmap file at repo root",
+        "retryable": false
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-12T16:55:14Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:commit_signing:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "commit_signing",
+      "group": "governance",
+      "source": "github",
+      "forgery_resistance": "very-high",
+      "value": {
+        "ratio": 0.9,
+        "signed_count": 9,
+        "total_count": 10
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:contributors:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "contributors",
+      "group": "governance",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "count": 10,
+        "top": [
+          {
+            "contributions": 3257,
+            "login": "tannerlinsley"
+          },
+          {
+            "contributions": 732,
+            "login": "schiller-manuel"
+          },
+          {
+            "contributions": 319,
+            "login": "SeanCassiere"
+          },
+          {
+            "contributions": 276,
+            "login": "birkskyum"
+          },
+          {
+            "contributions": 147,
+            "login": "Sheraff"
+          },
+          {
+            "contributions": 91,
+            "login": "chorobin"
+          },
+          {
+            "contributions": 85,
+            "login": "github-actions[bot]"
+          },
+          {
+            "contributions": 66,
+            "login": "autofix-ci[bot]"
+          },
+          {
+            "contributions": 59,
+            "login": "lachlancollins"
+          },
+          {
+            "contributions": 52,
+            "login": "nlynzaad"
+          }
+        ]
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:effective_maintainer_concentration:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "effective_maintainer_concentration",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "top_author_share": 0.221,
+        "top_authors": [
+          {
+            "author": "Tanner Linsley \u003ctannerlinsley@users.noreply.github.com\u003e",
+            "count": 221
+          },
+          {
+            "author": "Manuel Schiller \u003cmanuel.schiller@caligano.de\u003e",
+            "count": 202
+          },
+          {
+            "author": "Birk Skyum \u003c74932975+birkskyum@users.noreply.github.com\u003e",
+            "count": 133
+          },
+          {
+            "author": "Flo \u003cfpellet@ensc.fr\u003e",
+            "count": 95
+          },
+          {
+            "author": "github-actions[bot] \u003cgithub-actions[bot]@users.noreply.github.com\u003e",
+            "count": 85
+          },
+          {
+            "author": "Tanner Linsley \u003ctannerlinsley@gmail.com\u003e",
+            "count": 33
+          },
+          {
+            "author": "autofix-ci[bot] \u003c114827586+autofix-ci[bot]@users.noreply.github.com\u003e",
+            "count": 16
+          },
+          {
+            "author": "Lachlan Collins \u003c1667261+lachlancollins@users.noreply.github.com\u003e",
+            "count": 14
+          },
+          {
+            "author": "Nico Lynzaad \u003c44094871+nlynzaad@users.noreply.github.com\u003e",
+            "count": 13
+          },
+          {
+            "author": "Brenley Dueck \u003cbrenleydueck@gmail.com\u003e",
+            "count": 8
+          }
+        ],
+        "top_k": 3,
+        "top_k_share": 0.556,
+        "total_commits": 1000,
+        "unique_authors": 137,
+        "window": "8760h0m0s"
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:identity_domain_consistency:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "identity_domain_consistency",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "high",
+      "value": {
+        "top_domain_share": 0.537,
+        "top_domains": [
+          {
+            "count": 537,
+            "domain": "users.noreply.github.com"
+          },
+          {
+            "count": 202,
+            "domain": "caligano.de"
+          },
+          {
+            "count": 108,
+            "domain": "gmail.com"
+          },
+          {
+            "count": 95,
+            "domain": "ensc.fr"
+          },
+          {
+            "count": 7,
+            "domain": "ustark.de"
+          },
+          {
+            "count": 5,
+            "domain": "pm.me"
+          },
+          {
+            "count": 3,
+            "domain": "nize.ph"
+          },
+          {
+            "count": 3,
+            "domain": "outlook.com"
+          },
+          {
+            "count": 3,
+            "domain": "qq.com"
+          },
+          {
+            "count": 2,
+            "domain": "dorfmeister.cc"
+          }
+        ],
+        "total_commits": 1000,
+        "unique_domains": 41,
+        "window": "8760h0m0s"
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:maintainer_count:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "maintainer_count",
+      "group": "governance",
+      "source": "npm-registry",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "count": 5,
+        "logins": [
+          "tannerlinsley",
+          "tkdodo",
+          "alemtuzlak",
+          "kevinvandy",
+          "schiller-manuel"
+        ]
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:owner_profile:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "owner_profile",
+      "group": "governance",
+      "source": "github",
+      "forgery_resistance": "very-high",
+      "value": {
+        "account_age_days": 2042,
+        "company": "",
+        "created": "2020-10-07T17:25:54Z",
+        "followers": 10404,
+        "login": "TanStack",
+        "name": "TanStack",
+        "public_repos": 25,
+        "type": "Organization"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:owner_type:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "owner_type",
+      "group": "governance",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "login": "TanStack",
+        "type": "Organization"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:per_developer_commit_signing_ratio:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "per_developer_commit_signing_ratio",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "high",
+      "value": {
+        "per_developer_signed": 0,
+        "ratio": 0,
+        "total_commits": 1000,
+        "unsigned": 1000,
+        "web_flow_signed": 0,
+        "window": "8760h0m0s"
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:web_flow_signing_ratio:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "web_flow_signing_ratio",
+      "group": "governance",
+      "source": "git",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "per_developer_signed": 0,
+        "ratio": 0,
+        "total_commits": 1000,
+        "unsigned": 1000,
+        "web_flow_signed": 0,
+        "window": "8760h0m0s"
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "openssf-scorecard:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:absence:scorecard-check:1778601317818292000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "absence:scorecard-check",
+      "group": "hygiene",
+      "source": "openssf-scorecard",
+      "forgery_resistance": "high",
+      "value": {
+        "absent": true,
+        "reason": "not in scorecards index",
+        "retryable": false
+      },
+      "collected_at": "2026-05-12T15:55:17Z",
+      "expires_at": "2026-05-12T16:55:17Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:ci_cd:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "ci_cd",
+      "group": "hygiene",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "providers": [
+          "github-actions"
+        ]
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:license:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "license",
+      "group": "hygiene",
+      "source": "github",
+      "forgery_resistance": "low-declining",
+      "value": {
+        "spdx_id": "MIT"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "repofiles:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:repo_files:1778601317818185000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "repo_files",
+      "group": "hygiene",
+      "source": "repofiles",
+      "forgery_resistance": "low-declining",
+      "value": {
+        "authors": {
+          "present": false
+        },
+        "changelog": {
+          "present": false
+        },
+        "codeowners": {
+          "present": false
+        },
+        "contributing": {
+          "present": true,
+          "path": "CONTRIBUTING.md"
+        },
+        "governance": {
+          "present": false
+        },
+        "mailmap": {
+          "present": false
+        },
+        "maintainers": {
+          "present": false
+        },
+        "readme": {
+          "present": true,
+          "path": "README.md"
+        },
+        "security": {
+          "present": false
+        }
+      },
+      "collected_at": "2026-05-12T15:55:17Z",
+      "expires_at": "2026-05-13T15:55:17Z"
+    },
+    {
+      "id": "artifact-vs-repo:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:absence:artifact_repo_divergence:1778601319679612000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "absence:artifact_repo_divergence",
+      "group": "publication",
+      "source": "artifact-vs-repo",
+      "forgery_resistance": "high",
+      "value": {
+        "absent": true,
+        "reason": "tarball-to-commit pairing unresolved",
+        "retryable": false
+      },
+      "collected_at": "2026-05-12T15:55:19Z",
+      "expires_at": "2026-05-12T16:55:19Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:artifact_url:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "artifact_url",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "high",
+      "value": {
+        "git_head": "",
+        "integrity": "sha512-OJM7Kguc7ERnweaNRWsyWgIKcl3z23rD1B4jaxjzd9RGdnzpt2HfrWa9rggbT0Hfzhfo4D2ZmsfoTme035tniQ==",
+        "url": "https://registry.npmjs.org/@tanstack/react-router/-/react-router-1.169.2.tgz",
+        "version": "1.169.2"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "exfilwatch:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:exfil_capture_host:1778601319679525000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "exfil_capture_host",
+      "group": "publication",
+      "source": "exfilwatch",
+      "forgery_resistance": "high",
+      "value": [],
+      "collected_at": "2026-05-12T15:55:19Z",
+      "expires_at": "2026-05-13T15:55:19Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:postinstall_introduced:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "postinstall_introduced",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "high",
+      "value": {
+        "introduced_at_version": "",
+        "introduced_recently": false,
+        "present_in_latest": false,
+        "prior_versions_without": 9,
+        "versions_checked": 10
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:postinstall_present:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "postinstall_present",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "high",
+      "value": {
+        "present": false,
+        "version_checked": "1.169.2"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:publish_origin_consistency:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "publish_origin_consistency",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "very-high",
+      "value": {
+        "attestation_transitions": 0,
+        "latest_has_attestation": true,
+        "latest_publisher": "GitHub Actions",
+        "publishers": [
+          "GitHub Actions"
+        ],
+        "unique_publishers": 1,
+        "versions_checked": 10
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:tag_signing_status:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "tag_signing_status",
+      "group": "publication",
+      "source": "git",
+      "forgery_resistance": "high",
+      "value": {
+        "annotated_unsigned": 2943,
+        "lightweight": 7,
+        "sample_annotated": [
+          "@tanstack/arktype-adapter@1.166.8",
+          "@tanstack/arktype-adapter@1.166.9",
+          "@tanstack/eslint-plugin-router@1.161.5",
+          "@tanstack/eslint-plugin-router@1.161.6",
+          "@tanstack/history@1.161.5",
+          "@tanstack/history@1.161.6",
+          "@tanstack/nitro-v2-vite-plugin@1.154.8",
+          "@tanstack/nitro-v2-vite-plugin@1.154.9",
+          "@tanstack/react-router-devtools@1.166.10",
+          "@tanstack/react-router-devtools@1.166.11"
+        ],
+        "sample_lightweight": [
+          "v0.0.1-alpha.0",
+          "v0.0.1-beta.0",
+          "v0.0.1-beta.112",
+          "v0.0.1-beta.120",
+          "v1.129.6",
+          "v1.142.9",
+          "v1.87.5"
+        ],
+        "sample_signed": [],
+        "signed_annotated": 0,
+        "signed_ratio": 0,
+        "total_tags": 2950
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:tags:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "tags",
+      "group": "publication",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "count": 10,
+        "recent": [
+          "v1.166.7",
+          "v1.166.6",
+          "v1.166.5",
+          "v1.166.4",
+          "v1.166.3",
+          "v1.166.2",
+          "v1.166.1",
+          "v1.166.0",
+          "v1.165.0",
+          "v1.164.1"
+        ]
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:trusted_publishing:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "trusted_publishing",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "very-high",
+      "value": {
+        "present": true,
+        "version_checked": "1.169.2"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:version_publish_burst:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "version_publish_burst",
+      "group": "publication",
+      "source": "npm-registry",
+      "forgery_resistance": "high",
+      "value": {
+        "burst_detected": false,
+        "versions_checked": 10,
+        "versions_in_window": 10,
+        "window_hours": 525
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:archived:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "archived",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "archived": false
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "git:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:first_commit_date:1778601314178541000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "first_commit_date",
+      "group": "vitality",
+      "source": "git",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "date": "2019-01-14T14:40:27Z",
+        "days_ago": 2675,
+        "era": "pre-llm"
+      },
+      "collected_at": "2026-05-12T15:55:14Z",
+      "expires_at": "2026-05-13T15:55:14Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:last_commit:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "last_commit",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "date": "2026-05-12T13:32:33Z",
+        "days_ago": 0,
+        "era": "mature-cyber"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:last_publish:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "last_publish",
+      "group": "vitality",
+      "source": "npm-registry",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "days_ago": 6,
+        "latest_version": "1.169.2",
+        "published_at": "2026-05-05T20:37:38Z"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:last_push:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "last_push",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "date": "2026-05-12T13:32:35Z",
+        "era": "mature-cyber"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:open_issues:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "open_issues",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "medium-declining",
+      "value": {
+        "count": 584
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:repo_age:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "repo_age",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "very-high",
+      "value": {
+        "age_days": 2675,
+        "created": "2019-01-14T13:54:39Z"
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "github:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:total_commits:1778601308735296000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "total_commits",
+      "group": "vitality",
+      "source": "github",
+      "forgery_resistance": "high",
+      "value": {
+        "count": 6257
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    },
+    {
+      "id": "npm-registry:80e7d1b7-4642-4d45-a65f-7bfe86511ed0:version_count:1778601308489378000",
+      "entity_id": "80e7d1b7-4642-4d45-a65f-7bfe86511ed0",
+      "type": "version_count",
+      "group": "vitality",
+      "source": "npm-registry",
+      "forgery_resistance": "high",
+      "value": {
+        "count": 1159
+      },
+      "collected_at": "2026-05-12T15:55:08Z",
+      "expires_at": "2026-05-13T15:55:08Z"
+    }
+  ]
+}
