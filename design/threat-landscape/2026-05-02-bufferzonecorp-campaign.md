@@ -342,9 +342,7 @@ The C2-destination-class corpus is a *typology* of host classes
 (request-capture-as-a-service, OOB-interaction, tunnel-as-a-service)
 with explicit class definitions and bounded membership. It is not
 "a list of bad domains we've seen in malware." The class-definition
-gate is what keeps the corpus from drifting into a vendor IOC list —
-see `ANTIPATTERNS.md` and `host-class-corpus-signal.md` §"Staying a
-typology, not a blocklist."
+gate is what keeps the corpus from drifting into a vendor IOC list.
 
 ### Does not promote any ecosystem to a first-class collector ahead of design
 
@@ -408,9 +406,6 @@ malicious in itself.
   defeats it).
 - [`../trust-policy-v1.md`](../trust-policy-v1.md) — posture
   evaluator that needs to know about `version_scope`.
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) §"No per-vendor IOC
-  list" — the discipline that keeps the host-class corpus a typology
-  rather than a blocklist.
 - [`2026-04-21-vercel-contextai-incident.md`](2026-04-21-vercel-contextai-incident.md)
   — parallel "named external incident motivates a new signal axis";
   this entry is the supply-chain-malware analogue.

@@ -140,8 +140,8 @@ operative finding is therefore:
 This is a stronger and more useful statement than a linear ranking,
 and it sharpens the 04-28a finding rather than complicating it. The
 threat is *two frontier capability sources*, not "OpenAI overtook
-Anthropic." The federation-asymmetry argument (`ANTIPATTERNS.md`,
-04-14) tightens with each additional vendor at parity.
+Anthropic." The federation-asymmetry argument from the 04-14 entry
+tightens with each additional vendor at parity.
 
 ### Forgery-resistance hierarchy: vendor-side abuse monitoring is empirically fragile
 
@@ -440,9 +440,6 @@ content of those evaluations begins to repeat.
   weighted by forgery resistance" — hierarchy unchanged; vendor-
   side abuse-monitoring fragility quantified at one-business-day
   timescale
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — federated-approve-
-  list rejection unchanged; vendor safeguard programs and evaluator
-  tiers as non-federate-able positive signals
 - [`../analysis-economics.md`](../analysis-economics.md) — dollar-
   per-expert-hour-equivalent calibration worth citing on next
   revision

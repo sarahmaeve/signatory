@@ -128,8 +128,8 @@ this from opposite directions:
 
 In both cases the consumer's only safe posture is to derive trust
 decisions locally and reject externally-curated positive trust. The
-existing `trust-model.md` §"Burn Governance" and `ANTIPATTERNS.md`
-architectural commitments hold.
+existing `trust-model.md` §"Burn Governance" architectural commitment
+holds.
 
 ### Forgery-resistance hierarchy (unchanged, pressure increased)
 
@@ -234,8 +234,5 @@ not.
 - [`../trust-model.md`](../trust-model.md) §"Signals must be weighted by
   forgery resistance" — the hierarchy whose bottom-tier pressure
   continues to increase
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) §"Architectural drift" and
-  §"Usage antipatterns" — the federated-approve-list failure mode the
-  OpenAI move instantiates
 - [`../open-questions.md`](../open-questions.md) — where the
   questions above are tracked for future resolution

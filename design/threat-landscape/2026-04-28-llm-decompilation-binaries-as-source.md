@@ -306,8 +306,5 @@ nothing for the trust model.
 - [`../signals-v01.md`](../signals-v01.md) — reproducible-from-source
   positive signal recommended for this cycle; closed-binary-only
   negative signal recommended for this cycle
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — federated-approve-list
-  rejection unchanged; vendor incident-response posts as
-  non-federate-able
 - [`../open-questions.md`](../open-questions.md) — questions above
   tracked there for resolution

@@ -270,8 +270,7 @@ actively reject:
 
 - `signatory scan-everything` over a lockfile or `go.mod` closure.
 - A CI action that gates PRs on signatory output for every
-  changed dep. (Also an antipattern for a second reason — see
-  [`ANTIPATTERNS.md`](ANTIPATTERNS.md) §"Usage antipatterns".)
+  changed dep.
 - Scheduled re-analysis without a user-visible decision moment
   on the other side. (Also an Invariant-1 non-goal.)
 - "Run signatory on the top 1000 npm packages so users can look

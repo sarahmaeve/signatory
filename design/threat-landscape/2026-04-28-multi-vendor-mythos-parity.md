@@ -284,7 +284,5 @@ remains conservative.
 - [`../trust-model.md`](../trust-model.md) §"Signals must be weighted
   by forgery resistance" — hierarchy unchanged; pressure on bottom
   tier increased
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — federated-approve-list
-  rejection unchanged; reinforced by multi-vendor landscape
 - [`../open-questions.md`](../open-questions.md) — questions above
   tracked there for resolution

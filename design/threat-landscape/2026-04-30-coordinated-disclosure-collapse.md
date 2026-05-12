@@ -398,7 +398,5 @@ observations; it does not federate their authority.
 - [`../signals-v01.md`](../signals-v01.md) — no v0.1 changes
   recommended; two candidate v0.2 signal classes flagged
   (time-to-merge-for-security-PRs; disclosure-practice posture).
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — federated-approve-list
-  rejection unchanged.
 - [`../open-questions.md`](../open-questions.md) — questions above
   tracked there for resolution.

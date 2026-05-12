@@ -184,8 +184,7 @@ entry discipline applies to. Record, do not weight.
 
 ### Does not add Context.ai specifically to any burn list or IOC registry
 
-Per `ANTIPATTERNS.md` §"Architectural drift" and §"Usage antipatterns,"
-signatory does not maintain per-vendor IOC lists or curated
+Signatory does not maintain per-vendor IOC lists or curated
 positive-trust sets. Context.ai is the illustrative instance of a
 pattern. Maintaining a vendor-specific burn list would instantiate
 precisely the federated-positive-trust failure mode the 04-14 entry
@@ -222,8 +221,6 @@ rejected, applied in the negative direction.
   by forgery resistance" — the hierarchy gaining a new axis
 - [`../trust-policy-v1.md`](../trust-policy-v1.md) — v0.2 posture
   evaluator, which will need to know about composite signals
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — no per-vendor IOC list,
-  no federated approve-list, apply in both directions
 - `design/analysis/` and `filestore/analysis/` — the dogfood analyses
   that surfaced the posture-tier overloading observation
   (`invariant-2.2.4`, `escape-html`, `msgpack-lite`)

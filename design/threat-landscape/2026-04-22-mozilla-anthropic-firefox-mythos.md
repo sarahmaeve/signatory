@@ -233,7 +233,5 @@ Mozilla's "no new vuln classes" claim, if taken at face value,
 - [`../trust-model.md`](../trust-model.md) §"Temporal Trust Boundaries"
   — era deferral preserved; §"Signals must be weighted by forgery
   resistance" — hierarchy unchanged
-- [`../ANTIPATTERNS.md`](../ANTIPATTERNS.md) — no vendor-tier signal
-  ingestion, no federated positive-trust lists; both hold
 - [`../open-questions.md`](../open-questions.md) — questions above
   tracked there for resolution
