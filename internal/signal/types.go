@@ -886,6 +886,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"commit_publish_cadence_divergence": {
+		Type:              "commit_publish_cadence_divergence",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Temporal gap between most-recent push to the source repo and most-recent publish to the registry. Four shapes: synchronized, active-repo-paused-publishes, active-publishes-fallow-repo, and both-fallow. Derived signal — reads sibling collectors' last_commit (or last_push) and last_publish emissions via the in-run accumulator.",
+		Caveats: []string{
+			"cadence is observable but not cryptographic — an attacker controlling both source and publish paths can fake either timestamp",
+			"the 'synchronized' threshold (|divergence| <= 2 days) and the 'fallow' threshold (60 days) are arbitrary defaults; values close to either edge are weak signal on their own",
+			"partial inputs (no commit-side signal, or no last_publish) produce no emission rather than an absence — the collector treats partial data as 'doesn't apply' to the entity, not 'failed'",
+			"both-fallow trumps the divergence shapes — a 200-day commit + 201-day publish is reported as both-fallow, not synchronized, because divergence is only meaningful when at least one side is recent",
+		},
+	},
 	"git_url_dep_introduced": {
 		Type:              "git_url_dep_introduced",
 		Group:             profile.SignalGroupPublication,
