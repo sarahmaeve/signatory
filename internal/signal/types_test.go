@@ -247,8 +247,8 @@ func TestRegistry_PyPICollectorTypesHaveExpectedShape(t *testing.T) {
 		group      profile.SignalGroup
 		forgery    profile.ForgeryResistance
 	}{
-		{"trusted_publishing", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
-		{"attestation_consistency", profile.SignalGroupPublication, profile.ForgeryVeryHigh},
+		{"trusted_publishing", profile.SignalGroupPublication, profile.ForgeryHigh},
+		{"attestation_consistency", profile.SignalGroupPublication, profile.ForgeryHigh},
 		{"sdist_only_present", profile.SignalGroupPublication, profile.ForgeryHigh},
 		{"sdist_only_introduced", profile.SignalGroupPublication, profile.ForgeryHigh},
 		{"yanked_release_count", profile.SignalGroupPublication, profile.ForgeryHigh},

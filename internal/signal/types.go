@@ -389,29 +389,32 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"build_provenance_attestation": {
 		Type:              "build_provenance_attestation",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Presence of Sigstore/SLSA build provenance attestations on published artifacts.",
 		Caveats: []string{
 			"attestation alone is not trust — a verifier must check it against a known-good build configuration",
+			"forgery resistance reflects 'requires CI pipeline compromise' (High), not 'requires cryptographic key compromise' (Very High). Sigstore's cryptographic primitives are Very High, but signal-presence is achievable via workflow-runtime exfiltration without breaking those primitives — TanStack 2026-05-11 is the demonstrated case. See design/threat-landscape/2026-05-12-tanstack-mini-shai-hulud.md",
 		},
 	},
 	"registry_publish_origin": {
 		Type:              "registry_publish_origin",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Origin of registry publishing — oidc_ci, long_lived_token_ci, local_maintainer_machine, or unknown.",
 		Caveats: []string{
 			"oidc_ci is the hardened posture; local_maintainer_machine is the lowest trust tier",
 			"CI-based publishing is only as trustworthy as the CI workflow's action-pin tightness",
+			"forgery resistance is High, not Very High: oidc_ci classification is derived from attestation presence; a CI-pipeline-compromise attack (TanStack 2026-05-11) produces oidc_ci classification while signing malicious content with the legitimate workflow's identity. The classification is correct about what the publisher uses; it's not a verdict about runtime integrity",
 		},
 	},
 	"crates_io_trusted_publishing": {
 		Type:              "crates_io_trusted_publishing",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Whether crates.io trusted-publishing (OIDC) is configured for the crate.",
 		Caveats: []string{
 			"status is visible only after a first publish that used it — absence on a new crate is not automatically negative",
+			"forgery resistance is High, not Very High: the same TanStack-shape exposure as npm trusted_publishing — OIDC binding doesn't guarantee runtime integrity. A CI-pipeline-compromise attack produces a valid attestation with the project's normal builder identity while signing malicious content",
 		},
 	},
 	"postinstall_present": {
@@ -428,12 +431,13 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"trusted_publishing": {
 		Type:              "trusted_publishing",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Presence of an OIDC trusted-publishing attestation on the latest published package version (npm's dist.attestations).",
 		Caveats: []string{
-			"present-and-valid is a very high-quality provenance signal — the attestation cryptographically binds the published version to a source repo and commit SHA",
+			"present-and-valid cryptographically binds the published version to a source repo and commit SHA — strong provenance evidence but not a verdict on artifact safety",
 			"absence is not automatically negative — older published versions predate trusted publishing, and the maintainer may have not opted in yet",
 			"absence on a package that previously used trusted publishing IS strongly negative — the axios attack pattern — but detecting the transition requires comparing across versions; publish_origin_consistency is the cross-version complement to this snapshot signal",
+			"forgery resistance is High, not Very High: the OIDC binding cryptographically guarantees the attestation chain but doesn't guarantee the workflow's runtime memory was integrity-bounded at token issuance. TanStack 2026-05-11 produced valid attestations with the project's normal release.yml@refs/heads/main builder identity by extracting the runner's OIDC token from /proc memory after pull_request_target + cache-poisoning compromise. The signal correctly observes 'publisher uses trusted publishing'; readers should not transitively conclude 'artifact is safe'",
 		},
 	},
 	"postinstall_introduced": {
@@ -450,19 +454,20 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 	"publish_origin_consistency": {
 		Type:              "publish_origin_consistency",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Consistency of publish provenance across recent versions: presence-transitions on OIDC attestations plus count of distinct publisher accounts.",
 		Caveats: []string{
 			"a single publisher across many versions with consistent attestation presence is the healthy pattern — transitions are anomaly signals, not verdicts",
 			"legitimate reasons to transition include maintainer handoff, CI pipeline migration, or a first adoption of trusted publishing — these produce false positives worth investigating, not dismissing",
 			"the axios 2026 forensic specifically called out the broken attestation chain as the detection-relevant fingerprint — this signal captures that shape across versions",
 			"the _npmUser.name field is the registry's publisher stamp and cannot be rewritten post-publish; it's higher-forgery-resistance than maintainer lists which are self-declared",
+			"forgery resistance is High, not Very High: presence-transitions and publisher consistency are observable, but a CI-pipeline-compromise attack (TanStack 2026-05-11) preserves both — it rides the legitimate workflow and signs the malicious tarball with the project's normal attesting identity, leaving attestation_transitions=0 and unique_publishers=1. The PyPI sibling attestation_consistency has added workflow_ref_transitions to close the careful-variant gap; the npm side awaits the same extension (deferred behind the Rekor-vs-attestations-URL question)",
 		},
 	},
 	"attestation_consistency": {
 		Type:              "attestation_consistency",
 		Group:             profile.SignalGroupPublication,
-		ForgeryResistance: profile.ForgeryVeryHigh,
+		ForgeryResistance: profile.ForgeryHigh,
 		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects two dimensions of break: transitions from attested to unattested publishing (the axios fingerprint of credential-theft attacks that bypass CI), and changes in the attesting workflow ref across attested versions (the TanStack-shape careful-variant where every version is attested but the builder identity changed).",
 		Caveats: []string{
 			"a transition from unattested to attested is positive (adoption) not negative",
@@ -470,6 +475,7 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"bounded to last N versions; a gap farther back is invisible",
 			"not emitted for packages that never adopted trusted publishing (progressive probe: latest + first prior both unattested → early exit)",
 			"workflow_ref_transitions counts adjacent workflow-string differences across checked[] in newest-first order; presence transitions (e.g., '' → 'release.yml') count toward it because the strings differ — pair with transition_detected to disambiguate presence-change from workflow-change",
+			"forgery resistance is High, not Very High: a TanStack-shape attack that rides the legitimate workflow preserves attestation chain consistency on every axis except workflow-ref content. workflow_ref_transitions catches the careful-variant where the workflow IDENTITY changes; presence-consistency and publisher-consistency alone are not sufficient verdicts on artifact safety",
 		},
 	},
 	"transparency_log_present": {

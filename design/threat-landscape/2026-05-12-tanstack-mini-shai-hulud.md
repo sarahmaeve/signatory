@@ -792,6 +792,136 @@ sketch-4 npm parity question (where to fetch the SLSA provenance
 from). The two npm signals would land together once that decision
 is made.
 
+## Reflection: Sigstore as a layer, not a verdict
+
+Surfacing here so the implementation work doesn't bury the
+architectural realization: **Sigstore attestation signals are not
+"is this artifact safe" signals**, and the trust-model entry
+already prices this correctly — the audit pass recorded below
+brings the in-code signal-type registry into alignment with what
+the trust-model entry has said all along.
+
+### What Sigstore actually binds
+
+The Fulcio + Rekor + bundle system cryptographically binds:
+
+1. An artifact hash to a signing identity (Fulcio-issued cert).
+2. A signing identity to an OIDC issuer claim — e.g., "this cert
+   was issued to a GitHub Actions runner that, at issuance time,
+   claimed to be running workflow X on repo Y at commit Z."
+3. A timestamp in an append-only public log (Rekor).
+4. A workflow runtime environment that requested the OIDC token.
+
+These bindings are real. Forging them would require breaking
+Fulcio's CA, the OIDC issuer, or Sigstore's signing infrastructure.
+Very high cryptographic forgery resistance.
+
+### What Sigstore does not bind
+
+The system does *not* bind:
+
+1. That the workflow's runtime memory was uncompromised at the
+   moment of token issuance.
+2. That the code that ran in the workflow matches what the source
+   repo says it should run.
+3. That the artifact being signed is what the workflow *intended*
+   to produce, rather than what the runtime *actually* produced.
+4. That no other process on the same runner observed the OIDC
+   token after issuance.
+
+TanStack exploited the fourth gap precisely. The cryptographic
+chain that signed the malicious tarball was complete and correct:
+Fulcio cert issued to a real GHA runner, OIDC claim naming
+`tanstack/router`'s `release.yml@refs/heads/main`, source commit
+the legitimate one. Everything was real. What's missing from the
+chain: "the tarball whose hash got signed is what the workflow
+would have produced from this commit if the runtime had been
+clean." Sigstore can't see inside the runtime; it signs what the
+runner asks it to sign.
+
+### Why the trust-model tier-table is right
+
+`design/trust-model.md` §"Signals must be weighted by forgery
+resistance" has the table:
+
+| Forgery resistance | Signal type | Why |
+|---|---|---|
+| Very high | Cryptographic signatures (GPG/SSH/OIDC) | Requires key compromise |
+| High | Publication metadata / trusted publishing | Requires CI pipeline compromise |
+
+TanStack didn't compromise keys. It compromised the CI pipeline —
+specifically the runner's runtime. The attack succeeded at the
+**High** tier, exactly where the table predicts it would. The
+table's tiering is correctly placed; "CI pipeline compromise" is
+what TanStack did, and the table already prices that risk at High
+rather than Very High.
+
+The thing that was wrong wasn't the tier — it was the casual
+reading of "High" as "trustworthy." High forgery resistance does
+not mean "this artifact is safe." It means "forging this requires
+CI pipeline compromise," and TanStack demonstrates that CI
+pipeline compromise is achievable. The signal is correctly valued;
+the interpretation gap was in how downstream readers — including
+this codebase's own signal-type registry — were treating the tier
+label.
+
+### Audit-pass outcome (2026-05-12)
+
+Six signals in `internal/signal/types.go` had been tagged
+`ForgeryVeryHigh` while reflecting CI-pipeline-compromisable
+properties. Re-tagged to `ForgeryHigh` with caveats explaining
+the contingency:
+
+- `build_provenance_attestation`
+- `registry_publish_origin`
+- `crates_io_trusted_publishing`
+- `trusted_publishing`
+- `publish_origin_consistency`
+- `attestation_consistency`
+
+Signals that stay at `ForgeryVeryHigh` because their forgery
+threshold is *not* CI-pipeline-compromise:
+
+- `commit_signing` / `commit_signing_keys` — actual GPG/SSH
+  signing keys; cryptographic compromise required.
+- `transparency_log_present` — `sum.golang.org` records module
+  hashes, not workflow claims; the immutable Merkle-log binding
+  doesn't depend on workflow runtime integrity.
+- `artifact_repo_divergence` — diffs published tarball against
+  source tree; both sides observable, no runtime gap.
+- `version_pin_table`, `source_evolution_matrix`,
+  `source_evolution_anomaly` — sourceforge-side observations of
+  Go module proxy state.
+- Identity-graph signals (`repo_age`, `owner_profile`,
+  `identity_graph_depth`) — long-tenure observations, not
+  cryptographic claims about artifacts.
+
+### What this implies for the sketches just landed
+
+Three implications worth stating plainly:
+
+- **Sketches 4 + 5 are more important after this realization, not
+  less.** The TanStack-shape detection — "did the attesting
+  workflow change?" — is exactly what turns the cryptographic
+  binding into actionable trust. Without those signals, all we
+  know is "signed by something via Sigstore."
+- **Tier 2 `repo_workflow_posture` becomes load-bearing.** Sigstore's
+  "this workflow signed this artifact" only translates to trust if
+  the workflow itself was integrity-bounded at sign time. That's
+  what workflow-posture observation answers, and Sigstore can't
+  answer it.
+- **The signal model values composition, not single-signal verdicts.**
+  Trust verdict = Sigstore-binds-artifact-to-builder (cryptographic
+  primitive) ∧ builder-is-the-project's-canonical-builder
+  (sketches 4 + 5) ∧ builder's-runtime-was-integrity-bounded
+  (Tier 2 `repo_workflow_posture`) ∧ other signals. Each predicate
+  is independently load-bearing; none alone is sufficient.
+
+The marketing of trusted publishing has often blurred the
+distinction between cryptographic primitive and operational trust.
+Signatory's signal model values the operational property; the
+audit pass records the codebase's alignment with that view.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal
