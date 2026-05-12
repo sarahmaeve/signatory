@@ -1638,6 +1638,133 @@ func TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted(t *testin
 		"environment must be omitted (not empty-string) when the publisher block doesn't set it")
 }
 
+// TestCollector_AttestationConsistency_WorkflowRefStable pins the
+// sketch-5 healthy case: all versions in the window are attested
+// by the same workflow. No transitions in attesting workflow
+// identity → workflow_ref_transitions=0, unique_workflow_refs=1,
+// workflow_refs lists the same workflow on each checked version.
+func TestCollector_AttestationConsistency_WorkflowRefStable(t *testing.T) {
+	t.Parallel()
+	att := makeAttestation("GitHub", "pallets/flask", "publish.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"3.0.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.0.0-py3-none-any.whl"}},
+				"3.1.0": {{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.1.0-py3-none-any.whl"}},
+				"3.2.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.2.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"3.0.0": att,
+			"3.1.0": att,
+			"3.2.0": att,
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("flask"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, "publish.yml", val["latest_workflow_ref"],
+		"latest_workflow_ref must surface the workflow from the latest version's attestation")
+	assert.EqualValues(t, 1, val["unique_workflow_refs"],
+		"all three versions attested by publish.yml → exactly one distinct workflow")
+	assert.EqualValues(t, 0, val["workflow_ref_transitions"],
+		"identical workflow across the window → zero adjacent transitions")
+	refs, ok := val["workflow_refs"].([]any)
+	require.True(t, ok, "workflow_refs must be a list")
+	assert.Equal(t, []any{"publish.yml", "publish.yml", "publish.yml"}, refs)
+}
+
+// TestCollector_AttestationConsistency_WorkflowRefChange models the
+// TanStack-shape careful-variant: every version is attested (no
+// presence transition the existing transition_detected fires on),
+// but the attesting workflow ref differs between the latest and the
+// prior versions. workflow_ref_transitions=1 surfaces the change
+// that publish_origin_consistency / attestation_consistency would
+// otherwise miss.
+func TestCollector_AttestationConsistency_WorkflowRefChange(t *testing.T) {
+	t.Parallel()
+	old := makeAttestation("GitHub", "pallets/flask", "publish.yml")
+	new := makeAttestation("GitHub", "pallets/flask", "release-v2.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"3.0.0": {{UploadTimeISO: "2025-06-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.0.0-py3-none-any.whl"}},
+				"3.1.0": {{UploadTimeISO: "2025-09-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.1.0-py3-none-any.whl"}},
+				"3.2.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "flask-3.2.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"3.0.0": old,
+			"3.1.0": old,
+			"3.2.0": new, // latest published with a different workflow.
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("flask"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.Equal(t, "release-v2.yml", val["latest_workflow_ref"])
+	assert.EqualValues(t, 2, val["unique_workflow_refs"],
+		"two distinct workflows seen across the window")
+	assert.EqualValues(t, 1, val["workflow_ref_transitions"],
+		"exactly one adjacent transition: 3.2.0 (release-v2.yml) → 3.1.0 (publish.yml)")
+	// Existing transition_detected stays false — presence didn't change,
+	// only the workflow ref did. This is the gap the new fields close.
+	assert.Equal(t, false, val["transition_detected"],
+		"workflow-ref-only changes leave the existing presence-transition flag untouched")
+}
+
+// TestCollector_AttestationConsistency_WorkflowRefMultipleTransitions
+// is a stress case: alternating workflows across four versions
+// (latest checked + first prior + 2 more from the sweep) produces
+// three adjacent transitions. Pins the count is "adjacent pair
+// differences" not "distinct workflows minus one."
+func TestCollector_AttestationConsistency_WorkflowRefMultipleTransitions(t *testing.T) {
+	t.Parallel()
+	a := makeAttestation("GitHub", "owner/pkg", "a.yml")
+	b := makeAttestation("GitHub", "owner/pkg", "b.yml")
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {{UploadTimeISO: "2025-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+				"1.1.0": {{UploadTimeISO: "2025-04-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.1.0-py3-none-any.whl"}},
+				"1.2.0": {{UploadTimeISO: "2025-08-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.2.0-py3-none-any.whl"}},
+				"1.3.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.3.0-py3-none-any.whl"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.0.0": b,
+			"1.1.0": a,
+			"1.2.0": b,
+			"1.3.0": a, // latest
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "attestation_consistency")
+	assert.EqualValues(t, 2, val["unique_workflow_refs"])
+	assert.EqualValues(t, 3, val["workflow_ref_transitions"],
+		"four versions alternating a/b/a/b → three adjacent transitions")
+	refs, ok := val["workflow_refs"].([]any)
+	require.True(t, ok)
+	// checked[] is newest-first: 1.3.0 (a), 1.2.0 (b), 1.1.0 (a), 1.0.0 (b).
+	assert.Equal(t, []any{"a.yml", "b.yml", "a.yml", "b.yml"}, refs)
+}
+
 // TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision
 // pins the cert-extraction path: when the attestation's first
 // bundle carries a Sigstore cert with the source-repo-digest OID

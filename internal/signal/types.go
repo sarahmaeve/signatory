@@ -463,12 +463,13 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Type:              "attestation_consistency",
 		Group:             profile.SignalGroupPublication,
 		ForgeryResistance: profile.ForgeryVeryHigh,
-		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects transitions from attested to unattested publishing — the PyPI fingerprint of credential-theft attacks that bypass CI pipelines.",
+		Description:       "Consistency of PEP 740 Sigstore attestations across recent versions. Detects two dimensions of break: transitions from attested to unattested publishing (the axios fingerprint of credential-theft attacks that bypass CI), and changes in the attesting workflow ref across attested versions (the TanStack-shape careful-variant where every version is attested but the builder identity changed).",
 		Caveats: []string{
 			"a transition from unattested to attested is positive (adoption) not negative",
 			"publisher_changed=true across attested versions may indicate legitimate CI migration or may indicate account takeover — the analyst disambiguates",
 			"bounded to last N versions; a gap farther back is invisible",
 			"not emitted for packages that never adopted trusted publishing (progressive probe: latest + first prior both unattested → early exit)",
+			"workflow_ref_transitions counts adjacent workflow-string differences across checked[] in newest-first order; presence transitions (e.g., '' → 'release.yml') count toward it because the strings differ — pair with transition_detected to disambiguate presence-change from workflow-change",
 		},
 	},
 	"transparency_log_present": {

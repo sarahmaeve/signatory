@@ -854,16 +854,52 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 		}
 	}
 
+	// Workflow-ref tracking (sketch 5): captures attesting-workflow
+	// identity changes across the window. The existing
+	// transition_detected boolean covers attestation PRESENCE
+	// transitions (axios shape: attestation lost or gained). It
+	// misses the TanStack-shape careful-variant where every version
+	// is attested but the attesting workflow ref changes. The new
+	// fields close that gap:
+	//
+	//   - workflow_refs:           per-version list (newest-first),
+	//                              empty string when unattested
+	//   - latest_workflow_ref:     workflow on the latest version
+	//   - unique_workflow_refs:    count of distinct non-empty
+	//                              workflows seen in the window
+	//   - workflow_ref_transitions: adjacent-pair workflow differences
+	//                              (counts both presence- and
+	//                              workflow-changes, since
+	//                              "" → "X" is an adjacent diff)
+	workflowRefs := make([]string, len(checked))
+	uniqueWorkflows := map[string]struct{}{}
+	for i, r := range checked {
+		workflowRefs[i] = r.publisher.workflow
+		if r.publisher.workflow != "" {
+			uniqueWorkflows[r.publisher.workflow] = struct{}{}
+		}
+	}
+	workflowRefTransitions := 0
+	for i := 1; i < len(workflowRefs); i++ {
+		if workflowRefs[i] != workflowRefs[i-1] {
+			workflowRefTransitions++
+		}
+	}
+
 	value := map[string]any{
-		"consistent":            consistent,
-		"versions_checked":      len(checked),
-		"versions_attested":     versionsAttested,
-		"versions_unattested":   versionsUnattested,
-		"versions_skipped":      versionsSkipped,
-		"transition_detected":   transitionDetected,
-		"transition_direction":  transitionDirection,
-		"transition_at_version": transitionAtVersion,
-		"publisher_changed":     publisherChanged,
+		"consistent":               consistent,
+		"versions_checked":         len(checked),
+		"versions_attested":        versionsAttested,
+		"versions_unattested":      versionsUnattested,
+		"versions_skipped":         versionsSkipped,
+		"transition_detected":      transitionDetected,
+		"transition_direction":     transitionDirection,
+		"transition_at_version":    transitionAtVersion,
+		"publisher_changed":        publisherChanged,
+		"workflow_refs":            workflowRefs,
+		"latest_workflow_ref":      workflowRefs[0],
+		"unique_workflow_refs":     len(uniqueWorkflows),
+		"workflow_ref_transitions": workflowRefTransitions,
 	}
 	if priorPublisher != nil {
 		value["prior_publisher"] = priorPublisher
