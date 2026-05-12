@@ -121,11 +121,13 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 
 	// All signals land, zero absences. (Five snapshot signals from
 	// Phase A+B, three cross-version signals from Phase B.6, plus
-	// version_count and artifact_url. The sample response has only
-	// a single version entry, so the cross-version signals land with
-	// stable-state payloads rather than transition flags.)
-	assert.Equal(t, 10, result.SignalCount(),
-		"all ten signals should land on happy path (5 snapshot + 3 cross-version + version_count + artifact_url)")
+	// version_count, artifact_url, and version_unpublish_observed.
+	// The sample response has only a single version entry, so the
+	// cross-version signals land with stable-state payloads rather
+	// than transition flags, and version_unpublish_observed lands
+	// with unpublished_count=0.)
+	assert.Equal(t, 11, result.SignalCount(),
+		"all eleven signals should land on happy path (5 snapshot + 3 cross-version + version_count + artifact_url + version_unpublish_observed)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// last_publish
@@ -253,11 +255,12 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Nine real signals (everything except weekly_downloads), one
+	// Ten real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
 	// failure must not poison the other signals. The three cross-
-	// version signals land from the same-wire versions map.
-	assert.Equal(t, 9, result.SignalCount())
+	// version signals plus version_unpublish_observed land from the
+	// same-wire versions map.
+	assert.Equal(t, 10, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -518,7 +521,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 9, result.SignalCount())
+	assert.Equal(t, 10, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -1088,4 +1091,134 @@ func TestExtractNpmPackageName(t *testing.T) {
 	got, ok := extractNpmPackageName(nil)
 	assert.False(t, ok)
 	assert.Equal(t, "", got)
+}
+
+// TestCollector_Collect_VersionUnpublishObserved_DetectsGap covers
+// the post-incident-cleanup shape the TanStack/Mini-Shai-Hulud
+// 2026-05-12 entry calls out: versions present in the registry's
+// publish-event log (pkg.Time) but absent from the current versions
+// map have been unpublished server-side, and the gap is the only
+// registry-visible trace of a recently-pulled compromise.
+//
+// See design/threat-landscape/2026-05-12-tanstack-mini-shai-hulud.md
+// §"Empirical: what the current signal model says at T+~21h".
+func TestCollector_Collect_VersionUnpublishObserved_DetectsGap(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "stretched",
+	  "dist-tags": {"latest": "1.0.2"},
+	  "time": {
+	    "created": "2024-01-01T00:00:00Z",
+	    "modified": "2026-05-11T20:00:00Z",
+	    "1.0.0": "2024-01-01T00:00:00Z",
+	    "1.0.1": "2025-06-01T00:00:00Z",
+	    "1.0.2": "2026-04-20T00:00:00Z",
+	    "1.0.3": "2026-05-11T19:20:42Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}},
+	    "1.0.2": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"stretched"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("stretched"))
+	require.NoError(t, err)
+
+	vu := getSignalValue(t, result, "version_unpublish_observed")
+	assert.EqualValues(t, 2, vu["unpublished_count"],
+		"two versions appear in time but not in versions: 1.0.1 and 1.0.3")
+
+	versions, ok := vu["unpublished_versions"].([]any)
+	require.True(t, ok, "unpublished_versions should be a list")
+	require.Len(t, versions, 2)
+
+	// Newest publish-time first.
+	first, ok := versions[0].(map[string]any)
+	require.True(t, ok)
+	second, ok := versions[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "1.0.3", first["version"])
+	assert.Equal(t, "2026-05-11T19:20:42Z", first["published_at"])
+	assert.Equal(t, "1.0.1", second["version"])
+	assert.Equal(t, "2025-06-01T00:00:00Z", second["published_at"])
+
+	assert.Equal(t, "2026-05-11T19:20:42Z", vu["most_recent_unpublished_publish_time"])
+	assert.Equal(t, false, vu["list_capped"])
+}
+
+// TestCollector_Collect_VersionUnpublishObserved_CleanRegistry
+// confirms the healthy case: every version in pkg.Time has a
+// corresponding entry in pkg.Versions, no unpublishes detectable.
+// most_recent_unpublished_publish_time is omitted when count is zero
+// rather than emitted with an empty/sentinel value.
+func TestCollector_Collect_VersionUnpublishObserved_CleanRegistry(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "tidy",
+	  "dist-tags": {"latest": "2.0.0"},
+	  "time": {
+	    "1.0.0": "2024-01-01T00:00:00Z",
+	    "2.0.0": "2026-04-20T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"tidy"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("tidy"))
+	require.NoError(t, err)
+
+	vu := getSignalValue(t, result, "version_unpublish_observed")
+	assert.EqualValues(t, 0, vu["unpublished_count"])
+	versions, ok := vu["unpublished_versions"].([]any)
+	require.True(t, ok, "unpublished_versions should always be a list, even when empty")
+	assert.Empty(t, versions)
+	assert.Equal(t, false, vu["list_capped"])
+
+	_, hasMostRecent := vu["most_recent_unpublished_publish_time"]
+	assert.False(t, hasMostRecent,
+		"most_recent_unpublished_publish_time should be omitted when no unpublishes")
+}
+
+// TestCollector_Collect_VersionUnpublishObserved_IgnoresMetaKeys
+// confirms npm's `created` and `modified` meta keys in pkg.Time —
+// which carry timestamps but are not version strings — do not
+// surface as unpublished versions.
+func TestCollector_Collect_VersionUnpublishObserved_IgnoresMetaKeys(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "metasafe",
+	  "dist-tags": {"latest": "1.0.0"},
+	  "time": {
+	    "created": "2024-01-01T00:00:00Z",
+	    "modified": "2024-01-01T00:00:00Z",
+	    "1.0.0": "2024-01-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"metasafe"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("metasafe"))
+	require.NoError(t, err)
+
+	vu := getSignalValue(t, result, "version_unpublish_observed")
+	assert.EqualValues(t, 0, vu["unpublished_count"],
+		"created/modified meta-keys must not register as unpublished versions")
 }

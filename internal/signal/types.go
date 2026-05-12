@@ -886,6 +886,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"version_unpublish_observed": {
+		Type:              "version_unpublish_observed",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Versions present in the registry's publish-event log but absent from the current versions map — the gap that signals a version was published and subsequently unpublished. The TanStack/Mini-Shai-Hulud 2026-05-12 cleanup pulled malicious versions server-side; the unpublish gap is the only registry-visible trace after the fact.",
+		Caveats: []string{
+			"the signal does not distinguish maintainer-initiated cleanup from registry-security takedowns — both produce the same gap shape",
+			"the registry exposes publish timestamps but not unpublish timestamps; recency in this signal is bounded by the publish time of the now-unpublished version, not when it disappeared",
+			"the unpublished_versions list is capped at 10 most-recent (by publish time); list_capped=true indicates more exist",
+			"strongest paired with version_publish_burst — burst-followed-by-unpublishes is the compromise-cleanup shape (TanStack 2026-05-11), while a burst without unpublishes is normal early-version churn",
+		},
+	},
 	"gpg_signature_present": {
 		Type:              "gpg_signature_present",
 		Group:             profile.SignalGroupPublication,

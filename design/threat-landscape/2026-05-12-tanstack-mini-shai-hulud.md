@@ -487,6 +487,93 @@ The raw JSON carries the full 38-signal cross-section for any future
 analysis that wants to audit a specific signal value rather than rely
 on this summary.
 
+## Follow-up: dogfood after adding `version_unpublish_observed`
+
+Same day, later. The session that produced this entry enumerated five
+Tier-1 easy-win signal additions; the first to land in code is the
+one the empirical section above named directly — detect the unpublish
+gap that post-cleanup registry state leaves behind. Three packages
+were analyzed with the new signal in place, chosen for spectrum
+coverage: this entry's flagship target, a small unscoped campaign
+target, and a mixed-history package by the same compromised publisher
+as the second.
+
+### `@tanstack/react-router`
+
+`unpublished_count = 2`, two versions on 2026-05-11 — 1.169.5 at
+19:20:42 and 1.169.8 at 19:26:17. Exact-matches the
+raw-data CSV. The previously-invisible compromise is now a Layer-1
+signal.
+
+### `cross-stitch` (npm, publisher `neilcochran`)
+
+`unpublished_count = 5`, all five within 1h35m on 2026-05-11
+(versions 1.1.3 – 1.1.7, 22:17 – 23:52 UTC). cross-stitch had no
+other unpublish history; the five compromise publishes are all the
+signal reports. `version_publish_burst` separately fires on the
+*legitimate* 2024 five-version release cluster
+(`window_hours = 27`) — unrelated to the compromise. The two signals
+report on different events on the same package.
+
+### `ts-dna` (npm, also `neilcochran`)
+
+`unpublished_count = 13, list_capped = true`. The
+`unpublished_versions` list splits into two temporal clusters: five
+compromise publishes 3.0.1 – 3.0.5 in 1h35m on 2026-05-11, plus eight
+or more legacy unpublishes (0.0.4 – 0.0.8 visible, three more implied
+by the count and the cap) across June 2 – 3, 2020 — probably
+maintainer cleanup of an abandoned 0.0.x line.
+`version_publish_burst.burst_detected = false` on this target: the
+ten surviving versions span 78 hours, no burst on the surviving
+state.
+
+### What the dogfood validates
+
+The signal does what the empirical-addendum gap argued it should: it
+makes the post-cleanup registry state legible. On three different
+packages — large-scope OIDC-published, small unscoped,
+mid-size single-maintainer — it correctly identified the compromise
+publishes as unpublished entries.
+
+### What the dogfood exposed that the brainstorm did not anticipate
+
+The brainstorm sketch and the initial signal-type caveats claimed the
+new signal pairs strongly with `version_publish_burst`
+("burst-followed-by-unpublishes is the compromise-cleanup shape").
+The three runs falsify that:
+
+- The compromise burst is *inside* the unpublish signal's
+  `unpublished_versions` list, because those versions are removed
+  from `pkg.Versions`. `version_publish_burst` cannot see it.
+- A package can have a *legitimate* burst (cross-stitch 2024 release
+  cluster) that fires `version_publish_burst` while a *separate*
+  compromise fires `version_unpublish_observed`. The two signals
+  point at different events on the same package.
+- A package can mix compromise unpublishes and legacy unpublishes in
+  the same `unpublished_versions` list (ts-dna). The signal counts
+  them together; cluster-analysis on the per-version publish
+  timestamps in the list is what distinguishes them.
+
+The right discrimination mechanism for cleanup-after-compromise is
+**timestamp clustering inside the `unpublished_versions` list**, not
+pairing with `version_publish_burst`. The signal-type caveats in
+`internal/signal/types.go` should reflect that as durable guidance;
+the dated package-specific observations above belong here, in the
+threat-landscape record.
+
+### Incidental publisher-pattern observation
+
+`cross-stitch` and `ts-dna` share publisher `neilcochran`. Both
+packages were swept up in the Mini-Shai-Hulud campaign through the
+same identity. This is the maintainer-token-theft pattern distinct
+from TanStack's OIDC-runner-memory-scrape: one credential compromise
+→ multiple packages republished by that identity. The campaign hits
+packages across the criticality spectrum with different vectors per
+target — the cross-ecosystem `operator:` entity URI that
+[`2026-05-02-bufferzonecorp-campaign.md`](2026-05-02-bufferzonecorp-campaign.md)
+proposed would group all three under the same campaign attribution
+even though the per-target vectors differ.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal

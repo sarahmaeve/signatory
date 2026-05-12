@@ -184,6 +184,16 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// patterns" shape gets caught.
 	recordCrossVersionSignals(result, entity.ID, pkg, collectedAt)
 
+	// ----- version_unpublish_observed -----
+	//
+	// Operates on the full Time / Versions diff rather than the
+	// recent-versions window, so it sits outside
+	// recordCrossVersionSignals. Surfaces the post-incident-cleanup
+	// shape the TanStack / Mini-Shai-Hulud 2026-05-12 entry calls
+	// out: versions present in pkg.Time but absent from pkg.Versions
+	// have been pulled server-side.
+	recordVersionUnpublishObserved(result, entity.ID, pkg, collectedAt)
+
 	// ----- publisher entity minting (Path C) -----
 	//
 	// Mint identity:npm/<login> entity rows for every maintainer
@@ -674,6 +684,97 @@ func recordVersionPublishBurst(result *signal.CollectionResult, entityID string,
 			"window_hours":       int(span.Hours()),
 			"versions_checked":   len(recent),
 		})
+}
+
+// recordVersionUnpublishObserved detects versions present in the
+// registry's publish-event log (pkg.Time) but absent from the
+// current versions map. The gap is the registry's only externally-
+// visible trace of a version that was published and subsequently
+// unpublished — either by the maintainer (legitimate cleanup) or by
+// registry security (compromise response). The signal does not
+// distinguish causes; it surfaces the pattern.
+//
+// Most useful paired with version_publish_burst: a burst followed by
+// unpublishes is the cleanup-after-compromise shape (TanStack /
+// Mini-Shai-Hulud 2026-05-12); a burst without unpublishes is the
+// normal-but-fast-release shape (early-version churn).
+//
+// See design/threat-landscape/2026-05-12-tanstack-mini-shai-hulud.md
+// §"Empirical: what the current signal model says at T+~21h" for
+// the motivating gap: by the time signatory analyzed
+// @tanstack/react-router ~21h post-compromise, the malicious
+// versions had been pulled server-side and the only registry-visible
+// trace was their entries in pkg.Time without corresponding
+// pkg.Versions entries.
+//
+// Operates on the full Time and Versions maps, not the recent-
+// versions window — an unpublish outside the recent window is still
+// observable as a registry-state diff and still signal.
+func recordVersionUnpublishObserved(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	type unpublishedRecord struct {
+		version     string
+		publishedAt time.Time
+	}
+
+	unpublished := make([]unpublishedRecord, 0)
+	for ver, t := range pkg.Time {
+		// npm reserves three keys in the time map for metadata that
+		// aren't version strings. The first two are timestamps and
+		// will unmarshal into time.Time cleanly; `unpublished` carries
+		// an object value (whole-package unpublish) that won't survive
+		// map[string]time.Time unmarshal anyway. Defensive skip across
+		// all three so the case is robust against either path.
+		switch ver {
+		case "created", "modified", "unpublished":
+			continue
+		}
+		if _, present := pkg.Versions[ver]; present {
+			continue
+		}
+		if t.IsZero() {
+			continue
+		}
+		unpublished = append(unpublished, unpublishedRecord{version: ver, publishedAt: t})
+	}
+
+	// Newest publish-time first. Ties broken by lex-greater version
+	// sorting first, mirroring recentVersionsByPublishTime — keeps
+	// output deterministic across runs even when the underlying map
+	// iteration order varies.
+	slices.SortStableFunc(unpublished, func(a, b unpublishedRecord) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.publishedAt.Compare(a.publishedAt)
+	})
+
+	const listCap = 10
+	capped := len(unpublished) > listCap
+	listed := unpublished
+	if capped {
+		listed = unpublished[:listCap]
+	}
+
+	versionsList := make([]map[string]any, 0, len(listed))
+	for _, u := range listed {
+		versionsList = append(versionsList, map[string]any{
+			"version":      u.version,
+			"published_at": u.publishedAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	value := map[string]any{
+		"unpublished_count":    len(unpublished),
+		"unpublished_versions": versionsList,
+		"list_capped":          capped,
+	}
+	if len(unpublished) > 0 {
+		value["most_recent_unpublished_publish_time"] = unpublished[0].publishedAt.UTC().Format(time.RFC3339)
+	}
+
+	result.RecordSignal(entityID, "version_unpublish_observed", source, collectedAt, defaultTTL, value)
 }
 
 // sanitizeFetchReason converts a fetch error into a reason string
