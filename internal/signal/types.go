@@ -893,6 +893,19 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"publisher_account_class": {
+		Type:              "publisher_account_class",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Heuristic classification of each extracted publisher login as human / bot / service-account / unknown, plus summary counts. Surfaces bot and service-account publishers as a distinct risk class — credential surfaces on automation accounts are operationally different from human-maintainer accounts (long-lived PATs, often without 2FA, credentials stored in CI configs rather than personal vaults).",
+		Caveats: []string{
+			"forgery resistance is medium-declining: an attacker can rename their account to bypass any pattern; the signal is heuristic risk-stratification, not a verdict",
+			"v1 uses name-pattern matching only — no GitHub type:Bot lookups, no activity-shape analysis, no allowlist of known automation accounts",
+			"v1 patterns are hyphen-strict: '-bot' / '-ci' / '-deploy' / '-svc' / '-release' / '-publisher' / '-automation' suffixes plus GitHub's '[bot]' suffix. Logins without a hyphen separator (e.g., 'deploybot', 'npmbot') fall through to 'human' — accepted false-negative tradeoff for low false-positive rate",
+			"false positives are possible — a human named with a coincidentally-matching pattern would misclassify. The matched_pattern field makes the classification auditable; analyst layer disambiguates",
+			"the signal describes publishers but emits on the package entity (login field links to the corresponding identity:pypi/<login> entity which is minted separately via Path E). Mirrors owner_type's emission convention",
+		},
+	},
 	"latest_attestation_builder": {
 		Type:              "latest_attestation_builder",
 		Group:             profile.SignalGroupPublication,

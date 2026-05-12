@@ -1638,6 +1638,99 @@ func TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted(t *testin
 		"environment must be omitted (not empty-string) when the publisher block doesn't set it")
 }
 
+// TestCollector_PublisherAccountClass_AllHuman pins the
+// healthy-baseline case: all extracted publisher logins classify as
+// human, non_human_count is 0, total_count equals the maintainer
+// count. Mirrors maintainer_count's emission pattern.
+func TestCollector_PublisherAccountClass_AllHuman(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "alice, bob"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "publisher_account_class"))
+	pac := getSignalValue(t, result, "publisher_account_class")
+	assert.EqualValues(t, 2, pac["total_count"])
+	assert.EqualValues(t, 0, pac["non_human_count"])
+
+	logins, ok := pac["logins"].([]any)
+	require.True(t, ok, "logins must be a list")
+	require.Len(t, logins, 2)
+	for _, l := range logins {
+		m, ok := l.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "human", m["class"])
+	}
+}
+
+// TestCollector_PublisherAccountClass_MixedShape models the
+// tj-actions case: a service-account-shaped publisher (`@tj-actions-bot`)
+// alongside a human maintainer. Pins per-login classification and
+// the non_human_count summary.
+func TestCollector_PublisherAccountClass_MixedShape(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		Info: Info{Maintainer: "alice, tj-actions-bot"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	pac := getSignalValue(t, result, "publisher_account_class")
+	assert.EqualValues(t, 2, pac["total_count"])
+	assert.EqualValues(t, 1, pac["non_human_count"],
+		"exactly one of two publishers should classify as non-human (the -bot suffix one)")
+
+	logins, ok := pac["logins"].([]any)
+	require.True(t, ok)
+	byLogin := map[string]map[string]any{}
+	for _, l := range logins {
+		m := l.(map[string]any)
+		byLogin[m["login"].(string)] = m
+	}
+	assert.Equal(t, "human", byLogin["alice"]["class"])
+	assert.Equal(t, "service-account", byLogin["tj-actions-bot"]["class"])
+	assert.Equal(t, "-bot", byLogin["tj-actions-bot"]["matched_pattern"])
+}
+
+// TestCollector_PublisherAccountClass_NoLogins_RecordsAbsence:
+// when no login-shaped publisher is extractable, mirror
+// maintainer_count's absence-recording discipline. The signal does
+// not apply when there's nothing to classify.
+func TestCollector_PublisherAccountClass_NoLogins_RecordsAbsence(t *testing.T) {
+	t.Parallel()
+	srv := projectServer(t, Project{
+		// Display-name-shaped values that extractPyPILogins rejects.
+		Info: Info{Maintainer: "John Smith <john@example.com>"},
+		Releases: map[string][]Distribution{
+			"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"}},
+		},
+	})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	assert.False(t, hasSignal(result, "publisher_account_class"),
+		"no extractable logins → no publisher_account_class signal")
+	assert.True(t, hasAbsence(result, "publisher_account_class"),
+		"absence must be recorded for downstream visibility, mirroring maintainer_count")
+}
+
 // TestCollector_AttestationConsistency_WorkflowRefStable pins the
 // sketch-5 healthy case: all versions in the window are attested
 // by the same workflow. No transitions in attesting workflow

@@ -140,11 +140,13 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	// ----- maintainer_count + publisher-entity minting -----
+	// ----- maintainer_count + publisher-entity minting + publisher_account_class -----
 	logins := extractPyPILogins(&proj.Info)
 	if len(logins) == 0 {
 		reason := "no login-shaped value in info.maintainer / info.author / info.maintainers"
 		result.RecordAbsence(entity.ID, "maintainer_count", source,
+			reason, false, collectedAt)
+		result.RecordAbsence(entity.ID, "publisher_account_class", source,
 			reason, false, collectedAt)
 	} else {
 		c.ensurePublisherEntities(ctx, logins)
@@ -153,6 +155,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 				"count":  len(logins),
 				"logins": logins,
 			})
+		recordPublisherAccountClass(result, entity.ID, logins, collectedAt)
 	}
 
 	// ----- version_count (vitality) -----
@@ -906,6 +909,51 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 	}
 
 	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL, value)
+}
+
+// recordPublisherAccountClass emits a per-package classification of
+// each extracted publisher login. Heuristic name-pattern matching
+// (see classify.go) — surfaces bot/service-account naming as
+// risk-stratification input. Forgery resistance is medium-declining
+// by design: an attacker can rename their account to bypass any
+// pattern; the signal is heuristic, not a verdict.
+//
+// Mirrors owner_type's emission convention: describe an identity
+// from the project entity, not from the identity entity itself.
+// The identity entities are minted separately by
+// ensurePublisherEntities (Path E); this signal links to them via
+// the login field on each entry.
+//
+// Tier 2 sketch — see /tmp/signal-sketch.md.
+func recordPublisherAccountClass(result *signal.CollectionResult, entityID string,
+	logins []string, collectedAt time.Time) {
+
+	classified := make([]map[string]any, 0, len(logins))
+	nonHumanCount := 0
+	for _, login := range logins {
+		c := classifyPublisherLogin(login)
+		m := map[string]any{
+			"login": c.Login,
+			"class": c.Class,
+		}
+		if c.MatchedPattern != "" {
+			m["matched_pattern"] = c.MatchedPattern
+		}
+		if c.Reason != "" {
+			m["reason"] = c.Reason
+		}
+		classified = append(classified, m)
+		if c.Class == "bot" || c.Class == "service-account" {
+			nonHumanCount++
+		}
+	}
+
+	result.RecordSignal(entityID, "publisher_account_class", source, collectedAt, defaultTTL,
+		map[string]any{
+			"logins":          classified,
+			"total_count":     len(logins),
+			"non_human_count": nonHumanCount,
+		})
 }
 
 // ensurePublisherEntities mints identity:pypi/<login> rows for each
