@@ -658,6 +658,140 @@ adoption collector's `WithInRun` setter — both already in code,
 both already documented as the orchestrator's "in-run accumulator"
 mechanism.
 
+## Follow-up: implementing `latest_attestation_builder` (sketch 4, PyPI)
+
+The fourth proposed signal to land in code — sketched as a
+"typed parse of currently-RawMessage attestations" on npm in the
+brainstorm. Two corrections emerged when the implementation actually
+started:
+
+1. **The mental model was wrong, not the design decision.** The
+   brainstorm's premise was that npm's `dist.attestations` field
+   carries the full SLSA provenance and the `json.RawMessage` type
+   choice was the obstacle to extracting `workflow_ref` etc. The
+   in-repo fixture at
+   `internal/signal/registry/npm/collector_test.go:297-300` shows
+   what the inline block actually contains: a `url` pointer and a
+   `predicateType` string — nothing else. The full SLSA predicate
+   lives at the URL the marker points to. The RawMessage choice is
+   correct for what the inline data carries; the workflow_ref isn't
+   reachable by a typed parse of the inline data alone.
+2. **The data is already extracted on PyPI, just split across
+   sibling signals.** `trusted_publishing` already emits
+   `publisher_kind` / `source_repository` / `workflow` /
+   `environment` from the PEP 740 publisher block. `artifact_url`
+   already emits the Fulcio-cert-extracted source-repo SHA on
+   `git_head`. The sketch's contribution on PyPI is consolidating —
+   exposing them coherently under one signal namespace so sketch 5
+   and future composites have a stable contract without merging
+   fields from two emitters.
+
+Scoped to PyPI in this round (commit `c40d9bc`). The npm parity
+question — fetch the npm attestations URL or query Sigstore Rekor —
+is deferred behind that scoping. Either path is one additional HTTP
+request when present; the decision is which endpoint owns the
+contract.
+
+### What the dogfood shows
+
+Two-target dogfood for spectrum coverage:
+
+- **`pkg:pypi/mistralai`** (Mini-Shai-Hulud campaign target): the
+  signal emits `present=false, extraction_status=no_attestation` —
+  mistralai 2.4.5 isn't on PyPI trusted publishing at all. The
+  malicious 2.4.6 was yanked, not deleted (more on this below).
+- **`pkg:pypi/cryptography`** (PyCA, early trusted-publishing
+  adopter, version 48.0.0): the signal emits `present=true,
+  builder_kind=GitHub, source_repository=pyca/cryptography,
+  workflow=pypi-publish.yml, source_revision=622d672e..., extraction_status=ok`.
+  Full contract realized. The Fulcio-cert-extracted `source_revision`
+  populates correctly; the publisher block round-trips through the
+  signal value.
+
+### Incidental observation: PyPI's `yanked_release_count` is the parallel to npm's `version_unpublish_observed`
+
+PyPI doesn't allow unpublishing versions with downloads (similar to
+npm's no-unpublish-if-dependents policy the TanStack postmortem
+documented), but it offers **yank** — a soft delete that marks the
+version not-installable-by-default while keeping the bytes
+accessible for explicit-version pins. The existing
+`yanked_release_count` signal already counts these. On `mistralai`
+that signal reports `count=1, total_versions=87` — the yanked 2.4.6
+is the only one. Yank and unpublish are different registry
+primitives, but on the *current* registry state they produce the
+same observable shape: a version is in the publish history but not
+in the current versions map.
+[`2025-03-14-tj-actions-changed-files.md`](2025-03-14-tj-actions-changed-files.md)
+§"Recommendation" and the
+[bufferzonecorp entry](2026-05-02-bufferzonecorp-campaign.md)'s
+host-class typology discipline both apply: yank-vs-unpublish is a
+host-platform-specific *mechanism* difference; the *signal* is the
+gap, normalized across platforms.
+
+### Incidental observation: mistralai's recovery pattern differs from TanStack's
+
+Running `commit_publish_cadence_divergence` on mistralai reports
+`shape=synchronized, divergence_days=0` — the package's commits and
+publishes are in step, no post-incident pause. TanStack reported
+`shape=active-repo-paused-publishes, divergence_days=6`. Two
+different recovery patterns from the same campaign window:
+
+- TanStack: stopped publishing, kept committing (hardening cycle
+  before next release). Pause shows as cadence divergence.
+- Mistral: kept publishing post-cleanup (the next release rolled
+  through the normal cadence). No cadence divergence.
+
+Neither pattern is wrong; they reflect different maintainer
+operational choices. The signal observes the pattern; cause
+attribution belongs at the analyst layer.
+
+## Follow-up: extending `attestation_consistency` with workflow-ref tracking (sketch 5, PyPI)
+
+The fifth and final Tier-1 proposed signal — sketched as
+`workflow_ref_transitions` extending `publish_origin_consistency`
+on npm. The PyPI parallel is `attestation_consistency`, which
+already walks the recent-versions window and extracts the publisher
+block per-version. Sketch 5 lands (commit `57f1bf8`) as field
+additions to that signal rather than a new signal type — the
+brainstorm's "extend or split?" guidance picked extend, and the
+per-version workflow data is already collected inside the sweep
+loop. Four new fields:
+
+- `workflow_refs`: per-version list, newest-first, empty when
+  unattested.
+- `latest_workflow_ref`: workflow on the latest version.
+- `unique_workflow_refs`: count of distinct non-empty workflows.
+- `workflow_ref_transitions`: adjacent-pair workflow-string
+  differences in the per-version list.
+
+The detection axis this closes: every version is attested (no
+presence transition the existing `transition_detected` boolean
+fires on), but the attesting workflow ref changes between versions.
+The TanStack-shape careful-variant. The sketch-4 + sketch-5
+composition: sketch 4 made latest-version builder identity a stable
+contract; sketch 5 added the cross-version composition that detects
+builder-identity changes across versions.
+
+### What the dogfood shows
+
+Same PyPI target as sketch 4 (`pkg:pypi/cryptography`): five
+versions checked, all attested by `pypi-publish.yml`, zero
+transitions. The healthy-state shape. Cannot fire positive against
+the TanStack incident itself because TanStack is npm (this sketch
+is PyPI-only in this round) and because the malicious versions
+have been pulled — the same fundamental constraint that bracketed
+sketch 3.
+
+### npm parity stays deferred
+
+`publish_origin_consistency` on npm is the parallel signal to
+`attestation_consistency` on PyPI. Extending it with
+workflow-ref-transitions would close the npm-side detection axis
+for the TanStack shape — but it depends on first solving the
+sketch-4 npm parity question (where to fetch the SLSA provenance
+from). The two npm signals would land together once that decision
+is made.
+
 ## What this does *not* do
 
 ### Does not weaken the trusted-publishing positive signal
