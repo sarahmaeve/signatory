@@ -78,3 +78,8 @@ filestore/
 # files at the directory root are NOT ignored.
 dogfood-metrics/raw/
 dogfood-metrics/sessions/
+
+# Migration-time backup snapshots produced by store.OpenSQLite when
+# running migrations on an existing DB. Tests / generators that open
+# the store may create these; they're not source-of-truth.
+*.db.backup-*
