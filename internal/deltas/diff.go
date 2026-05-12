@@ -60,15 +60,19 @@ const (
 // ValueDiff carries the structural difference between two signal
 // values. A zero ValueDiff (no Added / Removed / Changed entries)
 // signals "no changes."
+//
+// JSON encoding produces all three keys even when empty — explicit
+// "no additions" is friendlier to machine consumers than maybe-
+// missing keys that force nil-checking.
 type ValueDiff struct {
 	// Added: keys present in current, absent in prior. Values are
 	// the current value verbatim.
-	Added map[string]any
+	Added map[string]any `json:"added"`
 	// Removed: keys present in prior, absent in current. Values
 	// are the prior value verbatim.
-	Removed map[string]any
+	Removed map[string]any `json:"removed"`
 	// Changed: keys present in both with differing values.
-	Changed map[string]Change
+	Changed map[string]Change `json:"changed"`
 }
 
 // HasChanges reports whether the diff is non-empty.
@@ -88,11 +92,11 @@ func (d ValueDiff) HasChanges() bool {
 // For ChangeKindScalar and ChangeKindOpaque, only Before/After
 // are populated; Nested and Elements are nil.
 type Change struct {
-	Kind     ChangeKind
-	Before   any
-	After    any
-	Nested   *ValueDiff
-	Elements []ElementChange
+	Kind     ChangeKind      `json:"kind"`
+	Before   any             `json:"before"`
+	After    any             `json:"after"`
+	Nested   *ValueDiff      `json:"nested,omitempty"`
+	Elements []ElementChange `json:"elements,omitempty"`
 }
 
 // ElementChange describes one entry's transition in an array diff.
@@ -107,12 +111,12 @@ type Change struct {
 // For object elements that changed, Nested holds the recursive
 // ValueDiff describing the field-level change within that element.
 type ElementChange struct {
-	Kind     ElementChangeKind
-	Position int
-	Key      string
-	Before   any
-	After    any
-	Nested   *ValueDiff
+	Kind     ElementChangeKind `json:"kind"`
+	Position int               `json:"position"`
+	Key      string            `json:"key,omitempty"`
+	Before   any               `json:"before,omitempty"`
+	After    any               `json:"after,omitempty"`
+	Nested   *ValueDiff        `json:"nested,omitempty"`
 }
 
 // Diff computes the per-field difference between two signal
