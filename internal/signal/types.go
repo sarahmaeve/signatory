@@ -890,12 +890,12 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Type:              "version_unpublish_observed",
 		Group:             profile.SignalGroupPublication,
 		ForgeryResistance: profile.ForgeryHigh,
-		Description:       "Versions present in the registry's publish-event log but absent from the current versions map — the gap that signals a version was published and subsequently unpublished. The TanStack/Mini-Shai-Hulud 2026-05-12 cleanup pulled malicious versions server-side; the unpublish gap is the only registry-visible trace after the fact.",
+		Description:       "Versions present in the registry's publish-event log but absent from the current versions map — the gap that signals a version was published and subsequently unpublished. The signal is direction-agnostic on cause (maintainer cleanup, registry-security takedown, or both at once); cleanup-after-compromise is the case where this signal carries information not derivable from the surviving registry state alone.",
 		Caveats: []string{
-			"the signal does not distinguish maintainer-initiated cleanup from registry-security takedowns — both produce the same gap shape",
-			"the registry exposes publish timestamps but not unpublish timestamps; recency in this signal is bounded by the publish time of the now-unpublished version, not when it disappeared",
-			"the unpublished_versions list is capped at 10 most-recent (by publish time); list_capped=true indicates more exist",
-			"strongest paired with version_publish_burst — burst-followed-by-unpublishes is the compromise-cleanup shape (TanStack 2026-05-11), while a burst without unpublishes is normal early-version churn",
+			"does not distinguish causes — maintainer-initiated cleanup and registry-security takedowns produce the same gap shape; a package can carry both kinds at once and the signal counts them together",
+			"the registry exposes publish timestamps for each unpublished version but not unpublish timestamps; recency in the value is bounded by when the now-unpublished version was originally published, not when it disappeared",
+			"the unpublished_versions list is capped at 10 most-recent by publish time; list_capped=true indicates more exist",
+			"a compromise burst, when one is present, lives inside this signal's unpublished_versions list — those versions have been removed from pkg.Versions, so version_publish_burst sees only the surviving cadence and is silent on the compromise itself. Cluster-analysis on the per-version publish timestamps in this signal's value (tight clusters of recent unpublishes) is the discrimination mechanism, not pairing with version_publish_burst",
 		},
 	},
 	"gpg_signature_present": {
