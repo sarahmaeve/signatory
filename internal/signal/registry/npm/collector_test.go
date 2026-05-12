@@ -120,14 +120,15 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	require.NotNil(t, result)
 
 	// All signals land, zero absences. (Five snapshot signals from
-	// Phase A+B, three cross-version signals from Phase B.6, plus
-	// version_count, artifact_url, and version_unpublish_observed.
-	// The sample response has only a single version entry, so the
-	// cross-version signals land with stable-state payloads rather
-	// than transition flags, and version_unpublish_observed lands
-	// with unpublished_count=0.)
-	assert.Equal(t, 11, result.SignalCount(),
-		"all eleven signals should land on happy path (5 snapshot + 3 cross-version + version_count + artifact_url + version_unpublish_observed)")
+	// Phase A+B, four cross-version signals — postinstall_introduced,
+	// publish_origin_consistency, version_publish_burst, and
+	// git_url_dep_introduced — plus version_count, artifact_url, and
+	// version_unpublish_observed. The sample response has only a
+	// single version entry, so the cross-version signals land with
+	// stable-state payloads rather than transition flags, and
+	// version_unpublish_observed lands with unpublished_count=0.)
+	assert.Equal(t, 12, result.SignalCount(),
+		"all twelve signals should land on happy path (5 snapshot + 4 cross-version + version_count + artifact_url + version_unpublish_observed)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// last_publish
@@ -255,12 +256,12 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Ten real signals (everything except weekly_downloads), one
+	// Eleven real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
-	// failure must not poison the other signals. The three cross-
+	// failure must not poison the other signals. The four cross-
 	// version signals plus version_unpublish_observed land from the
 	// same-wire versions map.
-	assert.Equal(t, 10, result.SignalCount())
+	assert.Equal(t, 11, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -521,7 +522,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 10, result.SignalCount())
+	assert.Equal(t, 11, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -1189,6 +1190,228 @@ func TestCollector_Collect_VersionUnpublishObserved_CleanRegistry(t *testing.T) 
 	_, hasMostRecent := vu["most_recent_unpublished_publish_time"]
 	assert.False(t, hasMostRecent,
 		"most_recent_unpublished_publish_time should be omitted when no unpublishes")
+}
+
+// TestCollector_Collect_GitURLDepIntroduced_DetectsTransition models
+// the TanStack/Mini-Shai-Hulud 2026-05-11 injection shape: the latest
+// version introduces a github:owner/repo#<sha>-pinned dep in
+// optionalDependencies where prior versions have no git-URL deps.
+// The signal should flag the transition, name the version, and emit
+// the parsed dep with pinned_sha populated.
+func TestCollector_Collect_GitURLDepIntroduced_DetectsTransition(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "victim",
+	  "dist-tags": {"latest": "2.1.0"},
+	  "time": {
+	    "1.0.0": "2024-01-01T00:00:00Z",
+	    "2.0.0": "2025-06-01T00:00:00Z",
+	    "2.1.0": "2026-05-11T19:20:42Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"}},
+	    "2.1.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"},
+	              "optionalDependencies": {
+	                "@victim/setup": "github:victim/repo#79ac49eedf774dd4b0cfa308722bc463cfe5885c"
+	              }}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"victim"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("victim"))
+	require.NoError(t, err)
+
+	gud := getSignalValue(t, result, "git_url_dep_introduced")
+	assert.Equal(t, true, gud["present_in_latest"])
+	assert.Equal(t, true, gud["introduced_recently"],
+		"git-URL dep in latest + absent in older versions should flag a transition")
+	assert.Equal(t, "2.1.0", gud["introduced_at_version"])
+	assert.EqualValues(t, 2, gud["prior_versions_without"])
+	assert.EqualValues(t, 3, gud["versions_checked"])
+
+	deps, ok := gud["git_url_deps_in_latest"].([]any)
+	require.True(t, ok, "git_url_deps_in_latest should be a list")
+	require.Len(t, deps, 1)
+	dep, ok := deps[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "@victim/setup", dep["name"])
+	assert.Equal(t, "github:victim/repo#79ac49eedf774dd4b0cfa308722bc463cfe5885c", dep["spec"])
+	assert.Equal(t, "optionalDependencies", dep["section"])
+	assert.Equal(t, "github", dep["host"])
+	assert.Equal(t, "victim/repo", dep["owner_repo"])
+	assert.Equal(t, "79ac49eedf774dd4b0cfa308722bc463cfe5885c", dep["ref"])
+	assert.Equal(t, "79ac49eedf774dd4b0cfa308722bc463cfe5885c", dep["pinned_sha"])
+}
+
+// TestCollector_Collect_GitURLDepIntroduced_ConsistentAbsence:
+// no git-URL deps across any version in the window. Healthy case.
+func TestCollector_Collect_GitURLDepIntroduced_ConsistentAbsence(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "clean",
+	  "dist-tags": {"latest": "3.0.0"},
+	  "time": {
+	    "1.0.0": "2024-01-01T00:00:00Z",
+	    "2.0.0": "2025-01-01T00:00:00Z",
+	    "3.0.0": "2026-01-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "solo"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"react": "^18.0.0"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"react": "^18.0.0"}},
+	    "3.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"react": "^18.0.0"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"clean"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("clean"))
+	require.NoError(t, err)
+
+	gud := getSignalValue(t, result, "git_url_dep_introduced")
+	assert.Equal(t, false, gud["present_in_latest"])
+	assert.Equal(t, false, gud["introduced_recently"])
+	assert.Equal(t, "", gud["introduced_at_version"])
+	assert.EqualValues(t, 2, gud["prior_versions_without"])
+	deps, ok := gud["git_url_deps_in_latest"].([]any)
+	require.True(t, ok)
+	assert.Empty(t, deps)
+}
+
+// TestCollector_Collect_GitURLDepIntroduced_ConsistentPresence:
+// every version in the window carries the same git-URL dep. Latest
+// has it, but so do the priors — no transition, no anomaly.
+func TestCollector_Collect_GitURLDepIntroduced_ConsistentPresence(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "always-fork",
+	  "dist-tags": {"latest": "3.0.0"},
+	  "time": {
+	    "1.0.0": "2024-01-01T00:00:00Z",
+	    "2.0.0": "2025-01-01T00:00:00Z",
+	    "3.0.0": "2026-01-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "solo"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"upstream-fix": "github:contrib/upstream#main"}},
+	    "2.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"upstream-fix": "github:contrib/upstream#main"}},
+	    "3.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "solo"},
+	              "dependencies": {"upstream-fix": "github:contrib/upstream#main"}}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"always-fork"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("always-fork"))
+	require.NoError(t, err)
+
+	gud := getSignalValue(t, result, "git_url_dep_introduced")
+	assert.Equal(t, true, gud["present_in_latest"])
+	assert.Equal(t, false, gud["introduced_recently"],
+		"git-URL dep present in latest AND all priors should NOT flag a transition")
+	assert.Equal(t, "", gud["introduced_at_version"])
+	assert.EqualValues(t, 0, gud["prior_versions_without"])
+}
+
+// TestCollector_Collect_GitURLDepIntroduced_ParsesMultipleSpecFormats
+// confirms the parser handles short-form (github:/gitlab:/bitbucket:),
+// URL-form (git+https://, git+ssh://, git://), and correctly skips
+// non-git specs (semver ranges, regular npm). pinned_sha populates
+// only when the ref is a 40-hex SHA; floating refs leave it empty.
+func TestCollector_Collect_GitURLDepIntroduced_ParsesMultipleSpecFormats(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "many-vectors",
+	  "dist-tags": {"latest": "1.0.0"},
+	  "time": {
+	    "1.0.0": "2026-05-11T19:20:42Z"
+	  },
+	  "maintainers": [{"name": "m"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {}, "_npmUser": {"name": "m"},
+	              "dependencies": {
+	                "github-sha":     "github:foo/bar#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	                "github-branch":  "github:foo/bar#main",
+	                "github-bare":    "github:foo/bar",
+	                "gitlab-form":    "gitlab:foo/bar#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	                "bitbucket-form": "bitbucket:foo/bar",
+	                "https-url":      "git+https://github.com/foo/bar.git#cccccccccccccccccccccccccccccccccccccccc",
+	                "ssh-url":        "git+ssh://git@github.com/foo/bar.git",
+	                "regular-dep":    "^1.0.0",
+	                "alias-dep":      "npm:alias-name@1.0.0"
+	              }}
+	  }
+	}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"many-vectors"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("many-vectors"))
+	require.NoError(t, err)
+
+	gud := getSignalValue(t, result, "git_url_dep_introduced")
+	assert.Equal(t, true, gud["present_in_latest"])
+
+	deps, ok := gud["git_url_deps_in_latest"].([]any)
+	require.True(t, ok)
+	require.Len(t, deps, 7, "seven git-URL specs should parse; regular-dep and alias-dep should be skipped")
+
+	// Index by name for stable assertions independent of map iteration order.
+	byName := make(map[string]map[string]any, len(deps))
+	for _, d := range deps {
+		m, ok := d.(map[string]any)
+		require.True(t, ok)
+		byName[m["name"].(string)] = m
+	}
+
+	// Short-form SHA-pinned.
+	assert.Equal(t, "github", byName["github-sha"]["host"])
+	assert.Equal(t, "foo/bar", byName["github-sha"]["owner_repo"])
+	assert.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", byName["github-sha"]["pinned_sha"])
+
+	// Short-form branch-pinned (pinned_sha empty since ref is not 40-hex).
+	assert.Equal(t, "github", byName["github-branch"]["host"])
+	assert.Equal(t, "main", byName["github-branch"]["ref"])
+	assert.Equal(t, "", byName["github-branch"]["pinned_sha"])
+
+	// Short-form bare (no ref at all).
+	assert.Equal(t, "github", byName["github-bare"]["host"])
+	assert.Equal(t, "", byName["github-bare"]["ref"])
+	assert.Equal(t, "", byName["github-bare"]["pinned_sha"])
+
+	// gitlab + bitbucket short forms.
+	assert.Equal(t, "gitlab", byName["gitlab-form"]["host"])
+	assert.Equal(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", byName["gitlab-form"]["pinned_sha"])
+	assert.Equal(t, "bitbucket", byName["bitbucket-form"]["host"])
+
+	// URL-form git+https with SHA.
+	assert.Equal(t, "github.com", byName["https-url"]["host"])
+	assert.Equal(t, "foo/bar", byName["https-url"]["owner_repo"])
+	assert.Equal(t, "cccccccccccccccccccccccccccccccccccccccc", byName["https-url"]["pinned_sha"])
+
+	// URL-form git+ssh, no ref.
+	assert.Equal(t, "github.com", byName["ssh-url"]["host"])
+	assert.Equal(t, "foo/bar", byName["ssh-url"]["owner_repo"])
+	assert.Equal(t, "", byName["ssh-url"]["pinned_sha"])
+
+	// regular-dep ("^1.0.0") and alias-dep ("npm:alias-name@1.0.0") absent.
+	assert.NotContains(t, byName, "regular-dep")
+	assert.NotContains(t, byName, "alias-dep")
 }
 
 // TestCollector_Collect_VersionUnpublishObserved_IgnoresMetaKeys

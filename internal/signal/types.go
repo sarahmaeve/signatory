@@ -886,6 +886,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"git_url_dep_introduced": {
+		Type:              "git_url_dep_introduced",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Whether the latest published version introduces a dependency whose specifier points at a git source (github:/gitlab:/bitbucket: short form, or git+https://, git+ssh://, git://, git+http:// URL forms) where prior versions in the window had no git-URL deps. The transition is the anomaly — consistent presence and consistent absence are both healthy.",
+		Caveats: []string{
+			"a git-URL dep is not by itself malicious — legitimate uses include prerelease testing against an upstream PR or temporarily pinning to a fork waiting on a merge",
+			"the pinned_sha field on each emitted dep entry is non-empty only when the ref is a 40-hex SHA-1; tag-pinned and branch-pinned refs leave it empty (tags are mutable on GitHub by default and branches are mutable by design)",
+			"tarball URLs (https:// to .tgz/.tar.gz) are a separate non-registry vector not covered here — this signal is git-fetch-specific",
+		},
+	},
 	"version_unpublish_observed": {
 		Type:              "version_unpublish_observed",
 		Group:             profile.SignalGroupPublication,

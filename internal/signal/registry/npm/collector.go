@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -463,6 +465,162 @@ func recordWeeklyDownloads(ctx context.Context, client *Client,
 		})
 }
 
+// gitURLDepInfo carries the parsed fields of a single git-URL dep
+// specifier from a published package's dependencies or
+// optionalDependencies. Populated by parseGitURLDepSpec and the
+// extractGitURLDeps walk; consumed by recordGitURLDepIntroduced.
+//
+// Spec preserves the raw value for downstream auditing; Host,
+// OwnerRepo, Ref, and PinnedSHA are derived for analyst-layer
+// pattern matching. PinnedSHA is non-empty only when Ref matches a
+// 40-hex SHA-1 commit identifier (the "hardcoded pin to attacker
+// content" shape the TanStack/Mini-Shai-Hulud 2026-05-11 injection
+// used).
+type gitURLDepInfo struct {
+	Name      string
+	Spec      string
+	Section   string
+	Host      string
+	OwnerRepo string
+	Ref       string
+	PinnedSHA string
+}
+
+// gitSHARegexp matches a git SHA-1 commit identifier (40 lowercase
+// hex). npm short-form and URL-form refs may carry tags, branches,
+// semver ranges, or commit SHAs; the SHA case is the
+// hardcoded-pin-to-attacker-content shape that this signal's threat
+// model surfaces specifically.
+var gitSHARegexp = regexp.MustCompile(`^[a-f0-9]{40}$`)
+
+// shortFormGitHosts maps the npm short-form prefixes to a host slug
+// for the parsed gitURLDepInfo.Host field. The keys are the prefixes
+// as they appear in dep specifiers, matching the documented npm
+// shorthand for github/gitlab/bitbucket — see
+// internal/manifest/npm/parse.go isNonRegistrySpec for the same
+// prefix set used in classification (binary check there; structured
+// parser here).
+var shortFormGitHosts = map[string]string{
+	"github:":    "github",
+	"gitlab:":    "gitlab",
+	"bitbucket:": "bitbucket",
+}
+
+// urlFormGitPrefixes lists the URL-form prefixes that indicate a git
+// source. All are stripped to leave a parseable URL (after dropping
+// the "git+" wrapper when present). Tarball URLs (https:// to a .tgz
+// or .tar.gz) are a different attack class and are not handled here.
+var urlFormGitPrefixes = []string{
+	"git+https://",
+	"git+ssh://",
+	"git+http://",
+	"git://",
+}
+
+// parseGitURLDepSpec parses an npm dep specifier that points at a
+// git source. Returns (info, true) on a recognized git form;
+// (zero, false) otherwise. Non-git specs (semver ranges, npm:alias,
+// file:, workspace:, http(s) tarball URLs) return (zero, false) —
+// they are different attack classes than the hardcoded-git-fetch
+// vector this signal observes.
+//
+// Name and Section are NOT set here — the caller has the map key
+// (dep name) and section name (dependencies / optionalDependencies)
+// and stamps them onto the returned info.
+func parseGitURLDepSpec(spec string) (gitURLDepInfo, bool) {
+	// Short forms: github:owner/repo[#ref], gitlab:..., bitbucket:...
+	for prefix, host := range shortFormGitHosts {
+		if !strings.HasPrefix(spec, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(spec, prefix)
+		ownerRepo, ref, _ := strings.Cut(rest, "#")
+		if !strings.Contains(ownerRepo, "/") {
+			return gitURLDepInfo{}, false
+		}
+		return gitURLDepInfo{
+			Spec:      spec,
+			Host:      host,
+			OwnerRepo: ownerRepo,
+			Ref:       ref,
+			PinnedSHA: shaIfMatches(ref),
+		}, true
+	}
+
+	// URL forms. Strip "git+" wrapper for net/url parsing; preserve
+	// the original prefix for the membership check.
+	var urlBody string
+	for _, prefix := range urlFormGitPrefixes {
+		if strings.HasPrefix(spec, prefix) {
+			urlBody = strings.TrimPrefix(spec, "git+")
+			break
+		}
+	}
+	if urlBody == "" {
+		return gitURLDepInfo{}, false
+	}
+
+	u, err := url.Parse(urlBody)
+	if err != nil {
+		return gitURLDepInfo{}, false
+	}
+	host := u.Host
+	// Strip user@ from authority (e.g., git@github.com -> github.com).
+	if at := strings.LastIndex(host, "@"); at != -1 {
+		host = host[at+1:]
+	}
+	path := strings.TrimPrefix(u.Path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	if !strings.Contains(path, "/") {
+		return gitURLDepInfo{}, false
+	}
+	return gitURLDepInfo{
+		Spec:      spec,
+		Host:      host,
+		OwnerRepo: path,
+		Ref:       u.Fragment,
+		PinnedSHA: shaIfMatches(u.Fragment),
+	}, true
+}
+
+// shaIfMatches returns ref when it parses as a 40-hex SHA-1 commit
+// identifier; empty string otherwise. Branches, tags, and semver
+// ranges all leave PinnedSHA empty — they signal "git source" but
+// not the harder-to-reverse "git source pinned to attacker content"
+// shape.
+func shaIfMatches(ref string) string {
+	if gitSHARegexp.MatchString(ref) {
+		return ref
+	}
+	return ""
+}
+
+// extractGitURLDeps walks a PackageVersion's dependencies and
+// optionalDependencies maps, parses each spec, and returns the
+// git-URL deps sorted by name for deterministic emission. Non-git
+// deps (semver ranges, aliases, etc.) are filtered out.
+func extractGitURLDeps(pv PackageVersion) []gitURLDepInfo {
+	out := make([]gitURLDepInfo, 0)
+	for name, spec := range pv.Dependencies {
+		if info, ok := parseGitURLDepSpec(spec); ok {
+			info.Name = name
+			info.Section = "dependencies"
+			out = append(out, info)
+		}
+	}
+	for name, spec := range pv.OptionalDependencies {
+		if info, ok := parseGitURLDepSpec(spec); ok {
+			info.Name = name
+			info.Section = "optionalDependencies"
+			out = append(out, info)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b gitURLDepInfo) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return out
+}
+
 // versionRecord is the per-version fact-set the longitudinal
 // signals operate over. Built once from pkg.Versions + pkg.Time
 // and iterated twice (once per emitted signal) rather than
@@ -473,6 +631,7 @@ type versionRecord struct {
 	postinstall    bool
 	hasAttestation bool
 	publisher      string
+	gitURLDeps     []gitURLDepInfo
 }
 
 // recentVersionsByPublishTime returns up to n versions from pkg's
@@ -494,6 +653,7 @@ func recentVersionsByPublishTime(pkg *RegistryPackage, n int) []versionRecord {
 			postinstall:    pv.Scripts.Postinstall != "",
 			hasAttestation: len(pv.Dist.Attestations) > 0 && string(pv.Dist.Attestations) != "null",
 			publisher:      pv.NpmUser.Name,
+			gitURLDeps:     extractGitURLDeps(pv),
 		})
 	}
 	// Stable sort + explicit tiebreaker: two versions with
@@ -548,12 +708,15 @@ func recordCrossVersionSignals(result *signal.CollectionResult, entityID string,
 			reason, false, collectedAt)
 		result.RecordAbsence(entityID, "version_publish_burst", source,
 			reason, false, collectedAt)
+		result.RecordAbsence(entityID, "git_url_dep_introduced", source,
+			reason, false, collectedAt)
 		return
 	}
 
 	recordPostinstallIntroduced(result, entityID, recent, collectedAt)
 	recordPublishOriginConsistency(result, entityID, recent, collectedAt)
 	recordVersionPublishBurst(result, entityID, recent, collectedAt)
+	recordGitURLDepIntroduced(result, entityID, recent, collectedAt)
 }
 
 // recordPostinstallIntroduced detects the axios-2026 shape: a
@@ -603,6 +766,72 @@ func recordPostinstallIntroduced(result *signal.CollectionResult, entityID strin
 			"introduced_at_version":  introducedAtVersion,
 			"prior_versions_without": priorWithout,
 			"versions_checked":       len(recent),
+		})
+}
+
+// recordGitURLDepIntroduced detects the TanStack/Mini-Shai-Hulud
+// 2026-05-11 injection shape: a dep whose version specifier is a
+// git URL (github:owner/repo#<sha>, git+https://..., etc.) appears
+// in the latest version where prior versions in the window had no
+// git-URL deps. Mirrors recordPostinstallIntroduced's transition-
+// not-snapshot framing: a "consistent presence" (git-URL dep across
+// the window) is typical for projects deliberately depending on a
+// fork or an unreleased upstream; a "consistent absence" is the
+// healthy case for packages with regular registry deps only.
+//
+// The signal records parsed dep entries for the latest version
+// only — older versions' deps inflate the payload without paying
+// for it analytically (the per-version pattern is captured by the
+// transition flag and the prior_versions_without count).
+func recordGitURLDepIntroduced(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	latestDeps := recent[0].gitURLDeps
+	latestPresent := len(latestDeps) > 0
+
+	priorWithout := 0
+	for i := 1; i < len(recent); i++ {
+		if len(recent[i].gitURLDeps) == 0 {
+			priorWithout++
+		}
+	}
+
+	introduced := latestPresent && priorWithout > 0
+
+	introducedAtVersion := ""
+	if introduced {
+		// Walk oldest-to-newest; the first version (going forward)
+		// that has at least one git-URL dep is where the transition
+		// happened.
+		for i := len(recent) - 1; i >= 0; i-- {
+			if len(recent[i].gitURLDeps) > 0 {
+				introducedAtVersion = recent[i].version
+				break
+			}
+		}
+	}
+
+	depsList := make([]map[string]any, 0, len(latestDeps))
+	for _, d := range latestDeps {
+		depsList = append(depsList, map[string]any{
+			"name":       d.Name,
+			"spec":       d.Spec,
+			"section":    d.Section,
+			"host":       d.Host,
+			"owner_repo": d.OwnerRepo,
+			"ref":        d.Ref,
+			"pinned_sha": d.PinnedSHA,
+		})
+	}
+
+	result.RecordSignal(entityID, "git_url_dep_introduced", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present_in_latest":      latestPresent,
+			"introduced_recently":    introduced,
+			"introduced_at_version":  introducedAtVersion,
+			"prior_versions_without": priorWithout,
+			"versions_checked":       len(recent),
+			"git_url_deps_in_latest": depsList,
 		})
 }
 
