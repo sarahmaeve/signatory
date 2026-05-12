@@ -614,17 +614,26 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	if err != nil {
 		// Integrity API failure — record as retryable absence so the
 		// next analyze run re-attempts without failing the whole collection.
-		result.RecordAbsence(entityID, "trusted_publishing", source,
-			sanitizeFetchReason(err), true, collectedAt)
+		reason := sanitizeFetchReason(err)
+		result.RecordAbsence(entityID, "trusted_publishing", source, reason, true, collectedAt)
+		result.RecordAbsence(entityID, "latest_attestation_builder", source, reason, true, collectedAt)
 		return nil, false
 	}
 
 	if attest == nil {
-		// 404 — no attestation exists. Emit present=false.
+		// 404 — no attestation exists. Emit present=false on both
+		// signals; their absent-shape is informative (the package
+		// isn't on trusted publishing).
 		result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL,
 			map[string]any{
 				"present":         false,
 				"version_checked": latest.version,
+			})
+		result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL,
+			map[string]any{
+				"present":           false,
+				"version_checked":   latest.version,
+				"extraction_status": "no_attestation",
 			})
 		return nil, true // state is known: definitively absent
 	}
@@ -645,7 +654,48 @@ func (c *Collector) recordTrustedPublishing(ctx context.Context, result *signal.
 	}
 
 	result.RecordSignal(entityID, "trusted_publishing", source, collectedAt, defaultTTL, value)
+	recordLatestAttestationBuilder(result, entityID, latest.version, attest, collectedAt)
 	return attest, true
+}
+
+// recordLatestAttestationBuilder emits the latest_attestation_builder
+// signal — a consolidating contract over the publisher identity the
+// attestation binds to. Provides a stable, single-signal view of
+// (builder_kind, source_repository, workflow, environment,
+// source_revision) for sketch 5 (workflow_ref_transitions) and
+// future composites to consume without merging fields from
+// trusted_publishing (publisher block) and artifact_url (Fulcio-
+// extracted git_head).
+//
+// The data is largely already on trusted_publishing; this signal
+// re-emits it under a stable namespace and adds extraction_status
+// reporting. source_revision is the hex SHA the Fulcio cert's
+// source-repo-digest extension stamps — extracted via the same
+// extractGitHeadFromAttestation helper artifact_url uses.
+//
+// Caller guarantees attest is non-nil. The 404 and fetch-error
+// paths are handled at the recordTrustedPublishing dispatch site.
+func recordLatestAttestationBuilder(result *signal.CollectionResult,
+	entityID, latestVersion string, attest *AttestationResponse, collectedAt time.Time) {
+
+	value := map[string]any{
+		"present":           true,
+		"version_checked":   latestVersion,
+		"extraction_status": "ok",
+	}
+	if len(attest.Bundles) > 0 {
+		pub := attest.Bundles[0].Publisher
+		value["builder_kind"] = pub.Kind
+		value["source_repository"] = pub.Repository
+		value["workflow"] = pub.Workflow
+		if pub.Environment != "" {
+			value["environment"] = pub.Environment
+		}
+	}
+	if sha, ok := extractGitHeadFromAttestation(attest); ok {
+		value["source_revision"] = sha
+	}
+	result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL, value)
 }
 
 // attestationWindow bounds the number of prior versions checked for

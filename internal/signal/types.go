@@ -886,6 +886,18 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the 72-hour window matches the BufferZoneCorp campaign cadence (4 versions in 3 days) — longer windows would capture more legitimate rapid-iteration patterns",
 		},
 	},
+	"latest_attestation_builder": {
+		Type:              "latest_attestation_builder",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Publisher identity the latest version's Sigstore provenance attestation binds to: builder_kind, source_repository, workflow, environment, and source_revision (the SHA stamped in the Fulcio cert's source-repo-digest extension). Consolidating contract over data the publication-integrity collectors already extract — provides a stable namespace for sketch 5 (workflow_ref_transitions) and future composites to consume without merging fields from sibling signals.",
+		Caveats: []string{
+			"forgery resistance is contingent on the attesting workflow being integrity-bounded at attestation time; the TanStack 2026-05-11 compromise rode a legitimate workflow and produced a valid attestation with the project's normal builder identity",
+			"PEP 740 on PyPI carries the publisher block (kind/repository/workflow/environment) directly; the npm side surfaces only an attestations URL marker in the inline registry block and would require a follow-up fetch to populate the same shape",
+			"workflow is the workflow path (e.g., 'release.yml' or '.github/workflows/release.yml') without the ref/branch suffix — the @ref portion is on a separate Fulcio extension OID not currently extracted",
+			"extraction_status reports ok (full publisher block parsed) or no_attestation (Integrity API returned 404); fetch errors record as retryable absence instead of an extraction_status value",
+		},
+	},
 	"commit_publish_cadence_divergence": {
 		Type:              "commit_publish_cadence_divergence",
 		Group:             profile.SignalGroupVitality,

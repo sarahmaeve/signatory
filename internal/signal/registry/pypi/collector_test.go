@@ -1493,3 +1493,234 @@ func TestCollector_Collect_ArtifactURL_GitHeadFromAttestation(t *testing.T) {
 			"artifact-vs-repo collector falls back to tag_match instead of "+
 			"using the publisher-stamped commit at exact_gitHead confidence")
 }
+
+// TestCollector_Collect_LatestAttestationBuilder_Present pins the
+// sketch-4 contract: when a PEP 740 attestation exists for the
+// latest version, the latest_attestation_builder signal emits with
+// publisher identity fields (builder_kind / source_repository /
+// workflow) parsed off the attestation's first bundle. Mirrors
+// trusted_publishing's publisher_* fields under the latest_
+// attestation_builder namespace so sketch 5 (workflow_ref_
+// transitions) and future composites can consume builder identity
+// without merging data from two sibling signals.
+func TestCollector_Collect_LatestAttestationBuilder_Present(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2024-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		&AttestationResponse{
+			Version: 1,
+			Bundles: []AttestationBundle{
+				{
+					Publisher: AttestationPublisher{
+						Kind:        "GitHub",
+						Repository:  "octocat/pkg",
+						Workflow:    "release.yml",
+						Environment: "release",
+					},
+				},
+			},
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "latest_attestation_builder"),
+		"package with attestation must emit latest_attestation_builder")
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, true, lab["present"])
+	assert.Equal(t, "2.0.0", lab["version_checked"])
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "octocat/pkg", lab["source_repository"])
+	assert.Equal(t, "release.yml", lab["workflow"])
+	assert.Equal(t, "release", lab["environment"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+	// No certificate in this fixture → source_revision absent.
+	_, hasSrcRev := lab["source_revision"]
+	assert.False(t, hasSrcRev,
+		"source_revision should be omitted when no Fulcio cert is present in the bundle")
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_Absent: 404 from
+// the Integrity API → signal still emits, with present=false and
+// extraction_status=no_attestation. Mirrors trusted_publishing's
+// absent-emission discipline (the package's "not on trusted
+// publishing" state is itself informative).
+func TestCollector_Collect_LatestAttestationBuilder_Absent(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"2.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "old-2.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("old"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "latest_attestation_builder"),
+		"package without attestation must still emit latest_attestation_builder")
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, false, lab["present"])
+	assert.Equal(t, "2.0.0", lab["version_checked"])
+	assert.Equal(t, "no_attestation", lab["extraction_status"])
+	// When attestation is absent, the builder-identity fields don't
+	// apply — they should be omitted, not emitted as empty strings.
+	for _, field := range []string{"builder_kind", "source_repository", "workflow", "environment", "source_revision"} {
+		_, has := lab[field]
+		assert.False(t, has, "field %q must be omitted on absent attestation", field)
+	}
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted
+// pins the empty-environment shape: per PEP 740 environment is
+// optional, so a publisher block with only kind/repo/workflow must
+// emit those three (and extraction_status=ok) without an
+// environment key. Avoids surfacing meaningless empty-string
+// values to downstream consumers.
+func TestCollector_Collect_LatestAttestationBuilder_EnvironmentOmitted(t *testing.T) {
+	t.Parallel()
+	srv := attestationProjectServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {
+					{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "bdist_wheel", Filename: "pkg-1.0.0-py3-none-any.whl"},
+				},
+			},
+		},
+		&AttestationResponse{
+			Version: 1,
+			Bundles: []AttestationBundle{
+				{
+					Publisher: AttestationPublisher{
+						Kind:       "GitHub",
+						Repository: "octocat/pkg",
+						Workflow:   "release.yml",
+						// Environment intentionally empty.
+					},
+				},
+			},
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "octocat/pkg", lab["source_repository"])
+	assert.Equal(t, "release.yml", lab["workflow"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+	_, hasEnv := lab["environment"]
+	assert.False(t, hasEnv,
+		"environment must be omitted (not empty-string) when the publisher block doesn't set it")
+}
+
+// TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision
+// pins the cert-extraction path: when the attestation's first
+// bundle carries a Sigstore cert with the source-repo-digest OID
+// extension, source_revision must surface the recovered SHA. Same
+// fixture construction as TestCollector_Collect_ArtifactURL_GitHeadFromAttestation;
+// the same Fulcio extraction feeds two consumers (artifact_url.git_head
+// and now latest_attestation_builder.source_revision).
+func TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision(t *testing.T) {
+	t.Parallel()
+
+	const wantSHA = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+
+	oidValue, err := asn1.MarshalWithParams(wantSHA, "utf8")
+	require.NoError(t, err)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: fulcioSourceRepoDigestOID, Value: oidValue},
+		},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	certB64 := base64.StdEncoding.EncodeToString(certDER)
+
+	attestBody, err := json.Marshal(AttestationResponse{
+		Version: 1,
+		Bundles: []AttestationBundle{
+			{
+				Publisher: AttestationPublisher{
+					Kind: "GitHub", Repository: "pallets/click",
+					Workflow: "publish.yaml", Environment: "publish",
+				},
+				Attestations: []SigstoreAttestation{
+					{VerificationMaterial: VerificationMaterial{Certificate: certB64}},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	projBody, err := json.Marshal(Project{
+		Info: Info{Maintainer: "ofek"},
+		Releases: map[string][]Distribution{
+			"1.2.3": {
+				{
+					UploadTimeISO: "2026-04-01T00:00:00Z",
+					PackageType:   "sdist",
+					Filename:      "hatch-1.2.3.tar.gz",
+					URL:           "https://files.pythonhosted.org/packages/aa/bb/hatch-1.2.3.tar.gz",
+					Digests:       Digests{SHA256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/pypi/"):
+			_, _ = w.Write(projBody)
+		case strings.HasPrefix(r.URL.Path, "/integrity/"):
+			_, _ = w.Write(attestBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("hatch"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	lab := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, wantSHA, lab["source_revision"],
+		"source_revision must carry the SHA the Fulcio cert's source-repo-digest extension stamps")
+	assert.Equal(t, "GitHub", lab["builder_kind"])
+	assert.Equal(t, "pallets/click", lab["source_repository"])
+	assert.Equal(t, "publish.yaml", lab["workflow"])
+	assert.Equal(t, "publish", lab["environment"])
+	assert.Equal(t, "ok", lab["extraction_status"])
+}
