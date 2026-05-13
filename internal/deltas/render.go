@@ -47,37 +47,61 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		filtered[i] = filterClockFields(g)
 	}
 
-	// Summary line — answers "is this important?" at a glance.
-	// Counts only groups with actual changes (not IncludeUnchanged
-	// padding); runs are distinct CollectedAt across the rendered
-	// set. The unchanged-only case gets a "No changes" line plus
-	// a hint at --include-unchanged.
-	changedCount, runCount := summarize(filtered)
-	switch {
-	case changedCount > 0:
-		bw.printf("\n%s changed across %s\n",
-			pluralize(changedCount, "signal"),
-			pluralize(runCount, "run"))
-	default:
-		bw.printf("\nNo changes in this window. (use --include-unchanged for the full view)\n")
+	// Partition changed groups into "meaningful" (any categorical
+	// change after clock-field suppression) and "drift" (only
+	// numeric scalar changes). Under default rendering, meaningful
+	// groups render in full and drift collapses into a footer line.
+	// --expand short-circuits the partition and renders everything
+	// inline (no footer).
+	groups := sortedGroups(filtered)
+	var meaningful, drift []SignalDelta
+	for _, g := range groups {
+		if !g.HasAnyChange() {
+			continue
+		}
+		if opts.Expand || g.HasCategoricalChange() {
+			meaningful = append(meaningful, g)
+		} else {
+			drift = append(drift, g)
+		}
 	}
 
-	groups := sortedGroups(filtered)
+	// Summary line — answers "is this important?" at a glance.
+	// When drift was bucketed, the meaningful count distinguishes
+	// real change from drift; an additional parenthesized
+	// "with N forge drift" annotates the bucketed set.
+	_, runCount := summarize(filtered)
+	totalChanged := len(meaningful) + len(drift)
+	switch {
+	case totalChanged == 0:
+		bw.printf("\nNo changes in this window. (use --include-unchanged for the full view)\n")
+	case len(drift) == 0 || opts.Expand:
+		bw.printf("\n%s changed across %s\n",
+			pluralize(len(meaningful), "signal"),
+			pluralize(runCount, "run"))
+	default:
+		bw.printf("\n%s changed across %s (%s with forge drift only)\n",
+			pluralize(len(meaningful), "signal"),
+			pluralize(runCount, "run"),
+			pluralize(len(drift), "signal"))
+	}
 
-	wrote := false
-	for _, g := range groups {
-		if !g.HasAnyChange() && !opts.IncludeUnchanged {
-			continue
-		}
-		wrote = true
-		bw.printf("\n%s (%s, %s)\n", g.Type, g.Source, g.SignalGroup)
-
-		if !g.HasAnyChange() {
+	// Render IncludeUnchanged padding groups (no-change rows) on
+	// the original sort order — these aren't in `meaningful` or
+	// `drift` because they have no changes.
+	if opts.IncludeUnchanged {
+		for _, g := range groups {
+			if g.HasAnyChange() {
+				continue
+			}
+			bw.printf("\n%s (%s, %s)\n", g.Type, g.Source, g.SignalGroup)
 			bw.printf("  %d observation(s), no change\n", len(g.Observations))
-			continue
 		}
+	}
 
-		// Render each pair-diff with the transition timestamps.
+	// Render meaningful groups in full.
+	for _, g := range meaningful {
+		bw.printf("\n%s (%s, %s)\n", g.Type, g.Source, g.SignalGroup)
 		for i, diff := range g.PairDiffs {
 			if !diff.HasChanges() {
 				continue
@@ -89,12 +113,94 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		}
 	}
 
-	// The top-level summary already owned the "no changes" message;
-	// nothing further to emit when wrote==false.
-	_ = wrote
+	// Drift footer.
+	if len(drift) > 0 {
+		bw.printf("\nforge drift only (use --expand to see per-transition detail):\n")
+		for _, g := range drift {
+			for _, entry := range cumulativeNumericDrift(g) {
+				bw.printf("  %s\n", entry)
+			}
+		}
+	}
 
 	return bw.err
 }
+
+// cumulativeNumericDrift summarizes a drift-only group as one line
+// per numeric-scalar field that moved across the window. Format:
+//
+//	<signal_type>.<field> (+N)               // single transition
+//	<signal_type>.<field> (+N over M runs)   // multi-transition
+//
+// The cumulative delta is first-observation-value vs last-
+// observation-value for each field that has a numeric scalar
+// entry in any Changed map across the group's PairDiffs. Fields
+// only present in some observations are skipped (rare in our
+// drift-shape signals).
+func cumulativeNumericDrift(g SignalDelta) []string {
+	if len(g.Observations) < 2 {
+		return nil
+	}
+	first := g.Observations[0].Value
+	last := g.Observations[len(g.Observations)-1].Value
+
+	// Collect candidate field names: any key that appeared in any
+	// PairDiff's Changed map. (Drift groups by definition have no
+	// Added/Removed and no nested/array/opaque changes — all
+	// changes are top-level numeric scalars.)
+	candidates := map[string]struct{}{}
+	for _, d := range g.PairDiffs {
+		for k, c := range d.Changed {
+			if c.Kind == ChangeKindScalar {
+				candidates[k] = struct{}{}
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(candidates))
+	for k := range candidates {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		bf, bok := toFloat(first[k])
+		af, aok := toFloat(last[k])
+		if !bok || !aok {
+			continue
+		}
+		delta := af - bf
+		if delta == 0 {
+			continue
+		}
+		ann := formatDelta(bf, af, delta)
+		if len(g.Observations) > 2 {
+			out = append(out, fmt.Sprintf("%s.%s (%s over %d runs)",
+				g.Type, k, ann, len(g.Observations)))
+		} else {
+			out = append(out, fmt.Sprintf("%s.%s (%s)",
+				g.Type, k, ann))
+		}
+	}
+	return out
+}
+
+// formatDelta renders a numeric delta with explicit sign,
+// integer-friendly when both endpoints are integer-valued.
+// Mirrors numericDeltaAnnotation but returns the body only (no
+// surrounding space or parens; the caller frames it).
+func formatDelta(before, after, delta float64) string {
+	if before == float64(int64(before)) && after == float64(int64(after)) {
+		return fmt.Sprintf("%+d", int64(delta))
+	}
+	return fmt.Sprintf("%+g", delta)
+}
+
+// sortStrings is a tiny wrapper over sort.Strings so the drift-
+// footer code doesn't need its own import; render.go already
+// imports sort for sortedKeys.
+func sortStrings(s []string) { sort.Strings(s) }
 
 // summarize returns (changedSignals, distinctRuns) over the
 // rendered set: a "changed signal" is a SignalDelta with at least

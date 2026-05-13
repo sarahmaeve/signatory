@@ -32,6 +32,7 @@ type DeltasCmd struct {
 	Group  string `help:"Filter by signal group (vitality, governance, publication, hygiene, criticality, identity)."`
 
 	IncludeUnchanged bool `help:"Include signals with no changes in the window. Default behavior suppresses them."`
+	Expand           bool `help:"Restore per-transition detail for forge-drift signals (stars, forks, followers, open_issues). Default collapses these into a footer."`
 	JSON             bool `help:"Emit structured JSON instead of human-readable text."`
 	Yes              bool `short:"y" help:"Skip the confirmation prompt for large --all expansions."`
 
@@ -106,7 +107,10 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	if cmd.JSON {
 		return deltas.RenderJSON(cmd.Stdout, in)
 	}
-	return deltas.RenderText(cmd.Stdout, in, deltas.TextOpts{IncludeUnchanged: cmd.IncludeUnchanged})
+	return deltas.RenderText(cmd.Stdout, in, deltas.TextOpts{
+		IncludeUnchanged: cmd.IncludeUnchanged,
+		Expand:           cmd.Expand,
+	})
 }
 
 // validateFlags enforces mutual exclusion of --since, --last,

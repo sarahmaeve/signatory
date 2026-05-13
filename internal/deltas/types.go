@@ -213,4 +213,13 @@ type TextOpts struct {
 	// window. Default behavior (false) suppresses them — a target
 	// with 40 signals and 2 changes produces a short output.
 	IncludeUnchanged bool
+
+	// Expand restores per-transition rendering for "drift-only"
+	// groups (signals whose only changes are numeric scalar drift,
+	// after clock-field suppression — typically stars/forks/
+	// open_issues/followers counters). Default behavior (false)
+	// collapses these into a single footer line with cumulative
+	// deltas, so the meaningful categorical transitions aren't
+	// buried under boilerplate.
+	Expand bool
 }

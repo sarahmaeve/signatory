@@ -170,13 +170,16 @@ func TestRenderText_ScalarDirectionArrow(t *testing.T) {
 // summary reports how many signals changed and how many distinct
 // collection runs the rendered set spans — answers the reader's
 // first question ("is this important?") without scrolling.
+//
+// Uses categorical (string) transitions so the test exercises the
+// summary line itself, not the drift-bucketing path (covered
+// separately in TestRenderText_BucketsForgeDrift).
 func TestRenderText_SummaryHeader(t *testing.T) {
 	t.Parallel()
 	tA := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	tB := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 	tC := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 
-	// Two signals, each with two transitions; three distinct runs total.
 	mkGroup := func(typ string, p, q, r map[string]any) SignalDelta {
 		return SignalDelta{
 			Type: typ, Source: "github", SignalGroup: "criticality",
@@ -192,14 +195,14 @@ func TestRenderText_SummaryHeader(t *testing.T) {
 		Target: "pkg:npm/example",
 		Window: TimeWindow{All: true},
 		Groups: []SignalDelta{
-			mkGroup("stars",
-				map[string]any{"count": float64(10)},
-				map[string]any{"count": float64(20)},
-				map[string]any{"count": float64(30)}),
-			mkGroup("forks",
-				map[string]any{"count": float64(1)},
-				map[string]any{"count": float64(2)},
-				map[string]any{"count": float64(3)}),
+			mkGroup("last_push_a",
+				map[string]any{"date": "2026-05-10T00:00:00Z"},
+				map[string]any{"date": "2026-05-11T00:00:00Z"},
+				map[string]any{"date": "2026-05-12T00:00:00Z"}),
+			mkGroup("last_push_b",
+				map[string]any{"date": "2026-05-01T00:00:00Z"},
+				map[string]any{"date": "2026-05-02T00:00:00Z"},
+				map[string]any{"date": "2026-05-03T00:00:00Z"}),
 		},
 	}
 	var buf bytes.Buffer
@@ -210,19 +213,19 @@ func TestRenderText_SummaryHeader(t *testing.T) {
 		"summary line must report changed signals and run count")
 }
 
-// TestRenderText_SummaryHeader_Pluralization: 1 signal / 1 run
-// should read in the singular form. The CLI verb's most common
-// case is "I just ran analyze twice; what's different?" — that's
-// exactly N=1 run-pair, N=1 signal in many scenarios.
+// TestRenderText_SummaryHeader_Pluralization: 1 signal / 2 runs
+// should read in the singular form ("1 signal") for the signal
+// count. Uses a categorical change so the group doesn't route to
+// the drift bucket.
 func TestRenderText_SummaryHeader_Pluralization(t *testing.T) {
 	t.Parallel()
-	prior := map[string]any{"count": float64(10)}
-	current := map[string]any{"count": float64(11)}
+	prior := map[string]any{"date": "2026-05-10T00:00:00Z"}
+	current := map[string]any{"date": "2026-05-11T00:00:00Z"}
 	in := RenderInput{
 		Target: "pkg:npm/x",
 		Window: TimeWindow{All: true},
 		Groups: []SignalDelta{{
-			Type: "stars", Source: "github", SignalGroup: "criticality",
+			Type: "last_push", Source: "github", SignalGroup: "vitality",
 			Observations: []Observation{
 				{CollectedAt: t1, Value: prior},
 				{CollectedAt: t2, Value: current},
@@ -236,8 +239,8 @@ func TestRenderText_SummaryHeader_Pluralization(t *testing.T) {
 
 	assert.Contains(t, got, "1 signal changed across 2 runs",
 		"singular 'signal' must appear when only one type changed")
-	assert.NotContains(t, got, "1 signals",
-		"plural 'signals' must not appear in singular case")
+	assert.NotContains(t, got, "1 signals changed",
+		"plural 'signals changed' must not appear in singular case")
 }
 
 // TestRenderText_SummaryHeader_NoChanges replaces the prior
@@ -667,6 +670,196 @@ func TestIsClockField(t *testing.T) {
 			assert.Equal(t, tc.want, isClockField(tc.name))
 		})
 	}
+}
+
+// TestRenderText_BucketsForgeDrift verifies that drift-only groups
+// (numeric scalar changes only, after clock-field suppression)
+// collapse into a footer line. The meaningful categorical
+// transition stays at the top; drift is summarized below.
+func TestRenderText_BucketsForgeDrift(t *testing.T) {
+	t.Parallel()
+	// Meaningful: a date change (categorical string).
+	mPrior := map[string]any{"date": "2026-05-10T00:00:00Z"}
+	mNow := map[string]any{"date": "2026-05-12T00:00:00Z"}
+	// Drift: pure numeric scalar.
+	dPrior := map[string]any{"count": float64(100)}
+	dNow := map[string]any{"count": float64(105)}
+
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			{
+				Type: "last_push", Source: "github", SignalGroup: "vitality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: mPrior},
+					{CollectedAt: t2, Value: mNow},
+				},
+				PairDiffs: []ValueDiff{Diff(mPrior, mNow)},
+			},
+			{
+				Type: "stars", Source: "github", SignalGroup: "criticality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: dPrior},
+					{CollectedAt: t2, Value: dNow},
+				},
+				PairDiffs: []ValueDiff{Diff(dPrior, dNow)},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	// Meaningful transition still renders in full.
+	assert.Contains(t, got, `date: "2026-05-10T00:00:00Z" → "2026-05-12T00:00:00Z"`)
+	// The CHANGED marker line for last_push is present.
+	assert.Contains(t, got, "last_push (github, vitality)")
+
+	// Drift group does NOT get the per-transition block; it's
+	// summarized in a footer.
+	assert.NotContains(t, got, "stars (github, criticality)",
+		"drift-only group must not render its per-transition block")
+
+	// Footer line names the drift field with its cumulative delta.
+	assert.Contains(t, got, "forge drift")
+	assert.Contains(t, got, "stars.count (+5)",
+		"footer reports the cumulative delta for the drift field")
+}
+
+// TestRenderText_BucketsForgeDrift_AllDrift: when every changed
+// group is drift-only, the meaningful count is zero and the
+// summary line frames the output as drift.
+func TestRenderText_BucketsForgeDrift_AllDrift(t *testing.T) {
+	t.Parallel()
+	mk := func(typ string, prior, now float64) SignalDelta {
+		p := map[string]any{"count": prior}
+		n := map[string]any{"count": now}
+		return SignalDelta{
+			Type: typ, Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: p},
+				{CollectedAt: t2, Value: n},
+			},
+			PairDiffs: []ValueDiff{Diff(p, n)},
+		}
+	}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			mk("forks", 100, 104),
+			mk("stars", 1000, 1006),
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "0 signals changed",
+		"meaningful count is zero when only drift moved")
+	assert.Contains(t, got, "forge drift",
+		"drift footer present")
+	assert.Contains(t, got, "forks.count (+4)")
+	assert.Contains(t, got, "stars.count (+6)")
+	assert.NotContains(t, got, "◀ CHANGED",
+		"no per-transition CHANGED markers when all groups are drift-only")
+}
+
+// TestRenderText_BucketsForgeDrift_CumulativeOverRuns: multi-
+// transition drift signals report net delta plus "over N runs".
+func TestRenderText_BucketsForgeDrift_CumulativeOverRuns(t *testing.T) {
+	t.Parallel()
+	tA := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	tB := time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC)
+	tC := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
+	tD := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
+
+	mk := func(typ string, ts []time.Time, vals []float64) SignalDelta {
+		obs := make([]Observation, len(ts))
+		for i := range ts {
+			obs[i] = Observation{CollectedAt: ts[i], Value: map[string]any{"count": vals[i]}}
+		}
+		diffs := make([]ValueDiff, 0, len(obs)-1)
+		for i := 1; i < len(obs); i++ {
+			diffs = append(diffs, Diff(obs[i-1].Value, obs[i].Value))
+		}
+		return SignalDelta{
+			Type: typ, Source: "github", SignalGroup: "criticality",
+			Observations: obs, PairDiffs: diffs,
+		}
+	}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			mk("stars",
+				[]time.Time{tA, tB, tC, tD},
+				[]float64{1000, 1003, 1005, 1010}), // net +10 over 4 obs
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Regexp(t, `stars\.count \(\+10 over 4 runs\)`, got,
+		"footer reports net delta and run count for multi-transition drift")
+}
+
+// TestRenderText_ExpandFlag: --expand restores per-transition
+// rendering for drift groups (no bucketing). The footer disappears.
+func TestRenderText_ExpandFlag(t *testing.T) {
+	t.Parallel()
+	dPrior := map[string]any{"count": float64(100)}
+	dNow := map[string]any{"count": float64(105)}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "stars", Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: dPrior},
+				{CollectedAt: t2, Value: dNow},
+			},
+			PairDiffs: []ValueDiff{Diff(dPrior, dNow)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{Expand: true}))
+	got := buf.String()
+
+	assert.Contains(t, got, "stars (github, criticality)",
+		"--expand restores the per-transition rendering")
+	assert.Contains(t, got, "count: 100 → 105 (+5)")
+	assert.NotContains(t, got, "forge drift",
+		"--expand drops the footer (drift renders inline)")
+}
+
+// TestRenderText_BucketsForgeDrift_MeaningfulOnly: when there's
+// no drift at all, no footer line appears.
+func TestRenderText_BucketsForgeDrift_MeaningfulOnly(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{"present": true}
+	now := map[string]any{"present": false}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "trusted_publishing", Source: "npm-registry", SignalGroup: "publication",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: now},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, now)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "present: true → false")
+	assert.NotContains(t, got, "forge drift",
+		"no footer when there are no drift groups")
 }
 
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
