@@ -47,7 +47,6 @@ func runDeltas(t *testing.T, target string, mod func(*DeltasCmd)) string {
 // the seeded axios entity. The trusted_publishing signal must show
 // the present→absent transition with publisher fields removed.
 func TestDeltas_E2E_AxiosTrustedPublishingLost(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/axios", nil)
 
 	assert.Contains(t, got, "Deltas for pkg:npm/axios",
@@ -69,7 +68,6 @@ func TestDeltas_E2E_AxiosTrustedPublishingLost(t *testing.T) {
 // because the entity has both version_unpublish_observed and
 // commit_publish_cadence_divergence scenarios seeded against it.
 func TestDeltas_E2E_TanStackUnpublishGap(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/@tanstack/react-router", nil)
 
 	// Both seeded signals must surface (--all + no filter).
@@ -91,7 +89,6 @@ func TestDeltas_E2E_TanStackUnpublishGap(t *testing.T) {
 // TestDeltas_E2E_FilterByType narrows to one signal even when the
 // entity has multiple. --type filter dropping the cadence row.
 func TestDeltas_E2E_FilterByType(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/@tanstack/react-router", func(c *DeltasCmd) {
 		c.Type = "version_unpublish_observed"
 	})
@@ -105,7 +102,6 @@ func TestDeltas_E2E_FilterByType(t *testing.T) {
 // TestDeltas_E2E_WorkflowRefChange exercises the sketch-5 detection
 // axis: workflow_refs array changes position-0 between observations.
 func TestDeltas_E2E_WorkflowRefChange(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:pypi/sample-careful-variant", nil)
 
 	assert.Contains(t, got, "attestation_consistency")
@@ -122,7 +118,6 @@ func TestDeltas_E2E_WorkflowRefChange(t *testing.T) {
 // on an array-of-objects: the publisher_account_class.logins array
 // gains one entry (evil-publisher-bot, class=service-account).
 func TestDeltas_E2E_BotPublisherAppears(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:pypi/sample-bot-target", nil)
 
 	assert.Contains(t, got, "publisher_account_class")
@@ -135,7 +130,6 @@ func TestDeltas_E2E_BotPublisherAppears(t *testing.T) {
 
 // TestDeltas_E2E_VersionBurstFlips: boolean transition surfaces.
 func TestDeltas_E2E_VersionBurstFlips(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/burst-shape-sample", nil)
 
 	assert.Contains(t, got, "version_publish_burst")
@@ -147,7 +141,6 @@ func TestDeltas_E2E_VersionBurstFlips(t *testing.T) {
 // TestDeltas_E2E_MaintainerChurn: different-length primitive array
 // (set-diff handling) — alice and bob unchanged, newcomer added.
 func TestDeltas_E2E_MaintainerChurn(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/maintainer-churn-sample", nil)
 
 	assert.Contains(t, got, "maintainer_count")
@@ -161,7 +154,6 @@ func TestDeltas_E2E_MaintainerChurn(t *testing.T) {
 // against a real scenario. Decodes the output and asserts on the
 // top-level shape.
 func TestDeltas_E2E_JSON(t *testing.T) {
-	t.Parallel()
 	out := runDeltas(t, "pkg:npm/axios", func(c *DeltasCmd) {
 		c.JSON = true
 	})
@@ -187,7 +179,6 @@ func TestDeltas_E2E_JSON(t *testing.T) {
 // TestDeltas_E2E_TargetNotFound surfaces a clean error when the
 // store has no entity for the requested URI.
 func TestDeltas_E2E_TargetNotFound(t *testing.T) {
-	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	cmd := &DeltasCmd{
 		Target: "pkg:npm/never-seen-by-store",
@@ -207,7 +198,6 @@ func TestDeltas_E2E_TargetNotFound(t *testing.T) {
 // diffs are computable (only one observation left); signal appears
 // as "no change" under --include-unchanged.
 func TestDeltas_E2E_LastFlag(t *testing.T) {
-	t.Parallel()
 	got := runDeltas(t, "pkg:npm/axios", func(c *DeltasCmd) {
 		c.All = false
 		c.Last = 1

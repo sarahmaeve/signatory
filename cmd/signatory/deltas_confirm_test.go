@@ -6,35 +6,48 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/deltas"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestCountRuns_DistinctCollectedAt verifies the "runs" metric is the
-// number of distinct CollectedAt timestamps across the signal slice.
-// Signals emitted in the same analyze invocation share a timestamp;
-// this collapses them into one run for the warning.
-func TestCountRuns_DistinctCollectedAt(t *testing.T) {
+// TestCountRunsInRender_DistinctCollectedAt verifies the "runs"
+// metric is the number of distinct CollectedAt timestamps across
+// all observations in the rendered set. Signals emitted in the
+// same analyze invocation share a timestamp; this collapses them
+// into one run for the prompt.
+func TestCountRunsInRender_DistinctCollectedAt(t *testing.T) {
 	t.Parallel()
 	t0 := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
 	t1 := t0.Add(2 * time.Hour)
 	t2 := t0.Add(4 * time.Hour)
 
-	sigs := []profile.Signal{
-		{Type: "a", CollectedAt: t0},
-		{Type: "b", CollectedAt: t0}, // same run as above
-		{Type: "a", CollectedAt: t1},
-		{Type: "c", CollectedAt: t2},
-		{Type: "b", CollectedAt: t2}, // same run as t2
+	// Two groups sharing some timestamps with one another — the
+	// dedup must collapse across groups, not just within one.
+	in := deltas.RenderInput{
+		Groups: []deltas.SignalDelta{
+			{
+				Type: "a",
+				Observations: []deltas.Observation{
+					{CollectedAt: t0}, {CollectedAt: t1},
+				},
+			},
+			{
+				Type: "b",
+				Observations: []deltas.Observation{
+					{CollectedAt: t0}, {CollectedAt: t2}, // t0 shared with group a
+				},
+			},
+		},
 	}
-	assert.Equal(t, 3, countRuns(sigs))
+	assert.Equal(t, 3, countRunsInRender(in),
+		"distinct timestamps are t0, t1, t2")
 }
 
-func TestCountRuns_Empty(t *testing.T) {
+func TestCountRunsInRender_Empty(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, 0, countRuns(nil))
-	assert.Equal(t, 0, countRuns([]profile.Signal{}))
+	assert.Equal(t, 0, countRunsInRender(deltas.RenderInput{}))
+	assert.Equal(t, 0, countRunsInRender(deltas.RenderInput{Groups: []deltas.SignalDelta{}}))
 }
 
 // TestConfirmAllExpansion_YesFlagBypasses: --yes short-circuits the
@@ -138,7 +151,8 @@ func TestConfirmAllExpansion_EOFDefaultsNo(t *testing.T) {
 // stderr. Sample.db's axios entity has only 2 runs so the prompt
 // wouldn't fire anyway, but --yes is the contract we care about here.
 func TestDeltasRun_YesFlagSuppressesPrompt(t *testing.T) {
-	t.Parallel()
+	// Not Parallel: opens sample.db; see TestDeltasRun_RangeWindow_E2E
+	// note for why DB-touching tests run serial.
 	var stdout, stderr bytes.Buffer
 	cmd := &DeltasCmd{
 		Target: "pkg:npm/axios",

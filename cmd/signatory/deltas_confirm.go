@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sarahmaeve/signatory/internal/profile"
+	"github.com/sarahmaeve/signatory/internal/deltas"
 )
 
 // allRunsPromptThreshold is the inclusive upper bound on "runs"
@@ -25,24 +25,25 @@ import (
 // constant if production usage suggests a different floor.
 const allRunsPromptThreshold = 10
 
-// countRuns returns the number of distinct CollectedAt timestamps
-// across the signal slice. A single `signatory analyze` invocation
-// produces many signal rows that share a collected_at, so this is
-// the closest the store has to a "run" count.
+// countRunsInRender returns the number of distinct CollectedAt
+// timestamps across all observations in the rendered set. A single
+// `signatory analyze` invocation produces many signal rows that
+// share a collected_at, so this is the closest representation of
+// "how many times has this target been analyzed" available from
+// the rendered output.
 //
-// Signals whose timestamps differ by sub-second jitter (different
-// collectors finishing at slightly different millisecond boundaries)
-// would count as separate runs — acceptable for v1 since the
-// threshold is well above any realistic jitter cluster, and a
-// stricter bucket-by-minute heuristic would obscure deliberate
-// back-to-back runs the user actually performed.
-func countRuns(signals []profile.Signal) int {
-	if len(signals) == 0 {
-		return 0
-	}
-	seen := make(map[time.Time]struct{}, len(signals))
-	for _, sig := range signals {
-		seen[sig.CollectedAt] = struct{}{}
+// Observations whose timestamps differ by sub-second jitter
+// (different collectors finishing at slightly different millisecond
+// boundaries) would count as separate runs — acceptable for v1
+// since the prompt threshold is well above any realistic jitter
+// cluster, and a stricter bucket-by-minute heuristic would obscure
+// deliberate back-to-back runs the user actually performed.
+func countRunsInRender(r deltas.RenderInput) int {
+	seen := map[time.Time]struct{}{}
+	for _, g := range r.Groups {
+		for _, o := range g.Observations {
+			seen[o.CollectedAt] = struct{}{}
+		}
 	}
 	return len(seen)
 }

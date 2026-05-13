@@ -2,22 +2,23 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"sort"
-	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/deltas"
-	"github.com/sarahmaeve/signatory/internal/profile"
-	"github.com/sarahmaeve/signatory/internal/store"
 )
 
 // DeltasCmd surfaces signal-value changes for a target over time.
 // See design/deltas.md for the full spec — diff semantics, output
 // shapes, and the Phase 1 / Phase 2 split.
+//
+// The verb itself is a thin shell: flag parsing, mutex check,
+// --all confirmation prompt, render-target wiring. The actual
+// store query → filter → window → diff pipeline lives in
+// internal/deltas (Computer.Compute), shared with the
+// signatory_deltas MCP tool.
 type DeltasCmd struct {
 	Target string `arg:"" help:"Target URI (pkg:npm/X, pkg:pypi/Y, repo:github/owner/repo, etc.)."`
 
@@ -67,56 +68,39 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit; error not actionable
 
-	// Resolve the target to an entity. Mirrors show-analyses /
-	// posture / analyze: normalize the URI form, look it up by
-	// canonical URI, surface a clean error when missing.
-	canonicalURI := normalizeTargetForQuery(cmd.Target)
-	entity, err := s.FindEntityByURI(ctx, canonicalURI)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("target %q not found in store — run `signatory analyze --refresh %s` first", cmd.Target, cmd.Target)
-		}
-		return fmt.Errorf("lookup target %q: %w", cmd.Target, err)
-	}
-
 	window, err := cmd.window()
 	if err != nil {
 		return err
 	}
 
-	// Query the full append-only signal history for the entity.
-	// The store returns rows chronologically ascending — see
-	// internal/store/sqlite.go GetSignals docstring.
-	allSignals, err := s.GetSignals(ctx, entity.ID)
+	in, err := deltas.New(s).Compute(ctx, deltas.Params{
+		Target: cmd.Target,
+		Window: window,
+		Type:   cmd.Type,
+		Source: cmd.Source,
+		Group:  cmd.Group,
+	})
 	if err != nil {
-		return fmt.Errorf("query signals for %s: %w", canonicalURI, err)
+		if errors.Is(err, deltas.ErrEntityNotFound) {
+			return fmt.Errorf("target %q not found in store — run `signatory analyze --refresh %s` first", cmd.Target, cmd.Target)
+		}
+		return err
 	}
 
-	filtered := applyFilters(allSignals, cmd)
-
-	// --all bound-check: when the filtered set has more than
+	// --all bound-check: when the rendered set has more than
 	// `allRunsPromptThreshold` distinct collection runs, ask the
 	// user before scrolling through it. --yes (or -y) bypasses.
 	// EOF / non-interactive callers default to "no" so scripts
 	// don't hang.
 	if cmd.All {
-		runs := countRuns(filtered)
-		proceed, err := confirmAllExpansion(cmd.Stderr, cmd.Stdin, runs, canonicalURI, cmd.Yes)
+		runs := countRunsInRender(in)
+		proceed, err := confirmAllExpansion(cmd.Stderr, cmd.Stdin, runs, in.Target, cmd.Yes)
 		if err != nil {
 			return err
 		}
 		if !proceed {
 			return nil
 		}
-	}
-	groups := groupByTypeSource(filtered)
-	groups = applyWindow(groups, window)
-	deltaGroups := buildSignalDeltas(groups)
-
-	in := deltas.RenderInput{
-		Target: canonicalURI,
-		Window: window,
-		Groups: deltaGroups,
 	}
 
 	if cmd.JSON {
@@ -173,147 +157,4 @@ func (cmd *DeltasCmd) window() (deltas.TimeWindow, error) {
 		return deltas.TimeWindow{}, NewUsageError(fmt.Errorf("--since %q: %w", raw, err))
 	}
 	return deltas.TimeWindow{Cutoff: cutoff}, nil
-}
-
-// applyFilters drops signals whose type, source, or group doesn't
-// match the user-supplied filter flags. Empty filter values match
-// everything (no filter).
-func applyFilters(signals []profile.Signal, cmd *DeltasCmd) []profile.Signal {
-	if cmd.Type == "" && cmd.Source == "" && cmd.Group == "" {
-		return signals
-	}
-	out := signals[:0]
-	for _, sig := range signals {
-		if cmd.Type != "" && sig.Type != cmd.Type {
-			continue
-		}
-		if cmd.Source != "" && sig.Source != cmd.Source {
-			continue
-		}
-		if cmd.Group != "" && string(sig.Group) != cmd.Group {
-			continue
-		}
-		out = append(out, sig)
-	}
-	return out
-}
-
-// typeSourceKey is the grouping key for signals.
-type typeSourceKey struct {
-	Type   string
-	Source string
-}
-
-// groupedSignals holds signals keyed by (type, source), each list
-// already sorted chronologically (GetSignals returns ascending).
-type groupedSignals struct {
-	byKey map[typeSourceKey][]profile.Signal
-}
-
-// groupByTypeSource partitions signals into (type, source) bins.
-// Preserves chronological order within each bin (relies on
-// GetSignals' ASC ordering).
-func groupByTypeSource(signals []profile.Signal) groupedSignals {
-	out := groupedSignals{byKey: map[typeSourceKey][]profile.Signal{}}
-	for _, sig := range signals {
-		key := typeSourceKey{Type: sig.Type, Source: sig.Source}
-		out.byKey[key] = append(out.byKey[key], sig)
-	}
-	return out
-}
-
-// applyWindow trims each group according to the TimeWindow:
-//
-//   - All: no trimming
-//   - Last>0: keep the most recent Last observations per group
-//   - Range: keep observations in [RangeStart, RangeEnd] inclusive
-//   - Cutoff non-zero: drop observations with collected_at < cutoff
-func applyWindow(g groupedSignals, w deltas.TimeWindow) groupedSignals {
-	if w.All {
-		return g
-	}
-	rangeMode := !w.RangeStart.IsZero() && !w.RangeEnd.IsZero()
-	for key, sigs := range g.byKey {
-		switch {
-		case w.Last > 0:
-			if len(sigs) > w.Last {
-				g.byKey[key] = sigs[len(sigs)-w.Last:]
-			}
-		case rangeMode:
-			kept := sigs[:0]
-			for _, sig := range sigs {
-				if sig.CollectedAt.Before(w.RangeStart) || sig.CollectedAt.After(w.RangeEnd) {
-					continue
-				}
-				kept = append(kept, sig)
-			}
-			g.byKey[key] = kept
-		default:
-			// Cutoff: drop earlier observations.
-			idx := 0
-			for idx < len(sigs) && sigs[idx].CollectedAt.Before(w.Cutoff) {
-				idx++
-			}
-			g.byKey[key] = sigs[idx:]
-		}
-	}
-	return g
-}
-
-// buildSignalDeltas converts the grouped signal slice into a sorted
-// []deltas.SignalDelta with per-pair diffs computed via deltas.Diff.
-func buildSignalDeltas(g groupedSignals) []deltas.SignalDelta {
-	out := make([]deltas.SignalDelta, 0, len(g.byKey))
-	for key, sigs := range g.byKey {
-		if len(sigs) == 0 {
-			continue
-		}
-		obs := make([]deltas.Observation, 0, len(sigs))
-		for _, sig := range sigs {
-			obs = append(obs, deltas.Observation{
-				CollectedAt: sig.CollectedAt,
-				Value:       decodeSignalValue(sig.Value),
-			})
-		}
-		pairDiffs := make([]deltas.ValueDiff, 0, len(obs)-1)
-		for i := 1; i < len(obs); i++ {
-			pairDiffs = append(pairDiffs, deltas.Diff(obs[i-1].Value, obs[i].Value))
-		}
-		out = append(out, deltas.SignalDelta{
-			Type:         key.Type,
-			Source:       key.Source,
-			SignalGroup:  string(sigs[0].Group),
-			Observations: obs,
-			PairDiffs:    pairDiffs,
-		})
-	}
-	// Sort: (signal_group, type, source) ascending. Renderer also
-	// sorts; we sort here so the slice has a stable order before
-	// the renderer sees it. Two layers of sort doesn't hurt.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].SignalGroup != out[j].SignalGroup {
-			return out[i].SignalGroup < out[j].SignalGroup
-		}
-		if out[i].Type != out[j].Type {
-			return out[i].Type < out[j].Type
-		}
-		return out[i].Source < out[j].Source
-	})
-	return out
-}
-
-// decodeSignalValue parses a signal's stored JSON value into a
-// map[string]any for the diff engine. Returns an empty map on
-// invalid JSON rather than failing — the deltas verb is read-only
-// and best-effort; a corrupted historical row shouldn't crash the
-// verb.
-func decodeSignalValue(raw json.RawMessage) map[string]any {
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
-		return map[string]any{}
-	}
-	var v map[string]any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return map[string]any{}
-	}
-	return v
 }

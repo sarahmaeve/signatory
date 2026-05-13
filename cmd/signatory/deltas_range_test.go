@@ -68,7 +68,11 @@ func TestDeltasCmd_Window_RangeError(t *testing.T) {
 // surface the transition; a range that excludes the older observation
 // should leave only one observation (no transition).
 func TestDeltasRun_RangeWindow_E2E(t *testing.T) {
-	t.Parallel()
+	// Not Parallel: shares sample.db with the other E2E tests; a
+	// fleet of parallel SQLite opens against the same file under
+	// the full `go test ./...` load flakes intermittently. The
+	// DB-touching deltas tests run serial; pure-unit tests above
+	// (validateFlags, window resolver) stay parallel.
 	// Wide range — brackets both observations.
 	var stdout, stderr bytes.Buffer
 	cmd := &DeltasCmd{
@@ -104,7 +108,6 @@ func runDeltasRange(t *testing.T, target, rng string) string {
 // observations of the probe entity — three transitions surface
 // (t1→t2, t2→t3, t3→t4), each with a count increment.
 func TestDeltasRun_RangeWindow_BracketsAll(t *testing.T) {
-	t.Parallel()
 	out := runDeltasRange(t, "pkg:npm/range-window-probe",
 		"2026-04-01T00:00:00Z..2026-06-01T00:00:00Z")
 	assert.Contains(t, out, "range 2026-04-01T00:00:00Z to 2026-06-01T00:00:00Z",
@@ -117,7 +120,6 @@ func TestDeltasRun_RangeWindow_BracketsAll(t *testing.T) {
 // TestDeltasRun_RangeWindow_BracketsSubset: range excludes t1 and
 // t4 (covers only t2 and t3) — exactly one transition surfaces.
 func TestDeltasRun_RangeWindow_BracketsSubset(t *testing.T) {
-	t.Parallel()
 	out := runDeltasRange(t, "pkg:npm/range-window-probe",
 		"2026-05-10T00:00:00Z..2026-05-22T00:00:00Z")
 	// Only t2 (2026-05-12) and t3 (2026-05-20) are inside.
@@ -131,7 +133,6 @@ func TestDeltasRun_RangeWindow_BracketsSubset(t *testing.T) {
 // observations to diff). Default IncludeUnchanged=false suppresses
 // the lone signal entirely.
 func TestDeltasRun_RangeWindow_SinglePoint(t *testing.T) {
-	t.Parallel()
 	out := runDeltasRange(t, "pkg:npm/range-window-probe",
 		"2026-05-12T00:00:00Z..2026-05-13T00:00:00Z")
 	// No transitions; signal suppressed (default behavior).
@@ -143,7 +144,6 @@ func TestDeltasRun_RangeWindow_SinglePoint(t *testing.T) {
 // observation timeline — the renderer surfaces an explicit
 // "no observations" line.
 func TestDeltasRun_RangeWindow_Empty(t *testing.T) {
-	t.Parallel()
 	out := runDeltasRange(t, "pkg:npm/range-window-probe",
 		"2030-01-01T00:00:00Z..2030-01-02T00:00:00Z")
 	assert.Contains(t, out, "no observations in this window",
