@@ -249,3 +249,86 @@ func TestCollector_OtherEntityIgnored(t *testing.T) {
 	assert.Empty(t, result.Signals(),
 		"cadence is per-entity; e2's signals must not produce an e1 emission")
 }
+
+// seedInRunWithVersionCount extends seedInRun with a version_count
+// sibling signal. Tests covering the prior_version_count enrichment
+// use this; tests that omit version_count use bare seedInRun and
+// assert prior_version_count is absent from the emission.
+func seedInRunWithVersionCount(commitDaysAgo, publishDaysAgo, versionCount int) *signal.CollectionResult {
+	inRun := seedInRun(commitDaysAgo, publishDaysAgo)
+	now := time.Now().UTC()
+	inRun.RecordSignal("e1", "version_count", "npm-registry", now, signalTTL,
+		map[string]any{
+			"count": versionCount,
+		})
+	return inRun
+}
+
+// TestCollector_PriorVersionCountIncluded verifies that when a
+// version_count sibling signal is in the in-run accumulator, the
+// cadence emission carries a prior_version_count field. This is
+// the disambiguating context the analyst layer (or a human reading
+// the deltas view in isolation) needs to read a both-fallow shape
+// correctly: a 228-version package with paused commits and publishes
+// is stable; a 3-version package with the same shape is more likely
+// abandoned. Same shape value, opposite trust posture.
+func TestCollector_PriorVersionCountIncluded(t *testing.T) {
+	t.Parallel()
+	c := NewCollector().WithInRun(seedInRunWithVersionCount(0, 6, 228))
+	result, err := c.Collect(context.Background(), entityForTest())
+	require.NoError(t, err)
+	sigs := result.Signals()
+	require.Len(t, sigs, 1)
+	var v map[string]any
+	require.NoError(t, json.Unmarshal(sigs[0].Value, &v))
+	assert.EqualValues(t, 228, v["prior_version_count"])
+	// Existing fields unchanged — the enrichment is purely additive.
+	assert.EqualValues(t, 0, v["commit_days_ago"])
+	assert.EqualValues(t, 6, v["publish_days_ago"])
+	assert.Equal(t, "active-repo-paused-publishes", v["shape"])
+}
+
+// TestCollector_PriorVersionCountOmittedWhenAbsent verifies that
+// when no version_count sibling exists in the in-run accumulator,
+// the cadence emission omits the prior_version_count field
+// entirely — no zero, no null, no empty string. Mirrors the
+// collector's existing partial-input discipline: absent context is
+// silent, not falsified.
+func TestCollector_PriorVersionCountOmittedWhenAbsent(t *testing.T) {
+	t.Parallel()
+	c := NewCollector().WithInRun(seedInRun(0, 6))
+	result, err := c.Collect(context.Background(), entityForTest())
+	require.NoError(t, err)
+	sigs := result.Signals()
+	require.Len(t, sigs, 1)
+	var v map[string]any
+	require.NoError(t, json.Unmarshal(sigs[0].Value, &v))
+	_, present := v["prior_version_count"]
+	assert.False(t, present,
+		"prior_version_count should be absent (silent skip) when no version_count signal is in the in-run accumulator")
+}
+
+// TestCollector_PriorVersionCountIgnoresMalformedCount verifies that
+// a version_count signal with a non-numeric count field is treated
+// as if it weren't present: the cadence signal still emits its core
+// observation, just without the enrichment. Mirrors findDateInRun's
+// "if you can't read the field, pretend it isn't there" posture.
+func TestCollector_PriorVersionCountIgnoresMalformedCount(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	inRun := seedInRun(0, 6)
+	inRun.RecordSignal("e1", "version_count", "npm-registry", now, signalTTL,
+		map[string]any{
+			"count": "not a number", // string where a number is expected
+		})
+	c := NewCollector().WithInRun(inRun)
+	result, err := c.Collect(context.Background(), entityForTest())
+	require.NoError(t, err)
+	sigs := result.Signals()
+	require.Len(t, sigs, 1)
+	var v map[string]any
+	require.NoError(t, json.Unmarshal(sigs[0].Value, &v))
+	_, present := v["prior_version_count"]
+	assert.False(t, present,
+		"malformed version_count.count should be ignored, not propagated")
+}

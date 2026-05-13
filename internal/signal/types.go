@@ -922,12 +922,14 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Type:              "commit_publish_cadence_divergence",
 		Group:             profile.SignalGroupVitality,
 		ForgeryResistance: profile.ForgeryMediumDeclining,
-		Description:       "Temporal gap between most-recent push to the source repo and most-recent publish to the registry. Four shapes: synchronized, active-repo-paused-publishes, active-publishes-fallow-repo, and both-fallow. Derived signal — reads sibling collectors' last_commit (or last_push) and last_publish emissions via the in-run accumulator.",
+		Description:       "Temporal gap between most-recent push to the source repo and most-recent publish to the registry. Four shapes: synchronized, active-repo-paused-publishes, active-publishes-fallow-repo, and both-fallow. Derived signal — reads sibling collectors' last_commit (or last_push), last_publish, and (when available) version_count emissions via the in-run accumulator. When version_count is visible, the emission carries a prior_version_count field — the disambiguating context that lets a reader distinguish a high-version-count package on a paused cadence (operationally stable) from a low-version-count package on the same cadence (more likely abandoned).",
 		Caveats: []string{
 			"cadence is observable but not cryptographic — an attacker controlling both source and publish paths can fake either timestamp",
 			"the 'synchronized' threshold (|divergence| <= 2 days) and the 'fallow' threshold (60 days) are arbitrary defaults; values close to either edge are weak signal on their own",
 			"partial inputs (no commit-side signal, or no last_publish) produce no emission rather than an absence — the collector treats partial data as 'doesn't apply' to the entity, not 'failed'",
 			"both-fallow trumps the divergence shapes — a 200-day commit + 201-day publish is reported as both-fallow, not synchronized, because divergence is only meaningful when at least one side is recent",
+			"prior_version_count is absent (field omitted, not zeroed) when no version_count sibling signal is in the in-run accumulator — typical for repo-only entities or partial runs",
+			"the shape value alone does not distinguish stable-foundational (e.g., 200+ releases over a decade, recent quiet stretch) from abandoned-thin-history (e.g., 3 releases, last touched a year ago); pair shape with prior_version_count for the disambiguating read",
 		},
 	},
 	"git_url_dep_introduced": {

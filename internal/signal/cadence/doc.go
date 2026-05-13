@@ -16,8 +16,10 @@
 //   - active-publishes-fallow-repo: publish_days_ago < commit_days_ago
 //     by >2 days; rare. Indicates registry-side activity not
 //     mirrored in the source repo.
-//   - both-fallow: both commit and publish > 60 days ago; the
-//     package may be abandoned. Trumps the divergence-based
+//   - both-fallow: both commit and publish > 60 days ago.
+//     The package may be stable, with a history of many releases,
+//     or abandoned, if it has few releases.
+//     Trumps the divergence-based
 //     classifications: a 90-day-old commit + 95-day-old publish
 //     reports "both-fallow", not "synchronized".
 //
@@ -26,6 +28,16 @@
 // is silent skip, not absence. The signal does not distinguish
 // causes; surfacing the pattern is the point. Cause attribution
 // belongs at the analyst layer.
+//
+// When a version_count sibling signal is also in the in-run
+// accumulator, the emission carries a prior_version_count field.
+// This gives readers consuming the cadence signal in isolation
+// (e.g., the deltas view filtered to one signal type) the
+// disambiguating context that the same shape value can come from
+// operationally-opposite trust postures — a long-running stable
+// package on a publish pause versus a thin-history package on a
+// pause. The field is silently omitted when no version_count is
+// visible, mirroring the collector's posture toward absent inputs.
 //
 // Origin:
 // design/threat-landscape/2026-05-12-tanstack-mini-shai-hulud.md

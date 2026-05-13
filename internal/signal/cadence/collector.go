@@ -86,13 +86,28 @@ func (c *Collector) Collect(_ context.Context, entity *profile.Entity) (*signal.
 	divergence := publishDaysAgo - commitDaysAgo
 	shape := classifyCadenceShape(commitDaysAgo, publishDaysAgo)
 
-	result.RecordSignal(entity.ID, "commit_publish_cadence_divergence", sourceName, now, signalTTL,
-		map[string]any{
-			"commit_days_ago":  commitDaysAgo,
-			"publish_days_ago": publishDaysAgo,
-			"divergence_days":  divergence,
-			"shape":            shape,
-		})
+	value := map[string]any{
+		"commit_days_ago":  commitDaysAgo,
+		"publish_days_ago": publishDaysAgo,
+		"divergence_days":  divergence,
+		"shape":            shape,
+	}
+	// Enrich with prior_version_count when the version_count sibling
+	// signal is in the in-run accumulator. This is the disambiguating
+	// context the analyst layer (or a human reading the deltas view
+	// in isolation) needs to read a both-fallow / paused shape
+	// correctly: a high-version-count package on a paused cadence is
+	// operationally stable, where a low-version-count package on the
+	// same cadence is more likely abandoned. The shape value alone
+	// does not distinguish these cases; prior_version_count does.
+	// Absent when the in-run lacks version_count — silent skip on
+	// the field, mirroring the collector's posture toward absent
+	// inputs throughout.
+	if count, ok := readVersionCount(c.inRun, entity.ID); ok {
+		value["prior_version_count"] = count
+	}
+
+	result.RecordSignal(entity.ID, "commit_publish_cadence_divergence", sourceName, now, signalTTL, value)
 	return result, nil
 }
 
@@ -138,6 +153,45 @@ func readCommitDate(inRun *signal.CollectionResult, entityID string) (time.Time,
 // nil-safe on inRun.
 func readPublishDate(inRun *signal.CollectionResult, entityID string) (time.Time, bool) {
 	return findDateInRun(inRun, entityID, "last_publish", "published_at")
+}
+
+// readVersionCount returns the count field from a version_count
+// signal in the in-run accumulator. Used by Collect to enrich the
+// cadence emission with prior_version_count — the disambiguating
+// context that lets a reader distinguish "stable, many releases,
+// publish pause" from "thin history, may be abandoned" within the
+// same shape value.
+//
+// nil-safe on inRun; returns (0, false) when no version_count signal
+// is present for the entity or its count field is malformed.
+// version_count is emitted by every registry collector (npm/pypi/
+// cargo/gem/maven/gopublish) with a uniform {"count": int} shape,
+// so a single reader works across ecosystems. JSON's numeric type is
+// float64 after unmarshal into map[string]any; the conversion to int
+// truncates fractional input that shouldn't be present in practice
+// (version counts are integer cardinals).
+func readVersionCount(inRun *signal.CollectionResult, entityID string) (int, bool) {
+	if inRun == nil {
+		return 0, false
+	}
+	var found float64
+	var ok bool
+	for _, sig := range inRun.Signals() {
+		if sig.EntityID != entityID || sig.Type != "version_count" {
+			continue
+		}
+		var v map[string]any
+		if err := json.Unmarshal(sig.Value, &v); err != nil {
+			continue
+		}
+		n, isFloat := v["count"].(float64)
+		if !isFloat {
+			continue
+		}
+		found = n
+		ok = true
+	}
+	return int(found), ok
 }
 
 // findDateInRun walks the in-run accumulator for an entity's signal
