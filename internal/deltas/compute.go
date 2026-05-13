@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -226,16 +225,7 @@ func buildSignalDeltas(g groupedSignals) []SignalDelta {
 			PairDiffs:    pairDiffs,
 		})
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].SignalGroup != out[j].SignalGroup {
-			return out[i].SignalGroup < out[j].SignalGroup
-		}
-		if out[i].Type != out[j].Type {
-			return out[i].Type < out[j].Type
-		}
-		return out[i].Source < out[j].Source
-	})
-	return out
+	return SortGroups(out)
 }
 
 // decodeSignalValue parses a signal's stored JSON value into a

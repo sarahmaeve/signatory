@@ -2,6 +2,7 @@ package deltas
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 )
 
@@ -42,6 +43,98 @@ func (s SignalDelta) HasAnyChange() bool {
 		}
 	}
 	return false
+}
+
+// HasCategoricalChange reports whether any pair-diff in this delta
+// surfaces a "categorical" change — one that signals a discrete
+// state transition rather than numeric drift. The rule:
+//
+//   - Added or Removed top-level fields → categorical
+//   - Scalar change where either endpoint is non-numeric (bool /
+//     string) → categorical
+//   - Array change (any add / remove / change of elements) →
+//     categorical (arrays in our signal model carry meaningful
+//     entries: publishers, versions, workflow_refs, maintainers)
+//   - Object change recurses into the same rule
+//   - Opaque change → categorical (we know something changed but
+//     couldn't decompose it; structurally significant)
+//
+// What's NOT categorical: a Scalar change between two numeric
+// endpoints (drift). Used by SortGroups to promote interesting
+// transitions above noisy numeric drift in the rendered output.
+func (s SignalDelta) HasCategoricalChange() bool {
+	for _, d := range s.PairDiffs {
+		if diffHasCategorical(d) {
+			return true
+		}
+	}
+	return false
+}
+
+func diffHasCategorical(d ValueDiff) bool {
+	if len(d.Added) > 0 || len(d.Removed) > 0 {
+		return true
+	}
+	for _, c := range d.Changed {
+		switch c.Kind {
+		case ChangeKindScalar:
+			if !isNumericValue(c.Before) || !isNumericValue(c.After) {
+				return true
+			}
+		case ChangeKindArray:
+			return true
+		case ChangeKindObject:
+			if c.Nested != nil && diffHasCategorical(*c.Nested) {
+				return true
+			}
+		case ChangeKindOpaque:
+			return true
+		}
+	}
+	return false
+}
+
+func isNumericValue(v any) bool {
+	switch v.(type) {
+	case float64, float32, int, int64, int32:
+		return true
+	}
+	return false
+}
+
+// SortGroups returns a sorted copy of the input where categorical-
+// change groups appear before pure-numeric-drift groups. Within
+// each tier, groups are ordered by (signal_group, type, source)
+// alphabetically.
+//
+// "Interesting stuff first" is the principle: a reader scanning
+// the output wants discrete state transitions (a trusted_publisher
+// disappeared, a service-account publisher appeared, a workflow
+// ref changed) before they wade through stars/forks drift. The
+// MCP truncation cap uses the same ordering so when groups must
+// be dropped, the noisy-drift groups go first.
+//
+// Used by both renderers and by the MCP truncation path. Groups
+// with no changes at all (HasAnyChange()==false) sort as numeric-
+// tier (no promotion) — they have nothing categorical to surface.
+func SortGroups(groups []SignalDelta) []SignalDelta {
+	out := make([]SignalDelta, len(groups))
+	copy(out, groups)
+	sort.SliceStable(out, func(i, j int) bool {
+		ci := out[i].HasCategoricalChange()
+		cj := out[j].HasCategoricalChange()
+		if ci != cj {
+			return ci // true (categorical) sorts before false
+		}
+		if out[i].SignalGroup != out[j].SignalGroup {
+			return out[i].SignalGroup < out[j].SignalGroup
+		}
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
 }
 
 // TimeWindow describes the time scope of a deltas query. Exactly

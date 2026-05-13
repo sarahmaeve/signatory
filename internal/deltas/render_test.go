@@ -271,6 +271,219 @@ func TestRenderText_SummaryHeader_NoChanges(t *testing.T) {
 		"summary must not claim signals changed when none did")
 }
 
+// TestRenderText_SeverityOrdering_CategoricalFirst: a group whose
+// only change is a boolean scalar (categorical) must render BEFORE
+// a group whose only change is a numeric scalar (drift), even when
+// alphabetical order would put the numeric group first.
+func TestRenderText_SeverityOrdering_CategoricalFirst(t *testing.T) {
+	t.Parallel()
+	numericPrior := map[string]any{"count": float64(100)}
+	numericNow := map[string]any{"count": float64(110)}
+	boolPrior := map[string]any{"present": true}
+	boolNow := map[string]any{"present": false}
+
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			// "a_metric" sorts BEFORE "z_state" alphabetically;
+			// post-promotion, z_state (bool change) must render first.
+			{
+				Type: "a_metric", Source: "github", SignalGroup: "criticality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: numericPrior},
+					{CollectedAt: t2, Value: numericNow},
+				},
+				PairDiffs: []ValueDiff{Diff(numericPrior, numericNow)},
+			},
+			{
+				Type: "z_state", Source: "github", SignalGroup: "criticality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: boolPrior},
+					{CollectedAt: t2, Value: boolNow},
+				},
+				PairDiffs: []ValueDiff{Diff(boolPrior, boolNow)},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	zIdx := strings.Index(got, "z_state")
+	aIdx := strings.Index(got, "a_metric")
+	require.Greater(t, zIdx, 0, "z_state must appear")
+	require.Greater(t, aIdx, 0, "a_metric must appear")
+	assert.Less(t, zIdx, aIdx,
+		"categorical (bool) change must render before numeric drift")
+}
+
+// TestRenderText_SeverityOrdering_AddedRemovedPromotes: a top-level
+// Added or Removed entry promotes the group above pure numeric
+// drift. trusted_publishing losing its publisher fields is the
+// load-bearing real-world case.
+func TestRenderText_SeverityOrdering_AddedRemovedPromotes(t *testing.T) {
+	t.Parallel()
+	numericPrior := map[string]any{"count": float64(100)}
+	numericNow := map[string]any{"count": float64(110)}
+	// publisher fields disappear — Removed entries.
+	prior := map[string]any{
+		"present":           true,
+		"publisher_kind":    "GitHub",
+		"source_repository": "owner/repo",
+	}
+	now := map[string]any{"present": true} // present unchanged; publisher fields gone
+
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			{
+				Type: "a_metric", Source: "github", SignalGroup: "criticality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: numericPrior},
+					{CollectedAt: t2, Value: numericNow},
+				},
+				PairDiffs: []ValueDiff{Diff(numericPrior, numericNow)},
+			},
+			{
+				Type: "z_publisher_drop", Source: "npm-registry", SignalGroup: "publication",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: prior},
+					{CollectedAt: t2, Value: now},
+				},
+				PairDiffs: []ValueDiff{Diff(prior, now)},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	zIdx := strings.Index(got, "z_publisher_drop")
+	aIdx := strings.Index(got, "a_metric")
+	assert.Less(t, zIdx, aIdx,
+		"group with Removed entries promotes above pure-numeric group")
+}
+
+// TestRenderText_SeverityOrdering_ArrayPromotes: an Array change
+// (gained/lost elements) promotes above numeric drift. Real-world
+// driver: publisher_account_class gaining a service-account login.
+func TestRenderText_SeverityOrdering_ArrayPromotes(t *testing.T) {
+	t.Parallel()
+	numericPrior := map[string]any{"count": float64(100)}
+	numericNow := map[string]any{"count": float64(110)}
+	arrPrior := map[string]any{
+		"logins": []any{
+			map[string]any{"login": "alice", "class": "human"},
+		},
+	}
+	arrNow := map[string]any{
+		"logins": []any{
+			map[string]any{"login": "alice", "class": "human"},
+			map[string]any{"login": "evil-bot", "class": "service-account"},
+		},
+	}
+
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			{
+				Type: "a_metric", Source: "github", SignalGroup: "criticality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: numericPrior},
+					{CollectedAt: t2, Value: numericNow},
+				},
+				PairDiffs: []ValueDiff{Diff(numericPrior, numericNow)},
+			},
+			{
+				Type: "z_publisher_array", Source: "npm-registry", SignalGroup: "governance",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: arrPrior},
+					{CollectedAt: t2, Value: arrNow},
+				},
+				PairDiffs: []ValueDiff{Diff(arrPrior, arrNow)},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	zIdx := strings.Index(got, "z_publisher_array")
+	aIdx := strings.Index(got, "a_metric")
+	assert.Less(t, zIdx, aIdx,
+		"group with array changes promotes above pure-numeric group")
+}
+
+// TestSortGroups_WithinTierAlphabetical: two groups in the same
+// severity tier (both numeric-only) must sort alphabetically by
+// (signal_group, type, source). Determinism within the tier is
+// preserved.
+func TestSortGroups_WithinTierAlphabetical(t *testing.T) {
+	t.Parallel()
+	numP := map[string]any{"count": float64(1)}
+	numN := map[string]any{"count": float64(2)}
+	mk := func(typ, src, grp string) SignalDelta {
+		return SignalDelta{
+			Type: typ, Source: src, SignalGroup: grp,
+			Observations: []Observation{
+				{CollectedAt: t1, Value: numP},
+				{CollectedAt: t2, Value: numN},
+			},
+			PairDiffs: []ValueDiff{Diff(numP, numN)},
+		}
+	}
+	in := []SignalDelta{
+		mk("b", "github", "criticality"),
+		mk("a", "github", "criticality"),
+		mk("a", "github", "vitality"), // different signal_group sorts later alphabetically
+	}
+	out := SortGroups(in)
+	assert.Equal(t, "a", out[0].Type)
+	assert.Equal(t, "criticality", out[0].SignalGroup)
+	assert.Equal(t, "b", out[1].Type)
+	assert.Equal(t, "vitality", out[2].SignalGroup,
+		"within the numeric-only tier, group ordering follows signal_group then type")
+}
+
+// TestSortGroups_CategoricalThenAlphabetical: across tiers,
+// categorical-first; within each tier, the (signal_group, type,
+// source) alphabetical rule continues to apply.
+func TestSortGroups_CategoricalThenAlphabetical(t *testing.T) {
+	t.Parallel()
+	numP := map[string]any{"count": float64(1)}
+	numN := map[string]any{"count": float64(2)}
+	catP := map[string]any{"present": true}
+	catN := map[string]any{"present": false}
+	mk := func(typ string, p, q map[string]any) SignalDelta {
+		return SignalDelta{
+			Type: typ, Source: "s", SignalGroup: "g",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: p},
+				{CollectedAt: t2, Value: q},
+			},
+			PairDiffs: []ValueDiff{Diff(p, q)},
+		}
+	}
+	in := []SignalDelta{
+		mk("z_numeric", numP, numN), // numeric-only, alphabetically last
+		mk("a_cat", catP, catN),     // categorical
+		mk("b_numeric", numP, numN), // numeric-only
+		mk("y_cat", catP, catN),     // categorical, alphabetically late
+	}
+	out := SortGroups(in)
+	// Categorical tier first (a_cat, y_cat), then numeric (b_numeric, z_numeric).
+	assert.Equal(t, "a_cat", out[0].Type)
+	assert.Equal(t, "y_cat", out[1].Type)
+	assert.Equal(t, "b_numeric", out[2].Type)
+	assert.Equal(t, "z_numeric", out[3].Type)
+}
+
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
 // unchanged-signal-suppression discipline: a SignalDelta with no
 // per-pair changes is omitted by default. The output still names

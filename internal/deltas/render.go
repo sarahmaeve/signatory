@@ -339,22 +339,11 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
-// sortedGroups returns a copy of the input sorted by (signal_group,
-// type, source). Independent of input order; same input produces
-// same output.
+// sortedGroups returns a copy sorted via SortGroups: categorical-
+// change groups first, then (signal_group, type, source)
+// alphabetical within each tier. See SortGroups in types.go.
 func sortedGroups(groups []SignalDelta) []SignalDelta {
-	out := make([]SignalDelta, len(groups))
-	copy(out, groups)
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].SignalGroup != out[j].SignalGroup {
-			return out[i].SignalGroup < out[j].SignalGroup
-		}
-		if out[i].Type != out[j].Type {
-			return out[i].Type < out[j].Type
-		}
-		return out[i].Source < out[j].Source
-	})
-	return out
+	return SortGroups(groups)
 }
 
 // sortedKeys returns the keys of m in lexical order. Maps in Go

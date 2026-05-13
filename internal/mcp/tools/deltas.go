@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/deltas"
@@ -213,18 +212,11 @@ func buildWindow(in deltasInput) (deltas.TimeWindow, error) {
 // fires when any groups were dropped, even if the kept set is at
 // exactly the cap.
 func assembleResponse(in deltas.RenderInput) *DeltasResponse {
-	// Groups already arrive sorted by (signal_group, type, source)
-	// from buildSignalDeltas; double-check here so the truncation
-	// is deterministic regardless of upstream changes.
-	sort.SliceStable(in.Groups, func(i, j int) bool {
-		if in.Groups[i].SignalGroup != in.Groups[j].SignalGroup {
-			return in.Groups[i].SignalGroup < in.Groups[j].SignalGroup
-		}
-		if in.Groups[i].Type != in.Groups[j].Type {
-			return in.Groups[i].Type < in.Groups[j].Type
-		}
-		return in.Groups[i].Source < in.Groups[j].Source
-	})
+	// Groups already arrive sorted via deltas.SortGroups (categorical-
+	// first, then alphabetical) from buildSignalDeltas; re-sort here
+	// so truncation is deterministic regardless of upstream changes,
+	// and so dropped groups are the noisy-drift ones at the tail.
+	in.Groups = deltas.SortGroups(in.Groups)
 
 	total := 0
 	for _, g := range in.Groups {
