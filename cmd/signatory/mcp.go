@@ -116,6 +116,7 @@ func registerMCPHandlers(srv *mcp.Server, s *store.SQLite, dbPath, version strin
 	srv.Register(&tools.ShowConclusionsTool{Store: s})
 	srv.Register(&tools.ShowMethodologyTool{Store: s})
 	srv.Register(&tools.ShowSynthesisTool{Store: s})
+	srv.Register(&tools.DeltasTool{Store: s})
 	srv.Register(&tools.IngestAnalysisTool{Store: s})
 	srv.Register(&tools.SurveyTool{})
 }

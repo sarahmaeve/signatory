@@ -39,6 +39,7 @@ type CLI struct {
 	ShowConclusions ShowConclusionsCmd `cmd:"show-conclusions" help:"Query conclusions across ingested analyst outputs." group:"review"`
 	ShowMethodology ShowMethodologyCmd `cmd:"show-methodology" help:"Query methodology patterns across ingested analyst outputs." group:"review"`
 	ShowSynthesis   ShowSynthesisCmd   `cmd:"show-synthesis" help:"Render a synthesis output as markdown or static HTML." group:"review"`
+	Deltas          DeltasCmd          `cmd:"deltas" help:"Show signal-value changes for a target between observations over time. Cheap, deterministic, no LLM cost." group:"review"`
 
 	// --- Infrastructure: setup and services ---
 	Init    InitCmd    `cmd:"" help:"Scaffold ./templates/, ./filestore/, and signatory.config.toml in a project." group:"infra"`
