@@ -21,6 +21,42 @@ The remaining Phase 2 item — `signatory deltas --html` for
 time-series charts — is still deferred behind its own
 chart-shape design pass.
 
+**Readability tier shipped (post-Phase-2, text-renderer only).**
+A first dogfood revealed the output read as boilerplate: real
+categorical transitions buried under stars/forks/followers drift
+and clock-tick artifacts. Six commits restructured the human view:
+
+  - **Direction arrows on numeric scalars:** `count: 1674 → 1678 (+4)`.
+  - **At-a-glance summary header:** `N signals changed across M runs`,
+    annotated `(K signals with forge drift only)` when bucketing
+    fires; `No changes in this window.` when nothing meaningful
+    moved.
+  - **Severity-tinted ordering:** groups whose pair-diffs touch
+    categorical changes (boolean / string scalars, Added /
+    Removed fields, array changes) sort BEFORE groups whose only
+    changes are numeric drift. `SortGroups` is shared between the
+    text renderer, `buildSignalDeltas`, and the MCP truncation
+    path — so when the cap fires, drift-only groups are dropped
+    first.
+  - **Clock-field suppression:** fields like `days_ago`,
+    `account_age_days`, `divergence_days` (values derived from
+    `now - stored_date`) are silenced. They tick with the wall
+    clock between collections and aren't real change. Text-only;
+    JSON / MCP preserve them.
+  - **Forge-drift bucketing:** drift-only groups collapse into a
+    one-line-per-field footer with cumulative deltas
+    (`stars.count (+6 over 4 runs)`). `--expand` restores
+    per-transition rendering. Text-only; JSON / MCP wire shape
+    unchanged.
+  - **ANSI color, three accents** (bold signal type, dim
+    timestamps, yellow CHANGED marker). TTY autodetect; honors
+    `NO_COLOR`, `CLICOLOR_FORCE`; `--no-color` flag for override.
+
+These are presentation concerns layered on top of the data
+pipeline; the JSON and MCP wire shapes were deliberately not
+touched. The principle: structured-data consumers see everything;
+human readers see the curated view.
+
 **Internal refactor:** the store→filter→window→diff pipeline
 lives in `internal/deltas.Computer`, mirroring
 `internal/summary.Assembler`. Both the CLI verb and the MCP tool
@@ -109,6 +145,8 @@ signatory deltas <target> [flags]
 | `--source <name>` | Filter by collector source (e.g. `npm-registry`, `github`, `git`). |
 | `--group <name>` | Filter by signal group (vitality / governance / publication / hygiene / criticality / identity). |
 | `--include-unchanged` | Surface signals that have no diffs in the window. Default behavior suppresses them. |
+| `--expand` | Restore per-transition rendering for forge-drift groups (stars, forks, followers, open_issues). Default collapses these into a footer with cumulative deltas. |
+| `--no-color` | Disable ANSI color/style codes in text output. Default auto-detects whether stdout is a terminal; `NO_COLOR` and `CLICOLOR_FORCE` env vars also honored. |
 | `--json` | Emit structured JSON instead of human-readable text. |
 | `--yes` / `-y` | Skip the confirmation prompt for large `--all` expansions. |
 
@@ -542,6 +580,21 @@ var ErrEntityNotFound = errors.New("no entity matches target")
 // Renderers consume RenderInput directly.
 func RenderText(w io.Writer, in RenderInput, opts TextOpts) error
 func RenderJSON(w io.Writer, in RenderInput) error
+
+// TextOpts (rendering knobs; renderer is stupid about runtime —
+// the CLI verb resolves env / TTY / flags before constructing).
+type TextOpts struct {
+    IncludeUnchanged bool // include no-change signals (--include-unchanged)
+    Expand           bool // restore drift groups inline (--expand)
+    Color            bool // ANSI bold/dim/yellow accents
+}
+
+// Severity-tinted sort, shared between renderer + MCP truncation.
+// Groups whose pair-diffs touch a "categorical" change sort
+// before groups whose only changes are numeric drift; within
+// each tier, (signal_group, type, source) alphabetical.
+func SortGroups(groups []SignalDelta) []SignalDelta
+func (s SignalDelta) HasCategoricalChange() bool
 ```
 
 ### CLI flow
@@ -684,6 +737,47 @@ Phase 2 adds visualization and the agent-facing surface.
   inventory per signal-value type-shape is the design-pass
   dependency. Open question #3 below.
 
+### Readability tier — shipped (text renderer only)
+
+A first dogfood of Phase 2 against tanstack data revealed the
+output read as boilerplate: the one meaningful transition
+(`last_push.date` — upstream pushed code) was buried under
+incrementing stars / forks / followers / open_issues and
+clock-tick artifacts from `days_ago` / `account_age_days` /
+`divergence_days`. Six commits restructured the human view:
+
+| Refinement | What it does | Affects MCP? |
+|---|---|---|
+| Direction arrows | `count: 1674 → 1678 (+4)` | No (JSON has raw before/after) |
+| Summary header | `N signals changed across M runs (K with forge drift only)` | No (counts derivable client-side) |
+| Severity-tinted sort | categorical-first; SortGroups | **Yes** — also reorders MCP truncation drops |
+| Clock-field suppression | `days_ago`-shape fields hidden | No (JSON / MCP keep them) |
+| Drift bucketing + `--expand` | drift-only groups → cumulative-delta footer | No (presentation only) |
+| ANSI color | bold/dim/yellow; TTY autodetect | No (no JSON equivalent) |
+
+The principle: JSON / MCP carry the canonical structured data;
+text rendering is curated for human readers. The one shared
+piece (severity ordering) propagated to MCP truncation
+deliberately — it determines which groups are dropped when the
+200-transition cap fires, and drift-first-dropped is the right
+behavior for agents too.
+
+Real-world impact on a 3.5h tanstack window:
+
+```
+before:                              after:
+5 transition blocks                  1 transition block
+~25 lines body                       8 lines body
+last_push buried at top              last_push leads
+forks/stars/followers/open_issues    one-line forge-drift footer
+all rendered in full
+```
+
+The "compact: true" MCP param contemplated as a possible
+future addition (turning on clock-suppression + drift-bucketing
+at the agent boundary) remains deferred until agent feedback
+shows context-budget pressure.
+
 ## Rendering for maximum coherency
 
 Two output modes in Phase 1, each shaped for its consumer:
@@ -724,7 +818,8 @@ Shape (sketch):
 ### Text output (default, human-readable)
 
 The principle: **highlight what changed, suppress what didn't.**
-Two design choices baked in:
+Design choices baked in (those marked ✓ shipped in the
+readability tier):
 
 - **Newest-change is the focal point.** A reader scanning the output
   asks "what changed most recently?" first. The most-recent observation
@@ -735,25 +830,56 @@ Two design choices baked in:
   40-block scroll. `--include-unchanged` (Phase 1 flag) restores the
   full view when the operator wants to confirm "nothing else
   changed either."
+- ✓ **Summary header up top.** `N signals changed across M
+  runs` (with `(K with forge drift only)` annotation when
+  bucketing fires) answers "is this important?" without
+  scrolling.
+- ✓ **Severity-tinted ordering.** Categorical state changes
+  (booleans, strings, Added/Removed fields, arrays) sort before
+  pure numeric drift. The reader sees `trusted_publishing.present:
+  true → false` before `stars.count: +5`.
+- ✓ **Clock-field suppression.** `*_days_ago` / `*_age_days` /
+  `divergence_days` aren't real change — they tick with the
+  wall clock. Silenced in text; JSON / MCP preserve.
+- ✓ **Forge-drift bucketing.** Drift-only groups (numeric
+  scalar changes only, after clock-filter) collapse into a
+  single `forge drift only:` footer with one-line-per-field
+  cumulative deltas. `--expand` restores per-transition.
 
-Sketch of the text layout for a single changed signal:
+Sketch of the text layout (as shipped):
 
 ```
-version_unpublish_observed (npm-registry, publication)
-  2026-05-11T19:20:39Z  unpublished_count=0
-  2026-05-12T15:55:08Z  unpublished_count=2  ◀ CHANGED
-    unpublished_count: 0 → 2
-    unpublished_versions: gained 2 entries
-        + 1.169.8 (published 2026-05-11T19:26:17Z)
-        + 1.169.5 (published 2026-05-11T19:20:42Z)
-    most_recent_unpublished_publish_time: added
+Deltas for pkg:npm/@tanstack/react-router (range ...)
+
+1 signal changed across 12 runs (4 signals with forge drift only)
+
+last_push (github, vitality)
+  2026-05-12T16:16:20Z → 2026-05-12T18:01:16Z  ◀ CHANGED
+    date: "2026-05-12T13:32:35Z" → "2026-05-12T17:47:39Z"
+
+forge drift only (use --expand to see per-transition detail):
+  forks.count (+4 over 4 runs)
+  stars.count (+6 over 4 runs)
+  owner_profile.followers (+3 over 4 runs)
+  open_issues.count (+1 over 4 runs)
 ```
 
-For a signal with no change in the window:
+When stdout is a TTY (and `NO_COLOR` is unset), the signal-type
+name is bold, the timestamps are dim, and the `◀ CHANGED` marker
+is yellow. `--no-color` disables.
+
+For a signal with no change in the window (when
+`--include-unchanged` is on):
 
 ```
 attestation_consistency (npm-registry, publication)
   2 observations, no change
+```
+
+When the whole window has no meaningful changes at all:
+
+```
+No changes in this window. (use --include-unchanged for the full view)
 ```
 
 For multiple changes in one signal (more than two observations with
@@ -862,3 +988,33 @@ C. ✓ Fixed the e2e fixture's gitignore exclusion. `sample.db`
    `RenderInput` shape plus `truncated` / `groups_total` /
    `groups_returned`. 200-transition cap. Strict
    `additionalProperties:false`. See `internal/mcp/tools/deltas.go`.
+
+### Readability tier — done (text-renderer only)
+
+Sequenced "simple-first" per the post-MCP brainstorm. Each
+step is one commit; each is contained enough to revert
+independently.
+
+D1. ✓ Direction arrows on numeric scalars
+    (`count: 1674 → 1678 (+4)`). Integer-valued endpoints get
+    `(+N)`; fractional endpoints use `%+g` (strips trailing
+    zeros).
+D2. ✓ At-a-glance summary header
+    (`N signals changed across M runs`). Distinguishes
+    drift-only count when bucketing fires; emits
+    `No changes in this window.` when nothing meaningful moved.
+D3. ✓ Severity-tinted sort (`SortGroups`). Categorical-first;
+    propagates to MCP truncation so drift-only groups drop
+    before meaningful ones when the cap fires.
+D4. ✓ Clock-field suppression. `days_ago`-shape fields
+    (text-only); JSON / MCP carry them. The text renderer
+    drops the field at render time without rebuilding the diff.
+D5. ✓ Forge-drift bucketing + `--expand`. Drift-only groups
+    (no categorical changes after clock-filter) collapse to a
+    cumulative-delta footer. `--expand` restores per-transition.
+    Text-only; MCP unaffected.
+D6. ✓ ANSI color. Three accents (bold signal type, dim
+    timestamps, yellow CHANGED). TTY autodetect on `os.Stdout`;
+    `NO_COLOR` / `CLICOLOR_FORCE` env honored; `--no-color`
+    flag for explicit override. Tests inject `bytes.Buffer`
+    Stdout and bypass the resolver entirely.
