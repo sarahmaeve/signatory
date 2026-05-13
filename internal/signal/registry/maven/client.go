@@ -260,7 +260,16 @@ func (c *Client) ResolveRepoURL(ctx context.Context, groupID, artifactID, versio
 			return "", err
 		}
 
-		if scm := parseSCMURL(body); scm != "" {
+		// parseSCMURL returns the raw <url> verbatim and the
+		// scm:git:-stripped <connection>. NormalizeDeclaredRepoURL
+		// reduces both to signatory's canonical https://<forge>/<owner>/<name>
+		// form (handling the SCP-shorthand case Go's url.Parse can't accept,
+		// among others) and returns "" for non-first-classed forges.
+		// Empty after normalization is treated like "no <scm> in this POM"
+		// — the parent-chase below proceeds, preferring a usable parent
+		// SCM to stamping a non-forge URL the downstream collectors can't
+		// clone from.
+		if scm := NormalizeDeclaredRepoURL(parseSCMURL(body)); scm != "" {
 			return scm, nil
 		}
 

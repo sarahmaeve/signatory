@@ -446,8 +446,13 @@ func TestResolveRepoURL_ParentPOM_MaxDepth(t *testing.T) {
 	assert.Empty(t, url, "should return empty after hitting parent depth limit")
 }
 
-// TestResolveRepoURL_DirectSCM verifies the existing behavior: when
-// the artifact POM has its own <scm> section, no parent chasing needed.
+// TestResolveRepoURL_DirectSCM verifies that when the artifact POM
+// has its own <scm> section, no parent chasing is needed. The
+// expected URL is the case-folded canonical form produced by
+// CloneURLForRepoPlatform — the maven client matches the cross-
+// ecosystem contract (every other ecosystem's NormalizeDeclaredRepoURL
+// also lowercases via ResolveTarget), so the FasterXML casing in the
+// POM resolves to the canonical fasterxml form here.
 func TestResolveRepoURL_DirectSCM(t *testing.T) {
 	t.Parallel()
 
@@ -466,7 +471,7 @@ func TestResolveRepoURL_DirectSCM(t *testing.T) {
 	url, err := client.ResolveRepoURL(context.Background(),
 		"com.fasterxml.jackson.core", "jackson-databind", "2.18.0")
 	require.NoError(t, err)
-	assert.Equal(t, "https://github.com/FasterXML/jackson-databind", url)
+	assert.Equal(t, "https://github.com/fasterxml/jackson-databind", url)
 }
 
 // --- Tests for new longitudinal/governance signals ---
