@@ -83,3 +83,69 @@ func TestDeltasRun_RangeWindow_E2E(t *testing.T) {
 		"wide range must include the seeded transitions")
 	assert.Contains(t, stdout.String(), "CHANGED")
 }
+
+// runDeltasRange is a small helper for the range-probe scenarios
+// below — same shape as runDeltas in deltas_e2e_test.go but accepts
+// a Range string and target.
+func runDeltasRange(t *testing.T, target, rng string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := &DeltasCmd{
+		Target: target,
+		Range:  rng,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	require.NoError(t, cmd.Run(deltasTestGlobals(t)))
+	return stdout.String()
+}
+
+// TestDeltasRun_RangeWindow_BracketsAll: range covers all four
+// observations of the probe entity — three transitions surface
+// (t1→t2, t2→t3, t3→t4), each with a count increment.
+func TestDeltasRun_RangeWindow_BracketsAll(t *testing.T) {
+	t.Parallel()
+	out := runDeltasRange(t, "pkg:npm/range-window-probe",
+		"2026-04-01T00:00:00Z..2026-06-01T00:00:00Z")
+	assert.Contains(t, out, "range 2026-04-01T00:00:00Z to 2026-06-01T00:00:00Z",
+		"header reflects the range")
+	assert.Contains(t, out, "1 → 2", "t1→t2 transition")
+	assert.Contains(t, out, "2 → 3", "t2→t3 transition")
+	assert.Contains(t, out, "3 → 4", "t3→t4 transition")
+}
+
+// TestDeltasRun_RangeWindow_BracketsSubset: range excludes t1 and
+// t4 (covers only t2 and t3) — exactly one transition surfaces.
+func TestDeltasRun_RangeWindow_BracketsSubset(t *testing.T) {
+	t.Parallel()
+	out := runDeltasRange(t, "pkg:npm/range-window-probe",
+		"2026-05-10T00:00:00Z..2026-05-22T00:00:00Z")
+	// Only t2 (2026-05-12) and t3 (2026-05-20) are inside.
+	assert.Contains(t, out, "2 → 3", "the t2→t3 transition surfaces")
+	assert.NotContains(t, out, "1 → 2", "t1 excluded — no t1→t2 transition")
+	assert.NotContains(t, out, "3 → 4", "t4 excluded — no t3→t4 transition")
+}
+
+// TestDeltasRun_RangeWindow_SinglePoint: range that admits exactly
+// one observation (just t2). No transitions render (you need two
+// observations to diff). Default IncludeUnchanged=false suppresses
+// the lone signal entirely.
+func TestDeltasRun_RangeWindow_SinglePoint(t *testing.T) {
+	t.Parallel()
+	out := runDeltasRange(t, "pkg:npm/range-window-probe",
+		"2026-05-12T00:00:00Z..2026-05-13T00:00:00Z")
+	// No transitions; signal suppressed (default behavior).
+	assert.NotContains(t, out, "CHANGED")
+	assert.NotContains(t, out, " → ")
+}
+
+// TestDeltasRun_RangeWindow_Empty: range falls entirely outside the
+// observation timeline — the renderer surfaces an explicit
+// "no observations" line.
+func TestDeltasRun_RangeWindow_Empty(t *testing.T) {
+	t.Parallel()
+	out := runDeltasRange(t, "pkg:npm/range-window-probe",
+		"2030-01-01T00:00:00Z..2030-01-02T00:00:00Z")
+	assert.Contains(t, out, "no observations in this window",
+		"empty-range output must signal the empty-window case")
+}

@@ -39,9 +39,16 @@ const dbPath = "internal/deltas/testdata/sample.db"
 // still differ run-to-run because entity IDs and signal IDs are
 // random UUIDs — tests assert on URI and signal value, not on
 // row IDs.
+//
+// t1/t2 are the two-observation timestamps used by most scenarios.
+// t3/t4 extend the timeline for the range-window probe scenario —
+// four observations let a range bracket a subset, a single point,
+// or fall entirely outside the data.
 var (
 	t1 = time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	t2 = time.Date(2026, 5, 12, 15, 55, 0, 0, time.UTC)
+	t3 = time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC)
+	t4 = time.Date(2026, 5, 25, 18, 0, 0, 0, time.UTC)
 )
 
 func main() {
@@ -74,6 +81,7 @@ func run() error {
 		seedBotPublisherAppears,
 		seedVersionBurstFlips,
 		seedMaintainerChurn,
+		seedRangeWindowProbe,
 	}
 	for _, seed := range scenarios {
 		if err := seed(ctx, s); err != nil {
@@ -316,6 +324,35 @@ func seedVersionBurstFlips(ctx context.Context, s *store.SQLite) error {
 	}
 	return appendSignal(ctx, s, id, "version_publish_burst", "npm-registry",
 		profile.SignalGroupPublication, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 9: range-window probe ---
+//
+// Four observations of a single signal at t1, t2, t3, t4. Lets the
+// e2e suite exercise --range bracketing: include all, include a
+// subset, include exactly one observation (no transitions to render),
+// and include none (empty-window output). The signal-type pick
+// (maintainer_count) is arbitrary — any registered scalar-bearing
+// type would do; this one already has a renderer-friendly shape.
+func seedRangeWindowProbe(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:npm/range-window-probe", "range-window-probe", "npm")
+	if err != nil {
+		return err
+	}
+	values := []map[string]any{
+		{"count": float64(1), "logins": []any{"alice"}},
+		{"count": float64(2), "logins": []any{"alice", "bob"}},
+		{"count": float64(3), "logins": []any{"alice", "bob", "carol"}},
+		{"count": float64(4), "logins": []any{"alice", "bob", "carol", "dave"}},
+	}
+	timestamps := []time.Time{t1, t2, t3, t4}
+	for i, v := range values {
+		if err := appendSignal(ctx, s, id, "maintainer_count", "npm-registry",
+			profile.SignalGroupGovernance, profile.ForgeryMediumDeclining, v, timestamps[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- Scenario 8: maintainer churn ---
