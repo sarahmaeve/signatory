@@ -102,6 +102,69 @@ func TestRenderText_TanStackUnpublishGapAppears(t *testing.T) {
 	assert.Contains(t, got, "1.169.5")
 }
 
+// TestRenderText_ScalarDirectionArrow verifies that numeric scalar
+// transitions get a signed delta appended in parentheses. Speeds
+// the read for the most common case (incrementing counts): the
+// reader sees the magnitude AND direction without subtracting in
+// their head.
+//
+// String and boolean scalars are unchanged — the existing
+// `before → after` form already conveys the direction.
+func TestRenderText_ScalarDirectionArrow(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{
+		"stars":      float64(14376),
+		"forks":      float64(10),
+		"divergence": float64(0.5),
+		"shape":      "synchronized",
+		"present":    true,
+	}
+	current := map[string]any{
+		"stars":      float64(14381), // +5
+		"forks":      float64(7),     // -3
+		"divergence": float64(1.7),   // +1.2
+		"shape":      "active",       // no arrow (string)
+		"present":    false,          // no arrow (bool)
+	}
+	in := RenderInput{
+		Target: "pkg:npm/example",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "stars", Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: current},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, current)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	// Positive integer delta.
+	assert.Contains(t, got, "stars: 14376 → 14381 (+5)",
+		"positive integer scalar must show signed delta")
+
+	// Negative integer delta.
+	assert.Contains(t, got, "forks: 10 → 7 (-3)",
+		"negative integer scalar must show signed delta")
+
+	// Float delta — accept either (+1.2) or (+1.20) etc.; pin the
+	// sign and the integer-part magnitude.
+	assert.Regexp(t, `divergence: 0\.5 → 1\.7 \(\+1\.?2?0?\)`, got,
+		"float scalar must show signed delta")
+
+	// String and bool scalars: no parenthesized delta.
+	assert.Contains(t, got, `shape: "synchronized" → "active"`,
+		"string scalar keeps existing form")
+	assert.NotContains(t, got, `shape: "synchronized" → "active" (`,
+		"string scalar must NOT gain a delta annotation")
+	assert.Contains(t, got, "present: true → false")
+	assert.NotContains(t, got, "present: true → false (",
+		"bool scalar must NOT gain a delta annotation")
+}
+
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
 // unchanged-signal-suppression discipline: a SignalDelta with no
 // per-pair changes is omitted by default. The output still names

@@ -90,8 +90,9 @@ func renderValueDiffIndented(bw *bufWriter, d ValueDiff, indent string) {
 		c := d.Changed[k]
 		switch c.Kind {
 		case ChangeKindScalar:
-			bw.printf("%s%s: %s → %s\n", indent, k,
-				formatValue(c.Before), formatValue(c.After))
+			bw.printf("%s%s: %s → %s%s\n", indent, k,
+				formatValue(c.Before), formatValue(c.After),
+				numericDeltaAnnotation(c.Before, c.After))
 		case ChangeKindObject:
 			bw.printf("%s%s: (object changed)\n", indent, k)
 			if c.Nested != nil {
@@ -240,6 +241,60 @@ func windowLabel(w TimeWindow) string {
 	default:
 		return fmt.Sprintf("since %s", w.Cutoff.UTC().Format(time.RFC3339))
 	}
+}
+
+// numericDeltaAnnotation returns " (+N)" or " (-N)" when both
+// before and after are numeric, and empty string otherwise. Used
+// by the scalar-change renderer to make numeric drift legible at
+// a glance — the reader sees magnitude and direction without
+// subtracting in their head.
+//
+// JSON decoding lands all numbers as float64; we accept either
+// float64 or int and format with minimal-precision: integer-valued
+// deltas render without a decimal point ("+5"), fractional
+// deltas use the smallest representation the value needs ("+1.2",
+// "+0.05"). The leading sign is always explicit.
+//
+// Booleans and strings get empty string — the before → after form
+// already conveys direction for those types.
+func numericDeltaAnnotation(before, after any) string {
+	bf, bok := toFloat(before)
+	af, aok := toFloat(after)
+	if !bok || !aok {
+		return ""
+	}
+	delta := af - bf
+	if delta == 0 {
+		// Shouldn't happen for a Changed entry, but defensive.
+		return ""
+	}
+	// Integer-valued deltas (where both endpoints are integer-
+	// valued) render without a decimal point.
+	if bf == float64(int64(bf)) && af == float64(int64(af)) {
+		return fmt.Sprintf(" (%+d)", int64(delta))
+	}
+	// Float deltas: strip trailing zeros, keep meaningful precision.
+	return fmt.Sprintf(" (%+g)", delta)
+}
+
+// toFloat normalizes any numeric value to float64. Returns (0,
+// false) for non-numeric inputs. JSON-decoded values are typically
+// float64 already; int / int64 are accepted for callers that
+// construct test values directly.
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	}
+	return 0, false
 }
 
 // sortedGroups returns a copy of the input sorted by (signal_group,
