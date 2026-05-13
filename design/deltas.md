@@ -1,5 +1,37 @@
 # Signal Deltas — Cheap, Deterministic Change Detection
 
+## Status (as of 2026-05-13)
+
+**Phase 1 shipped.** Pure `Diff`, text + JSON renderers, CLI verb,
+time-shorthand parser, seeded sample.db with 9 adversary-shape
+scenarios, full e2e coverage. The `--all` confirmation prompt
+landed as a y/N interactive prompt at >10 *runs* (not the
+originally-spec'd passive stderr warning at >100 *observations* —
+see the "Implementation order" section for the rationale).
+
+**`--range T1..T2` added post-Phase-1.** Bounded windows
+(inclusive on both ends) with the same time-shorthand each
+endpoint accepts. Mutex with `--since` / `--last` / `--all`.
+
+**Phase 2 partial.** The MCP tool `signatory_deltas` is live —
+agent-facing surface mirrors the CLI's `--json` wire shape with
+a 200-transition cap and `truncated` flag. Time scope is
+required (no implicit default; `--all` has no MCP equivalent).
+The remaining Phase 2 item — `signatory deltas --html` for
+time-series charts — is still deferred behind its own
+chart-shape design pass.
+
+**Internal refactor:** the store→filter→window→diff pipeline
+lives in `internal/deltas.Computer`, mirroring
+`internal/summary.Assembler`. Both the CLI verb and the MCP tool
+construct a `Computer` with the store and call `Compute(ctx,
+Params) (RenderInput, error)`.
+
+**Gitignore fix:** the e2e sample.db was originally caught by a
+broad `*.db` rule and silently never tracked. An explicit
+`!internal/deltas/testdata/sample.db` exception now keeps the
+fixture under version control.
+
 ## Problem statement
 
 `signatory analyze` produces point-in-time observations. Layer 2
@@ -54,7 +86,7 @@ observations, and (optionally) an MCP tool wrapping the same.
 |---|---|
 | Diff granularity | Per-field — show *what actually changed* |
 | Default time window | Last 24 hours |
-| Time-window flags | `--since` (words / durations / timestamps), `--last N`, `--all` |
+| Time-window flags | `--since` (words / durations / timestamps), `--last N`, `--range T1..T2`, `--all` (mutually exclusive) |
 | Package home | `internal/deltas/` |
 
 ## CLI surface
@@ -70,12 +102,19 @@ signatory deltas <target> [flags]
 | Flag | Purpose |
 |---|---|
 | `--since <value>` | Time-bounded view. Accepts: Go duration (`2d`, `12h`, `30m`), word-shaped (`yesterday`, `today`, `last-week`, `last-month`), or RFC3339 timestamp. Default if no time flag is `--since 24h`. |
-| `--last <n>` | Show the most recent `n` observations per `(type, source)` group. Mutually exclusive with `--since`. |
-| `--all` | Show the full history. Mutually exclusive with `--since` and `--last`. Emits a stderr warning when the result set would exceed 100 observations total; processes the full set regardless. |
+| `--last <n>` | Show the most recent `n` observations per `(type, source)` group. |
+| `--range <T1..T2>` | Bounded range (inclusive on both ends). Each endpoint accepts the same syntax as `--since`. Mirrors git rev-range. |
+| `--all` | Show the full history. Prompts y/N when more than 10 collection runs are present (a "run" = distinct `collected_at` timestamp). `--yes` / `-y` bypasses. EOF / closed stdin defaults to no. |
 | `--type <name>` | Filter by signal type (e.g. `trusted_publishing`, `version_unpublish_observed`). |
 | `--source <name>` | Filter by collector source (e.g. `npm-registry`, `github`, `git`). |
 | `--group <name>` | Filter by signal group (vitality / governance / publication / hygiene / criticality / identity). |
+| `--include-unchanged` | Surface signals that have no diffs in the window. Default behavior suppresses them. |
 | `--json` | Emit structured JSON instead of human-readable text. |
+| `--yes` / `-y` | Skip the confirmation prompt for large `--all` expansions. |
+
+The four window flags (`--since`, `--last`, `--range`, `--all`)
+are mutually exclusive; the CLI verb returns an EX_USAGE error
+when more than one is set.
 
 ### Examples
 
@@ -94,13 +133,23 @@ signatory deltas repo:github/tj-actions/changed-files --all
 
 signatory deltas pkg:npm/lodash --last 5 --json
   → most recent 5 observations per (type, source), JSON-formatted
+
+signatory deltas pkg:npm/@tanstack/react-router \
+    --range '2026-05-10T00:00:00Z..2026-05-12T23:59:59Z'
+  → bounded window, both endpoints inclusive
+
+signatory deltas pkg:npm/@tanstack/react-router --range 'last-week..yesterday'
+  → bounded window using time-shorthand on both endpoints
 ```
 
 ### Time parsing extension
 
-The existing `parseSinceFlag` in `cmd/signatory/analysis.go:407`
-already handles Go duration + RFC3339. We extend it to recognize
-word-shaped inputs before falling through to duration parsing:
+**As shipped:** the parser lives at `cmd/signatory/deltas_time.go`
+as a standalone `parseTimeShorthand` (and `parseRangeShorthand`
+for `--range`), not as an extension of an existing function. The
+design rationale below still describes the accepted forms.
+
+The original sketch:
 
 ```go
 // New parseTimeWindowFlag (or extend existing parseSinceFlag):
@@ -356,67 +405,143 @@ entries should be cleanly surfaced by the deltas view.
 
 ## Implementation outline
 
-### File layout
+### File layout (as shipped)
 
 ```
 internal/deltas/
-  doc.go              package comment, public API
-  diff.go             pure function Diff(prior, current map[string]any) ValueDiff
-  diff_test.go        the eight scenarios above plus edge cases
-  render.go           render(ValueDiff) → text (human) / JSON (structured)
-  render_test.go      golden-file tests for render output
+  doc.go                  package comment
+  types.go                Observation, SignalDelta, TimeWindow,
+                          RenderInput, TextOpts; TimeWindow.Kind()
+                          and MarshalJSON
+  types_test.go           TimeWindow precedence + JSON shape
+  diff.go                 pure Diff(prior, current) ValueDiff
+  diff_test.go            8 adversary-shape scenarios + edge cases
+  render.go               RenderText + RenderJSON with newest-
+                          change highlighting + unchanged-signal
+                          suppression
+  render_test.go          renderer behavior tests
+  compute.go              ComputerStore interface (narrow:
+                          FindEntityByURI + GetSignals), Params,
+                          Computer.Compute, ErrEntityNotFound
+                          sentinel
+  compute_test.go         7 unit tests against an in-memory
+                          fakeStore; mutation-verified resolver
+                          coverage
+  testdata/sample.db      committed e2e fixture (9 scenarios)
+  testdata/generate/      generator program for the fixture
 
 cmd/signatory/
-  deltas.go           CLI verb: DeltasCmd struct + Run method
-  deltas_test.go      end-to-end with seeded store
+  deltas.go               thin CLI shell: flags, mutex check,
+                          window resolver, --all prompt, render
+                          wiring (calls deltas.Computer)
+  deltas_time.go          parseTimeShorthand, parseRangeShorthand
+  deltas_time_test.go     parser coverage
+  deltas_range_test.go    DeltasCmd flag/window tests + range
+                          e2e against sample.db
+  deltas_confirm.go       allRunsPromptThreshold,
+                          countRunsInRender, confirmAllExpansion
+  deltas_confirm_test.go  prompt-path coverage + run-counter
+  deltas_e2e_test.go      e2e against sample.db across all 8
+                          original adversary scenarios
 
-cmd/signatory/main.go modified: add Deltas subcommand to the kong CLI
-                      structure
+internal/mcp/tools/
+  deltas.go               DeltasTool + DeltasResponse;
+                          DeltasTransitionsCap = 200; buildWindow
+                          enforces "must set one of since / last /
+                          range_start+range_end"
+  deltas_test.go          11 unit tests against openTestStore
 ```
 
-### Public API of internal/deltas
+### Public API of internal/deltas (as shipped)
 
 ```go
 package deltas
 
-// ValueDiff carries the structural diff between two signal values.
-// Top-level operation is per-key add/remove/change; nested objects
-// recurse; arrays use length+stable-key heuristics. See design/deltas.md.
+// ValueDiff / Change / ChangeKind / ElementChange — the
+// structural diff types. Top-level is per-key add/remove/change;
+// nested objects recurse; arrays use length+stable-key heuristics.
 type ValueDiff struct {
-    Added   map[string]any       // keys present in current, absent in prior
-    Removed map[string]any       // keys present in prior, absent in current
-    Changed map[string]Change    // keys present in both with differing values
+    Added   map[string]any
+    Removed map[string]any
+    Changed map[string]Change
 }
 
-// Change carries the before/after pair for a single changed key,
-// plus a kind discriminator so renderers can dispatch on shape.
 type Change struct {
-    Kind     ChangeKind  // "scalar", "object", "array", "opaque"
+    Kind     ChangeKind
     Before   any
     After    any
-    Nested   *ValueDiff  // populated when Kind == "object"
-    Elements []ElementChange // populated when Kind == "array" with positional/keyed alignment
+    Nested   *ValueDiff
+    Elements []ElementChange
 }
 
-type ChangeKind string
-
-// SignalDelta is the unit the CLI verb emits: a (type, source) group
-// plus the chronological observation pairs and the diff between each.
+// SignalDelta groups chronological observations of one
+// (type, source) pair plus the pair-wise diffs.
 type SignalDelta struct {
-    Type        string
-    Source      string
-    Group       string
-    Observations []Observation  // chronological
-    PairDiffs   []ValueDiff     // len = len(Observations) - 1
+    Type         string
+    Source       string
+    SignalGroup  string
+    Observations []Observation
+    PairDiffs    []ValueDiff
 }
 
-type Observation struct {
-    CollectedAt time.Time
-    Value       map[string]any
+func (s SignalDelta) HasAnyChange() bool
+
+// TimeWindow's four modes (All / Last / Range / Cutoff) are
+// mutually exclusive; Kind() returns the discriminator the
+// renderer dispatches on.
+type TimeWindow struct {
+    All        bool
+    Last       int
+    RangeStart time.Time
+    RangeEnd   time.Time
+    Cutoff     time.Time
+}
+func (w TimeWindow) Kind() string  // "all" / "last" / "range" / "since"
+
+// RenderInput is what RenderText and RenderJSON consume — and
+// what Computer.Compute returns.
+type RenderInput struct {
+    Target string
+    Window TimeWindow
+    Groups []SignalDelta
 }
 
 // Diff is the pure-function workhorse.
 func Diff(prior, current map[string]any) ValueDiff
+
+// ComputerStore is the narrow Store subset Compute needs.
+// *store.SQLite satisfies it; tests inject fakes.
+type ComputerStore interface {
+    FindEntityByURI(ctx context.Context, canonicalURI string) (*profile.Entity, error)
+    GetSignals(ctx context.Context, entityID string) ([]profile.Signal, error)
+}
+
+// Params describes the inputs to Compute. Target accepts any
+// form profile.ResolveTarget understands (canonical URI, URL,
+// owner/repo shorthand).
+type Params struct {
+    Target string
+    Window TimeWindow
+    Type   string
+    Source string
+    Group  string
+}
+
+type Computer struct{ Store ComputerStore }
+
+func New(s ComputerStore) *Computer
+
+// Compute resolves the target, queries history, applies the
+// filters and window, and returns the rendered-shape input.
+// Returns ErrEntityNotFound (wrapped) when the target misses;
+// other store errors propagate wrapped.
+func (c *Computer) Compute(ctx context.Context, p Params) (RenderInput, error)
+
+var ErrEntityNotFound = errors.New("no entity matches target")
+
+// Renderers consume RenderInput directly.
+func RenderText(w io.Writer, in RenderInput, opts TextOpts) error
+func RenderJSON(w io.Writer, in RenderInput) error
 ```
 
 ### CLI flow
@@ -454,7 +579,11 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 
 ### Time-window parsing
 
-Extend (or replace) `parseSinceFlag` in `cmd/signatory/analysis.go`:
+**As shipped:** lives at `cmd/signatory/deltas_time.go` +
+`cmd/signatory/deltas.go`'s `window()` method, with `--range`
+folded in as a fourth window mode. The original sketch below
+predates `--range`; the actual implementation honors the same
+mutex with one extra arm.
 
 ```go
 // parseTimeWindow resolves the (--since | --last | --all) trio into a
@@ -517,30 +646,43 @@ The design splits naturally into two phases. Phase 1 lands the
 deterministic-diff primitive and the human/machine-readable surfaces.
 Phase 2 adds visualization and the agent-facing surface.
 
-### Phase 1 (this design's implementation scope)
+### Phase 1 — shipped
 
-- `internal/deltas/` package: pure `Diff` function + `Render` text/JSON.
-- `cmd/signatory/deltas.go` CLI verb with the flags spec'd above
-  (`--since`, `--last`, `--all`, `--type`, `--source`, `--group`,
-  `--json`).
-- COUNT-based pre-query before `--all` to detect large result sets;
-  stderr warning at > 100 observations total.
-- Time-shorthand parsing extension (`yesterday`, `last-week`,
-  `2d`, RFC3339).
-- The eight adversary-shape test scenarios.
+- `internal/deltas/` package: pure `Diff` + `RenderText` / `RenderJSON`.
+- `cmd/signatory/deltas.go` CLI verb with the flags from the
+  table above. `--range T1..T2` was added post-Phase-1 but
+  belongs to the same surface — the implementation cost was a
+  parser + a TimeWindow field.
+- The `--all` over-expansion guard shipped as an interactive
+  y/N prompt at >10 distinct collection runs, not the
+  originally-spec'd passive stderr warning at >100 observations.
+  Rationale: tanstack's actual production data sat at ~18 runs
+  in one day, and a passive warning was not load-bearing enough
+  to prevent unwanted scrolling. The y/N + `--yes` bypass +
+  EOF-defaults-to-no is closer to standard CLI hygiene
+  (`apt`/`dnf` style).
+- Time-shorthand parsing (`yesterday`, `last-week`, `2d`, RFC3339).
+- `internal/deltas/testdata/sample.db` with 9 seeded scenarios
+  (8 original adversary shapes + a 4-observation range-window
+  probe).
 
-### Phase 2 (follow-up scope, separate design pass)
+### Phase 2 — partial
 
-- **`--html` output for time-series visualization.** Mirrors
-  `signatory show-synthesis --html`'s static-page model. A chart
-  per `(type, source)` group plotting numeric fields over
-  `collected_at`; categorical fields rendered as state-change
-  timelines. Useful for "show me the trend of attestation
-  consistency over the last 30 days."
-- **MCP tool `signatory_deltas`.** Wraps the same query+diff path
-  for agent consumption during analysis-skill flows. The JSON
-  output of Phase 1 is already structured for this; Phase 2 is
-  just the MCP wiring.
+- **`signatory_deltas` MCP tool — shipped.** Wraps
+  `internal/deltas.Computer` for agent consumption. Wire shape
+  mirrors the CLI's `--json` output (same `RenderInput`) with
+  three meta fields appended: `truncated`, `groups_total`,
+  `groups_returned`. Caps total transitions at 200; agents are
+  required to scope the time window explicitly (no implicit
+  default; no `--all` equivalent). See
+  `internal/mcp/tools/deltas.go` and the routing line in
+  `internal/mcp/handshake.go`.
+
+- **`signatory deltas --html` — still deferred.** Static-page
+  renderer with per-`(type, source)` time-series charts.
+  Mirrors `signatory show-synthesis --html`. Chart-shape
+  inventory per signal-value type-shape is the design-pass
+  dependency. Open question #3 below.
 
 ## Rendering for maximum coherency
 
@@ -628,40 +770,32 @@ poorly in practice.
 ### Output-channel discipline
 
 - The structured JSON or text goes to stdout.
-- The COUNT-warning, parse errors, and progress narration go to
-  stderr.
+- The `--all` prompt, parse errors, and progress narration go
+  to stderr.
 - Mirrors the discipline of other signatory verbs (`analyze`,
   `survey`).
 
 ## Open questions
 
-1. **Group-by-group rendering vs. chronological-stream rendering.**
-   Two natural shapes for the Phase 1 text output:
-   - Group-by-(type, source): one signal type at a time, all its
-     observations, all its diffs (the sketch above).
-   - Chronological stream: interleave changes across signal types in
-     the order they occurred.
+1. ~~Group-by-group rendering vs. chronological-stream rendering.~~
+   **Resolved**: shipped group-by. A `--chronological` flag has not
+   been requested in dogfood; leave for a future ask.
 
-   Group-by is easier to read for one-signal investigation; stream is
-   better for "what happened on day X." Phase 1 ships group-by; a
-   `--chronological` flag can be added later if the stream framing
-   proves useful.
+2. ~~`--vs-baseline` framing for Phase 1.~~ **Deferred**: not
+   shipped. Pair-wise framing has worked well in dogfood (intraday
+   drift on tanstack reads naturally as "this changed, then this
+   changed"). Revisit if a consumer surfaces a specific gap.
 
-2. **`--vs-baseline` framing for Phase 1.** As noted above, pair-wise
-   diffs may sometimes obscure the "current vs starting point"
-   reading that consumers want. Could be a small flag that compares
-   the latest observation against the oldest in the window directly,
-   skipping intermediate diffs. Defer until pair-wise feedback
-   surfaces a clear gap.
-
-3. **Phase 2 HTML chart shapes per signal type.** Numeric fields
-   plot naturally on a Y-axis (e.g., `unpublished_count`,
-   `divergence_days`, `non_human_count`). Categorical fields are
-   state-change timelines (e.g., `shape="active-repo-paused-publishes"`).
-   Array-valued fields (e.g., `workflow_refs`) need a different
-   visualization — possibly a stacked-row timeline. Phase 2 design
-   pass will need to inventory the signal-value type-shapes and
-   spec a chart-per-shape mapping.
+3. **Phase 2 HTML chart shapes per signal type.** Still open.
+   Numeric fields plot naturally on a Y-axis (e.g.,
+   `unpublished_count`, `divergence_days`, `non_human_count`).
+   Categorical fields are state-change timelines (e.g.,
+   `shape="active-repo-paused-publishes"`). Array-valued fields
+   (e.g., `workflow_refs`) need a different visualization —
+   possibly a stacked-row timeline. The Phase 2 design pass will
+   need to inventory the signal-value type-shapes and spec a
+   chart-per-shape mapping before `--html` can be implemented
+   coherently.
 
 ## Cross-references
 
@@ -688,29 +822,43 @@ poorly in practice.
 
 ## Implementation order
 
-### Phase 1 (this implementation)
+### Phase 1 — done
 
-1. Pure `internal/deltas/diff.go` + tests for all eight adversary
-   scenarios (RED → GREEN).
-2. `internal/deltas/render.go` text and JSON output (golden tests),
-   newest-change highlighting + unchanged-signal suppression.
-3. `cmd/signatory/deltas.go` CLI verb wiring with `GetSignals`,
-   filter, group, diff, render. Includes COUNT pre-query for the
-   `--all` warning.
-4. Time-shorthand extension to `parseTimeShorthand` (`yesterday`,
-   `last-week`, `2d`, RFC3339).
-5. End-to-end test against a seeded store.
-6. Manual dogfood: run `signatory analyze --refresh` twice on a
-   target (with a few-minute gap to ensure distinct timestamps),
-   then `signatory deltas <target>` and verify the second
-   observation produces a coherent diff against the first.
+1. ✓ Pure `internal/deltas/diff.go` + 8 adversary-scenario tests.
+2. ✓ `internal/deltas/render.go` text + JSON with newest-change
+   highlighting and unchanged-signal suppression.
+3. ✓ `cmd/signatory/deltas.go` CLI verb. The COUNT-warning
+   originally spec'd here was replaced by the y/N prompt at >10
+   runs (see Phase 1 section above for the rationale).
+4. ✓ Time-shorthand parsing.
+5. ✓ End-to-end tests against `internal/deltas/testdata/sample.db`
+   (committed, 9 scenarios).
+6. ✓ Manual dogfood: ran `signatory analyze --refresh
+   pkg:npm/@tanstack/react-router` twice on the same day, then
+   `signatory deltas pkg:npm/@tanstack/react-router --all`
+   surfaced the real intraday drift (stars/forks counts, owner
+   profile, last_push date, cadence divergence).
 
-### Phase 2 (separate design pass + implementation)
+### Phase 1.5 — done (post-Phase-1 refinements)
 
-7. `signatory deltas --html <target>` — static-page renderer with
-   per-`(type, source)` time-series charts. Models on
-   `signatory show-synthesis --html`. Chart-shape inventory per
-   signal-value type-shape is the design-pass dependency.
-8. MCP tool `signatory_deltas(target, since, last, all, type, source,
-   group)` — wraps the same query+diff path that the JSON CLI output
-   already produces. Documentation in the MCP server's tool list.
+A. ✓ `--range T1..T2` CLI flag. Syntax mirrors git rev-range;
+   each endpoint accepts the same time-shorthand as `--since`;
+   inclusive on both ends; rejects start>end.
+B. ✓ Extracted `internal/deltas.Computer` to share the
+   store→filter→window→diff path between the CLI and MCP. The
+   CLI verb is now a thin shell around `Computer.Compute`.
+C. ✓ Fixed the e2e fixture's gitignore exclusion. `sample.db`
+   was being silently dropped by the broad `*.db` rule; an
+   explicit negation now tracks it.
+
+### Phase 2 — partial
+
+7. **Deferred:** `signatory deltas --html <target>` —
+   chart-shape inventory needed first; see Open Question #3.
+8. ✓ MCP tool `signatory_deltas`. Required `target`; mutex on
+   `since` / `last` / `range_start+range_end` (at least one;
+   no implicit default; no `--all` equivalent); optional
+   `type` / `source` / `group` filters. Response inlines the
+   `RenderInput` shape plus `truncated` / `groups_total` /
+   `groups_returned`. 200-transition cap. Strict
+   `additionalProperties:false`. See `internal/mcp/tools/deltas.go`.
