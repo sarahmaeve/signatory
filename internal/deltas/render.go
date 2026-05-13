@@ -38,12 +38,21 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		return bw.err
 	}
 
+	// Filter clock-counter fields out of the text rendering. The
+	// filtered slice is what everything below (sort, summary,
+	// emit) operates on. The original `in.Groups` is unchanged,
+	// so RenderJSON / MCP consumers still see the raw data.
+	filtered := make([]SignalDelta, len(in.Groups))
+	for i, g := range in.Groups {
+		filtered[i] = filterClockFields(g)
+	}
+
 	// Summary line — answers "is this important?" at a glance.
 	// Counts only groups with actual changes (not IncludeUnchanged
 	// padding); runs are distinct CollectedAt across the rendered
 	// set. The unchanged-only case gets a "No changes" line plus
 	// a hint at --include-unchanged.
-	changedCount, runCount := summarize(in.Groups)
+	changedCount, runCount := summarize(filtered)
 	switch {
 	case changedCount > 0:
 		bw.printf("\n%s changed across %s\n",
@@ -53,7 +62,7 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		bw.printf("\nNo changes in this window. (use --include-unchanged for the full view)\n")
 	}
 
-	groups := sortedGroups(in.Groups)
+	groups := sortedGroups(filtered)
 
 	wrote := false
 	for _, g := range groups {
@@ -283,6 +292,81 @@ func windowLabel(w TimeWindow) string {
 	default:
 		return fmt.Sprintf("since %s", w.Cutoff.UTC().Format(time.RFC3339))
 	}
+}
+
+// isClockField reports whether a top-level diff field name is a
+// "clock counter" — a value derived from (now - some_stored_date).
+// These fields tick with the wall clock between collection runs
+// even when the underlying world (the stored date) hasn't moved,
+// so their deltas are measurement artifacts, not signal. The
+// text renderer suppresses them.
+//
+// Patterns (all match the exact key at one level of the value tree;
+// no path-style matching for v1 — recursion is deferred until a
+// nested clock-counter actually shows up in the corpus):
+//
+//   - "days_ago" exactly (e.g., last_publish.days_ago)
+//   - any name ending in "_days_ago" (publish_days_ago,
+//     commit_days_ago, last_days_ago)
+//   - "age_days" exactly
+//   - any name ending in "_age_days" (account_age_days,
+//     repo_age_days)
+//   - "divergence_days" exactly (a function of *_days_ago in
+//     commit_publish_cadence_divergence; tracks the clock when
+//     publishes pause, and the meaningful state is `shape`)
+//
+// JSON / MCP output is NOT filtered — those are structured
+// consumers; suppression is human-text-only.
+func isClockField(name string) bool {
+	switch name {
+	case "days_ago", "age_days", "divergence_days":
+		return true
+	}
+	if strings.HasSuffix(name, "_days_ago") || strings.HasSuffix(name, "_age_days") {
+		return true
+	}
+	return false
+}
+
+// filterClockFields returns a copy of g whose PairDiffs have had
+// clock-counter fields removed at the top level. The original
+// SignalDelta is not mutated. Used by RenderText to prune noise
+// before the unchanged-suppression pass; JSON / MCP renderers
+// don't call this.
+func filterClockFields(g SignalDelta) SignalDelta {
+	out := g
+	out.PairDiffs = make([]ValueDiff, len(g.PairDiffs))
+	for i, d := range g.PairDiffs {
+		out.PairDiffs[i] = filterClockFieldsValueDiff(d)
+	}
+	return out
+}
+
+func filterClockFieldsValueDiff(d ValueDiff) ValueDiff {
+	out := ValueDiff{
+		Added:   map[string]any{},
+		Removed: map[string]any{},
+		Changed: map[string]Change{},
+	}
+	for k, v := range d.Added {
+		if isClockField(k) {
+			continue
+		}
+		out.Added[k] = v
+	}
+	for k, v := range d.Removed {
+		if isClockField(k) {
+			continue
+		}
+		out.Removed[k] = v
+	}
+	for k, c := range d.Changed {
+		if isClockField(k) {
+			continue
+		}
+		out.Changed[k] = c
+	}
+	return out
 }
 
 // numericDeltaAnnotation returns " (+N)" or " (-N)" when both

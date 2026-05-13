@@ -484,6 +484,191 @@ func TestSortGroups_CategoricalThenAlphabetical(t *testing.T) {
 	assert.Equal(t, "z_numeric", out[3].Type)
 }
 
+// TestRenderText_SuppressesClockFields verifies that field
+// names matching the clock-counter list (days_ago, account_age_days,
+// divergence_days, etc.) are filtered out of the text rendering.
+// These fields tick with the wall clock and don't reflect any
+// change in the underlying world.
+func TestRenderText_SuppressesClockFields(t *testing.T) {
+	t.Parallel()
+	// A mixed case: date changed (meaningful), days_ago changed
+	// (clock-tick noise). Only the date should appear.
+	prior := map[string]any{
+		"date":     "2026-05-10T12:00:00Z",
+		"days_ago": float64(3),
+	}
+	current := map[string]any{
+		"date":     "2026-05-12T12:00:00Z",
+		"days_ago": float64(1),
+	}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "last_push", Source: "github", SignalGroup: "vitality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: current},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, current)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, `date: "2026-05-10T12:00:00Z" → "2026-05-12T12:00:00Z"`,
+		"meaningful field (date) must surface")
+	assert.NotContains(t, got, "days_ago:",
+		"clock-counter field must be suppressed from text output")
+}
+
+// TestRenderText_SuppressesClockOnlyGroups: a group whose changes
+// are entirely clock-tick noise should be treated as "unchanged"
+// and suppressed under the default (--include-unchanged off).
+func TestRenderText_SuppressesClockOnlyGroups(t *testing.T) {
+	t.Parallel()
+	// All three changed fields are clock-counters.
+	prior := map[string]any{
+		"commit_days_ago":  float64(0),
+		"publish_days_ago": float64(6),
+		"divergence_days":  float64(6),
+		"shape":            "active-repo-paused-publishes",
+	}
+	current := map[string]any{
+		"commit_days_ago":  float64(0),
+		"publish_days_ago": float64(7),
+		"divergence_days":  float64(7),
+		"shape":            "active-repo-paused-publishes", // unchanged
+	}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "commit_publish_cadence_divergence", Source: "cadence", SignalGroup: "vitality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: current},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, current)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.NotContains(t, got, "commit_publish_cadence_divergence",
+		"group with only clock-tick changes must be suppressed entirely")
+	assert.Contains(t, got, "No changes in this window.",
+		"summary must reflect that no meaningful changes remain")
+}
+
+// TestRenderText_ClockSuppression_SummaryCount: the at-a-glance
+// summary line counts only the signals that have meaningful
+// changes after clock-field suppression — not the raw count.
+func TestRenderText_ClockSuppression_SummaryCount(t *testing.T) {
+	t.Parallel()
+	// Two groups: one with a real string change, one with only
+	// clock noise. Summary should report 1 signal, not 2.
+	realPrior := map[string]any{"date": "2026-05-10T00:00:00Z"}
+	realNow := map[string]any{"date": "2026-05-12T00:00:00Z"}
+	clockPrior := map[string]any{"days_ago": float64(3)}
+	clockNow := map[string]any{"days_ago": float64(1)}
+
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			{
+				Type: "last_push", Source: "github", SignalGroup: "vitality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: realPrior},
+					{CollectedAt: t2, Value: realNow},
+				},
+				PairDiffs: []ValueDiff{Diff(realPrior, realNow)},
+			},
+			{
+				Type: "last_publish", Source: "npm-registry", SignalGroup: "vitality",
+				Observations: []Observation{
+					{CollectedAt: t1, Value: clockPrior},
+					{CollectedAt: t2, Value: clockNow},
+				},
+				PairDiffs: []ValueDiff{Diff(clockPrior, clockNow)},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "1 signal changed",
+		"summary must count only signals with non-clock changes")
+	assert.NotContains(t, got, "2 signals changed")
+}
+
+// TestRenderJSON_PreservesClockFields: the JSON renderer (and
+// therefore the MCP wire shape) must NOT suppress clock fields.
+// Structured consumers see the raw data; suppression is a
+// human-text-only presentation concern.
+func TestRenderJSON_PreservesClockFields(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{"days_ago": float64(3), "date": "2026-05-10T00:00:00Z"}
+	current := map[string]any{"days_ago": float64(1), "date": "2026-05-12T00:00:00Z"}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "last_push", Source: "github", SignalGroup: "vitality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: current},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, current)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderJSON(&buf, in))
+	got := buf.String()
+
+	assert.Contains(t, got, `"days_ago"`,
+		"JSON output must preserve clock fields for structured consumers")
+	assert.Contains(t, got, `"date"`)
+}
+
+// TestIsClockField pins the field-name pattern matcher. Any
+// addition to the clock-field list needs a corresponding test
+// case here.
+func TestIsClockField(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"days_ago", true},
+		{"publish_days_ago", true},
+		{"commit_days_ago", true},
+		{"last_days_ago", true},
+		{"account_age_days", true},
+		{"age_days", true},
+		{"repo_age_days", true},
+		{"divergence_days", true},
+
+		// Not clock fields.
+		{"date", false},
+		{"count", false},
+		{"days", false}, // ambiguous; not in the list
+		{"shape", false},
+		{"present", false},
+		{"version_checked", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isClockField(tc.name))
+		})
+	}
+}
+
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
 // unchanged-signal-suppression discipline: a SignalDelta with no
 // per-pair changes is omitted by default. The output still names
