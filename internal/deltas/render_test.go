@@ -165,6 +165,112 @@ func TestRenderText_ScalarDirectionArrow(t *testing.T) {
 		"bool scalar must NOT gain a delta annotation")
 }
 
+// TestRenderText_SummaryHeader verifies the at-a-glance line that
+// appears between "Deltas for ..." and the first group block. The
+// summary reports how many signals changed and how many distinct
+// collection runs the rendered set spans — answers the reader's
+// first question ("is this important?") without scrolling.
+func TestRenderText_SummaryHeader(t *testing.T) {
+	t.Parallel()
+	tA := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	tB := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	tC := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+
+	// Two signals, each with two transitions; three distinct runs total.
+	mkGroup := func(typ string, p, q, r map[string]any) SignalDelta {
+		return SignalDelta{
+			Type: typ, Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: tA, Value: p},
+				{CollectedAt: tB, Value: q},
+				{CollectedAt: tC, Value: r},
+			},
+			PairDiffs: []ValueDiff{Diff(p, q), Diff(q, r)},
+		}
+	}
+	in := RenderInput{
+		Target: "pkg:npm/example",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{
+			mkGroup("stars",
+				map[string]any{"count": float64(10)},
+				map[string]any{"count": float64(20)},
+				map[string]any{"count": float64(30)}),
+			mkGroup("forks",
+				map[string]any{"count": float64(1)},
+				map[string]any{"count": float64(2)},
+				map[string]any{"count": float64(3)}),
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "2 signals changed across 3 runs",
+		"summary line must report changed signals and run count")
+}
+
+// TestRenderText_SummaryHeader_Pluralization: 1 signal / 1 run
+// should read in the singular form. The CLI verb's most common
+// case is "I just ran analyze twice; what's different?" — that's
+// exactly N=1 run-pair, N=1 signal in many scenarios.
+func TestRenderText_SummaryHeader_Pluralization(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{"count": float64(10)}
+	current := map[string]any{"count": float64(11)}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "stars", Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: current},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, current)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "1 signal changed across 2 runs",
+		"singular 'signal' must appear when only one type changed")
+	assert.NotContains(t, got, "1 signals",
+		"plural 'signals' must not appear in singular case")
+}
+
+// TestRenderText_SummaryHeader_NoChanges replaces the prior
+// per-group "no change" with a top-level "No changes in this
+// window." line when nothing in the window moved AND
+// IncludeUnchanged is off (default).
+func TestRenderText_SummaryHeader_NoChanges(t *testing.T) {
+	t.Parallel()
+	value := map[string]any{"count": float64(42)}
+	in := RenderInput{
+		Target: "pkg:npm/stable",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "stars", Source: "github", SignalGroup: "criticality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: value},
+				{CollectedAt: t2, Value: value},
+			},
+			PairDiffs: []ValueDiff{Diff(value, value)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	got := buf.String()
+
+	assert.Contains(t, got, "No changes in this window.",
+		"unchanged window must produce an explicit summary line")
+	assert.Contains(t, got, "--include-unchanged",
+		"summary should hint at the flag that surfaces unchanged signals")
+	assert.NotContains(t, got, "signals changed",
+		"summary must not claim signals changed when none did")
+}
+
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
 // unchanged-signal-suppression discipline: a SignalDelta with no
 // per-pair changes is omitted by default. The output still names

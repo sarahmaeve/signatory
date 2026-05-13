@@ -38,6 +38,21 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		return bw.err
 	}
 
+	// Summary line — answers "is this important?" at a glance.
+	// Counts only groups with actual changes (not IncludeUnchanged
+	// padding); runs are distinct CollectedAt across the rendered
+	// set. The unchanged-only case gets a "No changes" line plus
+	// a hint at --include-unchanged.
+	changedCount, runCount := summarize(in.Groups)
+	switch {
+	case changedCount > 0:
+		bw.printf("\n%s changed across %s\n",
+			pluralize(changedCount, "signal"),
+			pluralize(runCount, "run"))
+	default:
+		bw.printf("\nNo changes in this window. (use --include-unchanged for the full view)\n")
+	}
+
 	groups := sortedGroups(in.Groups)
 
 	wrote := false
@@ -65,11 +80,38 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 		}
 	}
 
-	if !wrote {
-		bw.printf("\n  no changes in this window (use --include-unchanged for the full view)\n")
-	}
+	// The top-level summary already owned the "no changes" message;
+	// nothing further to emit when wrote==false.
+	_ = wrote
 
 	return bw.err
+}
+
+// summarize returns (changedSignals, distinctRuns) over the
+// rendered set: a "changed signal" is a SignalDelta with at least
+// one pair-diff that surfaces a change; a "run" is a distinct
+// CollectedAt across all observations of all groups (the same
+// notion the CLI's --all prompt uses).
+func summarize(groups []SignalDelta) (changed int, runs int) {
+	seen := make(map[time.Time]struct{})
+	for _, g := range groups {
+		if g.HasAnyChange() {
+			changed++
+		}
+		for _, o := range g.Observations {
+			seen[o.CollectedAt] = struct{}{}
+		}
+	}
+	return changed, len(seen)
+}
+
+// pluralize returns "1 signal" or "N signals" — strict English
+// rules: anything not exactly 1 gets the plural form.
+func pluralize(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // renderValueDiffIndented renders a single ValueDiff under the given
