@@ -222,4 +222,12 @@ type TextOpts struct {
 	// deltas, so the meaningful categorical transitions aren't
 	// buried under boilerplate.
 	Expand bool
+
+	// Color enables ANSI color/style codes in the text output.
+	// Default behavior (false) emits plain text. The CLI verb
+	// auto-detects whether stdout is a terminal and sets this
+	// accordingly (with NO_COLOR env and --no-color flag honored).
+	// Renderer-internal: bold for signal-type names, dim for
+	// timestamps, yellow for the CHANGED marker.
+	Color bool
 }

@@ -862,6 +862,67 @@ func TestRenderText_BucketsForgeDrift_MeaningfulOnly(t *testing.T) {
 		"no footer when there are no drift groups")
 }
 
+// TestRenderText_Color_Off: default behavior emits no ANSI codes.
+// The renderer is a strict pass-through unless TextOpts.Color is
+// set explicitly.
+func TestRenderText_Color_Off(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{"date": "2026-05-10T00:00:00Z"}
+	now := map[string]any{"date": "2026-05-12T00:00:00Z"}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "last_push", Source: "github", SignalGroup: "vitality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: now},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, now)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{}))
+	assert.NotContains(t, buf.String(), "\x1b[",
+		"default rendering must not emit ANSI escapes")
+}
+
+// TestRenderText_Color_On wraps signal type / timestamps /
+// CHANGED marker in their respective ANSI sequences when Color
+// is enabled.
+func TestRenderText_Color_On(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{"date": "2026-05-10T00:00:00Z"}
+	now := map[string]any{"date": "2026-05-12T00:00:00Z"}
+	in := RenderInput{
+		Target: "pkg:npm/x",
+		Window: TimeWindow{All: true},
+		Groups: []SignalDelta{{
+			Type: "last_push", Source: "github", SignalGroup: "vitality",
+			Observations: []Observation{
+				{CollectedAt: t1, Value: prior},
+				{CollectedAt: t2, Value: now},
+			},
+			PairDiffs: []ValueDiff{Diff(prior, now)},
+		}},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, RenderText(&buf, in, TextOpts{Color: true}))
+	got := buf.String()
+
+	// Bold around the signal-type name.
+	assert.Contains(t, got, "\x1b[1mlast_push\x1b[0m",
+		"signal type must be bold in colored output")
+	// Dim around timestamps in the transition line.
+	assert.Contains(t, got, "\x1b[2m2026-05-11T19:20:39Z\x1b[0m",
+		"prior timestamp must be dimmed")
+	assert.Contains(t, got, "\x1b[2m2026-05-12T15:55:08Z\x1b[0m",
+		"current timestamp must be dimmed")
+	// Yellow around the CHANGED marker.
+	assert.Contains(t, got, "\x1b[33m◀ CHANGED\x1b[0m",
+		"CHANGED marker must be yellow")
+}
+
 // TestRenderText_NoChanges_DefaultSuppresses confirms the
 // unchanged-signal-suppression discipline: a SignalDelta with no
 // per-pair changes is omitted by default. The output still names

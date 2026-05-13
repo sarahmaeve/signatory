@@ -33,6 +33,7 @@ type DeltasCmd struct {
 
 	IncludeUnchanged bool `help:"Include signals with no changes in the window. Default behavior suppresses them."`
 	Expand           bool `help:"Restore per-transition detail for forge-drift signals (stars, forks, followers, open_issues). Default collapses these into a footer."`
+	NoColor          bool `help:"Disable ANSI color/style codes in text output. Default auto-detects whether stdout is a terminal. NO_COLOR env var also honored."`
 	JSON             bool `help:"Emit structured JSON instead of human-readable text."`
 	Yes              bool `short:"y" help:"Skip the confirmation prompt for large --all expansions."`
 
@@ -49,7 +50,16 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Resolve color BEFORE substituting the writer fallback —
+	// when Stdout is nil we'll write to os.Stdout (the production
+	// path), and a TTY check on os.Stdout is meaningful. When
+	// Stdout is already set (test path, pipe, file), color stays
+	// off regardless of NoColor/NO_COLOR. The renderer is the
+	// sole consumer of the resolved bool; the CLI doesn't emit
+	// color anywhere else.
+	useColor := false
 	if cmd.Stdout == nil {
+		useColor = shouldUseColor(cmd.NoColor)
 		cmd.Stdout = os.Stdout
 	}
 	if cmd.Stderr == nil {
@@ -110,7 +120,41 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	return deltas.RenderText(cmd.Stdout, in, deltas.TextOpts{
 		IncludeUnchanged: cmd.IncludeUnchanged,
 		Expand:           cmd.Expand,
+		Color:            useColor,
 	})
+}
+
+// shouldUseColor resolves the effective color setting for a
+// production CLI invocation (where Stdout is os.Stdout). Honors,
+// in priority order:
+//
+//  1. The --no-color flag (cmd.NoColor=true → off)
+//  2. The NO_COLOR env var (any non-empty value → off per
+//     https://no-color.org)
+//  3. The CLICOLOR_FORCE env var (any non-empty value → on,
+//     overrides TTY detection — used by CI that wants color in
+//     captured logs)
+//  4. TTY detection on os.Stdout — color on iff stdout is a
+//     character device (a real terminal, not a pipe or file)
+//
+// Tests inject a non-nil Stdout and bypass this helper entirely
+// (color stays off), so the rules above only run on the real
+// production path.
+func shouldUseColor(noColorFlag bool) bool {
+	if noColorFlag {
+		return false
+	}
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("CLICOLOR_FORCE") != "" {
+		return true
+	}
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // validateFlags enforces mutual exclusion of --since, --last,

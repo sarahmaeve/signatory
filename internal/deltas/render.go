@@ -29,6 +29,7 @@ import (
 // by collected_at (the caller's responsibility).
 func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 	bw := &bufWriter{w: w}
+	sty := style{on: opts.Color}
 
 	// Header.
 	bw.printf("Deltas for %s (%s)\n", in.Target, windowLabel(in.Window))
@@ -101,14 +102,15 @@ func RenderText(w io.Writer, in RenderInput, opts TextOpts) error {
 
 	// Render meaningful groups in full.
 	for _, g := range meaningful {
-		bw.printf("\n%s (%s, %s)\n", g.Type, g.Source, g.SignalGroup)
+		bw.printf("\n%s (%s, %s)\n", sty.bold(g.Type), g.Source, g.SignalGroup)
 		for i, diff := range g.PairDiffs {
 			if !diff.HasChanges() {
 				continue
 			}
 			t1 := g.Observations[i].CollectedAt.UTC().Format(time.RFC3339)
 			t2 := g.Observations[i+1].CollectedAt.UTC().Format(time.RFC3339)
-			bw.printf("  %s → %s  ◀ CHANGED\n", t1, t2)
+			bw.printf("  %s → %s  %s\n",
+				sty.dim(t1), sty.dim(t2), sty.yellow("◀ CHANGED"))
 			renderValueDiffIndented(bw, diff, "    ")
 		}
 	}
@@ -398,6 +400,48 @@ func windowLabel(w TimeWindow) string {
 	default:
 		return fmt.Sprintf("since %s", w.Cutoff.UTC().Format(time.RFC3339))
 	}
+}
+
+// style centralizes the ANSI escape sequences the text renderer
+// emits when TextOpts.Color is set. When Color is off, every
+// method returns the input unchanged.
+//
+// Scheme is deliberately minimal — three accents — so the output
+// stays readable in xterm, gnome-terminal, iTerm, tmux, and
+// dumber monochrome terminals where bold/dim still render even
+// if color codes don't:
+//
+//	bold(...)   group-header signal-type name; field names in diffs
+//	dim(...)    timestamps in the transition line
+//	yellow(...) the "◀ CHANGED" marker
+//
+// Additions for v2 (when polarity decisions are settled): green
+// for added entries, red for removed entries, color-coded
+// boolean transitions on safety-shaped fields (present, valid,
+// active).
+type style struct {
+	on bool
+}
+
+func (s style) bold(t string) string {
+	if !s.on {
+		return t
+	}
+	return "\x1b[1m" + t + "\x1b[0m"
+}
+
+func (s style) dim(t string) string {
+	if !s.on {
+		return t
+	}
+	return "\x1b[2m" + t + "\x1b[0m"
+}
+
+func (s style) yellow(t string) string {
+	if !s.on {
+		return t
+	}
+	return "\x1b[33m" + t + "\x1b[0m"
 }
 
 // isClockField reports whether a top-level diff field name is a
