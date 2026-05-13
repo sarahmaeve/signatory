@@ -23,7 +23,7 @@ type DeltasCmd struct {
 
 	Since string `help:"Time-bounded view. Word shortcuts (yesterday, last-week, last-month), Go duration (2d, 12h, 30m), or RFC3339 timestamp. Default '24h' when no time flag is set."`
 	Last  int    `help:"Show the most recent N observations per (type, source) group. Mutually exclusive with --since and --all."`
-	All   bool   `help:"Show the full history. Mutually exclusive with --since and --last. Emits a stderr warning when result exceeds 100 observations."`
+	All   bool   `help:"Show the full history. Mutually exclusive with --since and --last. Prompts for confirmation when more than 10 collection runs are present (use --yes to skip)."`
 
 	Type   string `help:"Filter by signal type (e.g., trusted_publishing, version_unpublish_observed)."`
 	Source string `help:"Filter by collector source (e.g., npm-registry, github, git)."`
@@ -31,9 +31,11 @@ type DeltasCmd struct {
 
 	IncludeUnchanged bool `help:"Include signals with no changes in the window. Default behavior suppresses them."`
 	JSON             bool `help:"Emit structured JSON instead of human-readable text."`
+	Yes              bool `short:"y" help:"Skip the confirmation prompt for large --all expansions."`
 
 	Stdout io.Writer `kong:"-"`
 	Stderr io.Writer `kong:"-"`
+	Stdin  io.Reader `kong:"-"`
 }
 
 // Run executes the deltas query against the configured store and
@@ -49,6 +51,9 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	}
 	if cmd.Stderr == nil {
 		cmd.Stderr = os.Stderr
+	}
+	if cmd.Stdin == nil {
+		cmd.Stdin = os.Stdin
 	}
 
 	if err := cmd.validateFlags(); err != nil {
@@ -86,18 +91,23 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 		return fmt.Errorf("query signals for %s: %w", canonicalURI, err)
 	}
 
-	// --all bound-check: stderr warning when the result set is
-	// large enough to be hard to navigate. Doesn't truncate;
-	// processes the full set per design/deltas.md §"Phased
-	// delivery / Phase 1."
-	const largeResultThreshold = 100
-	if cmd.All && len(allSignals) > largeResultThreshold {
-		fmt.Fprintf(cmd.Stderr,
-			"warning: --all returned %d observations for %s; consider --last or --since to narrow the view\n",
-			len(allSignals), canonicalURI)
-	}
-
 	filtered := applyFilters(allSignals, cmd)
+
+	// --all bound-check: when the filtered set has more than
+	// `allRunsPromptThreshold` distinct collection runs, ask the
+	// user before scrolling through it. --yes (or -y) bypasses.
+	// EOF / non-interactive callers default to "no" so scripts
+	// don't hang.
+	if cmd.All {
+		runs := countRuns(filtered)
+		proceed, err := confirmAllExpansion(cmd.Stderr, cmd.Stdin, runs, canonicalURI, cmd.Yes)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return nil
+		}
+	}
 	groups := groupByTypeSource(filtered)
 	groups = applyWindow(groups, window)
 	deltaGroups := buildSignalDeltas(groups)
