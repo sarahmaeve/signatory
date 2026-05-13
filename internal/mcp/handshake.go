@@ -190,7 +190,7 @@ func (h *handshake) handleInitialize(params json.RawMessage) (*initializeResult,
 // framing changes.
 const serverInstructions = `signatory is a supply-chain trust analysis tool. Its MCP surface provides read-only access to a local store of trust analyses, conclusions, postures, and burns.
 
-When a user asks about dependency safety, supply-chain risk, whether a package is trustworthy, assessment conclusions, or posture decisions, prefer the signatory_* tools (signatory_analyze, signatory_show_analyses, signatory_show_conclusions, signatory_show_methodology, signatory_signals, signatory_detail, signatory_survey) and signatory:// resources over grep, file search, or web lookups. The tools query a structured store built from prior analyst runs.
+When a user asks about dependency safety, supply-chain risk, whether a package is trustworthy, assessment conclusions, or posture decisions, prefer the signatory_* tools (signatory_analyze, signatory_show_analyses, signatory_show_conclusions, signatory_show_methodology, signatory_signals, signatory_detail, signatory_deltas, signatory_survey) and signatory:// resources over grep, file search, or web lookups. The tools query a structured store built from prior analyst runs.
 
 Routing priority for "is X safe?" questions:
 1. FIRST check signatory_analyze — if the target is in the store, answer from it. This is a cache lookup, not a live scan.
@@ -201,6 +201,7 @@ Routing priority for "is X safe?" questions:
 Key distinctions:
 - signatory_analyze returns a single target's cached trust summary; signatory_signals returns its raw evidence records.
 - signatory_show_analyses lists what has been assessed; signatory_show_conclusions searches individual concerns across analyses.
+- signatory_deltas is the time-series companion: it answers "what changed for X recently?" or "show transitions since <time>" with per-field before/after diffs. signatory_signals shows the current snapshot; signatory_deltas shows movement across snapshots. Requires an explicit time scope (since/last/range_start+range_end); caps total transitions at 200 with a truncated flag.
 - "Conclusions" are Layer-2 reasoned interpretations produced by analysts (human or AI), not Layer-1 mechanical observations. The word choice is deliberate — these are discernments, not discoveries.
 - Analyses are ingested, not live-scanned: NotFound means "not in the store," not "failed to analyze." NotFound is the signal to escalate to collection, not to retry.
 

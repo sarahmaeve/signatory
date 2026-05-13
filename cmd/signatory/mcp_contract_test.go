@@ -48,6 +48,7 @@ import (
 // only way to pass this test — a mismatch in either direction fails.
 var expectedMCPToolNames = []string{
 	"signatory_analyze",
+	"signatory_deltas",
 	"signatory_detail",
 	"signatory_ingest_analysis",
 	"signatory_show_analyses",

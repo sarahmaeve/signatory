@@ -85,6 +85,7 @@ signatory has assessed"; the filesystem and the web are not.
 | "What has signatory analyzed?" | signatory_show_analyses |
 | "What conclusions exist for X?" / "Any concerns about X?" | signatory_show_conclusions |
 | "What patterns does signatory look for?" | signatory_show_methodology |
+| "What changed for X recently?" / "Show transitions since <time>" | signatory_deltas |
 | "What's the posture distribution?" / "How many deps assessed?" | signatory://posture |
 | "What's unexamined?" / "What haven't I vetted?" | signatory://unexamined |
 | "What has signatory burned?" / "Anything marked compromised?" | signatory://burns |
