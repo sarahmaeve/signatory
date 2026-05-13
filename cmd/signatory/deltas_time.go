@@ -80,6 +80,67 @@ func parseTimeShorthandAt(raw string, now time.Time) (time.Time, error) {
 // day-count and the rest.
 var dayUnitPattern = regexp.MustCompile(`^(\d+)d(.*)$`)
 
+// parseRangeShorthand resolves the deltas verb's --range flag value
+// into two absolute times (start, end). Syntax is "T1..T2" — two
+// endpoints separated by literal "..". Each endpoint accepts the
+// same syntax as --since (word shortcuts, Go durations including
+// "Nd", or RFC3339 timestamps).
+//
+// Both endpoints are inclusive; the rendered window is [start, end].
+// The parser rejects:
+//
+//   - Empty input
+//   - Missing "..".
+//   - Empty endpoint on either side
+//   - An endpoint that parseTimeShorthand can't resolve
+//   - start > end (reversed range)
+//
+// Equal endpoints (start == end) are permitted and resolve to a
+// single point-in-time match.
+func parseRangeShorthand(raw string) (time.Time, time.Time, error) {
+	return parseRangeShorthandAt(raw, time.Now().UTC())
+}
+
+// parseRangeShorthandAt is the testable form with an explicit
+// reference time.
+func parseRangeShorthandAt(raw string, now time.Time) (time.Time, time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("empty range")
+	}
+	parts := strings.SplitN(trimmed, "..", 2)
+	if len(parts) != 2 {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: missing '..' separator (expected 'T1..T2')", raw)
+	}
+	startRaw := strings.TrimSpace(parts[0])
+	endRaw := strings.TrimSpace(parts[1])
+	if startRaw == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: empty start endpoint", raw)
+	}
+	if endRaw == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: empty end endpoint", raw)
+	}
+	start, err := parseTimeShorthandAt(startRaw, now)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: start endpoint: %w", raw, err)
+	}
+	end, err := parseTimeShorthandAt(endRaw, now)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: end endpoint: %w", raw, err)
+	}
+	if start.After(end) {
+		return time.Time{}, time.Time{}, fmt.Errorf(
+			"range %q: start (%s) is after end (%s)",
+			raw, start.Format(time.RFC3339), end.Format(time.RFC3339))
+	}
+	return start, end, nil
+}
+
 // convertDayUnit transforms "Nd[rest]" into "(N*24)h[rest]" so
 // time.ParseDuration can consume it. Returns (converted, true) on
 // match; (raw, false) when the input has no "d" prefix segment.

@@ -206,6 +206,10 @@ func TestRenderText_WindowKindLabels(t *testing.T) {
 		{"since", TimeWindow{Cutoff: t1}, "since 2026-05-11"},
 		{"last", TimeWindow{Last: 5}, "last 5"},
 		{"all", TimeWindow{All: true}, "full history"},
+		{"range", TimeWindow{
+			RangeStart: time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC),
+			RangeEnd:   time.Date(2026, 5, 12, 23, 59, 59, 0, time.UTC),
+		}, "range 2026-05-10T00:00:00Z to 2026-05-12T23:59:59Z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

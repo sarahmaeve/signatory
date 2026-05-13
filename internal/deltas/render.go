@@ -225,13 +225,18 @@ func isCollection(v any) bool {
 }
 
 // windowLabel produces the header phrase describing the window.
-// Three shapes: "since <RFC3339>", "last N", or "full history."
+// Four shapes: "since <RFC3339>", "last N", "range T1 to T2", or
+// "full history."
 func windowLabel(w TimeWindow) string {
-	switch {
-	case w.All:
+	switch w.Kind() {
+	case "all":
 		return "full history"
-	case w.Last > 0:
+	case "last":
 		return fmt.Sprintf("last %d observation(s) per signal", w.Last)
+	case "range":
+		return fmt.Sprintf("range %s to %s",
+			w.RangeStart.UTC().Format(time.RFC3339),
+			w.RangeEnd.UTC().Format(time.RFC3339))
 	default:
 		return fmt.Sprintf("since %s", w.Cutoff.UTC().Format(time.RFC3339))
 	}

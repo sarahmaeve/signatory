@@ -22,8 +22,9 @@ type DeltasCmd struct {
 	Target string `arg:"" help:"Target URI (pkg:npm/X, pkg:pypi/Y, repo:github/owner/repo, etc.)."`
 
 	Since string `help:"Time-bounded view. Word shortcuts (yesterday, last-week, last-month), Go duration (2d, 12h, 30m), or RFC3339 timestamp. Default '24h' when no time flag is set."`
-	Last  int    `help:"Show the most recent N observations per (type, source) group. Mutually exclusive with --since and --all."`
-	All   bool   `help:"Show the full history. Mutually exclusive with --since and --last. Prompts for confirmation when more than 10 collection runs are present (use --yes to skip)."`
+	Last  int    `help:"Show the most recent N observations per (type, source) group. Mutually exclusive with --since, --range, and --all."`
+	Range string `help:"Bounded range as 'T1..T2' (inclusive). Each endpoint accepts the same syntax as --since. Mutually exclusive with --since, --last, and --all."`
+	All   bool   `help:"Show the full history. Mutually exclusive with --since, --last, and --range. Prompts for confirmation when more than 10 collection runs are present (use --yes to skip)."`
 
 	Type   string `help:"Filter by signal type (e.g., trusted_publishing, version_unpublish_observed)."`
 	Source string `help:"Filter by collector source (e.g., npm-registry, github, git)."`
@@ -124,8 +125,9 @@ func (cmd *DeltasCmd) Run(globals *Globals) error {
 	return deltas.RenderText(cmd.Stdout, in, deltas.TextOpts{IncludeUnchanged: cmd.IncludeUnchanged})
 }
 
-// validateFlags enforces mutual exclusion of --since, --last, and
-// --all. Kong doesn't have native group-mutex; we do it at Run time.
+// validateFlags enforces mutual exclusion of --since, --last,
+// --range, and --all. Kong doesn't have native group-mutex; we do
+// it at Run time.
 func (cmd *DeltasCmd) validateFlags() error {
 	set := 0
 	if cmd.Since != "" {
@@ -134,23 +136,33 @@ func (cmd *DeltasCmd) validateFlags() error {
 	if cmd.Last > 0 {
 		set++
 	}
+	if cmd.Range != "" {
+		set++
+	}
 	if cmd.All {
 		set++
 	}
 	if set > 1 {
-		return NewUsageError(errors.New("--since, --last, and --all are mutually exclusive"))
+		return NewUsageError(errors.New("--since, --last, --range, and --all are mutually exclusive"))
 	}
 	return nil
 }
 
-// window resolves the (--since | --last | --all) trio into a
-// deltas.TimeWindow. Default when none is set: --since 24h.
+// window resolves the (--since | --last | --range | --all) tuple
+// into a deltas.TimeWindow. Default when none is set: --since 24h.
 func (cmd *DeltasCmd) window() (deltas.TimeWindow, error) {
 	if cmd.All {
 		return deltas.TimeWindow{All: true}, nil
 	}
 	if cmd.Last > 0 {
 		return deltas.TimeWindow{Last: cmd.Last}, nil
+	}
+	if cmd.Range != "" {
+		start, end, err := parseRangeShorthand(cmd.Range)
+		if err != nil {
+			return deltas.TimeWindow{}, NewUsageError(fmt.Errorf("--range %q: %w", cmd.Range, err))
+		}
+		return deltas.TimeWindow{RangeStart: start, RangeEnd: end}, nil
 	}
 	raw := cmd.Since
 	if raw == "" {
@@ -214,24 +226,36 @@ func groupByTypeSource(signals []profile.Signal) groupedSignals {
 //
 //   - All: no trimming
 //   - Last>0: keep the most recent Last observations per group
+//   - Range: keep observations in [RangeStart, RangeEnd] inclusive
 //   - Cutoff non-zero: drop observations with collected_at < cutoff
 func applyWindow(g groupedSignals, w deltas.TimeWindow) groupedSignals {
 	if w.All {
 		return g
 	}
+	rangeMode := !w.RangeStart.IsZero() && !w.RangeEnd.IsZero()
 	for key, sigs := range g.byKey {
-		if w.Last > 0 {
+		switch {
+		case w.Last > 0:
 			if len(sigs) > w.Last {
 				g.byKey[key] = sigs[len(sigs)-w.Last:]
 			}
-			continue
+		case rangeMode:
+			kept := sigs[:0]
+			for _, sig := range sigs {
+				if sig.CollectedAt.Before(w.RangeStart) || sig.CollectedAt.After(w.RangeEnd) {
+					continue
+				}
+				kept = append(kept, sig)
+			}
+			g.byKey[key] = kept
+		default:
+			// Cutoff: drop earlier observations.
+			idx := 0
+			for idx < len(sigs) && sigs[idx].CollectedAt.Before(w.Cutoff) {
+				idx++
+			}
+			g.byKey[key] = sigs[idx:]
 		}
-		// Cutoff: drop earlier observations.
-		idx := 0
-		for idx < len(sigs) && sigs[idx].CollectedAt.Before(w.Cutoff) {
-			idx++
-		}
-		g.byKey[key] = sigs[idx:]
 	}
 	return g
 }

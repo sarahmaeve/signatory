@@ -45,30 +45,37 @@ func (s SignalDelta) HasAnyChange() bool {
 }
 
 // TimeWindow describes the time scope of a deltas query. Exactly
-// one of (All, Last, Cutoff) is meaningful at a time:
+// one of (All, Last, Range, Cutoff) is meaningful at a time:
 //
 //   - All=true means "the full history."
 //   - Last>0 means "the most recent Last observations per
 //     (type, source) group."
+//   - RangeStart/RangeEnd both non-zero means "observations
+//     between RangeStart and RangeEnd, inclusive on both ends."
 //   - Cutoff non-zero means "observations at or after Cutoff."
 //
 // The CLI verb enforces mutual exclusion; renderers don't need to
-// re-check.
+// re-check. Kind() returns the discriminator in stable precedence
+// order (All > Last > Range > Cutoff/since).
 type TimeWindow struct {
-	All    bool      `json:"-"`
-	Last   int       `json:"last,omitempty"`
-	Cutoff time.Time `json:"cutoff,omitzero"`
+	All        bool      `json:"-"`
+	Last       int       `json:"last,omitempty"`
+	RangeStart time.Time `json:"-"`
+	RangeEnd   time.Time `json:"-"`
+	Cutoff     time.Time `json:"cutoff,omitzero"`
 }
 
 // Kind returns a short label for the window's mode, used in the
-// JSON output's "window.kind" field. Three values: "all", "last",
-// "since".
+// JSON output's "window.kind" field. Values: "all", "last",
+// "range", "since".
 func (w TimeWindow) Kind() string {
 	switch {
 	case w.All:
 		return "all"
 	case w.Last > 0:
 		return "last"
+	case !w.RangeStart.IsZero() && !w.RangeEnd.IsZero():
+		return "range"
 	default:
 		return "since"
 	}
@@ -86,17 +93,23 @@ type RenderInput struct {
 // MarshalJSON for TimeWindow emits the Kind() field alongside the
 // active mode's value. The plain struct serialization omits the
 // kind discriminator, which downstream consumers would otherwise
-// have to infer from which field is populated.
+// have to infer from which field is populated. range_start and
+// range_end appear only when the window is in "range" mode; cutoff
+// only when in "since" mode; last only when in "last" mode.
 func (w TimeWindow) MarshalJSON() ([]byte, error) {
 	type windowJSON struct {
-		Kind   string    `json:"kind"`
-		Last   int       `json:"last,omitempty"`
-		Cutoff time.Time `json:"cutoff,omitzero"`
+		Kind       string    `json:"kind"`
+		Last       int       `json:"last,omitempty"`
+		Cutoff     time.Time `json:"cutoff,omitzero"`
+		RangeStart time.Time `json:"range_start,omitzero"`
+		RangeEnd   time.Time `json:"range_end,omitzero"`
 	}
 	return json.Marshal(windowJSON{
-		Kind:   w.Kind(),
-		Last:   w.Last,
-		Cutoff: w.Cutoff,
+		Kind:       w.Kind(),
+		Last:       w.Last,
+		Cutoff:     w.Cutoff,
+		RangeStart: w.RangeStart,
+		RangeEnd:   w.RangeEnd,
 	})
 }
 
