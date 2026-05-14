@@ -666,6 +666,44 @@ func TestCheckRedirect_RefusesNonHTTPSSchemes(t *testing.T) {
 	}
 }
 
+// TestCheckRedirect_NonHTTPSError_StripsQueryAndFragment pins that
+// the non-HTTPS redirect error message does NOT include the redirect
+// target's query string or fragment. An attacker-controlled upstream
+// could embed session tokens, CSRF state, or signed-URL parameters
+// in those positions; the error propagates to CI logs and LLM
+// transcripts. Host+path is enough to diagnose the scheme-downgrade
+// attempt — query and fragment are upstream-controlled bytes that
+// have no business reaching error strings (#93 discipline).
+func TestCheckRedirect_NonHTTPSError_StripsQueryAndFragment(t *testing.T) {
+	t.Parallel()
+	httpsVia, err := url.Parse("https://example.com/start")
+	require.NoError(t, err)
+	via := []*http.Request{{URL: httpsVia}}
+
+	target, err := url.Parse("http://attacker.example/path?token=THISMUSTNOTLEAK#secret_frag")
+	require.NoError(t, err)
+	next := &http.Request{URL: target}
+
+	cerr := checkRedirect(next, via)
+	require.Error(t, cerr)
+
+	// Host + path are useful for diagnosing the scheme-downgrade
+	// attempt — they MUST be present.
+	assert.Contains(t, cerr.Error(), "attacker.example",
+		"redirect target host should be in error for diagnosis")
+	assert.Contains(t, cerr.Error(), "/path",
+		"redirect target path should be in error for diagnosis")
+
+	// Query and fragment must NOT leak — upstream-controlled bytes
+	// have no business in error strings.
+	assert.NotContains(t, cerr.Error(), "THISMUSTNOTLEAK",
+		"redirect target's query value must not leak into error string")
+	assert.NotContains(t, cerr.Error(), "secret_frag",
+		"redirect target's fragment must not leak into error string")
+	assert.NotContains(t, cerr.Error(), "token=",
+		"even the query-parameter key must not leak")
+}
+
 func TestCheckRedirect_AllowsHTTPS(t *testing.T) {
 	t.Parallel()
 

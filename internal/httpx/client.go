@@ -271,7 +271,17 @@ func parseRequestOpts(opts []RequestOption) *reqConfig {
 // forges signatory talks to.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+		// Strip query and fragment before formatting — an attacker-
+		// controlled upstream could embed session tokens, CSRF state,
+		// or signed-URL parameters in those positions, and the error
+		// propagates to CI logs and LLM transcripts. Scheme+host+path
+		// is enough to diagnose the downgrade attempt; the rest is
+		// upstream-controlled bytes that have no business in error
+		// strings (#93 discipline).
+		safe := *req.URL
+		safe.RawQuery = ""
+		safe.Fragment = ""
+		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", safe.Redacted())
 	}
 	if len(via) >= 10 {
 		return fmt.Errorf("too many redirects")
