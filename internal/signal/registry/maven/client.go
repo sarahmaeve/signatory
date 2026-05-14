@@ -53,6 +53,48 @@ func ValidateCoordinate(segment string) error {
 	return nil
 }
 
+// maxVersionLength is a defensive cap on version strings before
+// validation runs. Real Maven versions are short (typically under
+// 30 chars even with qualifiers like "-SNAPSHOT" or ".RELEASE");
+// capping at 128 keeps validation cheap on adversarial inputs
+// without rejecting any legitimate version.
+const maxVersionLength = 128
+
+// ValidateVersion guards version strings before they land in a URL.
+// Maven versions in real artifacts use a narrow ASCII grammar
+// (digits, dots, hyphens, plus, underscores, tildes, and letters
+// for qualifiers like "RC1", "-jre", ".RELEASE"). Reject anything
+// outside that grammar — particularly `/`, `?`, `#`, and `..` which
+// would re-parse the request path or smuggle traversal segments.
+//
+// Mirrors gopublish.validateVersion. Maven Central rejects
+// non-conforming versions server-side, but #90 discipline says
+// validate at the function boundary before substitution — the
+// fetchPOM path inside ResolveRepoURL takes versions from
+// parseParent(body) (POM XML), and an adversarial POM upload could
+// embed traversal-shaped strings that extractXMLElement doesn't
+// filter (it only rejects control chars + non-UTF-8).
+func ValidateVersion(v string) error {
+	if v == "" {
+		return fmt.Errorf("version is empty")
+	}
+	if len(v) > maxVersionLength {
+		return fmt.Errorf("version exceeds %d-byte cap (got %d)", maxVersionLength, len(v))
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_', r == '+', r == '~':
+			// allowed
+		default:
+			return fmt.Errorf("version %q contains disallowed character %q", v, r)
+		}
+	}
+	return nil
+}
+
 // Client is the Maven Central HTTP client. All requests go to
 // repo1.maven.org — version discovery via maven-metadata.xml,
 // POM retrieval, signature HEAD checks, and timestamp resolution.
@@ -125,6 +167,9 @@ func (c *Client) HeadTimestamp(ctx context.Context, groupID, artifactID, version
 	if err := ValidateCoordinate(artifactID); err != nil {
 		return time.Time{}, fmt.Errorf("head timestamp: artifactID: %w", err)
 	}
+	if err := ValidateVersion(version); err != nil {
+		return time.Time{}, fmt.Errorf("head timestamp: version: %w", err)
+	}
 
 	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.jar",
 		groupPath(groupID), artifactID, version, artifactID, version)
@@ -158,6 +203,9 @@ func (c *Client) CheckSignature(ctx context.Context, groupID, artifactID, versio
 	}
 	if err := ValidateCoordinate(artifactID); err != nil {
 		return false, fmt.Errorf("check signature: artifactID: %w", err)
+	}
+	if err := ValidateVersion(version); err != nil {
+		return false, fmt.Errorf("check signature: version: %w", err)
 	}
 
 	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.jar.asc",
@@ -224,7 +272,24 @@ func (c *Client) ResolveRepoURL(ctx context.Context, groupID, artifactID, versio
 }
 
 // fetchPOM retrieves a single POM file from repo1 and returns the raw body.
+//
+// Validates all three coordinate inputs even though the public entry
+// points already do — this is the load-bearing guard inside the
+// ResolveRepoURL parent-chase loop, where the loop reassigns
+// (g, a, v) from parseParent(body) on each iteration. Those values
+// come from POM XML, and extractXMLElement only filters control
+// chars + non-UTF-8; it does NOT filter `/`, `?`, `#`, or `..`.
+// Validating at the URL boundary closes that hole.
 func (c *Client) fetchPOM(ctx context.Context, groupID, artifactID, version string) ([]byte, error) {
+	if err := ValidateCoordinate(groupID); err != nil {
+		return nil, fmt.Errorf("fetch POM: groupID: %w", err)
+	}
+	if err := ValidateCoordinate(artifactID); err != nil {
+		return nil, fmt.Errorf("fetch POM: artifactID: %w", err)
+	}
+	if err := ValidateVersion(version); err != nil {
+		return nil, fmt.Errorf("fetch POM: version: %w", err)
+	}
 	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.pom",
 		groupPath(groupID), artifactID, version, artifactID, version)
 
