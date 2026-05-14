@@ -24,11 +24,7 @@ func newHelperTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &Client{
-		httpClient: server.Client(),
-		token:      "test-token",
-		baseURL:    server.URL,
-	}
+	return NewClientWithBaseURLAndToken(server.URL, "test-token")
 }
 
 func TestGetRepoLanguage_ReturnsRepoField(t *testing.T) {

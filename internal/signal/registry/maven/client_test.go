@@ -1,85 +1,123 @@
 package maven
 
 import (
+	"context"
 	"net/http"
-	"net/url"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// mustParseURL is a parse-or-fatal helper used by the redirect-policy
-// unit tests below. Mirrors the helper in the npm and gem packages.
-func mustParseURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	require.NoError(t, err, "parse %q", raw)
-	return u
-}
-
-// ----- redirect policy unit tests -----
-//
-// repo1.maven.org is HTTPS-only. Any redirect target other than HTTPS
-// is either a misconfiguration or a MITM attempting a scheme downgrade
-// to tamper with POM / SCM URL / developer metadata that feeds trust
-// signals. The policy here is symmetric with the npm, PyPI, cargo, gem,
-// and gopublish clients so an audit can grep for one shape.
-
-func TestClient_CheckRedirect_RefusesNonHTTPS(t *testing.T) {
+// TestValidateVersion pins the maven-version grammar. The function
+// is the equivalent of gopublish.validateVersion: it gates strings
+// before they reach URL substitution, rejecting characters that
+// would re-parse the request path (/, ?, #) or smuggle traversal
+// segments (..). Real Maven versions are short alphanumeric tokens
+// with `.`, `-`, `+`, `_`, `~` separators.
+func TestValidateVersion(t *testing.T) {
 	t.Parallel()
 
-	via := []*http.Request{{URL: mustParseURL(t, "https://repo1.maven.org/maven2/com/google/guava/guava/maven-metadata.xml")}}
-
 	tests := []struct {
-		name   string
-		target string
+		name    string
+		in      string
+		wantErr bool
 	}{
-		{"http scheme downgrade", "http://repo1.maven.org/maven2/com/google/guava/guava/maven-metadata.xml"},
-		{"attacker-host http redirect", "http://attacker.example/maven2/x"},
-		{"file scheme", "file:///etc/passwd"},
-		{"javascript scheme", "javascript:alert(1)"},
+		// Accepted shapes — examples from real Maven Central artifacts.
+		{"simple semver", "33.6.0", false},
+		{"semver with -jre suffix", "33.6.0-jre", false},
+		{"version with RELEASE qualifier", "5.3.1.RELEASE", false},
+		{"M1 milestone qualifier", "5.0.0-M1", false},
+		{"RC1 release candidate", "1.0.0-RC1", false},
+		{"beta-1 qualifier", "2.0.0-beta-1", false},
+		{"snapshot", "1.0-SNAPSHOT", false},
+		{"plus build metadata", "1.0+meta", false},
+		{"tilde legacy", "1.0~rc1", false},
+		{"single digit", "1", false},
+
+		// Rejected shapes — URL-syntactic metacharacters and traversal.
+		{"empty", "", true},
+		{"slash", "1/0", true},
+		{"backslash", "1\\0", true},
+		{"path traversal", "../../etc/passwd", true},
+		{"query separator", "1.0?inject=true", true},
+		{"fragment", "1.0#frag", true},
+		{"space", "1.0 alpha", true},
+		{"null byte", "1.0\x00", true},
+		{"newline", "1.0\n", true},
+		{"too long", strings.Repeat("a", maxVersionLength+1), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			next := &http.Request{URL: mustParseURL(t, tc.target)}
-			err := checkRedirect(next, via)
-			require.Error(t, err, "must refuse redirect to %q", tc.target)
+			err := ValidateVersion(tc.in)
+			if tc.wantErr {
+				assert.Error(t, err, "ValidateVersion(%q) should error", tc.in)
+			} else {
+				assert.NoError(t, err, "ValidateVersion(%q) should accept", tc.in)
+			}
 		})
 	}
 }
 
-func TestClient_CheckRedirect_AllowsHTTPS(t *testing.T) {
+// TestMavenClient_RejectsInvalidVersion_BeforeHTTP pins that the
+// three public methods that interpolate version into a URL
+// (HeadTimestamp, CheckSignature, ResolveRepoURL) reject invalid
+// versions BEFORE any HTTP request fires. Counter on the test
+// server stays at zero — otherwise the validator is a fig leaf.
+//
+// Same shape as gopublish + cargo's pre-HTTP rejection tests; the
+// validator's job is to gate the URL boundary, not produce a
+// pretty error message.
+func TestMavenClient_RejectsInvalidVersion_BeforeHTTP(t *testing.T) {
 	t.Parallel()
 
-	via := []*http.Request{{URL: mustParseURL(t, "https://repo1.maven.org/maven2/com/google/guava/guava/")}}
-	next := &http.Request{URL: mustParseURL(t, "https://repo1.maven.org/maven2/com/google/guava/guava/maven-metadata.xml")}
-	assert.NoError(t, checkRedirect(next, via))
-}
+	const badVersion = "../../etc/passwd"
 
-func TestClient_CheckRedirect_BoundsChain(t *testing.T) {
-	t.Parallel()
-
-	via := make([]*http.Request, 10)
-	for i := range via {
-		via[i] = &http.Request{URL: mustParseURL(t, "https://repo1.maven.org/")}
+	tests := []struct {
+		name string
+		call func(c *Client, ctx context.Context) error
+	}{
+		{
+			name: "HeadTimestamp",
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.HeadTimestamp(ctx, "com.example", "foo", badVersion)
+				return err
+			},
+		},
+		{
+			name: "CheckSignature",
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.CheckSignature(ctx, "com.example", "foo", badVersion)
+				return err
+			},
+		},
+		{
+			name: "ResolveRepoURL",
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.ResolveRepoURL(ctx, "com.example", "foo", badVersion)
+				return err
+			},
+		},
 	}
-	next := &http.Request{URL: mustParseURL(t, "https://repo1.maven.org/next")}
-	err := checkRedirect(next, via)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redirects")
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&hits, 1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
 
-// TestClient_NewClient_WiresCheckRedirect asserts that the production
-// constructor actually installs the redirect policy on the http.Client.
-// Regression guard against a future refactor that adds a new code path
-// and forgets to mirror the CheckRedirect wiring.
-func TestClient_NewClient_WiresCheckRedirect(t *testing.T) {
-	t.Parallel()
-
-	for _, c := range []*Client{NewClient(), NewClientWithBaseURL("https://example.test")} {
-		require.NotNil(t, c.httpClient.CheckRedirect,
-			"NewClient must install CheckRedirect; default policy follows HTTP redirects")
+			c := NewClientWithBaseURL(srv.URL)
+			err := tc.call(c, context.Background())
+			require.Error(t, err, "%s must reject %q", tc.name, badVersion)
+			assert.Zero(t, atomic.LoadInt32(&hits),
+				"%s must reject malformed version BEFORE any HTTP request fires", tc.name)
+		})
 	}
 }

@@ -3,32 +3,28 @@
 // needs (GetCrate for the repository URL); Phase B extends it with
 // owners, per-version metadata, and the full signal-collector surface.
 //
-// Mirrors the defensive patterns established by the npm and PyPI
-// clients: HTTPS-only redirects, response-body size cap, crate-name
-// validation before URL construction, error-body sanitization, and
-// context-propagation testing.
+// The defensive network discipline (HTTPS-only redirects, response-
+// body cap, drain-and-discard on non-2xx, sanitized status errors)
+// lives in httpx.SecureClient; this package owns input validation,
+// sentinel-error wrapping, and crates.io's mandatory User-Agent
+// requirement.
 package cargo
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
-	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
-// ErrNotFound is returned (wrapped via %w) when crates.io responds
-// 404 for a crate lookup. Callers compare with errors.Is.
-var ErrNotFound = errors.New("cargo: not found")
-
-// maxResponseSize bounds registry response bodies. Even large crates
-// (serde with 300+ versions) produce <1 MB responses; 10 MB matches
-// the npm and PyPI caps for consistency.
-const maxResponseSize = 10 * 1024 * 1024
+// ErrNotFound is the sentinel callers compare via errors.Is when
+// crates.io reports a crate is absent. Wraps httpx.ErrNotFound so
+// callers can also do errors.Is(err, httpx.ErrNotFound) for
+// ecosystem-agnostic absence detection — both checks resolve true.
+var ErrNotFound = fmt.Errorf("cargo: %w", httpx.ErrNotFound)
 
 // maxCrateNameLength is crates.io's published cap.
 const maxCrateNameLength = 64
@@ -37,6 +33,12 @@ const maxCrateNameLength = 64
 // letter, then letters, digits, hyphens, or underscores. Max 64 chars
 // is enforced separately by length check.
 var crateNamePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// crateUserAgent is the User-Agent the cargo client sends. crates.io
+// REQUIRES a User-Agent; requests without one get 403. Per crates.io's
+// published guidance, operators include a contact URL so the registry
+// team can reach the source of unusual traffic.
+const crateUserAgent = "signatory/0.1 (https://github.com/sarahmaeve/signatory)"
 
 // ValidateCrateName enforces the crate-name grammar before any URL
 // construction. Per npm's #90 lesson: user-influenced bytes
@@ -58,22 +60,19 @@ func ValidateCrateName(name string) error {
 }
 
 // Client is a narrow crates.io registry HTTP client. Phase A exposes
-// only GetCrate (for source resolution); Phase B will add GetOwners,
-// GetVersion, etc.
+// GetCrate (for source resolution) and GetOwners; Phase B will extend
+// the surface with version metadata.
 type Client struct {
-	httpClient  *http.Client
-	registryURL string
+	api *httpx.SecureClient
 }
 
 // NewClient returns a Client bound to the public crates.io endpoint.
-// The 60s per-request timeout matches npm, PyPI, and gopublish.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL: "https://crates.io",
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL("https://crates.io"),
+			httpx.WithUserAgent(crateUserAgent),
+		),
 	}
 }
 
@@ -81,128 +80,55 @@ func NewClient() *Client {
 // Primary use: test harnesses with httptest servers.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL: base,
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL(base),
+			httpx.WithUserAgent(crateUserAgent),
+		),
 	}
-}
-
-// checkRedirect enforces HTTPS-only redirects and bounds the chain.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // GetCrate fetches the crate metadata from crates.io's JSON API.
 // Returns ErrNotFound (wrapped) on 404. Other non-2xx statuses
-// surface as sanitized errors (response body is never in the error
-// string per #93).
+// surface as sanitized errors (the response body is discarded before
+// it reaches the caller — #93's drain-on-error discipline, enforced
+// by httpx).
 //
 // Phase A models only Crate.Repository (for source resolution);
-// Phase B will extend CrateResponse with Versions, owners, etc.
+// Phase B extends CrateResponse with Versions, owners, etc.
 func (c *Client) GetCrate(ctx context.Context, name string) (*CrateResponse, error) {
 	if err := ValidateCrateName(name); err != nil {
 		return nil, fmt.Errorf("get crate: %w", err)
 	}
 
-	escapedName := url.PathEscape(name)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.registryURL+"/api/v1/crates/"+escapedName, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request for %q: %w", name, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	// crates.io REQUIRES a User-Agent; requests without one get 403.
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("crates.io request for %q failed: %w", name, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain-and-discard; body NEVER in error string.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("crates.io returned status %d for %q",
-			resp.StatusCode, name)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read crates.io response for %q: %w", name, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("crates.io response for %q exceeds %d-byte cap",
-			name, maxResponseSize)
-	}
-
 	var cr CrateResponse
-	if err := json.Unmarshal(body, &cr); err != nil {
-		return nil, fmt.Errorf("decode crates.io response for %q: %w", name, err)
+	err := c.api.GetJSON(ctx, "/api/v1/crates/"+url.PathEscape(name), &cr,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		return nil, fmt.Errorf("crates.io request for %q: %w", name, err)
 	}
 	return &cr, nil
 }
 
 // GetOwners fetches the crate's owner list from crates.io. Returns
-// ErrNotFound (wrapped) on 404. A non-nil error on this endpoint does
-// NOT block signal collection — callers degrade gracefully and record
-// the absence for owner-derived signals only.
+// ErrNotFound (wrapped) on 404. A non-nil error on this endpoint
+// does NOT block signal collection — callers degrade gracefully and
+// record the absence for owner-derived signals only.
 func (c *Client) GetOwners(ctx context.Context, name string) (*OwnersResponse, error) {
 	if err := ValidateCrateName(name); err != nil {
 		return nil, fmt.Errorf("get owners: %w", err)
 	}
 
-	escapedName := url.PathEscape(name)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.registryURL+"/api/v1/crates/"+escapedName+"/owners", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build owners request for %q: %w", name, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("crates.io owners request for %q failed: %w", name, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: owners for %s", ErrNotFound, name)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("crates.io returned status %d for owners of %q",
-			resp.StatusCode, name)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read crates.io owners response for %q: %w", name, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("crates.io owners response for %q exceeds %d-byte cap",
-			name, maxResponseSize)
-	}
-
 	var or OwnersResponse
-	if err := json.Unmarshal(body, &or); err != nil {
-		return nil, fmt.Errorf("decode crates.io owners response for %q: %w", name, err)
+	err := c.api.GetJSON(ctx, "/api/v1/crates/"+url.PathEscape(name)+"/owners", &or,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: owners for %s", ErrNotFound, name)
+		}
+		return nil, fmt.Errorf("crates.io owners request for %q: %w", name, err)
 	}
 	return &or, nil
 }

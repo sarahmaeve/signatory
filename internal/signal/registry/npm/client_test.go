@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -15,15 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// mustParseURL is a tiny parse-or-fatal helper used by the redirect-
-// policy unit tests below.
-func mustParseURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	require.NoError(t, err, "parse %q", raw)
-	return u
-}
 
 // sampleRegistryResponse is a minimal but realistic registry
 // response body. The shape matches what registry.npmjs.org emits
@@ -161,52 +151,14 @@ func TestClient_GetPackage_OversizedResponse_Rejected(t *testing.T) {
 		"oversized response must fail with a size-cap error")
 }
 
-// ----- redirect policy unit tests -----
-
-func TestClient_CheckRedirect_RefusesNonHTTPS(t *testing.T) {
-	t.Parallel()
-
-	httpsVia := mustParseURL(t, "https://registry.npmjs.org/express")
-	via := []*http.Request{{URL: httpsVia}}
-
-	tests := []struct {
-		name   string
-		target string
-	}{
-		{"http scheme downgrade", "http://registry.npmjs.org/express"},
-		{"attacker-host http redirect", "http://attacker.example/x"},
-		{"file scheme", "file:///etc/passwd"},
-		{"javascript scheme", "javascript:alert(1)"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			next := &http.Request{URL: mustParseURL(t, tc.target)}
-			err := checkRedirect(next, via)
-			require.Error(t, err, "must refuse redirect to %q", tc.target)
-		})
-	}
-}
-
-func TestClient_CheckRedirect_AllowsHTTPS(t *testing.T) {
-	t.Parallel()
-
-	via := []*http.Request{{URL: mustParseURL(t, "https://registry.npmjs.org/old-path")}}
-	next := &http.Request{URL: mustParseURL(t, "https://registry.npmjs.org/new-path")}
-	assert.NoError(t, checkRedirect(next, via))
-}
-
-func TestClient_CheckRedirect_BoundsChain(t *testing.T) {
-	t.Parallel()
-
-	via := make([]*http.Request, 10)
-	for i := range via {
-		via[i] = &http.Request{URL: mustParseURL(t, "https://registry.npmjs.org/")}
-	}
-	next := &http.Request{URL: mustParseURL(t, "https://registry.npmjs.org/next")}
-	err := checkRedirect(next, via)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redirects")
-}
+// Redirect-policy unit tests previously lived here. After the
+// internal/httpx port, the shared SecureClient owns the redirect
+// policy and its tests live in internal/httpx/client_test.go
+// (TestCheckRedirect_*). The integration-level "client refuses
+// plaintext redirect" coverage for npm specifically is implicit in
+// the same property tested for every per-ecosystem client via the
+// httpx integration tests; rebuilding the per-ecosystem unit tests
+// would just duplicate them.
 
 // ----- package name validation (pre-HTTP) -----
 

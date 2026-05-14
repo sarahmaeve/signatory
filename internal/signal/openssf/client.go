@@ -2,25 +2,27 @@ package openssf
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrNotFound is returned (wrapped via %w) when the Scorecard API
 // responds 404. Distinct from network/5xx errors because it carries
 // product meaning: the project hasn't been indexed by Scorecard,
 // not that we couldn't reach the service.
-var ErrNotFound = errors.New("openssf: scorecard not found")
+//
+// Wraps httpx.ErrNotFound so callers can also do errors.Is(err,
+// httpx.ErrNotFound) for ecosystem-agnostic absence detection.
+var ErrNotFound = fmt.Errorf("openssf: %w", httpx.ErrNotFound)
 
 // maxResponseSize bounds upstream response bodies. Real Scorecard
 // payloads are 5-50 KiB (one entry per ~18 standard checks plus
 // metadata); 1 MiB is generous slack and a hard stop on a
-// misbehaving upstream.
+// misbehaving upstream. Tighter than the httpx default (10 MiB)
+// because we know the schema is narrow.
 const maxResponseSize = 1 * 1024 * 1024
 
 // ownerRepoMaxLen caps owner / repo path components before
@@ -137,25 +139,32 @@ type Check struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Client is a narrow Scorecard HTTP client. Surface is one method
-// (GetScorecard) plus a constructor; extending to additional
-// Scorecard endpoints (badge, raw) should follow the same TDD
-// shape — test the response model, then add the method.
+// Client is a narrow Scorecard HTTP client. The defensive network
+// discipline (timeouts, HTTPS-only redirects, response-body cap,
+// drain-and-discard on non-2xx, sanitized status errors) lives in
+// httpx.SecureClient; this package owns input validation,
+// sentinel-error wrapping, and the tighter 1 MiB response cap
+// appropriate for Scorecard's narrow schema.
+//
+// One construction note: the original openssf client's redirect
+// policy was deliberately permissive ("no https→http downgrade,
+// http→http OK") so its test suite could redirect within an http
+// httptest server. The shared httpx policy is stricter (HTTPS-only
+// always). In production, Scorecard's API IS HTTPS, so the strict
+// policy is correct; the redirect-chain test that exercised the
+// permissive path is now covered by httpx's TestCheckRedirect_*
+// unit tests instead.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	api *httpx.SecureClient
 }
 
 // NewClient returns a Client bound to the public Scorecard API.
-// Timeout matches the gopublish + npm + github clients' 60s for
-// uniform cancellation behavior across collectors.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: "https://api.securityscorecards.dev",
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL("https://api.securityscorecards.dev"),
+			httpx.WithMaxBytes(maxResponseSize),
+		),
 	}
 }
 
@@ -163,33 +172,11 @@ func NewClient() *Client {
 // an httptest.Server URL; production wires the public API.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: base,
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL(base),
+			httpx.WithMaxBytes(maxResponseSize),
+		),
 	}
-}
-
-// checkRedirect refuses scheme downgrades and bounds the redirect
-// chain. Symmetric with the other ecosystem clients — uniform
-// policy lowers the review burden when a future collector ships
-// against another endpoint.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" && req.URL.Scheme != "http" {
-		return fmt.Errorf("refusing redirect to non-HTTP(S) URL %s", req.URL.Redacted())
-	}
-	// Scheme-downgrade defense: once we started on https, never
-	// follow a redirect to http. tests use the http httptest base
-	// URL exclusively, so the policy gate is "never downgrade,"
-	// not "https-only."
-	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing scheme downgrade to %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // GetScorecard fetches /projects/github.com/{owner}/{repo} and
@@ -200,43 +187,15 @@ func (c *Client) GetScorecard(ctx context.Context, owner, repo string) (*Scoreca
 	if err := ValidateOwnerRepo(owner, repo); err != nil {
 		return nil, fmt.Errorf("get scorecard: %w", err)
 	}
-	url := c.baseURL + "/projects/github.com/" + owner + "/" + repo
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request for %s/%s: %w", owner, repo, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request for %s/%s failed: %w", owner, repo, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close after read; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s/%s", ErrNotFound, owner, repo)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Discard body without surfacing it — the response can
-		// carry server-debug noise. Same approach as gopublish.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("upstream returned status %d for %s/%s", resp.StatusCode, owner, repo)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read response for %s/%s: %w", owner, repo, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("response for %s/%s exceeds %d-byte cap", owner, repo, maxResponseSize)
-	}
+	path := "/projects/github.com/" + owner + "/" + repo
 
 	var sc Scorecard
-	if err := json.Unmarshal(body, &sc); err != nil {
-		return nil, fmt.Errorf("decode scorecard response for %s/%s: %w", owner, repo, err)
+	err := c.api.GetJSON(ctx, path, &sc, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s/%s", ErrNotFound, owner, repo)
+		}
+		return nil, fmt.Errorf("openssf request for %s/%s: %w", owner, repo, err)
 	}
 	return &sc, nil
 }

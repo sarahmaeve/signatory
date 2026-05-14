@@ -36,70 +36,54 @@
 // names the API contract so future Forgejo deployments fold under the
 // same emission discipline.
 //
-// The github collector is the reference implementation. Where this
-// package's discipline matches github's (timeouts, response-size
-// limits, redirect policy, error sanitization), the rationale lives
-// in internal/signal/github/client.go and is not repeated here.
+// The defensive network discipline (HTTPS-only redirects, response-
+// body cap, drain-and-discard on non-2xx, sanitized status errors)
+// lives in httpx.SecureClient; this package owns input validation,
+// the IsOrg / ListRootFilenames / GetRepoLanguage 404-as-zero-value
+// semantics, and the per-forge response-shape decoding.
 package forgejo
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrNotFound is the sentinel callers compare via errors.Is when the
-// Forgejo API responds 404. Mirrors github.ErrNotFound's role.
-var ErrNotFound = errors.New("forgejo: not found")
+// Forgejo API responds 404. Wraps httpx.ErrNotFound so callers can
+// also do errors.Is(err, httpx.ErrNotFound) for ecosystem-agnostic
+// absence detection.
+var ErrNotFound = fmt.Errorf("forgejo: %w", httpx.ErrNotFound)
 
-// maxResponseSize bounds the JSON body we'll read. Mirrors github's
-// 10 MiB cap; Forgejo /repos responses are typically <50 KiB so this
-// is generous slack against malicious or runaway upstreams.
-const maxResponseSize = 10 * 1024 * 1024
-
-// Client is a minimal Forgejo REST client. baseURL is the API root
-// (e.g. https://codeberg.org/api/v1) — caller-injectable for tests,
-// fixed to the codeberg.org root in production via NewClient.
+// Client is a minimal Forgejo REST client. The defensive HTTP
+// pipeline is delegated to httpx.SecureClient; this package owns
+// response-shape decoding and the per-method 404 semantics.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	api *httpx.SecureClient
 }
 
 // NewClient creates a Forgejo client pointed at codeberg.org's API
-// root with a 60s per-request timeout (matches github's client). v0.1
-// is unauthenticated; the codeberg.org public-API rate limit (1000
-// req/h) is sufficient for a single-target analyze. Authenticated
-// access via a CODEBERG_TOKEN env var is a follow-up when survey-side
-// usage emerges.
+// root. v0.1 is unauthenticated; the codeberg.org public-API rate
+// limit (1000 req/h) is sufficient for a single-target analyze.
+// Authenticated access via a CODEBERG_TOKEN env var is a follow-up
+// when survey-side usage emerges.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: "https://codeberg.org/api/v1",
+		api: httpx.NewSecureClient(httpx.WithBaseURL("https://codeberg.org/api/v1")),
 	}
 }
 
-// checkRedirect mirrors the github client's redirect policy: refuse
-// non-HTTPS targets, bound the chain to <10 hops. The Authorization-
-// strip rule is dropped because v0.1 is unauthenticated; bringing
-// auth back in a follow-up requires re-introducing the cross-origin
-// header-strip rule (see internal/signal/github/client.go for the
-// rationale).
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+// NewClientWithBaseURL returns a Client whose endpoint points at the
+// supplied base. Primary use case: test harnesses pointing the
+// client at an httptest server. Production code should call NewClient.
+func NewClientWithBaseURL(base string) *Client {
+	return &Client{
+		api: httpx.NewSecureClient(httpx.WithBaseURL(base)),
 	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // repo represents the subset of /api/v1/repos/{owner}/{repo} response
@@ -137,64 +121,25 @@ type repoOwner struct {
 	Login string `json:"login"`
 }
 
-// get performs a GET against the Forgejo API at path, decoding the
-// response into result. Returns ErrNotFound (wrapped) on 404 so
-// callers can use errors.Is. Other non-200 responses surface as a
-// status-only error — body is intentionally NOT included for the
-// same reason github's client drops it (issue #93: response bodies
-// are attacker-influenceable bytes that propagate to stderr / CI logs).
-func (c *Client) get(ctx context.Context, path string, result any) error {
-	url := c.baseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-after-read; body consumed below, error here is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %s", ErrNotFound, path)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("forgejo API returned status %d", resp.StatusCode)
-	}
-
-	if result != nil {
-		limited := io.LimitReader(resp.Body, maxResponseSize+1)
-		body, readErr := io.ReadAll(limited)
-		if readErr != nil {
-			return fmt.Errorf("read response: %w", readErr)
-		}
-		if int64(len(body)) > maxResponseSize {
-			return fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
-		}
-		if jsonErr := json.Unmarshal(body, result); jsonErr != nil {
-			return fmt.Errorf("decode response: %w", jsonErr)
-		}
-	}
-	return nil
-}
-
 // GetRepo fetches /api/v1/repos/{owner}/{repo}. Returns ErrNotFound
 // (wrapped) when the repo doesn't exist or is private to the
 // unauthenticated client.
 //
-// owner and repoName are url.PathEscape'd before path concatenation as
-// defense-in-depth: production callers already validate the inputs
-// upstream (profile.NormalizeForgeRepoInput), and Forgejo's server-side
-// login grammar rejects path-traversal-shaped names, but escaping at
-// the call site keeps the client safe under any future caller and
-// matches the gitlab client's projectIDPath discipline.
+// owner and repoName are url.PathEscape'd before path concatenation
+// as defense-in-depth: production callers already validate the inputs
+// upstream (profile.NormalizeForgeRepoInput), and Forgejo's server-
+// side login grammar rejects path-traversal-shaped names, but
+// escaping at the call site keeps the client safe under any future
+// caller.
 func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, error) {
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName)
 	var r repo
-	if err := c.get(ctx, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repoName), &r); err != nil {
-		return nil, err
+	err := c.api.GetJSON(ctx, path, &r, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("forgejo API request for %s: %w", path, err)
 	}
 	return &r, nil
 }
@@ -214,15 +159,15 @@ func (c *Client) GetRepo(ctx context.Context, owner, repoName string) (*repo, er
 // call (see GetUser below), which works for both user accounts
 // and organizations in Forgejo's data model.
 func (c *Client) IsOrg(ctx context.Context, name string) (bool, error) {
-	// url.PathEscape: defense-in-depth, see GetRepo for rationale.
-	err := c.get(ctx, "/orgs/"+url.PathEscape(name), nil)
+	path := "/orgs/" + url.PathEscape(name)
+	_, err := c.api.Get(ctx, path, httpx.WithHeader("Accept", "application/json"))
 	if err == nil {
 		return true, nil
 	}
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, httpx.ErrNotFound) {
 		return false, nil
 	}
-	return false, err
+	return false, fmt.Errorf("forgejo API request for %s: %w", path, err)
 }
 
 // userProfile is the subset of /api/v1/users/{name} fields the
@@ -257,10 +202,14 @@ type userProfile struct {
 // Returns ErrNotFound (wrapped) on 404. Other non-200 statuses
 // surface as status-only errors per the client convention.
 func (c *Client) GetUser(ctx context.Context, name string) (*userProfile, error) {
+	path := "/users/" + url.PathEscape(name)
 	var u userProfile
-	// url.PathEscape: defense-in-depth, see GetRepo for rationale.
-	if err := c.get(ctx, "/users/"+url.PathEscape(name), &u); err != nil {
-		return nil, err
+	err := c.api.GetJSON(ctx, path, &u, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("forgejo API request for %s: %w", path, err)
 	}
 	return &u, nil
 }
@@ -296,13 +245,14 @@ type repoContent struct {
 // One API call. Directories, symlinks, and submodules are filtered
 // out client-side; ecosystem detection only cares about files.
 func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) ([]string, error) {
-	var entries []repoContent
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName) + "/contents"
-	if err := c.get(ctx, path, &entries); err != nil {
-		if errors.Is(err, ErrNotFound) {
+	var entries []repoContent
+	err := c.api.GetJSON(ctx, path, &entries, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("forgejo API request for %s: %w", path, err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -330,13 +280,14 @@ func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) 
 // handling so the ecosystem detector can apply the same
 // "language=” → fall back to manifest" reasoning across forges.
 func (c *Client) GetRepoLanguage(ctx context.Context, owner, repoName string) (string, error) {
-	var languages map[string]int64
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName) + "/languages"
-	if err := c.get(ctx, path, &languages); err != nil {
-		if errors.Is(err, ErrNotFound) {
+	var languages map[string]int64
+	err := c.api.GetJSON(ctx, path, &languages, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
 			return "", nil
 		}
-		return "", err
+		return "", fmt.Errorf("forgejo API request for %s: %w", path, err)
 	}
 	var topLang string
 	var topBytes int64

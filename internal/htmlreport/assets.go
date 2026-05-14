@@ -15,7 +15,7 @@ import (
 // dot unless an "all:" prefix is supplied, and "all:" pulls in
 // dotfiles too. A plain alphabetic dir keeps the rule legible.
 //
-//go:embed embedded_assets/style.css embedded_assets/images/otis-watermark.jpg
+//go:embed embedded_assets/style.css
 var embeddedAssets embed.FS
 
 // AssetsFS returns a filesystem rooted at the assets directory —

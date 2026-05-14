@@ -27,12 +27,7 @@ func newTestCollector(t *testing.T, handler http.Handler) *Collector {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	client := &Client{
-		httpClient: server.Client(),
-		token:      "test-token",
-		baseURL:    server.URL,
-	}
-	return NewCollectorWithClient(client)
+	return NewCollectorWithClient(NewClientWithBaseURLAndToken(server.URL, "test-token"))
 }
 
 // mockGitHubAPI returns a handler that serves realistic GitHub API responses.

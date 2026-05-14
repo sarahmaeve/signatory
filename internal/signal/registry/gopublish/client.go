@@ -4,29 +4,27 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
-// ErrNotFound is returned (wrapped via %w) when an upstream
-// endpoint responds 404 — for the proxy that means "module/version
-// not in the proxy"; for sum.golang.org it means "no transparency
-// log entry." Callers compare via errors.Is.
-var ErrNotFound = errors.New("gopublish: not found")
-
-// maxResponseSize bounds upstream response bodies to prevent OOM
-// from unbounded streams. proxy responses are typically a few KB
-// (.info JSON) up to a few hundred KB (the @v/list of a
-// long-lived module); 10 MiB is generous slack symmetric with the
-// npm client. sum.golang.org records are a few hundred bytes; the
-// same cap is more than enough.
-const maxResponseSize = 10 * 1024 * 1024
+// ErrNotFound is the sentinel callers compare via errors.Is when an
+// upstream endpoint reports the module / version is absent. The
+// proxy returns 404 for "module not in the proxy" and 410 Gone for
+// retracted / deleted versions; both map to ErrNotFound — the
+// collector records absence either way. sum.golang.org's /lookup
+// also returns 404 when the (module, version) isn't in the log.
+//
+// Wraps httpx.ErrNotFound so callers can also do
+// errors.Is(err, httpx.ErrNotFound) for ecosystem-agnostic absence
+// detection.
+var ErrNotFound = fmt.Errorf("gopublish: %w", httpx.ErrNotFound)
 
 // modulePathMaxLen is a defensive cap on the module-path length
 // before validation runs. Real module paths top out under 200
@@ -135,19 +133,32 @@ func encodeModulePath(path string) string {
 	return b.String()
 }
 
-// Client is a narrow Go-publish data-plane HTTP client. Surface is
-// kept to the endpoints v0.1's collector and the resolver read:
-// @latest, @v/list, @v/<v>.info on the proxy; /lookup on the sumdb;
-// <module>?go-get=1 on the vanity host (for meta-tag fallback when
-// the proxy lacks an Origin block). Extending the surface should
-// follow the same TDD shape (test the response model, then add the
-// method).
+// Client is a narrow Go-publish data-plane HTTP client. The
+// defensive network discipline (timeouts, HTTPS-only redirects,
+// response-body cap, drain-and-discard on non-2xx, sanitized status
+// errors) lives in three httpx.SecureClients: one each for the
+// proxy, sum, and vanity-host endpoints. This package owns input
+// validation, the proxy's @v/list newline shape, the transparency-
+// log leaf-id parsing, and the vanity-host's "all errors are not-
+// resolvable, never an error" semantic.
+//
+// The proxy and sum SecureClients are configured with
+// WithNotFoundStatuses(404, 410): a 410 Gone from the proxy
+// (retracted / deleted version) is treated the same as a 404 for
+// collection purposes — both mean "record absence."
 type Client struct {
-	httpClient *http.Client
-	proxyURL   string
-	sumURL     string
-	// metaTagURLPrefix overrides the vanity-host base URL for the
-	// meta-tag fallback. Empty (production) → ResolveRepoURL fetches
+	proxyAPI   *httpx.SecureClient
+	sumAPI     *httpx.SecureClient
+	metaTagAPI *httpx.SecureClient
+
+	// proxyURL is duplicated from proxyAPI's baseURL because ZipURL
+	// builds a URL string (consumed by the artifact-vs-repo
+	// collector) without making an HTTP request. The string must
+	// match what proxyAPI sends on the wire.
+	proxyURL string
+
+	// metaTagURLPrefix overrides the vanity-host base for resolve.go's
+	// meta-tag fallback. Empty (production) → resolveViaMetaTag fetches
 	// "https://<modulePath>?go-get=1" directly. Non-empty (tests) →
 	// "<metaTagURLPrefix>/<modulePath>?go-get=1" so the fetch hits
 	// the test's httptest server. NEVER set this in production —
@@ -156,21 +167,19 @@ type Client struct {
 	metaTagURLPrefix string
 }
 
+// Production endpoints. Kept as constants so the test-only
+// NewClientWithBaseURL[s] can sit alongside the production NewClient
+// in one file.
+const (
+	publicProxyURL = "https://proxy.golang.org"
+	publicSumURL   = "https://sum.golang.org"
+)
+
 // NewClient returns a Client bound to the public Go endpoints —
 // proxy.golang.org for module metadata and sum.golang.org for
-// transparency-log lookups. Timeout matches the npm + github
-// clients' 60s; the Go data plane is generally faster than that
-// but the upper bound keeps a slow upstream from collapsing a
-// collection run into a blanket absence.
+// transparency-log lookups.
 func NewClient() *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		proxyURL: "https://proxy.golang.org",
-		sumURL:   "https://sum.golang.org",
-	}
+	return buildClient(publicProxyURL, publicSumURL, "")
 }
 
 // NewClientWithBaseURL returns a Client whose proxy and sum
@@ -183,7 +192,7 @@ func NewClient() *Client {
 // exercise the fallback need to use NewClientWithBaseURLs to
 // override that target.
 func NewClientWithBaseURL(proxy, sum string) *Client {
-	return NewClientWithBaseURLs(proxy, sum, "")
+	return buildClient(proxy, sum, "")
 }
 
 // NewClientWithBaseURLs returns a Client with explicit overrides
@@ -195,30 +204,31 @@ func NewClientWithBaseURL(proxy, sum string) *Client {
 // metaTagBase empty preserves the production behavior of fetching
 // the live <modulePath>?go-get=1 URL.
 func NewClientWithBaseURLs(proxy, sum, metaTagBase string) *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		proxyURL:         proxy,
-		sumURL:           sum,
-		metaTagURLPrefix: metaTagBase,
-	}
+	return buildClient(proxy, sum, metaTagBase)
 }
 
-// checkRedirect refuses any non-HTTPS redirect target and bounds
-// the redirect chain. Symmetric with the npm + github clients —
-// scheme downgrade has no legitimate use case on these public
-// services, and a uniform policy lowers the review burden when a
-// future collector ships against another endpoint.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+// buildClient is the shared constructor implementation. Three
+// SecureClients are constructed because the three endpoints carry
+// independent base URLs (and the meta-tag client has none — it
+// receives a full URL per request).
+func buildClient(proxy, sum, metaTagBase string) *Client {
+	notFound := httpx.WithNotFoundStatuses(http.StatusNotFound, http.StatusGone)
+	return &Client{
+		proxyAPI: httpx.NewSecureClient(
+			httpx.WithBaseURL(proxy),
+			notFound,
+		),
+		sumAPI: httpx.NewSecureClient(
+			httpx.WithBaseURL(sum),
+			notFound,
+		),
+		// metaTagAPI has no baseURL — resolveViaMetaTag passes a
+		// fully-qualified URL because each module maps to a
+		// different vanity host.
+		metaTagAPI:       httpx.NewSecureClient(),
+		proxyURL:         proxy,
+		metaTagURLPrefix: metaTagBase,
 	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // LatestInfo is the @latest response shape — Version is the
@@ -260,20 +270,17 @@ type TransparencyRecord struct {
 }
 
 // GetLatest fetches the @latest pointer from the proxy. Returns
-// ErrNotFound (wrapped) on 404.
+// ErrNotFound (wrapped) on 404 or 410.
 func (c *Client) GetLatest(ctx context.Context, modulePath string) (*LatestInfo, error) {
 	if err := ValidateModulePath(modulePath); err != nil {
 		return nil, fmt.Errorf("get latest: %w", err)
 	}
-	encoded := encodeModulePath(modulePath)
-	url := c.proxyURL + "/" + encoded + "/@latest"
-	body, err := c.doGetJSON(ctx, url, modulePath)
-	if err != nil {
-		return nil, err
-	}
+	path := "/" + encodeModulePath(modulePath) + "/@latest"
 	var li LatestInfo
-	if err := json.Unmarshal(body, &li); err != nil {
-		return nil, fmt.Errorf("decode @latest response for %q: %w", modulePath, err)
+	err := c.proxyAPI.GetJSON(ctx, path, &li,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		return nil, c.wrapProxyErr(err, modulePath)
 	}
 	return &li, nil
 }
@@ -287,11 +294,11 @@ func (c *Client) GetVersionList(ctx context.Context, modulePath string) ([]strin
 	if err := ValidateModulePath(modulePath); err != nil {
 		return nil, fmt.Errorf("get version list: %w", err)
 	}
-	encoded := encodeModulePath(modulePath)
-	url := c.proxyURL + "/" + encoded + "/@v/list"
-	body, err := c.doGetBytes(ctx, url, modulePath)
+	path := "/" + encodeModulePath(modulePath) + "/@v/list"
+	body, err := c.proxyAPI.Get(ctx, path,
+		httpx.WithHeader("Accept", "text/plain"))
 	if err != nil {
-		return nil, err
+		return nil, c.wrapProxyErr(err, modulePath)
 	}
 	var versions []string
 	scanner := bufio.NewScanner(bytes.NewReader(body))
@@ -333,16 +340,12 @@ func (c *Client) GetVersionInfo(ctx context.Context, modulePath, version string)
 	if err := validateVersion(version); err != nil {
 		return nil, fmt.Errorf("get version info: %w", err)
 	}
-	encodedPath := encodeModulePath(modulePath)
-	encodedVer := encodeModulePath(version)
-	url := c.proxyURL + "/" + encodedPath + "/@v/" + encodedVer + ".info"
-	body, err := c.doGetJSON(ctx, url, modulePath)
-	if err != nil {
-		return nil, err
-	}
+	path := "/" + encodeModulePath(modulePath) + "/@v/" + encodeModulePath(version) + ".info"
 	var vi VersionInfo
-	if err := json.Unmarshal(body, &vi); err != nil {
-		return nil, fmt.Errorf("decode @v/%s.info response for %q: %w", version, modulePath, err)
+	err := c.proxyAPI.GetJSON(ctx, path, &vi,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		return nil, c.wrapProxyErr(err, modulePath)
 	}
 	return &vi, nil
 }
@@ -364,12 +367,11 @@ func (c *Client) LookupTransparency(ctx context.Context, modulePath, version str
 	// path the same way the proxy does. The version follows the
 	// `@` separator without bang-encoding because version strings
 	// are already lowercased (`v0.20.0`).
-	encodedPath := encodeModulePath(modulePath)
-	url := c.sumURL + "/lookup/" + encodedPath + "@" + version
-
-	body, err := c.doGetBytes(ctx, url, modulePath)
+	path := "/lookup/" + encodeModulePath(modulePath) + "@" + version
+	body, err := c.sumAPI.Get(ctx, path,
+		httpx.WithHeader("Accept", "text/plain"))
 	if err != nil {
-		return nil, err
+		return nil, c.wrapProxyErr(err, modulePath)
 	}
 	rec := &TransparencyRecord{RawRecord: string(body)}
 	// Parse the leaf id from line 1. Empty/non-numeric line 1 is
@@ -383,6 +385,17 @@ func (c *Client) LookupTransparency(ctx context.Context, modulePath, version str
 		}
 	}
 	return rec, nil
+}
+
+// wrapProxyErr maps httpx errors to the per-package shape callers
+// expect: ErrNotFound for absent-upstream paths (404 / 410), and a
+// contextual wrap for other failures. Centralized so adding a new
+// method doesn't drift from this convention.
+func (c *Client) wrapProxyErr(err error, modulePath string) error {
+	if errors.Is(err, httpx.ErrNotFound) {
+		return fmt.Errorf("%w: %s", ErrNotFound, modulePath)
+	}
+	return fmt.Errorf("request for %q: %w", modulePath, err)
 }
 
 // validateVersion guards version strings before they land in a
@@ -410,60 +423,4 @@ func validateVersion(v string) error {
 		}
 	}
 	return nil
-}
-
-// doGetJSON is the shared HTTP path for endpoints that return
-// JSON: build request, dispatch, drain and bound the body, return
-// raw bytes. Caller decodes.
-func (c *Client) doGetJSON(ctx context.Context, url, modulePath string) ([]byte, error) {
-	return c.doGet(ctx, url, modulePath, "application/json")
-}
-
-// doGetBytes is the shared HTTP path for endpoints that return
-// non-JSON (newline-list, transparency-log record). Same shape;
-// different Accept header to nudge content-negotiation toward the
-// expected response.
-func (c *Client) doGetBytes(ctx context.Context, url, modulePath string) ([]byte, error) {
-	return c.doGet(ctx, url, modulePath, "text/plain")
-}
-
-func (c *Client) doGet(ctx context.Context, url, modulePath, accept string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request for %q: %w", modulePath, err)
-	}
-	req.Header.Set("Accept", accept)
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request for %q failed: %w", modulePath, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, modulePath)
-	}
-	if resp.StatusCode == http.StatusGone {
-		// 410 from the proxy means "the version was retracted /
-		// deleted." Treat the same as NotFound for collection
-		// purposes — the collector records absence.
-		return nil, fmt.Errorf("%w: %s (410 Gone)", ErrNotFound, modulePath)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Discard body without surfacing it (#93 npm-client lesson):
-		// the response can carry server-debug noise.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("upstream returned status %d for %q", resp.StatusCode, modulePath)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read response for %q: %w", modulePath, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("response for %q exceeds %d-byte cap", modulePath, maxResponseSize)
-	}
-	return body, nil
 }

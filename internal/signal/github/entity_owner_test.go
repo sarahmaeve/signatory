@@ -140,11 +140,7 @@ func TestCollector_OwnerEntity_MintedForOrgType(t *testing.T) {
 	srv := httptest.NewServer(orgOwnerHandler("vitest-dev", "vitest"))
 	t.Cleanup(srv.Close)
 
-	client := &Client{
-		httpClient: srv.Client(),
-		token:      "test-token",
-		baseURL:    srv.URL,
-	}
+	client := NewClientWithBaseURLAndToken(srv.URL, "test-token")
 	c := NewCollectorWithClient(client).WithEntityStore(store)
 
 	entity := &profile.Entity{
@@ -227,11 +223,7 @@ func TestCollector_OwnerEntity_LowercasesLogin(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	client := &Client{
-		httpClient: srv.Client(),
-		token:      "test-token",
-		baseURL:    srv.URL,
-	}
+	client := NewClientWithBaseURLAndToken(srv.URL, "test-token")
 	c := NewCollectorWithClient(client).WithEntityStore(store)
 
 	entity := &profile.Entity{

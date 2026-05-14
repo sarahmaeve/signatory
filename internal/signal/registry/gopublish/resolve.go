@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
@@ -125,31 +123,18 @@ func (c *Client) resolveViaMetaTag(ctx context.Context, modulePath string) (stri
 		return "", fmt.Errorf("resolve via meta tag: %w", err)
 	}
 
-	url := c.metaTagURL(modulePath)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// metaTagAPI has no baseURL — we pass a fully-qualified URL
+	// because each module maps to a different vanity host. httpx
+	// still applies the redirect/timeout/size-cap defenses; the
+	// only behavioral wrinkle is that ALL failures here
+	// (transport, non-200 status, body cap) map to "not resolvable,
+	// not an error." The vanity host's response is advisory; the
+	// proxy already declined to provide an Origin, and surfacing
+	// these errors would turn every offline run on a proxy-
+	// incomplete module into a hard --refresh failure.
+	body, err := c.metaTagAPI.Get(ctx, c.metaTagURL(modulePath))
 	if err != nil {
-		return "", fmt.Errorf("build meta-tag request for %q: %w", modulePath, err)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// Network failure to the vanity host is a "not resolvable"
-		// outcome, not a hard error: the proxy already declined
-		// to provide an Origin, and the vanity host is a best-
-		// effort fallback. Surfacing transport errors here would
-		// turn every offline run on a proxy-incomplete module into
-		// a hard --refresh failure.
-		return "", nil //nolint:nilerr // Intentional — vanity-host transport failure is "not resolvable".
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-on-return; error is not actionable
-
-	if resp.StatusCode != http.StatusOK {
-		return "", nil
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-	if err != nil {
-		return "", nil //nolint:nilerr // Body-read error → "not resolvable".
+		return "", nil //nolint:nilerr // Intentional — vanity-host failure is "not resolvable".
 	}
 
 	// Try go-import first. Github-hosted vanity (k8s.io, golang.org/x/...)

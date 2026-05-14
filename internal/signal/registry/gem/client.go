@@ -2,72 +2,85 @@ package gem
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
-// Sentinel errors for registry responses.
+// Sentinel errors for registry responses. ErrNotFound wraps
+// httpx.ErrNotFound so callers can also do errors.Is(err,
+// httpx.ErrNotFound) for ecosystem-agnostic absence detection.
+// ErrUnauthorized is gem-specific (rubygems.org's owners endpoint
+// requires an API key for some queries) and surfaces via a status
+// interceptor that maps 401/403 to this sentinel before the default
+// status classification runs.
 var (
-	ErrNotFound     = errors.New("gem not found on rubygems.org")
+	ErrNotFound     = fmt.Errorf("gem not found on rubygems.org: %w", httpx.ErrNotFound)
 	ErrUnauthorized = errors.New("rubygems.org requires authentication")
 )
 
 const (
 	defaultBaseURL = "https://rubygems.org"
 	userAgent      = "signatory/0.1 (https://github.com/sarahmaeve/signatory)"
-	maxBodyBytes   = 4 * 1024 * 1024 // 4 MiB cap on response bodies
+	// gemTimeout is tighter than the 60s default because rubygems.org
+	// API responses are small (a few KB) and the original gem client
+	// used 15s. Preserved for behavior parity.
+	gemTimeout = 15 * time.Second
+	// gemMaxBytes is tighter than the 10 MiB httpx default because
+	// gem JSON responses are small. Preserved for behavior parity.
+	gemMaxBytes = 4 * 1024 * 1024
 )
 
 // gemNameRe validates gem names: starts with a letter or digit, then
 // allows letters, digits, hyphens, underscores, and dots.
 var gemNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
-// Client queries the rubygems.org JSON API.
+// Client queries the rubygems.org JSON API. The defensive network
+// discipline (HTTPS-only redirects, body cap, drain-and-discard on
+// non-2xx, sanitized status errors) lives in httpx.SecureClient. This
+// package owns input validation, sentinel-error wrapping, and the
+// 401/403 → ErrUnauthorized translation via WithStatusInterceptor.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	api *httpx.SecureClient
 }
 
 // NewClient returns a Client pointed at the production rubygems.org.
 func NewClient() *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:       15 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: defaultBaseURL,
-	}
+	return &Client{api: buildAPI(defaultBaseURL)}
 }
 
 // NewClientWithBaseURL returns a Client pointed at a custom base URL.
 // Primary use: tests with httptest servers.
 func NewClientWithBaseURL(base string) *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:       15 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: base,
-	}
+	return &Client{api: buildAPI(base)}
 }
 
-// checkRedirect enforces HTTPS-only redirects and bounds the chain.
-// Symmetric with the npm, PyPI, cargo, maven, and gopublish clients —
-// see those for the rationale: rubygems.org is HTTPS-only, so any
-// scheme downgrade is either misconfiguration or a MITM attempting to
-// tamper with owner / version metadata that feeds trust signals.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
+// buildAPI keeps the two constructors in lockstep on transport
+// configuration: tighter 15s timeout, tighter 4 MiB body cap, gem
+// User-Agent, and the 401/403 interceptor that maps to
+// ErrUnauthorized.
+func buildAPI(base string) *httpx.SecureClient {
+	return httpx.NewSecureClient(
+		httpx.WithBaseURL(base),
+		httpx.WithTimeout(gemTimeout),
+		httpx.WithMaxBytes(gemMaxBytes),
+		httpx.WithUserAgent(userAgent),
+	)
+}
+
+// unauthorizedInterceptor maps rubygems' 401 / 403 responses to
+// ErrUnauthorized before httpx's default status classification runs.
+// Called per-request because the interceptor option is per-request;
+// passing the same function each time keeps it simple.
+func unauthorizedInterceptor(resp *http.Response) error {
+	if resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusForbidden {
+		return ErrUnauthorized
 	}
 	return nil
 }
@@ -77,16 +90,9 @@ func (c *Client) GetGem(ctx context.Context, name string) (*GemResponse, error) 
 	if err := ValidateGemName(name); err != nil {
 		return nil, err
 	}
-
-	url := c.baseURL + "/api/v1/gems/" + name + ".json"
-	body, err := c.doGet(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-
 	var resp GemResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parse gem response: %w", err)
+	if err := c.fetchJSON(ctx, "/api/v1/gems/"+name+".json", &resp); err != nil {
+		return nil, err
 	}
 	return &resp, nil
 }
@@ -96,16 +102,9 @@ func (c *Client) GetVersions(ctx context.Context, name string) ([]VersionEntry, 
 	if err := ValidateGemName(name); err != nil {
 		return nil, err
 	}
-
-	url := c.baseURL + "/api/v1/versions/" + name + ".json"
-	body, err := c.doGet(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-
 	var versions []VersionEntry
-	if err := json.Unmarshal(body, &versions); err != nil {
-		return nil, fmt.Errorf("parse versions response: %w", err)
+	if err := c.fetchJSON(ctx, "/api/v1/versions/"+name+".json", &versions); err != nil {
+		return nil, err
 	}
 	return versions, nil
 }
@@ -116,18 +115,34 @@ func (c *Client) GetOwners(ctx context.Context, name string) ([]OwnerEntry, erro
 	if err := ValidateGemName(name); err != nil {
 		return nil, err
 	}
-
-	url := c.baseURL + "/api/v1/gems/" + name + "/owners.json"
-	body, err := c.doGet(ctx, url)
-	if err != nil {
+	var owners []OwnerEntry
+	if err := c.fetchJSON(ctx, "/api/v1/gems/"+name+"/owners.json", &owners); err != nil {
 		return nil, err
 	}
-
-	var owners []OwnerEntry
-	if err := json.Unmarshal(body, &owners); err != nil {
-		return nil, fmt.Errorf("parse owners response: %w", err)
-	}
 	return owners, nil
+}
+
+// fetchJSON is the shared per-method helper. Wraps the httpx call
+// with the gem-specific error translation (httpx.ErrNotFound →
+// gem.ErrNotFound; interceptor 401/403 → ErrUnauthorized which
+// surfaces here as-is; other errors get a contextual wrap).
+func (c *Client) fetchJSON(ctx context.Context, path string, result any) error {
+	err := c.api.GetJSON(ctx, path, result,
+		httpx.WithHeader("Accept", "application/json"),
+		httpx.WithStatusInterceptor(unauthorizedInterceptor),
+	)
+	if err != nil {
+		if errors.Is(err, ErrUnauthorized) {
+			// Propagate the typed sentinel unwrapped so callers'
+			// errors.Is(err, ErrUnauthorized) branch fires.
+			return err
+		}
+		if errors.Is(err, httpx.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("rubygems.org request: %w", err)
+	}
+	return nil
 }
 
 // ResolveRepoURL fetches gem metadata and returns the declared source
@@ -164,39 +179,6 @@ func ValidateGemName(name string) error {
 		return fmt.Errorf("gem name %q contains invalid characters", name)
 	}
 	return nil
-}
-
-// doGet performs a GET request with context, User-Agent, and body cap.
-func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("rubygems.org request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// fall through to read body
-	case http.StatusNotFound:
-		return nil, ErrNotFound
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, ErrUnauthorized
-	default:
-		return nil, fmt.Errorf("rubygems.org returned HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	return body, nil
 }
 
 // isGitHostURL checks whether a URL points to a known git hosting

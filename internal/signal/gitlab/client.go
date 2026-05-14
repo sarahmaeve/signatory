@@ -43,69 +43,57 @@
 // encoding would route to a different gitlab path or 404. See
 // projectIDPath for the encoding rule.
 //
-// The github / forgejo collectors are the reference implementations.
-// Where this package's discipline matches theirs (timeouts,
-// response-size limits, redirect policy), the rationale lives in
-// internal/signal/github/client.go and is not repeated here.
+// The defensive network discipline (HTTPS-only redirects, response-
+// body cap, drain-and-discard on non-2xx, sanitized status errors)
+// lives in httpx.SecureClient; this package owns the per-method 404
+// semantics (ListRootFilenames / GetRepoLanguage return zero on 404;
+// GetProject / GetGroup propagate ErrNotFound; GetUserByUsername
+// also folds "empty result array" into ErrNotFound) and the
+// nested-namespace URL-encoding rule.
 package gitlab
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrNotFound is the sentinel callers compare via errors.Is when the
-// GitLab API responds 404. Mirrors github.ErrNotFound /
-// forgejo.ErrNotFound.
-var ErrNotFound = errors.New("gitlab: not found")
+// GitLab API responds 404. Wraps httpx.ErrNotFound so callers can
+// also do errors.Is(err, httpx.ErrNotFound) for ecosystem-agnostic
+// absence detection.
+var ErrNotFound = fmt.Errorf("gitlab: %w", httpx.ErrNotFound)
 
-// maxResponseSize bounds the JSON body we'll read. Mirrors
-// github/forgejo's 10 MiB cap; GitLab project responses are typically
-// <100 KiB so this is generous slack against malicious or runaway
-// upstreams.
-const maxResponseSize = 10 * 1024 * 1024
-
-// Client is a minimal GitLab REST client. baseURL is the API root
-// (e.g. https://gitlab.com/api/v4) — caller-injectable for tests,
-// fixed to the gitlab.com root in production via NewClient.
+// Client is a minimal GitLab REST client. The defensive HTTP pipeline
+// is delegated to httpx.SecureClient; this package owns response-shape
+// decoding and the per-method 404 semantics.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	api *httpx.SecureClient
 }
 
 // NewClient creates a GitLab client pointed at gitlab.com's public
-// API root with a 60s per-request timeout (matches github/forgejo
-// clients). v0.1 is unauthenticated; gitlab.com's public-API rate
+// API root. v0.1 is unauthenticated; gitlab.com's public-API rate
 // limit (600 req/min unauth) is sufficient for a single-target
 // analyze. Authenticated access via a GITLAB_TOKEN env var is a
 // follow-up when survey-side usage emerges.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: "https://gitlab.com/api/v4",
+		api: httpx.NewSecureClient(httpx.WithBaseURL("https://gitlab.com/api/v4")),
 	}
 }
 
-// checkRedirect mirrors the github / forgejo redirect policy: refuse
-// non-HTTPS targets, bound the chain to <10 hops.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+// NewClientWithBaseURL returns a Client whose endpoint points at the
+// supplied base. Primary use case: test harnesses pointing the
+// client at an httptest server. Production code should call NewClient.
+func NewClientWithBaseURL(base string) *Client {
+	return &Client{
+		api: httpx.NewSecureClient(httpx.WithBaseURL(base)),
 	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // project represents the subset of /api/v4/projects/{id} response
@@ -174,58 +162,20 @@ func projectIDPath(namespacePath string) string {
 	return strings.ReplaceAll(escaped, "/", "%2F")
 }
 
-// get performs a GET against the GitLab API at path, decoding the
-// response into result. Returns ErrNotFound (wrapped) on 404 so
-// callers can use errors.Is. Other non-200 responses surface as a
-// status-only error — body intentionally NOT included for the same
-// reason github's client drops it (issue #93).
-func (c *Client) get(ctx context.Context, path string, result any) error {
-	endpoint := c.baseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-after-read; body consumed below, error here is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %s", ErrNotFound, path)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("gitlab API returned status %d", resp.StatusCode)
-	}
-
-	if result != nil {
-		limited := io.LimitReader(resp.Body, maxResponseSize+1)
-		body, readErr := io.ReadAll(limited)
-		if readErr != nil {
-			return fmt.Errorf("read response: %w", readErr)
-		}
-		if int64(len(body)) > maxResponseSize {
-			return fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
-		}
-		if jsonErr := json.Unmarshal(body, result); jsonErr != nil {
-			return fmt.Errorf("decode response: %w", jsonErr)
-		}
-	}
-	return nil
-}
-
 // GetProject fetches /api/v4/projects/{namespace_url_encoded}.
 // namespacePath is the full path (e.g. "gitlab-org/gitlab" or
 // "gitlab-org/security/foo"); URL encoding happens inside via
 // projectIDPath. Returns ErrNotFound (wrapped) when the project
 // doesn't exist or is private to the unauthenticated client.
 func (c *Client) GetProject(ctx context.Context, namespacePath string) (*project, error) {
+	path := "/projects/" + projectIDPath(namespacePath)
 	var p project
-	if err := c.get(ctx, "/projects/"+projectIDPath(namespacePath), &p); err != nil {
-		return nil, err
+	err := c.api.GetJSON(ctx, path, &p, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("gitlab API request for %s: %w", path, err)
 	}
 	return &p, nil
 }
@@ -260,9 +210,14 @@ type group struct {
 // "gitlab-org/security"); same URL-encoding rule as GetProject.
 // Returns ErrNotFound (wrapped) on 404.
 func (c *Client) GetGroup(ctx context.Context, namespacePath string) (*group, error) {
+	path := "/groups/" + projectIDPath(namespacePath)
 	var g group
-	if err := c.get(ctx, "/groups/"+projectIDPath(namespacePath), &g); err != nil {
-		return nil, err
+	err := c.api.GetJSON(ctx, path, &g, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("gitlab API request for %s: %w", path, err)
 	}
 	return &g, nil
 }
@@ -287,10 +242,14 @@ type user struct {
 // case is a legitimate "no such user" and folds into ErrNotFound
 // so callers can errors.Is against the single sentinel.
 func (c *Client) GetUserByUsername(ctx context.Context, username string) (*user, error) {
-	var users []user
 	path := "/users?username=" + url.QueryEscape(username)
-	if err := c.get(ctx, path, &users); err != nil {
-		return nil, err
+	var users []user
+	err := c.api.GetJSON(ctx, path, &users, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("gitlab API request for %s: %w", path, err)
 	}
 	if len(users) == 0 {
 		return nil, fmt.Errorf("%w: /users?username=%s (no matching user)", ErrNotFound, username)
@@ -340,13 +299,14 @@ func namespacePathFromOwnerRepo(owner, repoName string) string {
 // Directories and submodules are filtered out client-side; ecosystem
 // detection only cares about files.
 func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) ([]string, error) {
-	var entries []treeEntry
 	path := "/projects/" + projectIDPath(namespacePathFromOwnerRepo(owner, repoName)) + "/repository/tree"
-	if err := c.get(ctx, path, &entries); err != nil {
-		if errors.Is(err, ErrNotFound) {
+	var entries []treeEntry
+	err := c.api.GetJSON(ctx, path, &entries, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("gitlab API request for %s: %w", path, err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -374,13 +334,14 @@ func (c *Client) ListRootFilenames(ctx context.Context, owner, repoName string) 
 // ecosystem detector can apply the same "language=” → fall back to
 // manifest" reasoning across forges.
 func (c *Client) GetRepoLanguage(ctx context.Context, owner, repoName string) (string, error) {
-	var languages map[string]float64
 	path := "/projects/" + projectIDPath(namespacePathFromOwnerRepo(owner, repoName)) + "/languages"
-	if err := c.get(ctx, path, &languages); err != nil {
-		if errors.Is(err, ErrNotFound) {
+	var languages map[string]float64
+	err := c.api.GetJSON(ctx, path, &languages, httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
 			return "", nil
 		}
-		return "", err
+		return "", fmt.Errorf("gitlab API request for %s: %w", path, err)
 	}
 	var topLang string
 	var topPct float64
