@@ -175,6 +175,13 @@ meta-tag). Most have one.
 | `WithNotFoundStatuses(codes...)` | `{404}` | Replace the not-found-status set. gopublish uses `{404, 410}`. |
 | `WithTransport(rt)` | stdlib default | **Test-only.** Inject a custom `http.RoundTripper`. Used by github security tests (leaking transport, TLS-trusting transport). Production must not call this. |
 
+**Non-positive values are ignored** by `WithTimeout`, `WithMaxBytes`,
+and `WithRequestMaxBytes`. The previous value (default or earlier
+override) is preserved. This is so a stray `time.Duration(0)` or
+`int64(0)` from caller arithmetic can't silently disable a defense
+(`http.Client.Timeout=0` means "no timeout" in the stdlib;
+`maxBytes=0` would fail every non-empty response).
+
 ### Per-request options
 
 | Option | Use |

@@ -144,8 +144,17 @@ func WithBaseURL(base string) Option {
 }
 
 // WithTimeout overrides the default 60s per-request timeout.
+// Non-positive values are ignored — the previous value (default or
+// earlier override) is preserved. This is so a stray time.Duration(0)
+// can't silently disable the timeout (http.Client.Timeout=0 means
+// "no timeout" in the stdlib).
 func WithTimeout(d time.Duration) Option {
-	return func(c *scConfig) { c.timeout = d }
+	return func(c *scConfig) {
+		if d <= 0 {
+			return
+		}
+		c.timeout = d
+	}
 }
 
 // WithUserAgent overrides the default User-Agent header
@@ -157,8 +166,17 @@ func WithUserAgent(ua string) Option {
 }
 
 // WithMaxBytes overrides the default 10 MiB response-body cap.
+// Non-positive values are ignored — the previous value (default or
+// earlier override) is preserved. A zero cap would otherwise make
+// every non-empty response fail with ErrResponseTooLarge (fail
+// closed, but operationally broken).
 func WithMaxBytes(n int64) Option {
-	return func(c *scConfig) { c.maxBytes = n }
+	return func(c *scConfig) {
+		if n <= 0 {
+			return
+		}
+		c.maxBytes = n
+	}
 }
 
 // WithTransport replaces the underlying http.RoundTripper used by
@@ -205,8 +223,19 @@ func WithHeader(key, value string) RequestOption {
 // single request. Use for endpoints with smaller expected payloads
 // (npm's downloads endpoint at 64 KiB, pypi attestation at 256 KiB)
 // where the tighter bound is a tighter abuse defense.
+//
+// Non-positive values are ignored: the per-request cap stays unset
+// and the client default applies. Zero would otherwise be ambiguous
+// — does it mean "use client default" (the impl's current fall-
+// through semantic) or "enforce zero-byte cap"? Ignoring zero
+// removes the ambiguity.
 func WithRequestMaxBytes(n int64) RequestOption {
-	return func(r *reqConfig) { r.maxBytes = n }
+	return func(r *reqConfig) {
+		if n <= 0 {
+			return
+		}
+		r.maxBytes = n
+	}
 }
 
 // WithStrictJSONDecode enables DisallowUnknownFields on GetJSON's

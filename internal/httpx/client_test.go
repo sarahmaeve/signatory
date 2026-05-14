@@ -582,6 +582,38 @@ func TestCheckRedirect_BoundsChainAt10(t *testing.T) {
 // Construction options
 // --------------------------------------------------------------------
 
+// TestNonPositiveOptionsKeepDefaults pins the guard that non-positive
+// values for WithTimeout / WithMaxBytes / WithRequestMaxBytes do NOT
+// silently disable the defense. Without this guard,
+// WithTimeout(0) → http.Client.Timeout=0 → no timeout (a defense
+// disable) and WithMaxBytes(0) → every non-empty response fails with
+// ErrResponseTooLarge (a fail-closed correctness break). Both are
+// undocumented surprises; the guard normalizes them to the default.
+//
+// Doubles as the regression guard for "NewSecureClient wires the
+// 60s default timeout" — without this assertion, a refactor changing
+// the default to 0 would not fail any test.
+func TestNonPositiveOptionsKeepDefaults(t *testing.T) {
+	t.Parallel()
+
+	c := NewSecureClient(WithTimeout(-1), WithMaxBytes(0))
+	assert.Equal(t, defaultTimeout, c.httpClient.Timeout,
+		"WithTimeout(<=0) must not disable the timeout")
+	assert.Equal(t, int64(defaultMaxBytes), c.maxBytes,
+		"WithMaxBytes(<=0) must not change the cap")
+
+	// Per-request override: WithRequestMaxBytes(<=0) must not
+	// silently fall through to the client default in a way that
+	// surprises callers. The chosen semantic is "non-positive is
+	// ignored," same as the client-level guards.
+	rcfg := parseRequestOpts([]RequestOption{WithRequestMaxBytes(0)})
+	assert.Equal(t, int64(0), rcfg.maxBytes,
+		"WithRequestMaxBytes(<=0) must not set the per-request cap (treated as unset, client default applies)")
+	rcfg = parseRequestOpts([]RequestOption{WithRequestMaxBytes(-5)})
+	assert.Equal(t, int64(0), rcfg.maxBytes,
+		"WithRequestMaxBytes(<=0) must not set the per-request cap")
+}
+
 func TestSecureClient_WithTimeout(t *testing.T) {
 	t.Parallel()
 	// Server blocks indefinitely. A 50ms client-side timeout must
