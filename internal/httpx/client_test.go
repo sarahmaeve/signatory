@@ -116,7 +116,20 @@ func TestSecureClient_Get_OtherNon2xx_NoBodyInError(t *testing.T) {
 	// Issue #93 lesson: response body content must never reach the
 	// error string. Bodies are attacker-influenceable; they can carry
 	// secrets, internal IPs, or controlled tokens.
-	const secretBody = "DEBUG: SecretToken=abc123xyz789"
+	//
+	// We construct the body from three distinctive substrings and
+	// assert NONE of them appear in the error. A partial leak — say,
+	// a refactor that included the first 20 bytes of the body in the
+	// error "for diagnostics" — would defeat a NotContains check on
+	// the full-body string (substring semantics: the partial leak
+	// doesn't contain the full pattern). Asserting against three
+	// distinct prefixes/keys catches the partial-leak case.
+	const (
+		debugPrefix = "DEBUG-leak-prefix:"
+		secretKey   = "SecretTokenName"
+		secretValue = "abc123xyz789payload"
+	)
+	const secretBody = debugPrefix + " " + secretKey + "=" + secretValue
 	srv := newSrv(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, secretBody)
@@ -127,7 +140,13 @@ func TestSecureClient_Get_OtherNon2xx_NoBodyInError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500", "status code should be in error string")
 	assert.NotContains(t, err.Error(), secretBody,
-		"#93: response body must not leak into error string")
+		"#93: full body must not leak into error string")
+	assert.NotContains(t, err.Error(), debugPrefix,
+		"#93: even a body prefix must not reach the error string")
+	assert.NotContains(t, err.Error(), secretKey,
+		"#93: token-shaped substring must not reach the error string")
+	assert.NotContains(t, err.Error(), secretValue,
+		"#93: any portion of an attacker-controlled body must stay sealed")
 	assert.False(t, errors.Is(err, ErrNotFound),
 		"500 should not be classified as not-found")
 }
