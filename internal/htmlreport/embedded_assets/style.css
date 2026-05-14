@@ -1,148 +1,201 @@
 /*
- * signatory show-synthesis --html stylesheet (Phase A).
+ * signatory show-synthesis --html stylesheet.
  *
- * Minimal but real: severity colour swatches, posture call-out,
- * missing-reference banner, readable body typography. No theming,
- * no responsive tricks, no JS-coupled state. A future iteration
- * can add light/dark/print variants if real use surfaces a need
- * (see design §10).
+ * Theme: Retrofuturism Chrome — deep-space dark base, neon cyan / amber /
+ * green / red for state. Pink (#ff6ec7) appears in exactly one place:
+ * the "recorded posture differs from synthesist recommendation" call-
+ * out. Everywhere else is cyan, amber, green, red, or muted.
+ *
+ * Class names mirror the renderer's emissions: .severity-*, .posture-*,
+ * .agent-banner, .posture-callout, etc. Renaming any class here means
+ * renaming it in render_*.go and updating assets_test.go in lockstep.
+ *
+ * Fonts load from Google Fonts CDN. signatory already requires network
+ * access at collection time, so reports can also depend on it.
+ *
+ * Print: an @media print block at the bottom reverts to a light ink-
+ * on-paper palette via custom-property override, so reports stapled
+ * to a remediation ticket stay legible.
  */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Rajdhani:wght@400;600&family=Share+Tech+Mono&display=swap');
+
+/* ------------------------------------------------------------------ */
+/* Design tokens — Retrofuturism Chrome (see /tmp/retrofuturism-      */
+/* chrome-DESIGN.md). Centralised here so @media print can swap the   */
+/* whole palette by overriding the custom properties in one block.    */
+/* ------------------------------------------------------------------ */
+
+:root {
+	--color-primary:    #00d4ff;  /* info / trusted-for-now / cyan accents */
+	--color-secondary:  #ff6ec7;  /* differs-from-recommended ONLY */
+	--color-accent:     #ffd700;  /* warning / unknown-provenance / amber */
+	--color-background: #0d0d1a;
+	--color-surface:    #1a1a2e;
+	--color-text:       #e8e8f0;
+	--color-muted:      #7a7a8e;
+	--color-border:     #2d2d4a;
+	--color-error:      #ff4757;  /* critical / rejected */
+	--color-success:    #2ed573;  /* positive / vetted-frozen */
+
+	--font-display: "Orbitron", "Segoe UI", sans-serif;
+	--font-body:    "Rajdhani", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	--font-mono:    "Share Tech Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+	--glow-cyan:    0 0 20px rgba(0, 212, 255, 0.5);
+	--glow-amber:   0 0 16px rgba(255, 215, 0, 0.45);
+	--glow-red:     0 0 16px rgba(255, 71, 87, 0.45);
+	--glow-success: 0 0 16px rgba(46, 213, 115, 0.4);
+	--chrome-sheen:   linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.02) 50%, rgba(0,0,0,0.15) 100%);
+	--space-gradient: linear-gradient(180deg, #1a1a2e 0%, #0d0d1a 100%);
+}
 
 /* ------------------------------------------------------------------ */
 /* Page foundations                                                   */
 /* ------------------------------------------------------------------ */
 
 html {
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-	             "Helvetica Neue", Arial, sans-serif;
+	font-family: var(--font-body);
 	font-size: 16px;
 	line-height: 1.5;
-	color: #1a1a1a;
-	background: #fafafa;
+	color: var(--color-text);
+	background: var(--space-gradient);
+	background-attachment: fixed;
 }
 
 body {
 	max-width: 56rem;
 	margin: 2rem auto;
 	padding: 0 1.5rem 4rem;
-	position: relative;
 }
 
-/* Otis watermark — every page carries a subtle backdrop anchored to
- * the right edge of the viewport. Positioned with bottom rather than
- * top so the watermark settles below the verdict heading on a fresh
- * load, then stays put as the reader scrolls (background-attachment:
- * fixed semantics, achieved here via position: fixed on a pseudo-
- * element so we can apply opacity).
- * pointer-events:none keeps it from swallowing clicks; z-index:-1
- * places it behind body content. */
-
-body::before {
-	content: "";
-	position: fixed;
-	bottom: 1rem;
-	right: -2rem;
-	width: 22rem;
-	height: 22rem;
-	background-image: url('images/otis-watermark.jpg');
-	background-repeat: no-repeat;
-	background-size: contain;
-	background-position: bottom right;
-	opacity: 0.2;
-	pointer-events: none;
-	z-index: -1;
-}
-
-/* Top-of-page banner. Monospace / courier-ish; stamps every page
- * with "this is signatory output" before the reader gets to the
- * verdict. Kept above the h1 so the page hierarchy reads
- * banner → page-title → sections. */
+/* Top-of-page banner. Chrome-tinted surface, Orbitron display type,
+ * cyan glow. Acts as the "this is a signatory readout" frame above
+ * every page's h1. Kept sharp-edged per the design doc's ban on
+ * heavy rounding (>12px) on containers. */
 
 .agent-banner {
-	font-family: "Courier New", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-family: var(--font-display);
 	font-weight: 700;
 	font-size: 0.95rem;
 	letter-spacing: 0.18em;
 	text-align: center;
-	color: #333;
-	background: #1a1a1a;
-	color: #fafafa;
-	padding: 0.5rem 1rem;
+	color: var(--color-primary);
+	background-color: var(--color-surface);
+	background-image: var(--chrome-sheen);
+	padding: 0.65rem 1rem;
 	margin: -2rem -1.5rem 2rem;
-	border-radius: 0 0 4px 4px;
+	border-bottom: 1px solid var(--color-primary);
+	text-shadow: var(--glow-cyan);
+	box-shadow: 0 0 30px rgba(0, 212, 255, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 h1 {
-	font-size: 1.75rem;
+	font-family: var(--font-display);
+	font-weight: 700;
+	font-size: 1.95rem;
+	line-height: 1.1;
+	letter-spacing: -0.02em;
 	margin-top: 0;
-	border-bottom: 1px solid #ddd;
+	color: var(--color-text);
+	text-shadow: var(--glow-cyan);
+	border-bottom: 1px solid var(--color-border);
 	padding-bottom: 0.5rem;
 }
 
 h2 {
-	font-size: 1.25rem;
+	font-family: var(--font-display);
+	font-weight: 600;
+	font-size: 1.4rem;
+	line-height: 1.15;
+	letter-spacing: -0.02em;
 	margin-top: 2rem;
-	color: #333;
+	color: var(--color-text);
+	text-shadow: 0 0 14px rgba(0, 212, 255, 0.35);
 }
 
 h3 {
-	font-size: 1.05rem;
-	color: #444;
+	font-family: var(--font-body);
+	font-weight: 600;
+	font-size: 1.1rem;
+	color: var(--color-text);
+	margin-top: 1rem;
 }
 
 p { margin: 0.5rem 0; }
 
 code, blockquote {
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-family: var(--font-mono);
 	font-size: 0.95em;
 }
 
 code {
-	background: #eef0f3;
-	padding: 0.1em 0.35em;
-	border-radius: 3px;
+	background: rgba(0, 212, 255, 0.08);
+	color: var(--color-primary);
+	padding: 0.1em 0.4em;
+	border-radius: 2px;
+	border: 1px solid var(--color-border);
 }
 
 blockquote {
 	margin: 0.5rem 0;
-	padding: 0.5rem 0.75rem;
-	border-left: 3px solid #ccc;
-	background: #f4f4f4;
-	color: #333;
+	padding: 0.6rem 0.85rem;
+	border-left: 3px solid var(--color-primary);
+	background: var(--color-surface);
+	color: var(--color-text);
+	border-radius: 0 4px 4px 0;
 }
 
-a { color: #0a52cc; }
-a:hover { text-decoration: underline; }
+a {
+	color: var(--color-primary);
+	text-decoration: none;
+	border-bottom: 1px dotted rgba(0, 212, 255, 0.4);
+	transition: color 120ms ease-out, text-shadow 120ms ease-out, border-bottom-color 120ms ease-out;
+}
+
+a:hover {
+	text-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
+	border-bottom-color: var(--color-primary);
+}
+
+a:focus-visible {
+	outline: 2px solid var(--color-primary);
+	outline-offset: 2px;
+}
 
 dl.metadata dt {
+	font-family: var(--font-display);
 	font-weight: 600;
-	color: #555;
+	font-size: 0.72rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--color-muted);
 	float: left;
 	clear: left;
 	width: 9rem;
+	padding-top: 0.15rem;
 }
 
 dl.metadata dd {
-	margin: 0 0 0.25rem 9.5rem;
+	margin: 0 0 0.4rem 9.5rem;
+	color: var(--color-text);
 }
 
 section { margin-top: 2rem; }
 
-/* Summary section gets a blue sidebar so it stands out against the
- * surrounding sections — operators looking for the executive
- * paragraph should be able to spot it from a long way down the
- * page. */
+/* Summary keeps the left-rail call-out; recoloured to cyan so the
+ * executive paragraph still stands out from surrounding sections. */
 
 section.summary {
-	border-left: 4px solid #2563eb;
-	padding: 0.25rem 0 0.25rem 1rem;
-	background: #f4f7fe;
+	border-left: 4px solid var(--color-primary);
+	padding: 0.4rem 0 0.4rem 1rem;
+	background: rgba(0, 212, 255, 0.04);
 	border-radius: 0 4px 4px 0;
 }
 
 section.summary h2 {
 	margin-top: 0.25rem;
-	color: #1a3da8;
+	color: var(--color-primary);
 }
 
 ul, ol { padding-left: 1.5rem; }
@@ -154,128 +207,152 @@ ul, ol { padding-left: 1.5rem; }
 .posture-callout {
 	margin: 1rem 0 2rem;
 	padding: 1rem 1.25rem;
-	border-radius: 6px;
-	border-left: 6px solid #888;
-	background: #f0f0f0;
+	border-radius: 4px;
+	border: 1px solid var(--color-border);
+	border-left: 6px solid var(--color-muted);
+	background-color: var(--color-surface);
+	background-image: var(--chrome-sheen);
+	box-shadow: 0 0 20px rgba(0, 212, 255, 0.08);
 }
 
 .posture-callout strong {
+	font-family: var(--font-display);
 	font-size: 1.1rem;
+	letter-spacing: 0.02em;
 }
 
 .posture-callout .version-scope {
-	color: #555;
+	color: var(--color-muted);
 	font-weight: 400;
 }
 
-.posture-vetted-frozen     { border-left-color: #1f7a1f; background: #e9f5e9; }
-.posture-trusted-for-now   { border-left-color: #2563eb; background: #e7eefe; }
-.posture-unexamined        { border-left-color: #888;    background: #f0f0f0; }
-.posture-unknown-provenance{ border-left-color: #c97a00; background: #fef0d9; }
-.posture-rejected          { border-left-color: #b3261e; background: #fbe5e3; }
-.posture-unknown           { border-left-color: #888;    background: #f0f0f0; }
+/* Tier-specific indicator rails. Background stays the chrome surface
+ * (the design doc bans neon at full saturation on large areas); only
+ * the left border + a faint matching glow signal the tier. */
+
+.posture-vetted-frozen      { border-left-color: var(--color-success); box-shadow: 0 0 24px rgba(46, 213, 115, 0.18); }
+.posture-trusted-for-now    { border-left-color: var(--color-primary); box-shadow: 0 0 24px rgba(0, 212, 255, 0.18); }
+.posture-unexamined         { border-left-color: var(--color-muted); }
+.posture-unknown-provenance { border-left-color: var(--color-accent);  box-shadow: 0 0 24px rgba(255, 215, 0, 0.18); }
+.posture-rejected           { border-left-color: var(--color-error);   box-shadow: 0 0 24px rgba(255, 71, 87, 0.18); }
+.posture-unknown            { border-left-color: var(--color-muted); }
 
 .posture-source {
-	color: #555;
+	color: var(--color-muted);
 	font-weight: 400;
 	font-size: 0.85em;
 }
 
 .posture-meta {
-	color: #555;
+	color: var(--color-muted);
 	font-size: 0.9em;
 	margin-top: 0.4rem;
 }
 
-/* When the recorded posture disagrees with the synthesist's
- * recommendation, override the tier-based palette with a clashing
- * red dashed border + warning label so the conflict is visually
- * loud and impossible to miss while skimming. */
+/* The only place pink appears: when the recorded posture disagrees
+ * with the synthesist's recommendation. The pink→cyan gradient
+ * border-image makes the disagreement visually electric without
+ * resorting to animation. The ::after badge stays solid pink so the
+ * label reads on the surface even when the border is busy. */
 
 .posture-callout.recorded.differs-from-recommended {
-	border: 3px dashed #b3261e;
-	border-left-width: 6px;
-	background: #fff8f7;
+	border: 2px solid transparent;
+	border-image: linear-gradient(135deg, var(--color-secondary), var(--color-primary)) 1;
+	background-color: var(--color-surface);
+	box-shadow: 0 0 24px rgba(255, 110, 199, 0.25);
 }
 
 .posture-callout.recorded.differs-from-recommended::after {
 	content: "↯ Differs from recommendation";
 	display: inline-block;
-	margin-top: 0.5rem;
-	padding: 0.15rem 0.6rem;
-	background: #b3261e;
-	color: #fff;
-	font-weight: 600;
-	font-size: 0.8rem;
-	border-radius: 3px;
-	letter-spacing: 0.05em;
+	margin-top: 0.6rem;
+	padding: 0.22rem 0.7rem;
+	background: var(--color-secondary);
+	color: #1a1a2e;
+	font-family: var(--font-display);
+	font-weight: 700;
+	font-size: 0.78rem;
+	letter-spacing: 0.06em;
+	border-radius: 2px;
+	text-shadow: none;
 }
 
 /* ------------------------------------------------------------------ */
-/* Severity badges                                                    */
+/* Severity badges + entries                                          */
 /* ------------------------------------------------------------------ */
 
 .severity-badge {
 	display: inline-block;
-	padding: 0.15rem 0.6rem;
+	padding: 0.22rem 0.75rem;
 	border-radius: 999px;
-	font-size: 0.85rem;
+	font-family: var(--font-display);
+	font-size: 0.78rem;
 	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 	margin: 0.5rem 0 1rem;
 	border: 1px solid transparent;
+	background: var(--color-surface);
 }
 
 .severity-tag {
 	display: inline-block;
 	padding: 0 0.4rem;
-	border-radius: 3px;
+	border-radius: 2px;
 	font-size: 0.8rem;
-	font-family: ui-monospace, monospace;
+	font-family: var(--font-mono);
 	margin-left: 0.4rem;
 }
 
-.severity-critical      { background: #fbe5e3; color: #780a04; border-color: #b3261e; }
-.severity-high          { background: #fde2cf; color: #7a3a00; border-color: #c97a00; }
-.severity-medium        { background: #fef3c7; color: #6b5400; border-color: #b78d00; }
-.severity-low           { background: #fef9d9; color: #555000; border-color: #b1a100; }
-.severity-informational { background: #e7eefe; color: #1a3da8; border-color: #2563eb; }
-.severity-positive      { background: #e9f5e9; color: #14541a; border-color: #1f7a1f; }
-.severity-unknown       { background: #f0f0f0; color: #333;    border-color: #888;    }
+/* Each severity gets a coloured border + matching glow; background
+ * stays the dark surface so coloured text holds 4.5:1 contrast. */
+.severity-critical      { color: var(--color-error);   border-color: var(--color-error);   box-shadow: var(--glow-red); }
+.severity-high          { color: var(--color-accent);  border-color: var(--color-accent);  box-shadow: var(--glow-amber); }
+.severity-medium        { color: var(--color-accent);  border-color: var(--color-accent);  opacity: 0.85; }
+.severity-low           { color: var(--color-accent);  border-color: var(--color-border); }
+.severity-informational { color: var(--color-primary); border-color: var(--color-primary); }
+.severity-positive      { color: var(--color-success); border-color: var(--color-success); box-shadow: var(--glow-success); }
+.severity-unknown       { color: var(--color-muted);   border-color: var(--color-border); }
 
-/* Conclusion-entry list items adopt a left border colour matching
- * severity, so a scrollable analyst page is scannable at a glance. */
+/* Conclusion-entry left rails match severity so a scrollable analyst
+ * page is scannable at a glance. */
 
 .conclusion-entry {
-	border-left: 4px solid #888;
-	padding-left: 0.6rem;
-	margin: 0.4rem 0;
+	border-left: 4px solid var(--color-muted);
+	padding: 0.2rem 0 0.2rem 0.7rem;
+	margin: 0.5rem 0;
+	background: rgba(26, 26, 46, 0.4);
 }
 
-.conclusion-entry.severity-critical      { border-left-color: #b3261e; }
-.conclusion-entry.severity-high          { border-left-color: #c97a00; }
-.conclusion-entry.severity-medium        { border-left-color: #b78d00; }
-.conclusion-entry.severity-low           { border-left-color: #b1a100; }
-.conclusion-entry.severity-informational { border-left-color: #2563eb; }
-.conclusion-entry.severity-positive      { border-left-color: #1f7a1f; }
+.conclusion-entry.severity-critical      { border-left-color: var(--color-error); }
+.conclusion-entry.severity-high          { border-left-color: var(--color-accent); }
+.conclusion-entry.severity-medium        { border-left-color: var(--color-accent); }
+.conclusion-entry.severity-low           { border-left-color: var(--color-accent); }
+.conclusion-entry.severity-informational { border-left-color: var(--color-primary); }
+.conclusion-entry.severity-positive      { border-left-color: var(--color-success); }
 
 /* ------------------------------------------------------------------ */
-/* Concordance and contradiction entries                              */
+/* Concordance + contradiction entries                                */
 /* ------------------------------------------------------------------ */
 
 .concordance-entry,
 .contradiction-entry {
 	margin: 1rem 0;
-	padding: 0.75rem 1rem;
+	padding: 0.85rem 1rem;
 	border-radius: 4px;
-	border: 1px solid #ddd;
-	background: #fff;
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
 }
 
-.concordance-entry { border-left: 4px solid #1f7a1f; }
-.contradiction-entry { border-left: 4px solid #c97a00; }
+/* Concordance = cyan (analysts aligned / primary signal).
+ * Contradiction = amber (warning / attention-required).
+ * Neither uses pink — that's reserved for the differs-from-
+ * recommended call-out, the loudest single signal in the report. */
+.concordance-entry   { border-left: 4px solid var(--color-primary); }
+.contradiction-entry { border-left: 4px solid var(--color-accent); }
 
 .confidence {
-	color: #555;
+	color: var(--color-muted);
 	font-weight: 400;
 	font-size: 0.9em;
 }
@@ -285,43 +362,43 @@ ul, ol { padding-left: 1.5rem; }
 /* ------------------------------------------------------------------ */
 
 .citation {
-	margin: 0.25rem 0;
+	margin: 0.3rem 0;
 }
 
 .citation .commit {
-	color: #555;
-	font-family: ui-monospace, monospace;
+	color: var(--color-muted);
+	font-family: var(--font-mono);
 	font-size: 0.9em;
 }
 
 .methodology-pattern {
-	margin: 0.4rem 0;
+	margin: 0.45rem 0;
 }
 
 .methodology-pattern .collector-hint {
-	color: #555;
-	font-family: ui-monospace, monospace;
+	color: var(--color-muted);
+	font-family: var(--font-mono);
 	font-size: 0.85em;
 }
 
-.methodology-pattern .hit  { color: #14541a; font-weight: 600; }
-.methodology-pattern .miss { color: #780a04; font-weight: 600; }
+.methodology-pattern .hit  { color: var(--color-success); font-weight: 600; }
+.methodology-pattern .miss { color: var(--color-error);   font-weight: 600; }
 
 /* ------------------------------------------------------------------ */
 /* Key-conclusion list                                                */
 /* ------------------------------------------------------------------ */
 
 .key-conclusion-ref {
-	margin: 0.4rem 0;
+	margin: 0.5rem 0;
 }
 
 .key-conclusion-ref .forgery-resistance {
-	color: #555;
+	color: var(--color-muted);
 	font-size: 0.9em;
 }
 
 .key-conclusion-ref .dangling {
-	color: #780a04;
+	color: var(--color-error);
 	font-style: italic;
 }
 
@@ -332,14 +409,24 @@ ul, ol { padding-left: 1.5rem; }
 .missing-reference-banner {
 	margin: 1rem 0;
 	padding: 1rem 1.25rem;
-	border-radius: 6px;
-	border-left: 6px solid #b3261e;
-	background: #fbe5e3;
-	color: #4a0a04;
+	border-radius: 4px;
+	border: 1px solid var(--color-error);
+	border-left: 6px solid var(--color-error);
+	background: var(--color-surface);
+	color: var(--color-text);
+	box-shadow: var(--glow-red);
 }
 
-.missing-reference-banner strong { color: #780a04; }
-.missing-reference-banner code   { background: #fff; }
+.missing-reference-banner strong {
+	color: var(--color-error);
+	font-family: var(--font-display);
+}
+
+.missing-reference-banner code {
+	background: rgba(255, 71, 87, 0.1);
+	color: var(--color-text);
+	border-color: var(--color-error);
+}
 
 /* ------------------------------------------------------------------ */
 /* Footer                                                             */
@@ -348,8 +435,8 @@ ul, ol { padding-left: 1.5rem; }
 .report-footer {
 	margin-top: 3rem;
 	padding-top: 1rem;
-	border-top: 1px solid #ddd;
-	color: #555;
+	border-top: 1px solid var(--color-border);
+	color: var(--color-muted);
 	font-size: 0.9rem;
 }
 
@@ -358,6 +445,63 @@ ul, ol { padding-left: 1.5rem; }
 }
 
 .unresolved {
-	color: #780a04;
+	color: var(--color-error);
 	font-style: italic;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced-motion + print                                             */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+	a { transition: none; }
+}
+
+/* Print fallback. Reports printed or saved to PDF revert to a light
+ * ink-on-paper palette by overriding the custom-property tokens; the
+ * rules above pick the new values up automatically via var().
+ * The retrofuturist chrome glow effects are stripped — they don't
+ * reproduce on paper and only smear the type. */
+
+@media print {
+	:root {
+		--color-background: #ffffff;
+		--color-surface:    #fafafa;
+		--color-text:       #1a1a1a;
+		--color-muted:      #555555;
+		--color-border:     #dddddd;
+		--color-primary:    #0a52cc;
+		--color-secondary:  #b3261e;
+		--color-accent:     #b78d00;
+		--color-success:    #1f7a1f;
+		--color-error:      #b3261e;
+
+		--glow-cyan:      none;
+		--glow-amber:     none;
+		--glow-red:       none;
+		--glow-success:   none;
+		--chrome-sheen:   none;
+		--space-gradient: none;
+	}
+
+	html { background: #ffffff; }
+	body { color: #1a1a1a; }
+
+	h1, h2, .agent-banner, .severity-badge, .posture-callout, .missing-reference-banner {
+		text-shadow: none;
+		box-shadow: none;
+	}
+
+	.agent-banner {
+		color: #1a1a1a;
+		background-color: #f0f0f0;
+		border-bottom: 1px solid #888;
+	}
+
+	a {
+		color: #0a52cc;
+		text-shadow: none;
+		border-bottom: none;
+		text-decoration: underline;
+	}
 }
