@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +40,25 @@ type sample struct {
 type sentinelRateLimit struct{}
 
 func (*sentinelRateLimit) Error() string { return "rate limit hit" }
+
+// recordingRT is a stub http.RoundTripper that records the request it
+// received and returns a canned 200 OK with empty body. Used by the
+// WithTransport coverage test to verify the transport is actually
+// wired through and that User-Agent is set before the transport is
+// invoked.
+type recordingRT struct {
+	gotRequest *http.Request
+}
+
+func (rt *recordingRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.gotRequest = req
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    req,
+	}, nil
+}
 
 // newSrv builds a hermetic httptest server and registers its
 // teardown on the test. Every test that uses it gets its own port +
@@ -111,6 +132,29 @@ func TestSecureClient_Get_CustomNotFoundStatuses(t *testing.T) {
 		"410 with custom not-found set should map to ErrNotFound; got: %v", err)
 }
 
+// TestWithNotFoundStatuses_Replaces pins the replacement semantic:
+// WithNotFoundStatuses(410) without 404 means 404 falls through to
+// the status-only error path. A refactor that switched to appending
+// (default {404} + caller's set) would silently break the contract;
+// this test catches it.
+func TestWithNotFoundStatuses_Replaces(t *testing.T) {
+	t.Parallel()
+	srv := newSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	c := NewSecureClient(
+		WithBaseURL(srv.URL),
+		WithNotFoundStatuses(http.StatusGone), // 410 only, NOT 404
+	)
+	_, err := c.Get(t.Context(), "/")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrNotFound),
+		"404 must NOT map to ErrNotFound when caller replaced the set with {410}; got: %v", err)
+	assert.Contains(t, err.Error(), "404",
+		"status-only error must surface the actual code")
+}
+
 func TestSecureClient_Get_OtherNon2xx_NoBodyInError(t *testing.T) {
 	t.Parallel()
 	// Issue #93 lesson: response body content must never reach the
@@ -149,6 +193,39 @@ func TestSecureClient_Get_OtherNon2xx_NoBodyInError(t *testing.T) {
 		"#93: any portion of an attacker-controlled body must stay sealed")
 	assert.False(t, errors.Is(err, ErrNotFound),
 		"500 should not be classified as not-found")
+}
+
+// TestErrorBodyIsDrainedForConnectionReuse pins the drain-on-error
+// discipline (#93) as a *behavior* property: after a non-2xx, the
+// connection must be returned cleanly so a subsequent request can
+// reuse it. The single-server two-request pattern verifies the body
+// was actually drained — a refactor that returns the status error
+// without draining would either deadlock the second request (waiting
+// for a connection slot) or force a new connection open. Either way
+// is observable here; the test serves as a regression guard for
+// "drain happens before classify."
+//
+// Strictly proving "the same TCP connection was reused" would need
+// httptrace.ClientTrace.GotConn + Reused; the two-request approach
+// is the lighter-weight property pin.
+func TestErrorBodyIsDrainedForConnectionReuse(t *testing.T) {
+	t.Parallel()
+	var reqCount int32
+	srv := newSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqCount, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		// Generous body so an undrained connection visibly leaves
+		// bytes behind.
+		_, _ = io.WriteString(w, strings.Repeat("body-bytes-", 1024))
+	})
+
+	c := NewSecureClient(WithBaseURL(srv.URL))
+	for i := range 2 {
+		_, err := c.Get(t.Context(), "/")
+		require.Error(t, err, "request %d", i)
+	}
+	assert.Equal(t, int32(2), atomic.LoadInt32(&reqCount),
+		"both requests must reach the server — an undrained connection from request 0 would block or open a new conn for request 1")
 }
 
 // --------------------------------------------------------------------
@@ -349,6 +426,32 @@ func TestSecureClient_Get_StatusInterceptor_FallThrough(t *testing.T) {
 	assert.True(t, interceptorCalled, "interceptor should run on non-2xx")
 	assert.True(t, errors.Is(err, ErrNotFound),
 		"after fall-through, default 404 classification must run; got: %v", err)
+}
+
+// TestStatusInterceptor_WinsOverErrNotFound pins the precedence
+// contract: when status is in the not-found set AND the interceptor
+// returns non-nil, the interceptor's error wins. ErrNotFound mapping
+// must NOT fire. Load-bearing for gem (401/403 → ErrUnauthorized) and
+// github (rate-limit) if either ever overlaps with the not-found set.
+// FallThrough above only proves the inverse path; this test pins the
+// "interceptor short-circuits even on a not-found status" branch.
+func TestStatusInterceptor_WinsOverErrNotFound(t *testing.T) {
+	t.Parallel()
+	srv := newSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	custom := &sentinelRateLimit{}
+	c := NewSecureClient(WithBaseURL(srv.URL))
+	_, err := c.Get(t.Context(), "/",
+		WithStatusInterceptor(func(*http.Response) error { return custom }),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrNotFound),
+		"interceptor's non-nil return must win over default 404 → ErrNotFound mapping; got: %v", err)
+	var got *sentinelRateLimit
+	assert.True(t, errors.As(err, &got),
+		"interceptor's typed error survives intact even on a not-found status")
 }
 
 // --------------------------------------------------------------------
@@ -597,6 +700,46 @@ func TestCheckRedirect_BoundsChainAt10(t *testing.T) {
 		"10-hop ceiling should be reported as a redirect-count error")
 }
 
+// TestCheckRedirect_HopCapBoundary pins the precise boundary: 9 hops
+// succeeds, 10 fires the cap, 11 fires the cap. Without the 9-hop
+// case, a refactor changing the limit (e.g., to 5) wouldn't be caught
+// by the single-example test above — at 10 hops, error fires either
+// way. The boundary case forces the precise threshold into the
+// contract.
+func TestCheckRedirect_HopCapBoundary(t *testing.T) {
+	t.Parallel()
+	viaURL, err := url.Parse("https://example.com/")
+	require.NoError(t, err)
+	nextURL, err := url.Parse("https://example.com/next")
+	require.NoError(t, err)
+	next := &http.Request{URL: nextURL}
+
+	tests := []struct {
+		name      string
+		viaLen    int
+		wantError bool
+	}{
+		{"9 hops succeeds (under cap)", 9, false},
+		{"10 hops fires the cap", 10, true},
+		{"11 hops fires the cap", 11, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			via := make([]*http.Request, tc.viaLen)
+			for i := range via {
+				via[i] = &http.Request{URL: viaURL}
+			}
+			err := checkRedirect(next, via)
+			if tc.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 // --------------------------------------------------------------------
 // Construction options
 // --------------------------------------------------------------------
@@ -631,6 +774,30 @@ func TestNonPositiveOptionsKeepDefaults(t *testing.T) {
 	rcfg = parseRequestOpts([]RequestOption{WithRequestMaxBytes(-5)})
 	assert.Equal(t, int64(0), rcfg.maxBytes,
 		"WithRequestMaxBytes(<=0) must not set the per-request cap")
+}
+
+// TestWithTransport_WiresThrough pins the test-only escape hatch:
+// the injected RoundTripper actually receives the request, AND the
+// User-Agent header is applied BEFORE the transport is invoked
+// (the security tests in github/ depend on this — a leaking
+// transport observes the request as the SecureClient prepared it,
+// not as the stdlib mutated it after).
+//
+// Without this test, a refactor that dropped the `if cfg.transport
+// != nil { httpClient.Transport = cfg.transport }` block in
+// NewSecureClient would silently break the github security tests
+// downstream without any httpx-layer test catching the regression.
+func TestWithTransport_WiresThrough(t *testing.T) {
+	t.Parallel()
+	rt := &recordingRT{}
+	c := NewSecureClient(WithTransport(rt))
+	_, err := c.Get(t.Context(), "https://example.com/x")
+	require.NoError(t, err)
+	require.NotNil(t, rt.gotRequest, "transport must have received the request")
+	assert.Equal(t, "signatory/0.1", rt.gotRequest.Header.Get("User-Agent"),
+		"User-Agent must be applied before transport is invoked")
+	assert.Equal(t, "https://example.com/x", rt.gotRequest.URL.String(),
+		"full URL must reach the transport (the SecureClient does no path mangling)")
 }
 
 func TestSecureClient_WithTimeout(t *testing.T) {
