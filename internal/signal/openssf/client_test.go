@@ -217,32 +217,15 @@ func TestGetScorecard_RejectsInvalidOwnerRepo(t *testing.T) {
 	assert.Contains(t, err.Error(), "owner is empty")
 }
 
-// TestClient_RejectsHTTPRedirect_OnDowngrade: once the request
-// starts on https, a 30x to http must be refused. Symmetric with
-// the npm + gopublish + github clients — scheme downgrade has no
-// legitimate use case on a public read-only API.
-//
-// The test uses two servers: an https-style first hop (we fake
-// the protocol via Via chain check) and an http-only target.
-// Because httptest doesn't ship https easily without certificates,
-// we instead assert the redirect-bound path: ten redirects in a
-// chain are also refused.
-func TestClient_BoundedRedirectChain(t *testing.T) {
-	t.Parallel()
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Redirect every request right back to ourselves. The client's
-		// CheckRedirect must cap iteration so this doesn't loop forever.
-		http.Redirect(w, r, srv.URL+r.URL.Path, http.StatusFound)
-	}))
-	defer srv.Close()
-
-	c := NewClientWithBaseURL(srv.URL)
-	_, err := c.GetScorecard(context.Background(), "kjd", "idna")
-	require.Error(t, err, "infinite redirect must be capped, not followed forever")
-	assert.Contains(t, err.Error(), "many redirects",
-		"client must surface the redirect-bound failure for diagnosis")
-}
+// Redirect-policy and hop-cap coverage previously lived here. After
+// the internal/httpx port, the shared SecureClient owns the redirect
+// policy (HTTPS-only, max 10 hops) and its tests live in
+// internal/httpx/client_test.go (TestCheckRedirect_*). The pre-port
+// openssf-specific test exercised a 10-hop loop against an http
+// httptest server, working around the absence of TLS; httpx's strict
+// HTTPS-only policy would refuse on hop 1 of that setup, so the test
+// shape doesn't carry over. Production behavior is the same: any
+// non-HTTPS redirect target from Scorecard's API is refused.
 
 // TestGetScorecard_PathHasNoExtraSegments pins a subtle bug class:
 // a future refactor could accidentally double-encode the path or

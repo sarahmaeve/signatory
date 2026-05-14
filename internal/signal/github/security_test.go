@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -144,11 +143,7 @@ func TestSecurity_GetFileRaw_RejectsMalformedPath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := &Client{
-				httpClient: server.Client(),
-				token:      "test-token",
-				baseURL:    server.URL,
-			}
+			client := NewClientWithBaseURLAndToken(server.URL, "test-token")
 
 			_, err := client.GetFileRaw(context.Background(), "owner", "repo", tc.path)
 			require.Error(t, err, "GetFileRaw must reject malformed path %q", tc.path)
@@ -178,11 +173,7 @@ func TestSecurity_GetDirectoryContents_RejectsMalformedPath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := &Client{
-				httpClient: server.Client(),
-				token:      "test-token",
-				baseURL:    server.URL,
-			}
+			client := NewClientWithBaseURLAndToken(server.URL, "test-token")
 
 			_, err := client.GetDirectoryContents(context.Background(), "owner", "repo", p)
 			require.Error(t, err, "GetDirectoryContents must reject malformed path %q", p)
@@ -337,11 +328,7 @@ func TestSecurity_TokenNotLeakedInCollectionResult(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{
-		httpClient: server.Client(),
-		token:      secretToken,
-		baseURL:    server.URL,
-	}
+	client := NewClientWithBaseURLAndToken(server.URL, secretToken)
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
@@ -407,7 +394,7 @@ func TestSecurity_RateLimitedCICheckProducesRetryableAbsence(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{httpClient: server.Client(), token: "test", baseURL: server.URL}
+	client := NewClientWithBaseURLAndToken(server.URL, "test")
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, ShortName: "owner/repo"}
@@ -474,7 +461,7 @@ func TestSecurity_ZeroCommitRepoProducesAbsence(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{httpClient: server.Client(), baseURL: server.URL}
+	client := NewClientWithBaseURL(server.URL)
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{ID: "test", Type: profile.EntityPackage, ShortName: "owner/empty"}
@@ -526,11 +513,7 @@ func TestSecurity_LargeResponseRejected(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	client := &Client{
-		httpClient: server.Client(),
-		token:      "",
-		baseURL:    server.URL,
-	}
+	client := NewClientWithBaseURL(server.URL)
 
 	var result map[string]any
 	err := client.get(context.Background(), "/test", &result)
@@ -612,11 +595,7 @@ func TestSecurity_TokenNotInCollectionErrorError(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{
-		httpClient: server.Client(),
-		token:      secretToken,
-		baseURL:    server.URL,
-	}
+	client := NewClientWithBaseURLAndToken(server.URL, secretToken)
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
@@ -664,11 +643,7 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{
-		httpClient: server.Client(),
-		token:      secretToken,
-		baseURL:    server.URL,
-	}
+	client := NewClientWithBaseURLAndToken(server.URL, secretToken)
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
@@ -701,63 +676,19 @@ func TestSecurity_TokenNotInRateLimitError(t *testing.T) {
 // "https" and asserts that checkRedirect returns an error. Because
 // returning an error from CheckRedirect aborts the redirect chain
 // before any further request is sent, no token can leak.
-func TestSecurity_CheckRedirect_RefusesSchemeDowngrade(t *testing.T) {
-	httpsVia := mustParseURL(t, "https://api.github.com/repos/x/y")
-	via := []*http.Request{{URL: httpsVia, Header: http.Header{"Authorization": []string{"Bearer secret-token"}}}}
-
-	tests := []struct {
-		name   string
-		target string
-	}{
-		{"same host downgrade to http", "http://api.github.com/redirected"},
-		{"different host downgrade to http", "http://attacker.example/exfiltrate"},
-		{"file scheme", "file:///etc/passwd"},
-		{"javascript scheme", "javascript:alert(1)"},
-		{"empty scheme", "//api.github.com/redirected"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			next := &http.Request{
-				URL:    mustParseURL(t, tc.target),
-				Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
-			}
-			err := checkRedirect(next, via)
-			require.Error(t, err, "checkRedirect must reject non-HTTPS redirect target %q", tc.target)
-		})
-	}
-}
-
-// TestSecurity_CheckRedirect_AllowsLegitimate verifies the negative
-// case: legitimate redirects (same host HTTPS → HTTPS, or cross-origin
-// HTTPS → HTTPS with auth stripped) must continue to work after the
-// scheme-downgrade fix. This locks in that the fix didn't accidentally
-// break the existing redirect-following behavior.
-func TestSecurity_CheckRedirect_AllowsLegitimate(t *testing.T) {
-	httpsVia := mustParseURL(t, "https://api.github.com/repos/x/y")
-	via := []*http.Request{{URL: httpsVia, Header: http.Header{"Authorization": []string{"Bearer secret-token"}}}}
-
-	t.Run("same host https redirect keeps auth", func(t *testing.T) {
-		next := &http.Request{
-			URL:    mustParseURL(t, "https://api.github.com/repos/x/y/contents/go.mod"),
-			Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
-		}
-		err := checkRedirect(next, via)
-		require.NoError(t, err)
-		assert.Equal(t, "Bearer secret-token", next.Header.Get("Authorization"),
-			"same-host redirect must keep auth header")
-	})
-
-	t.Run("cross-origin https redirect strips auth", func(t *testing.T) {
-		next := &http.Request{
-			URL:    mustParseURL(t, "https://codeload.github.com/x/y/tarball/main"),
-			Header: http.Header{"Authorization": []string{"Bearer secret-token"}},
-		}
-		err := checkRedirect(next, via)
-		require.NoError(t, err)
-		assert.Empty(t, next.Header.Get("Authorization"),
-			"cross-origin redirect must strip auth header")
-	})
-}
+// Redirect-policy unit tests previously lived here:
+//
+//   - TestSecurity_CheckRedirect_RefusesSchemeDowngrade
+//   - TestSecurity_CheckRedirect_AllowsLegitimate
+//
+// After the internal/httpx port, the shared SecureClient owns the
+// redirect policy and its tests live in internal/httpx/client_test.go
+// (TestCheckRedirect_*). The "strips auth on cross-origin redirect"
+// behavior is enforced by Go's stdlib http.Client (via
+// shouldCopyHeaderOnRedirect) and is end-to-end-tested below by
+// TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect — the wire-
+// level assertion that no Authorization header reaches an HTTP
+// target on an HTTPS→HTTP redirect attempt.
 
 // TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect is the end-to-end
 // integration counterpart to TestSecurity_CheckRedirect_RefusesSchemeDowngrade.
@@ -788,20 +719,13 @@ func TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect(t *testing.T) {
 	}))
 	defer httpsSource.Close()
 
-	// Construct a Client that uses the production checkRedirect AND
-	// trusts the test TLS server's self-signed cert (via httpsSource.Client()
-	// which returns a pre-configured *http.Client).
-	// We have to copy the production CheckRedirect into this httpClient
-	// because httpsSource.Client() doesn't set one — it returns a default
-	// client that follows redirects unconditionally.
-	testHTTPClient := httpsSource.Client()
-	testHTTPClient.CheckRedirect = checkRedirect
-
-	client := &Client{
-		httpClient: testHTTPClient,
-		token:      secretToken,
-		baseURL:    httpsSource.URL,
-	}
+	// Construct a Client whose transport is the test TLS-trusting
+	// transport (from httpsSource.Client(), which is preconfigured
+	// to trust the test server's self-signed cert) AND which goes
+	// through httpx.SecureClient's production redirect policy
+	// (HTTPS-only, installed automatically by httpx). The
+	// newClientWithTransport helper composes the two.
+	client := newClientWithTransport(httpsSource.URL, secretToken, httpsSource.Client().Transport)
 
 	// Make any request through the client. The request goes to httpsSource,
 	// which redirects to httpTarget. With the fix, the client returns an
@@ -814,14 +738,6 @@ func TestSecurity_GitHubClient_RefusesHTTPSToHTTPRedirect(t *testing.T) {
 	// The redirect was refused before any plaintext request was sent.
 	assert.Zero(t, hits, "HTTP target server must not have been hit — redirect should have been refused")
 	assert.Empty(t, capturedAuth, "Authorization header must never reach an HTTP URL — token leak otherwise")
-}
-
-// mustParseURL is a small test helper that fails the test on parse error.
-func mustParseURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	require.NoError(t, err, "url.Parse(%q)", raw)
-	return u
 }
 
 // TestSecurity_ClientErrorDoesNotLeakBody verifies that error responses
@@ -868,11 +784,7 @@ func TestSecurity_ClientErrorDoesNotLeakBody(t *testing.T) {
 			server := httptest.NewServer(mux)
 			defer server.Close()
 
-			client := &Client{
-				httpClient: server.Client(),
-				token:      "test-token",
-				baseURL:    server.URL,
-			}
+			client := NewClientWithBaseURLAndToken(server.URL, "test-token")
 
 			t.Run("GetRepo (client.get path)", func(t *testing.T) {
 				_, err := client.GetRepo(context.Background(), "owner", "repo")
@@ -991,7 +903,7 @@ func TestSecurity_CollectGoDeps_AbsenceOnOversizedGoMod(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := &Client{httpClient: server.Client(), token: "test", baseURL: server.URL}
+	client := NewClientWithBaseURLAndToken(server.URL, "test")
 	collector := NewCollectorWithClient(client)
 
 	entity := &profile.Entity{
@@ -1085,11 +997,7 @@ func TestSecurity_TokenSanitized_FromGet(t *testing.T) {
 	t.Parallel()
 	const token = "ghp_pretendThisIsARealGitHubTokenAaa1234567890"
 
-	client := &Client{
-		httpClient: &http.Client{Transport: &tokenLeakingRoundTripper{}},
-		token:      token,
-		baseURL:    "https://api.github.invalid",
-	}
+	client := newClientWithTransport("https://api.github.invalid", token, &tokenLeakingRoundTripper{})
 
 	_, err := client.GetRepo(context.Background(), "owner", "repo")
 	require.Error(t, err, "leaking transport must produce an error")
@@ -1114,11 +1022,7 @@ func TestSecurity_TokenSanitized_FromGetWithLinkHeader(t *testing.T) {
 	t.Parallel()
 	const token = "ghp_pretendThisIsARealGitHubTokenAaa1234567890"
 
-	client := &Client{
-		httpClient: &http.Client{Transport: &tokenLeakingRoundTripper{}},
-		token:      token,
-		baseURL:    "https://api.github.invalid",
-	}
+	client := newClientWithTransport("https://api.github.invalid", token, &tokenLeakingRoundTripper{})
 
 	_, err := client.GetTotalCommitCount(context.Background(), "owner", "repo")
 	require.Error(t, err, "leaking transport must produce an error")
@@ -1142,11 +1046,7 @@ func TestSecurity_ClientErrorPreservesStatusCode(t *testing.T) {
 			server := httptest.NewServer(mux)
 			defer server.Close()
 
-			client := &Client{
-				httpClient: server.Client(),
-				token:      "test-token",
-				baseURL:    server.URL,
-			}
+			client := NewClientWithBaseURLAndToken(server.URL, "test-token")
 
 			_, err := client.GetRepo(context.Background(), "owner", "repo")
 			require.Error(t, err)

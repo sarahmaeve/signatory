@@ -30,11 +30,7 @@ func newTestCollector(t *testing.T, handler http.Handler) *Collector {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	client := &Client{
-		httpClient: server.Client(),
-		baseURL:    server.URL,
-	}
-	return NewCollectorWithClient(client)
+	return NewCollectorWithClient(NewClientWithBaseURL(server.URL))
 }
 
 // mockGitLabAPI returns a handler serving a realistic

@@ -31,10 +31,7 @@ func newHelperTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return &Client{
-		httpClient: server.Client(),
-		baseURL:    server.URL,
-	}
+	return NewClientWithBaseURL(server.URL)
 }
 
 func TestGetRepoLanguage_ReturnsTopByteCount(t *testing.T) {

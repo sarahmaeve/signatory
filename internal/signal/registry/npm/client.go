@@ -1,29 +1,30 @@
 package npm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
-// ErrNotFound is returned (wrapped via %w) when the npm registry
-// responds 404 for a package lookup. Callers that treat absence as
-// a signal compare with errors.Is.
-var ErrNotFound = errors.New("npm: not found")
+// ErrNotFound is the sentinel callers compare via errors.Is when
+// the npm registry reports a package is absent. Wraps
+// httpx.ErrNotFound so callers can also do errors.Is(err,
+// httpx.ErrNotFound) for ecosystem-agnostic absence detection.
+var ErrNotFound = fmt.Errorf("npm: %w", httpx.ErrNotFound)
 
-// maxResponseSize bounds registry response bodies to prevent OOM
-// from unbounded streams. npm metadata for popular packages with
-// many historical versions can legitimately reach several MB (the
-// full versions map is a multi-MB payload); 10MB is generous slack.
-const maxResponseSize = 10 * 1024 * 1024
+// downloadsMaxSize bounds the api.npmjs.org downloads response. The
+// downloads endpoint returns one small JSON object (a few hundred
+// bytes); the 64 KiB ceiling is a much tighter bound than the
+// registry endpoint's 10 MiB default — the smaller the legitimate
+// payload, the smaller the abuse cap should be.
+const downloadsMaxSize = 64 * 1024
 
 // maxPackageNameLength matches npm's published limit.
 const maxPackageNameLength = 214
@@ -72,33 +73,27 @@ func ValidatePackageName(name string) error {
 	return nil
 }
 
-// Client is a narrow npm registry HTTP client. It exposes only the
-// methods Phase A+B collectors need; extending the surface requires
-// modelling additional response structures plus adding validation
-// and size-bound tests for each new call.
+// Client is a narrow npm registry HTTP client. The defensive network
+// discipline (timeouts, HTTPS-only redirects, response-body cap,
+// drain-and-discard on non-2xx, sanitized status errors) lives in
+// httpx.SecureClient; this package owns input validation, sentinel-
+// error wrapping, the polymorphic Repository decoder, and the
+// downloads endpoint's strict-decode + tighter-cap policy.
 //
-// Two base URLs because npm's API is split across two hosts:
+// Two SecureClients because npm's API is split across two hosts:
 // registry.npmjs.org serves package metadata; api.npmjs.org serves
 // download statistics. Tests point both at a single httptest server
 // that multiplexes on path; production separates them.
 type Client struct {
-	httpClient   *http.Client
-	registryURL  string
-	downloadsURL string
+	registryAPI  *httpx.SecureClient
+	downloadsAPI *httpx.SecureClient
 }
 
 // NewClient returns a Client bound to the public npm endpoints.
-// The 60s per-request timeout matches the github client — the
-// registry can be slow under load, and a shorter deadline would
-// collapse the collection run into a blanket absence.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL:  "https://registry.npmjs.org",
-		downloadsURL: "https://api.npmjs.org",
+		registryAPI:  httpx.NewSecureClient(httpx.WithBaseURL("https://registry.npmjs.org")),
+		downloadsAPI: httpx.NewSecureClient(httpx.WithBaseURL("https://api.npmjs.org")),
 	}
 }
 
@@ -109,12 +104,8 @@ func NewClient() *Client {
 // NewClient, which separates the two hosts as npm does.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL:  base,
-		downloadsURL: base,
+		registryAPI:  httpx.NewSecureClient(httpx.WithBaseURL(base)),
+		downloadsAPI: httpx.NewSecureClient(httpx.WithBaseURL(base)),
 	}
 }
 
@@ -122,26 +113,6 @@ func NewClientWithBaseURL(base string) *Client {
 // for the existing test suite.
 func newClientWithBaseURL(base string) *Client {
 	return NewClientWithBaseURL(base)
-}
-
-// checkRedirect enforces the two redirect invariants the github
-// client also enforces:
-//
-//  1. Refuse any redirect target that isn't HTTPS (#89). Scheme
-//     downgrade to plaintext has no legitimate use case on the
-//     public registry; refusing is loud, silently-following would
-//     mask a misconfiguration. npm requests don't bear credentials
-//     today, but the policy is symmetric with github's so that
-//     adding an auth path later doesn't require a new review.
-//  2. Bound the redirect chain to <10 hops.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // RegistryPackage models the subset of the npm registry's package
@@ -282,10 +253,10 @@ func containsControlChars(s string) bool {
 }
 
 // GetPackage fetches metadata for a package from the registry.
-// Returns ErrNotFound (wrapped) on 404. Other non-2xx statuses are
-// returned as a sanitized error — the response body is discarded
-// before it reaches the caller (#93) because it can contain
-// server-debug payloads or, in pathological cases, reflected headers.
+// Returns ErrNotFound (wrapped) on 404. Other non-2xx statuses
+// surface as sanitized errors (the response body is discarded before
+// it reaches the caller — #93's drain-on-error discipline, enforced
+// by httpx).
 func (c *Client) GetPackage(ctx context.Context, name string) (*RegistryPackage, error) {
 	if err := ValidatePackageName(name); err != nil {
 		return nil, fmt.Errorf("get package: %w", err)
@@ -296,49 +267,14 @@ func (c *Client) GetPackage(ctx context.Context, name string) (*RegistryPackage,
 	// path segment, because the registry's URL grammar treats the
 	// scope as a single path element. url.PathEscape handles the '@'
 	// too.
-	escapedName := url.PathEscape(name)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.registryURL+"/"+escapedName, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request for %q: %w", name, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("npm registry request for %q failed: %w", name, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// #93: do NOT include the response body in the error string.
-		// Drain-and-discard so the connection can be reused.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("npm registry returned status %d for %q",
-			resp.StatusCode, name)
-	}
-
-	// Bound the response before decoding. A malicious or malfunction-
-	// ing server streaming an unbounded body could otherwise exhaust
-	// memory — the json.Decoder itself doesn't cap input size.
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read npm registry response for %q: %w", name, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("npm registry response for %q exceeds %d-byte cap",
-			name, maxResponseSize)
-	}
-
 	var pkg RegistryPackage
-	if err := json.Unmarshal(body, &pkg); err != nil {
-		return nil, fmt.Errorf("decode npm registry response for %q: %w", name, err)
+	err := c.registryAPI.GetJSON(ctx, "/"+url.PathEscape(name), &pkg,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		return nil, fmt.Errorf("npm registry request for %q: %w", name, err)
 	}
 	return &pkg, nil
 }
@@ -369,53 +305,24 @@ func (c *Client) GetWeeklyDownloads(ctx context.Context, name string) (int, erro
 		return 0, fmt.Errorf("get weekly downloads: %w", err)
 	}
 
-	escapedName := url.PathEscape(name)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.downloadsURL+"/downloads/point/last-week/"+escapedName, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build downloads request for %q: %w", name, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("npm downloads request for %q failed: %w", name, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return 0, fmt.Errorf("%w: %s (no download stats)", ErrNotFound, name)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return 0, fmt.Errorf("npm downloads returned status %d for %q",
-			resp.StatusCode, name)
-	}
-
-	// Downloads responses are tiny (one small JSON object), so a
-	// much smaller cap here is both adequate and a tighter bound on
-	// OOM-style abuse than the registry cap.
-	const downloadsMaxSize = 64 * 1024
-	limited := io.LimitReader(resp.Body, downloadsMaxSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return 0, fmt.Errorf("read npm downloads response for %q: %w", name, err)
-	}
-	if int64(len(body)) > downloadsMaxSize {
-		return 0, fmt.Errorf("npm downloads response for %q exceeds %d-byte cap",
-			name, downloadsMaxSize)
-	}
-
-	// Strict decode: downloads schema is stable and narrow. Unknown
-	// fields here signal real drift we want to notice — unlike the
-	// main registry response where drift is normal traffic.
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
 	var dl downloadsResponse
-	if err := dec.Decode(&dl); err != nil {
-		return 0, fmt.Errorf("decode npm downloads response for %q: %w", name, err)
+	err := c.downloadsAPI.GetJSON(ctx,
+		"/downloads/point/last-week/"+url.PathEscape(name), &dl,
+		httpx.WithHeader("Accept", "application/json"),
+		httpx.WithRequestMaxBytes(downloadsMaxSize),
+		// Strict decode: downloads schema is stable and narrow.
+		// Unknown fields here signal real drift we want to notice —
+		// unlike the main registry response where drift is normal
+		// traffic.
+		httpx.WithStrictJSONDecode(),
+	)
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return 0, fmt.Errorf("%w: %s (no download stats)", ErrNotFound, name)
+		}
+		return 0, fmt.Errorf("npm downloads request for %q: %w", name, err)
 	}
+
 	// Guard against malicious/malformed responses serving negative
 	// counts. JSON decodes them into int without complaint; downstream
 	// code using this value for criticality scoring must not see

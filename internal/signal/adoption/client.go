@@ -58,86 +58,106 @@
 // confident derivation of the module import path. Self-hosted
 // forges would need to land alongside the per-forge metadata
 // collectors' allow-list mechanism.
+//
+// The defensive network discipline (HTTPS-only redirects, response-
+// body cap, drain-and-discard on non-2xx, sanitized status errors)
+// lives in httpx.SecureClient. This package owns the URL shape for
+// GitHub's code-search endpoint, the auth/no-auth conditional, and
+// the 403/429 → ErrRateLimit translation (via httpx's
+// WithStatusInterceptor — the typed-error hook the github client
+// will also use for its RateLimitError).
 package adoption
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrRateLimit is the sentinel callers compare via errors.Is when
 // GitHub's search API responds 403 or 429. The search endpoint has
 // its own rate-limit pool (30 req/min unauth, 5000/hr auth) distinct
 // from the main API, and exhausting it returns Forbidden with an
-// X-RateLimit-Reset header. The github collector handles this
-// gracefully by recording a retryable failure; this collector
-// mirrors the discipline.
+// X-RateLimit-Reset header. The collector handles this gracefully by
+// recording a retryable failure.
 var ErrRateLimit = errors.New("adoption: github search rate limit exceeded")
-
-// maxResponseSize bounds the search-response body. Mirrors the
-// github / forgejo / gitlab clients' 10 MiB cap.
-const maxResponseSize = 10 * 1024 * 1024
 
 // Client is the minimal HTTP client for the adoption collector. It
 // hits GitHub's /search/code endpoint and counts results. Owns its
-// own client rather than reusing the github package's so the two
-// collectors stay independently constructible (the github collector
-// no longer needs the search code path after this commit's lift-out).
+// own httpx.SecureClient rather than reusing the github package's so
+// the two collectors stay independently constructible.
+//
+// Authorization is per-request (when token is non-empty) rather than
+// constructor-time because httpx options apply to all requests; the
+// token-conditional logic belongs in GoModRefCount where it's clear.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	token      string
+	api   *httpx.SecureClient
+	token string
 }
 
-// NewClient creates a client pointed at api.github.com with a 60s
-// timeout (matches the per-forge metadata clients). Reads
+// NewClient creates a client pointed at api.github.com. Reads
 // GITHUB_TOKEN from the environment when present — search calls
 // authenticated raise the rate limit from 30 req/min to 5000/hr,
 // and adoption is the noisiest API consumer in the dispatch list
 // because every Go-ecosystem analyze fires one search call.
+//
+// User-Agent is intentionally not set — the existing client relied
+// on Go's stdlib default ("Go-http-client/1.1") and we preserve that
+// to keep this port behavior-equivalent. A future improvement
+// could set an explicit "signatory/0.1 (...)" UA in lockstep with
+// the github client.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: "https://api.github.com",
-		token:   os.Getenv("GITHUB_TOKEN"),
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL("https://api.github.com"),
+			// Preserve the existing behavior of no explicit
+			// User-Agent — Go's default fires.
+			httpx.WithUserAgent(""),
+		),
+		token: os.Getenv("GITHUB_TOKEN"),
 	}
 }
 
-// checkRedirect mirrors the per-forge clients' redirect policy:
-// refuse non-HTTPS, bound the chain. Also strips the Authorization
-// header on cross-origin redirects so the GITHUB_TOKEN doesn't
-// leak to an attacker-controlled redirect target (same rule the
-// github collector's checkRedirect enforces — see
-// internal/signal/github/client.go for the full rationale).
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+// NewClientWithBaseURL returns a Client whose endpoint points at the
+// supplied base. Primary use case: test harnesses pointing the
+// client at an httptest server. Production code should call NewClient.
+//
+// Token is left empty in this constructor — production-pattern code
+// reads GITHUB_TOKEN from env, but tests don't want env-dependent
+// authentication leaking into the test environment.
+func NewClientWithBaseURL(base string) *Client {
+	return &Client{
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL(base),
+			httpx.WithUserAgent(""),
+		),
 	}
-	if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-		req.Header.Del("Authorization")
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
+}
+
+// rateLimitInterceptor translates GitHub's 403 / 429 responses into
+// ErrRateLimit before httpx's default status classification runs.
+// Returning a non-nil error short-circuits httpx.GetJSON; the typed
+// sentinel survives the boundary so the collector's
+// errors.Is(err, adoption.ErrRateLimit) branch fires.
+func rateLimitInterceptor(resp *http.Response) error {
+	if resp.StatusCode == http.StatusForbidden ||
+		resp.StatusCode == http.StatusTooManyRequests {
+		return ErrRateLimit
 	}
 	return nil
 }
 
 // GoModRefCount queries GitHub's code-search API for the number of
 // public go.mod files that mention modulePath. Returns the count
-// from total_count. ErrRateLimit (wrapped) when the search rate
-// limit has been hit; other non-200 responses surface as
-// status-only errors (body deliberately not included — same issue
-// #93 reasoning as the per-forge clients).
+// from total_count. ErrRateLimit when the search rate limit has been
+// hit; other non-200 responses surface as wrapped errors with the
+// status code (body deliberately not included — #93 reasoning,
+// enforced by httpx).
 //
 // modulePath is passed through url.QueryEscape so slashes and dots
 // in the import path don't break the query string. The "+"
@@ -147,42 +167,25 @@ func (c *Client) GoModRefCount(ctx context.Context, modulePath string) (int, err
 	q := url.QueryEscape(modulePath) + "+filename:go.mod"
 	path := "/search/code?q=" + q + "&per_page=1"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
+	opts := []httpx.RequestOption{
+		httpx.WithHeader("Accept", "application/vnd.github.v3+json"),
+		httpx.WithStatusInterceptor(rateLimitInterceptor),
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-after-read; body consumed below, error here is not actionable
-
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return 0, ErrRateLimit
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("github search API returned status %d", resp.StatusCode)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, readErr := io.ReadAll(limited)
-	if readErr != nil {
-		return 0, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return 0, fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
+		opts = append(opts, httpx.WithHeader("Authorization", "Bearer "+c.token))
 	}
 
 	var result struct {
 		TotalCount int `json:"total_count"`
 	}
-	if jsonErr := json.Unmarshal(body, &result); jsonErr != nil {
-		return 0, fmt.Errorf("decode response: %w", jsonErr)
+	if err := c.api.GetJSON(ctx, path, &result, opts...); err != nil {
+		if errors.Is(err, ErrRateLimit) {
+			// Propagate the sentinel unwrapped so the collector's
+			// errors.Is(err, ErrRateLimit) branch fires for retry
+			// classification.
+			return 0, err
+		}
+		return 0, fmt.Errorf("github search API request: %w", err)
 	}
 	return result.TotalCount, nil
 }

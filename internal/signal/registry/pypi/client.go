@@ -2,32 +2,31 @@ package pypi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
-	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
-// ErrNotFound is returned (wrapped via %w) when the PyPI registry
-// responds 404 for a project lookup. Callers that treat absence as
-// a signal compare with errors.Is.
-var ErrNotFound = errors.New("pypi: not found")
+// ErrNotFound is the sentinel callers compare via errors.Is when PyPI
+// reports a project is absent. It wraps httpx.ErrNotFound so callers
+// can also do errors.Is(err, httpx.ErrNotFound) for ecosystem-agnostic
+// absence detection — both checks resolve true against the chain.
+var ErrNotFound = fmt.Errorf("pypi: %w", httpx.ErrNotFound)
 
-// maxResponseSize bounds registry response bodies to prevent OOM
-// from unbounded streams. The legacy /pypi/<name>/json endpoint
-// embeds the entire historical release map, which can run to several
-// MB for popular packages (boto3, numpy, tensorflow); 10 MB matches
-// npm's cap and covers the long tail of real PyPI projects.
-//
-// Outlier mega-packages at unversioned URIs that exceed the cap are
-// expected to fail closed — the workaround for those is to pin a
-// version (uses the per-release endpoint, which is always small).
-// That optimization is deferred until Layer 5 lands.
+// maxResponseSize is the registry response-body cap (10 MiB). The
+// bounding itself is performed by httpx, whose default matches this
+// value; the constant is retained because tests reference it to drive
+// the oversize-body cap check.
 const maxResponseSize = 10 * 1024 * 1024
+
+// attestationMaxSize is the tighter cap for the Integrity API.
+// Real attestation responses are typically <10 KiB; the 256 KiB
+// ceiling is a tight abuse defense passed per-request via
+// httpx.WithRequestMaxBytes.
+const attestationMaxSize = 256 * 1024
 
 // maxPackageNameLength is PyPI's published cap on package names.
 const maxPackageNameLength = 100
@@ -68,27 +67,20 @@ func ValidatePackageName(name string) error {
 	return nil
 }
 
-// Client is a narrow PyPI registry HTTP client. Exposes only the
-// methods Layer 6's source resolver needs; extending the surface
-// (Layer 5's collector, PEP 740 trusted-publishing, downloads stats)
-// requires modelling additional response structures plus adding
-// validation and size-bound tests for each new call.
+// Client is a narrow PyPI registry HTTP client. The defensive
+// network discipline (timeouts, HTTPS-only redirects, response-body
+// cap, drain-and-discard on non-2xx, sanitized status errors) lives
+// in httpx.SecureClient; this package owns input validation,
+// sentinel-error wrapping, and the PEP 740 Integrity API's
+// nil-on-404 semantic.
 type Client struct {
-	httpClient  *http.Client
-	registryURL string
+	api *httpx.SecureClient
 }
 
 // NewClient returns a Client bound to the public PyPI endpoint.
-// The 60s per-request timeout matches the npm and github clients —
-// the registry can be slow under load, and a shorter deadline would
-// collapse the resolution run into a blanket absence.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL: "https://pypi.org",
+		api: httpx.NewSecureClient(httpx.WithBaseURL("https://pypi.org")),
 	}
 }
 
@@ -97,36 +89,15 @@ func NewClient() *Client {
 // client at an httptest server. Production code calls NewClient.
 func NewClientWithBaseURL(base string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		registryURL: base,
+		api: httpx.NewSecureClient(httpx.WithBaseURL(base)),
 	}
-}
-
-// checkRedirect enforces the two redirect invariants the npm and
-// github clients also enforce:
-//
-//  1. Refuse any redirect target that isn't HTTPS. Scheme downgrade
-//     to plaintext has no legitimate use case on the public registry;
-//     refusing is loud, silently following would mask a misconfig.
-//  2. Bound the redirect chain to <10 hops.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // GetProject fetches the full project response from PyPI's legacy
 // JSON endpoint. Returns ErrNotFound (wrapped) on 404. Other non-2xx
 // statuses surface as a sanitized error — the response body is
-// discarded before reaching the caller (npm's #93 applies
-// symmetrically to PyPI).
+// discarded before reaching the caller (#93's drain-on-error
+// discipline, enforced by httpx).
 func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
 	if err := ValidatePackageName(name); err != nil {
 		return nil, fmt.Errorf("get project: %w", err)
@@ -136,49 +107,14 @@ func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) 
 	// ValidatePackageName already constrains the byte set to one
 	// that needs no escaping. If the validator ever loosens, the
 	// URL construction stays safe.
-	escapedName := url.PathEscape(name)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.registryURL+"/pypi/"+escapedName+"/json", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request for %q: %w", name, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("pypi registry request for %q failed: %w", name, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain-and-discard so the connection can be reused; do
-		// NOT include the body in the error string (#93 lesson).
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("pypi registry returned status %d for %q",
-			resp.StatusCode, name)
-	}
-
-	// Bound the response before decoding. A malicious or malfunc-
-	// tioning server streaming an unbounded body could otherwise
-	// exhaust memory — the json.Decoder doesn't cap input size.
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read pypi registry response for %q: %w", name, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("pypi registry response for %q exceeds %d-byte cap",
-			name, maxResponseSize)
-	}
-
 	var proj Project
-	if err := json.Unmarshal(body, &proj); err != nil {
-		return nil, fmt.Errorf("decode pypi registry response for %q: %w", name, err)
+	err := c.api.GetJSON(ctx, "/pypi/"+url.PathEscape(name)+"/json", &proj,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		return nil, fmt.Errorf("pypi registry request for %q: %w", name, err)
 	}
 	return &proj, nil
 }
@@ -217,63 +153,30 @@ func (c *Client) GetAttestation(ctx context.Context, project, version, filename 
 		return nil, fmt.Errorf("get attestation: filename is empty")
 	}
 
-	// Construct the Integrity API URL. Each path segment is escaped
-	// independently — defense-in-depth against injection via version
-	// or filename strings (both are publisher-supplied values from the
-	// release data, not attacker-controlled in practice, but the client
-	// boundary closes the hole up front).
-	escapedProject := url.PathEscape(project)
-	escapedVersion := url.PathEscape(version)
-	escapedFilename := url.PathEscape(filename)
-
-	reqURL := c.registryURL + "/integrity/" + escapedProject + "/" +
-		escapedVersion + "/" + escapedFilename + "/provenance"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build attestation request for %s/%s/%s: %w",
-			project, version, filename, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "signatory/0.1")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("pypi integrity request for %s/%s/%s failed: %w",
-			project, version, filename, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close; err is not actionable
-
-	if resp.StatusCode == http.StatusNotFound {
-		// 404 means no attestation exists for this distribution.
-		// This is a valid state — the publisher hasn't opted in.
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("pypi integrity returned status %d for %s/%s/%s",
-			resp.StatusCode, project, version, filename)
-	}
-
-	// Attestation responses are small (typically < 10 KB); use a
-	// tighter cap than the project endpoint.
-	const attestationMaxSize = 256 * 1024
-	limited := io.LimitReader(resp.Body, attestationMaxSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read pypi integrity response for %s/%s/%s: %w",
-			project, version, filename, err)
-	}
-	if int64(len(body)) > attestationMaxSize {
-		return nil, fmt.Errorf("pypi integrity response for %s/%s/%s exceeds %d-byte cap",
-			project, version, filename, attestationMaxSize)
-	}
+	// Each path segment is escaped independently — defense-in-depth
+	// against injection via version or filename strings (both are
+	// publisher-supplied values from the release data, not attacker-
+	// controlled in practice, but the client boundary closes the hole
+	// up front).
+	path := "/integrity/" + url.PathEscape(project) + "/" +
+		url.PathEscape(version) + "/" +
+		url.PathEscape(filename) + "/provenance"
 
 	var attest AttestationResponse
-	if err := json.Unmarshal(body, &attest); err != nil {
-		return nil, fmt.Errorf("decode pypi integrity response for %s/%s/%s: %w",
+	err := c.api.GetJSON(ctx, path, &attest,
+		httpx.WithHeader("Accept", "application/json"),
+		httpx.WithRequestMaxBytes(attestationMaxSize),
+	)
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			// 404 means no attestation exists for this distribution.
+			// Valid state — publisher hasn't opted in.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("pypi integrity request for %s/%s/%s: %w",
 			project, version, filename, err)
 	}
+
 	// Validate publisher identity fields. These are security-load-
 	// bearing: signatory uses Kind+Repository+Workflow to determine
 	// whether a package has trusted CI/CD provenance. Control chars

@@ -2,6 +2,12 @@
 // Central (repo1.maven.org). All operations — metadata, POM fetch,
 // signature checks, timestamp resolution — go through repo1's static
 // file layout. No Solr/search dependency.
+//
+// The defensive network discipline (HTTPS-only redirects, response-
+// body cap, drain-and-discard on non-2xx, sanitized status errors)
+// lives in httpx.SecureClient. This package owns input validation,
+// XML decoding, the HEAD-based signature-presence and last-modified
+// probes, and the parent-POM chase for SCM URL resolution.
 package maven
 
 import (
@@ -9,26 +15,30 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrNotFound is returned (wrapped via %w) when Maven Central responds
-// 404 for a lookup. Callers compare with errors.Is.
-var ErrNotFound = errors.New("maven: not found")
-
-// maxResponseSize bounds registry response bodies. 10 MB matches the
-// npm, PyPI, and cargo caps for consistency.
-const maxResponseSize = 10 * 1024 * 1024
+// 404 for a lookup. Wraps httpx.ErrNotFound so callers can also do
+// errors.Is(err, httpx.ErrNotFound) for ecosystem-agnostic absence
+// detection.
+var ErrNotFound = fmt.Errorf("maven: %w", httpx.ErrNotFound)
 
 // coordinatePattern matches Maven coordinate segments (groupId,
 // artifactId). Starts with a letter or digit, then letters, digits,
 // dots, hyphens, or underscores.
 var coordinatePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// mavenUserAgent is the User-Agent the maven client sends. Maven
+// Central serves anonymous traffic but the contact URL helps the
+// operators route abuse reports — same rationale as the cargo client.
+const mavenUserAgent = "signatory/0.1 (https://github.com/sarahmaeve/signatory)"
 
 // ValidateCoordinate enforces the Maven coordinate grammar for a single
 // segment (groupId or artifactId) before URL construction.
@@ -47,19 +57,17 @@ func ValidateCoordinate(segment string) error {
 // repo1.maven.org — version discovery via maven-metadata.xml,
 // POM retrieval, signature HEAD checks, and timestamp resolution.
 type Client struct {
-	httpClient *http.Client
-	repoURL    string
+	api *httpx.SecureClient
 }
 
 // NewClient returns a Client bound to the public Maven Central repo1
 // endpoint.
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		repoURL: "https://repo1.maven.org",
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL("https://repo1.maven.org"),
+			httpx.WithUserAgent(mavenUserAgent),
+		),
 	}
 }
 
@@ -67,27 +75,11 @@ func NewClient() *Client {
 // Primary use: test harnesses with httptest servers.
 func NewClientWithBaseURL(repoBase string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		repoURL: repoBase,
+		api: httpx.NewSecureClient(
+			httpx.WithBaseURL(repoBase),
+			httpx.WithUserAgent(mavenUserAgent),
+		),
 	}
-}
-
-// checkRedirect enforces HTTPS-only redirects and bounds the chain.
-// repo1.maven.org is HTTPS-only; an HTTP redirect target is either a
-// misconfiguration or a MITM attempting a scheme downgrade to tamper
-// with POM / SCM URL / developer metadata that feeds trust signals.
-// Symmetric with the npm, PyPI, cargo, gem, and gopublish clients.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	return nil
 }
 
 // groupPath converts a dotted groupId to the slash-separated path
@@ -107,38 +99,13 @@ func (c *Client) FetchMetadata(ctx context.Context, groupID, artifactID string) 
 		return nil, fmt.Errorf("fetch metadata: artifactID: %w", err)
 	}
 
-	metaURL := fmt.Sprintf("%s/maven2/%s/%s/maven-metadata.xml",
-		c.repoURL, groupPath(groupID), artifactID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
+	path := fmt.Sprintf("/maven2/%s/%s/maven-metadata.xml", groupPath(groupID), artifactID)
+	body, err := c.api.Get(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("build metadata request for %s:%s: %w", groupID, artifactID, err)
-	}
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("maven metadata request for %s:%s failed: %w", groupID, artifactID, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s:%s", ErrNotFound, groupID, artifactID)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("maven metadata returned status %d for %s:%s",
-			resp.StatusCode, groupID, artifactID)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read maven metadata for %s:%s: %w", groupID, artifactID, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("maven metadata for %s:%s exceeds %d-byte cap",
-			groupID, artifactID, maxResponseSize)
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s:%s", ErrNotFound, groupID, artifactID)
+		}
+		return nil, fmt.Errorf("maven metadata request for %s:%s: %w", groupID, artifactID, err)
 	}
 
 	var meta Metadata
@@ -159,37 +126,24 @@ func (c *Client) HeadTimestamp(ctx context.Context, groupID, artifactID, version
 		return time.Time{}, fmt.Errorf("head timestamp: artifactID: %w", err)
 	}
 
-	jarURL := fmt.Sprintf("%s/maven2/%s/%s/%s/%s-%s.jar",
-		c.repoURL, groupPath(groupID), artifactID, version, artifactID, version)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, jarURL, nil)
+	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.jar",
+		groupPath(groupID), artifactID, version, artifactID, version)
+	headers, _, err := c.api.Head(ctx, path)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("build HEAD request for %s:%s:%s: %w",
+		if errors.Is(err, httpx.ErrNotFound) {
+			return time.Time{}, fmt.Errorf("%w: jar for %s:%s:%s",
+				ErrNotFound, groupID, artifactID, version)
+		}
+		return time.Time{}, fmt.Errorf("maven HEAD request for %s:%s:%s: %w",
 			groupID, artifactID, version, err)
 	}
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("maven HEAD request for %s:%s:%s failed: %w",
-			groupID, artifactID, version, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	if resp.StatusCode == http.StatusNotFound {
-		return time.Time{}, fmt.Errorf("%w: jar for %s:%s:%s", ErrNotFound, groupID, artifactID, version)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return time.Time{}, fmt.Errorf("maven repo returned status %d for HEAD on %s:%s:%s",
-			resp.StatusCode, groupID, artifactID, version)
-	}
-
-	lm := resp.Header.Get("Last-Modified")
+	lm := headers.Get("Last-Modified")
 	if lm == "" {
 		return time.Time{}, nil
 	}
-	t, err := http.ParseTime(lm)
-	if err != nil {
+	t, perr := http.ParseTime(lm)
+	if perr != nil {
 		return time.Time{}, nil // unparseable — degrade gracefully
 	}
 	return t.UTC(), nil
@@ -206,32 +160,17 @@ func (c *Client) CheckSignature(ctx context.Context, groupID, artifactID, versio
 		return false, fmt.Errorf("check signature: artifactID: %w", err)
 	}
 
-	ascURL := fmt.Sprintf("%s/maven2/%s/%s/%s/%s-%s.jar.asc",
-		c.repoURL, groupPath(groupID), artifactID, version, artifactID, version)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, ascURL, nil)
-	if err != nil {
-		return false, fmt.Errorf("build signature request for %s:%s:%s: %w",
-			groupID, artifactID, version, err)
-	}
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("maven signature request for %s:%s:%s failed: %w",
-			groupID, artifactID, version, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	switch resp.StatusCode {
-	case http.StatusOK:
+	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.jar.asc",
+		groupPath(groupID), artifactID, version, artifactID, version)
+	_, _, err := c.api.Head(ctx, path)
+	if err == nil {
 		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, fmt.Errorf("maven repo returned status %d for signature check on %s:%s:%s",
-			resp.StatusCode, groupID, artifactID, version)
 	}
+	if errors.Is(err, httpx.ErrNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("maven HEAD request for signature of %s:%s:%s: %w",
+		groupID, artifactID, version, err)
 }
 
 // maxParentDepth limits parent POM chasing to prevent infinite loops
@@ -286,43 +225,18 @@ func (c *Client) ResolveRepoURL(ctx context.Context, groupID, artifactID, versio
 
 // fetchPOM retrieves a single POM file from repo1 and returns the raw body.
 func (c *Client) fetchPOM(ctx context.Context, groupID, artifactID, version string) ([]byte, error) {
-	pomURL := fmt.Sprintf("%s/maven2/%s/%s/%s/%s-%s.pom",
-		c.repoURL, groupPath(groupID), artifactID, version, artifactID, version)
+	path := fmt.Sprintf("/maven2/%s/%s/%s/%s-%s.pom",
+		groupPath(groupID), artifactID, version, artifactID, version)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pomURL, nil)
+	body, err := c.api.Get(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("build POM request for %s:%s:%s: %w",
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: POM for %s:%s:%s",
+				ErrNotFound, groupID, artifactID, version)
+		}
+		return nil, fmt.Errorf("maven POM request for %s:%s:%s: %w",
 			groupID, artifactID, version, err)
 	}
-	req.Header.Set("User-Agent", "signatory/0.1 (https://github.com/sarahmaeve/signatory)")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("maven POM request for %s:%s:%s failed: %w",
-			groupID, artifactID, version, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // response body close
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: POM for %s:%s:%s", ErrNotFound, groupID, artifactID, version)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseSize))
-		return nil, fmt.Errorf("maven repo returned status %d for POM of %s:%s:%s",
-			resp.StatusCode, groupID, artifactID, version)
-	}
-
-	limited := io.LimitReader(resp.Body, maxResponseSize+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("read POM response for %s:%s:%s: %w",
-			groupID, artifactID, version, err)
-	}
-	if int64(len(body)) > maxResponseSize {
-		return nil, fmt.Errorf("POM response for %s:%s:%s exceeds %d-byte cap",
-			groupID, artifactID, version, maxResponseSize)
-	}
-
 	return body, nil
 }
 
@@ -439,13 +353,13 @@ func (c *Client) FetchDevelopers(ctx context.Context, groupID, artifactID, versi
 // corrupted or adversarial — treat as absent rather than propagate.
 func extractXMLElement(xml, tag string) string {
 	open := "<" + tag + ">"
-	close := "</" + tag + ">"
+	closeTag := "</" + tag + ">"
 	start := strings.Index(xml, open)
 	if start < 0 {
 		return ""
 	}
 	start += len(open)
-	end := strings.Index(xml[start:], close)
+	end := strings.Index(xml[start:], closeTag)
 	if end < 0 {
 		return ""
 	}

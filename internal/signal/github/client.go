@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sarahmaeve/signatory/internal/httpx"
 )
 
 // ErrNotFound is the sentinel the client returns (wrapped via %w)
@@ -23,7 +24,10 @@ import (
 // the 404 semantic (GetDirectoryContents, GetFileRaw, GetGoModRefCount)
 // translate this sentinel into the lightweight (nil, nil) "not
 // present" signal their existing consumers check.
-var ErrNotFound = errors.New("github: not found")
+//
+// Wraps httpx.ErrNotFound so callers can also do errors.Is(err,
+// httpx.ErrNotFound) for ecosystem-agnostic absence detection.
+var ErrNotFound = fmt.Errorf("github: %w", httpx.ErrNotFound)
 
 // validGitHubName matches valid GitHub owner and repo names.
 // GitHub allows alphanumeric, hyphens, dots, and underscores.
@@ -77,33 +81,28 @@ func validateContentsPath(path string) error {
 
 var base64Std = base64.StdEncoding
 
-// maxResponseSize limits the maximum response body size to prevent OOM
-// from malicious or broken API servers. 10MB is generous for any
-// legitimate GitHub API response.
-const maxResponseSize = 10 * 1024 * 1024 // 10MB
-
-// Client is a minimal GitHub REST API client.
+// Client is a minimal GitHub REST API client. The defensive network
+// discipline (timeouts, HTTPS-only redirects, response-body cap,
+// drain-and-discard on non-2xx, sanitized status errors) lives in
+// httpx.SecureClient; this package owns input validation, sentinel-
+// error wrapping, the typed RateLimitError translation, and
+// token-redaction on error paths (sanitizeError).
+//
+// Cross-origin Authorization stripping on redirect is handled by Go's
+// stdlib http.Client via shouldCopyHeaderOnRedirect — the pre-port
+// client added an explicit req.Header.Del("Authorization") inside
+// checkRedirect as belt-and-suspenders; that's redundant with
+// stdlib's default and is dropped in the httpx port. Production
+// behavior is unchanged because stdlib already enforces the strip.
 type Client struct {
-	httpClient *http.Client
-	token      string
-	baseURL    string
+	api   *httpx.SecureClient
+	token string
 }
 
 // NewClient creates a GitHub API client. If token is empty, requests
 // are unauthenticated (60 req/hr limit vs. 5000 authenticated).
-// The per-request timeout is generous (60s) because GitHub API can be
-// slow under load, and a timeout should not collapse the entire
-// collection — partial results with absence records are preferable
-// to a total failure.
 func NewClient(token string) *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		token:   token,
-		baseURL: "https://api.github.com",
-	}
+	return newClient("https://api.github.com", token)
 }
 
 // NewClientWithBaseURL creates an unauthenticated Client pointed at
@@ -111,41 +110,47 @@ func NewClient(token string) *Client {
 // integration tests redirect API calls to an httptest.Server without
 // needing internal field access. Production callers use NewClient.
 func NewClientWithBaseURL(baseURL string) *Client {
+	return newClient(baseURL, "")
+}
+
+// NewClientWithBaseURLAndToken creates a Client with both a custom
+// base URL and a token. Used by security tests that need to verify
+// token-handling discipline against an httptest server.
+func NewClientWithBaseURLAndToken(baseURL, token string) *Client {
+	return newClient(baseURL, token)
+}
+
+// newClient is the shared constructor — keeps the three exported
+// constructors in lockstep on transport configuration.
+func newClient(baseURL, token string) *Client {
 	return &Client{
-		httpClient: &http.Client{
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		baseURL: baseURL,
+		api:   httpx.NewSecureClient(httpx.WithBaseURL(baseURL)),
+		token: token,
 	}
 }
 
-// checkRedirect is the http.Client redirect policy used by NewClient
-// and the security tests. It enforces three invariants in order:
-//
-//  1. Refuse any redirect target that is not HTTPS (#89). Scheme
-//     downgrade has no legitimate reason in the GitHub API context —
-//     continuing would either leak the bearer token over plaintext
-//     (the documented bug) or produce an unauthenticated request
-//     that masks the misconfiguration. Refusing the redirect makes
-//     the failure loud rather than silent.
-//  2. Strip the Authorization header on cross-origin redirects (still
-//     HTTPS at this point because of rule 1). The bearer token must
-//     never reach an external host even over HTTPS — the token grants
-//     access to api.github.com specifically.
-//  3. Limit redirect chains to <10 hops.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	// Rule 1: refuse any non-HTTPS redirect target.
-	if req.URL.Scheme != "https" {
-		return fmt.Errorf("refusing redirect to non-HTTPS URL %s (token leak prevention)", req.URL.Redacted())
-	}
-	// Rule 2: strip Authorization on cross-origin redirects.
-	if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-		req.Header.Del("Authorization")
-	}
-	// Rule 3: bound the redirect chain.
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
+// RateLimitError is returned when the API rate limit is exceeded.
+// The interceptor wired into every get / getWithLinkHeader call
+// translates GitHub's 403 / 429 responses (with X-RateLimit-Reset)
+// into this typed error before httpx's default status classification
+// fires. Callers use errors.As(err, &github.RateLimitError{}) to
+// route on the typed error and read ResetAt for retry scheduling.
+type RateLimitError struct {
+	ResetAt time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("GitHub API rate limit exceeded, resets at %s", e.ResetAt.Format(time.RFC3339))
+}
+
+// rateLimitInterceptor translates GitHub's 403 / 429 responses into a
+// typed *RateLimitError. Returns nil for other non-2xx statuses so
+// httpx's default classification (ErrNotFound for 404, status-only
+// error for the rest) fires. Symmetric with adoption's interceptor.
+func rateLimitInterceptor(resp *http.Response) error {
+	if resp.StatusCode == http.StatusForbidden ||
+		resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimitError{ResetAt: parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))}
 	}
 	return nil
 }
@@ -225,15 +230,6 @@ type user struct {
 	Type        string    `json:"type"`
 }
 
-// RateLimitError is returned when the API rate limit is exceeded.
-type RateLimitError struct {
-	ResetAt time.Time
-}
-
-func (e *RateLimitError) Error() string {
-	return fmt.Sprintf("GitHub API rate limit exceeded, resets at %s", e.ResetAt.Format(time.RFC3339))
-}
-
 // sanitizeError redacts token from err's rendered string when it
 // appears, returning a fresh value carrying the redacted text.
 //
@@ -264,128 +260,74 @@ func sanitizeError(err error, token string) error {
 	return errors.New(strings.ReplaceAll(s, token, "[REDACTED-TOKEN]"))
 }
 
+// requestOpts assembles the per-request httpx options that every
+// authenticated GitHub call shares: Accept header, rate-limit
+// interceptor, conditional Authorization header.
+func (c *Client) requestOpts() []httpx.RequestOption {
+	opts := []httpx.RequestOption{
+		httpx.WithHeader("Accept", "application/vnd.github.v3+json"),
+		httpx.WithStatusInterceptor(rateLimitInterceptor),
+	}
+	if c.token != "" {
+		opts = append(opts, httpx.WithHeader("Authorization", "Bearer "+c.token))
+	}
+	return opts
+}
+
 // get performs a GET request to the GitHub API.
 //
 // Named return + deferred sanitizeError applies token redaction at
 // every error-return path including those added in the future. See
 // sanitizeError's doc for the threat model.
+//
+// If result is non-nil, the response body is JSON-decoded into it
+// via httpx.GetJSON. If nil, the body is read and discarded — the
+// caller only needs the success/failure signal (typical for the
+// pagination probe in GetTotalCommitCount).
 func (c *Client) get(ctx context.Context, path string, result any) (err error) {
 	defer func() { err = sanitizeError(err, c.token) }()
 
-	url := c.baseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	var gerr error
+	if result == nil {
+		// Drain the body so the connection is reusable; we still
+		// want the status classification (ErrNotFound mapping,
+		// rate-limit translation) that httpx applies.
+		_, gerr = c.api.Get(ctx, path, c.requestOpts()...)
+	} else {
+		gerr = c.api.GetJSON(ctx, path, result, c.requestOpts()...)
 	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-after-read; body is consumed above, error here is not actionable
-
-	// Limit response body size to prevent OOM from malicious responses.
-	limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
-
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		resetAt := parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))
-		return &RateLimitError{ResetAt: resetAt}
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
+	if gerr != nil && errors.Is(gerr, httpx.ErrNotFound) {
+		// Wrap with github.ErrNotFound so callers'
+		// errors.Is(err, github.ErrNotFound) keeps working — the
+		// httpx sentinel is also in the chain via the wrap.
 		return fmt.Errorf("%w: %s", ErrNotFound, path)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		// Issue #93: do NOT include the response body in the error.
-		// The body is attacker-influenceable bytes (a malicious or
-		// compromised upstream can echo secrets, internal IPs, email
-		// addresses, or controlled tokens) and the error propagates
-		// up to stderr via main.go's Fprintln, where it lands in CI
-		// logs, SIEM ingest, and LLM agent transcripts that treat
-		// stderr as ground truth. Drop the body entirely; the status
-		// code is the only piece a caller actually needs to classify.
-		return fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
-	if result != nil {
-		body, err := io.ReadAll(limitedBody)
-		if err != nil {
-			return fmt.Errorf("read response: %w", err)
-		}
-		if int64(len(body)) > maxResponseSize {
-			return fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
-		}
-		if err := json.Unmarshal(body, result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-	}
-
-	return nil
+	return gerr
 }
 
-// getWithLinkHeader performs a GET and returns the Link header for pagination.
+// getWithLinkHeader performs a GET and returns the Link header for
+// pagination. Used by GetTotalCommitCount to extract page count from
+// the rel="last" Link entry without paging through every commit.
 //
-// Named return + deferred sanitizeError matches get's pattern:
-// every error-return path runs through token redaction at function
-// exit. See sanitizeError's doc for the threat model.
+// Named return + deferred sanitizeError matches get's pattern: every
+// error-return path runs through token redaction at function exit.
+// See sanitizeError's doc for the threat model.
 func (c *Client) getWithLinkHeader(ctx context.Context, path string, result any) (link string, err error) {
 	defer func() { err = sanitizeError(err, c.token) }()
 
-	url := c.baseURL + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+	body, headers, _, gerr := c.api.GetWithResponse(ctx, path, c.requestOpts()...)
+	if gerr != nil {
+		if errors.Is(gerr, httpx.ErrNotFound) {
+			return "", fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return "", gerr
 	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // close-after-read; body is consumed above, error here is not actionable
-
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		resetAt := parseRateLimitReset(resp.Header.Get("X-RateLimit-Reset"))
-		return "", &RateLimitError{ResetAt: resetAt}
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("not found: %s", path)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		// Issue #93: drop the response body — see client.get above
-		// for the rationale.
-		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
 	if result != nil {
-		limitedBody := io.LimitReader(resp.Body, maxResponseSize+1)
-		body, err := io.ReadAll(limitedBody)
-		if err != nil {
-			return "", fmt.Errorf("read response: %w", err)
-		}
-		if int64(len(body)) > maxResponseSize {
-			return "", fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxResponseSize)
-		}
-		if err := json.Unmarshal(body, result); err != nil {
-			return "", fmt.Errorf("decode response: %w", err)
+		if jerr := json.Unmarshal(body, result); jerr != nil {
+			return "", fmt.Errorf("decode response: %w", jerr)
 		}
 	}
-
-	return resp.Header.Get("Link"), nil
+	return headers.Get("Link"), nil
 }
 
 // GetRepo fetches repository metadata.
@@ -458,7 +400,8 @@ func (c *Client) GetDirectoryContents(ctx context.Context, owner, repoName, path
 	return contents, err
 }
 
-// GetFileContent fetches the raw content of a single file (base64-encoded).
+// fileContent is the base64-encoded representation GitHub returns for
+// single-file fetches from the contents API.
 type fileContent struct {
 	Content  string `json:"content"`
 	Encoding string `json:"encoding"`
