@@ -326,6 +326,29 @@ func TestSecureClient_Get_UserAgentOverride(t *testing.T) {
 	assert.Equal(t, "signatory/0.1 (https://github.com/sarahmaeve/signatory)", seenUA)
 }
 
+// TestWithUserAgent_EmptyStringSkipsHeader pins the adoption package's
+// contract: WithUserAgent("") causes httpx to NOT call Set on the
+// User-Agent header, so Go's stdlib default ("Go-http-client/1.1")
+// fires unchanged on the wire. Without this guard, adoption would
+// silently send an empty User-Agent literal — GitHub's search-code
+// endpoint and some other registries reject requests with empty UA.
+//
+// Uses recordingRT to observe the request as httpx prepared it
+// (before the stdlib transport's default-UA injection runs). With
+// recordingRT in place, an empty User-Agent header on rt.gotRequest
+// means httpx didn't Set it — exactly the contract.
+func TestWithUserAgent_EmptyStringSkipsHeader(t *testing.T) {
+	t.Parallel()
+	rt := &recordingRT{}
+	c := NewSecureClient(WithTransport(rt), WithUserAgent(""))
+	_, err := c.Get(t.Context(), "https://example.com/")
+	require.NoError(t, err)
+	require.NotNil(t, rt.gotRequest)
+	assert.Empty(t, rt.gotRequest.Header.Get("User-Agent"),
+		`WithUserAgent("") must cause httpx to skip Set on User-Agent, `+
+			"letting Go's stdlib default fire (the adoption package's contract)")
+}
+
 func TestSecureClient_Get_HeaderOption(t *testing.T) {
 	t.Parallel()
 	var seenAccept, seenAuth string
@@ -533,6 +556,10 @@ func TestSecureClient_GetJSON_MalformedReturnsError(t *testing.T) {
 	var s sample
 	err := c.GetJSON(t.Context(), "/", &s)
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode JSON response",
+		"decode errors must be annotated so diagnostics can distinguish "+
+			"them from transport / status errors (openssf's "+
+			"TestGetScorecard_MalformedJSON depends on this annotation)")
 }
 
 func TestSecureClient_GetJSON_NotFoundPropagates(t *testing.T) {
