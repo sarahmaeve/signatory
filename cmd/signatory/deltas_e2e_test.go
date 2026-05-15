@@ -221,6 +221,22 @@ func TestDeltas_E2E_PyPIDependenciesAdded(t *testing.T) {
 		"the newly-added dependency must surface as an added entry")
 }
 
+// TestDeltas_E2E_GoDependenciesAdded: parity proof for the pre-
+// existing go signal. Unlike the registry ecosystems, go_dependencies
+// carries a real indirect_count: it stays constant (5) across the two
+// observations while the direct list gains one module path, so only
+// direct_count and total_count move. Confirms go renders an
+// equivalent CLI transition now that parseGoModDeps sorts+dedupes.
+func TestDeltas_E2E_GoDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "repo:github/example/go-dependency-added-sample", nil)
+
+	assert.Contains(t, got, "go_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "github.com/spf13/cobra",
+		"the newly-added module path must surface as an added entry")
+}
+
 // TestDeltas_E2E_JSON exercises the structured JSON output path
 // against a real scenario. Decodes the output and asserts on the
 // top-level shape.

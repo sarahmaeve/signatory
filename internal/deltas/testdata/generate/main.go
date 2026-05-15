@@ -86,6 +86,7 @@ func run() error {
 		seedMavenDependenciesAdded,
 		seedGemDependenciesAdded,
 		seedPyPIDependenciesAdded,
+		seedGoDependenciesAdded,
 		seedRangeWindowProbe,
 	}
 	for _, seed := range scenarios {
@@ -534,5 +535,39 @@ func seedPyPIDependenciesAdded(ctx context.Context, s *store.SQLite) error {
 		return err
 	}
 	return appendSignal(ctx, s, id, "pypi_dependencies", "pypi-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 14: go dependency added ---
+//
+// Parity scenario for the pre-existing go signal. Unlike scenarios
+// 9–13, go_dependencies carries a REAL indirect_count (go.mod exposes
+// the MVS-forced transitive set via // indirect), so indirect_count
+// is a non-zero constant across both observations and total_count is
+// direct + indirect, not equal to direct_count. The drift under test
+// is still the direct list gaining one module path; the source is
+// "github" (go_dependencies is emitted by the github collector).
+func seedGoDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "repo:github/example/go-dependency-added-sample", "go-dependency-added-sample", "go")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(5),
+		"total_count":    float64(7),
+		"direct":         []any{"github.com/pkg/errors", "github.com/stretchr/testify"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(5),
+		"total_count":    float64(8),
+		"direct":         []any{"github.com/pkg/errors", "github.com/spf13/cobra", "github.com/stretchr/testify"},
+	}
+	if err := appendSignal(ctx, s, id, "go_dependencies", "github",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "go_dependencies", "github",
 		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
 }

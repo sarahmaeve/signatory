@@ -401,6 +401,18 @@ func TestComputer_PyPIDependencyAdded(t *testing.T) {
 	assertDependencyAdded(t, fs, "pkg:pypi/example", "pypi_dependencies", 2, 3, "charset-normalizer")
 }
 
+// TestComputer_GoDependencyAdded: parity proof for the pre-existing
+// go signal. Now that parseGoModDeps sorts+dedupes its direct list,
+// go_dependencies flows through Compute through the same set-diff
+// path as the five registry ecosystems. Entries are module paths.
+func TestComputer_GoDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "repo:github/example/proj", "go_dependencies", "github",
+		[]string{"github.com/pkg/errors", "github.com/stretchr/testify"},
+		[]string{"github.com/pkg/errors", "github.com/spf13/cobra", "github.com/stretchr/testify"})
+	assertDependencyAdded(t, fs, "repo:github/example/proj", "go_dependencies", 2, 3, "github.com/spf13/cobra")
+}
+
 // errFakeStore returns its configured error from every method.
 type errFakeStore struct {
 	err error
