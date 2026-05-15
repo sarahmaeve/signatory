@@ -150,6 +150,37 @@ func TestDeltas_E2E_MaintainerChurn(t *testing.T) {
 		"the added maintainer must surface as an added entry")
 }
 
+// TestDeltas_E2E_NpmDependenciesAdded: a new npm dependency surfaces
+// through the real `signatory deltas` command — the dependency-drift
+// transition the live dogfood could not produce against an unchanging
+// real package. `direct` is a different-length primitive array, so it
+// goes through the same set-diff path as maintainer logins.
+func TestDeltas_E2E_NpmDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "pkg:npm/dependency-added-sample", nil)
+
+	assert.Contains(t, got, "Deltas for pkg:npm/dependency-added-sample",
+		"header names the target")
+	assert.Contains(t, got, "npm_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "direct_count")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "left-pad",
+		"the newly-added dependency must surface as an added entry")
+}
+
+// TestDeltas_E2E_CargoDependenciesAdded: same proof for the cargo
+// signal, confirming the byte-identical value shape renders an
+// identical CLI transition across ecosystems.
+func TestDeltas_E2E_CargoDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "pkg:cargo/dependency-added-sample", nil)
+
+	assert.Contains(t, got, "cargo_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "tokio-macros",
+		"the newly-added crate must surface as an added entry")
+}
+
 // TestDeltas_E2E_JSON exercises the structured JSON output path
 // against a real scenario. Decodes the output and asserts on the
 // top-level shape.

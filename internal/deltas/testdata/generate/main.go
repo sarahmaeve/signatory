@@ -81,6 +81,8 @@ func run() error {
 		seedBotPublisherAppears,
 		seedVersionBurstFlips,
 		seedMaintainerChurn,
+		seedNpmDependenciesAdded,
+		seedCargoDependenciesAdded,
 		seedRangeWindowProbe,
 	}
 	for _, seed := range scenarios {
@@ -376,4 +378,66 @@ func seedMaintainerChurn(ctx context.Context, s *store.SQLite) error {
 	}
 	return appendSignal(ctx, s, id, "maintainer_count", "npm-registry",
 		profile.SignalGroupGovernance, profile.ForgeryMediumDeclining, current, t2)
+}
+
+// --- Scenario 9: npm dependency added ---
+//
+// Two npm_dependencies observations whose `direct` array gains one
+// entry. Exercises the dependency-drift path end to end through the
+// real `signatory deltas` command — the transition the live dogfood
+// could not produce because real packages did not change deps
+// between observations.
+func seedNpmDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:npm/dependency-added-sample", "dependency-added-sample", "npm")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"express", "lodash"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"express", "left-pad", "lodash"},
+	}
+	if err := appendSignal(ctx, s, id, "npm_dependencies", "npm-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "npm_dependencies", "npm-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 10: cargo dependency added ---
+//
+// Same shape as scenario 9 for the cargo signal, confirming the
+// byte-identical value shape renders an identical transition through
+// the CLI across ecosystems.
+func seedCargoDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:cargo/dependency-added-sample", "dependency-added-sample", "cargo")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"libc", "mio"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"libc", "mio", "tokio-macros"},
+	}
+	if err := appendSignal(ctx, s, id, "cargo_dependencies", "cargo-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "cargo_dependencies", "cargo-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
 }
