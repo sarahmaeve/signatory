@@ -167,6 +167,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- last_publish, version_publish_burst, sdist signals -----
 	recordReleaseSignals(result, entity.ID, proj, collectedAt)
 
+	// ----- pypi_dependencies (governance) -----
+	recordPyPIDependencies(result, entity.ID, proj, collectedAt)
+
 	// ----- Build version-file list (shared by Phase A and Phase B) -----
 	versions := buildVersionFiles(proj)
 
@@ -191,6 +194,91 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 
 	return result, nil
+}
+
+// recordPyPIDependencies emits pypi_dependencies: the declared
+// dependency surface of the project's displayed version, parsed from
+// info.requires_dist (already fetched via GetProject — no extra
+// request). Uniform value shape across ecosystems.
+//
+// Extras policy: every requires_dist entry is included regardless of
+// its environment marker or `extra ==` gate. PyPI has no clean
+// runtime/dev partition (unlike npm dependencies/devDependencies,
+// cargo kind, maven scope, gem runtime/development); a dev-extra
+// denylist would not even catch the dominant noise source (optional
+// *feature* extras like requests[socks] or black[jupyter], which are
+// real dependencies, not tooling). Including everything is the only
+// policy that surfaces a dependency injected under an innocuous-
+// looking extra. The cost — a consumer toggling an optional extra
+// across versions reads as drift — is accepted: that is a real
+// supply-chain change worth seeing, not noise to suppress.
+//
+// indirect_count is always 0: requires_dist declares only direct
+// dependencies; the resolved transitive graph is never available.
+func recordPyPIDependencies(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	var direct []string
+	for _, spec := range proj.Info.RequiresDist {
+		name := pep508Name(spec)
+		if name == "" {
+			continue
+		}
+		direct = append(direct, name)
+	}
+	slices.Sort(direct)
+	direct = slices.Compact(direct)
+
+	result.RecordSignal(entityID, "pypi_dependencies", source, collectedAt, defaultTTL,
+		map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
+		})
+}
+
+// pep508Name extracts and PEP 503-normalizes the project name from a
+// PEP 508 requirement string. The name is the leading run of
+// [A-Za-z0-9._-]; everything after (extras, version specifier,
+// environment marker, `@ url`) is ignored. Normalization lowercases
+// and collapses runs of -_. to a single - so "Foo_Bar" and "foo-bar"
+// do not read as drift.
+func pep508Name(spec string) string {
+	s := strings.TrimSpace(spec)
+	end := len(s)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isNameChar := (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '-' || c == '_'
+		if !isNameChar {
+			end = i
+			break
+		}
+	}
+	return normalizePEP503(s[:end])
+}
+
+// normalizePEP503 applies PEP 503 name normalization: lowercase, and
+// collapse any run of -, _, or . to a single -, trimming leading and
+// trailing separators.
+func normalizePEP503(name string) string {
+	var b strings.Builder
+	prevSep := false
+	for _, r := range strings.ToLower(name) {
+		if r == '-' || r == '_' || r == '.' {
+			if !prevSep {
+				b.WriteByte('-')
+				prevSep = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSep = false
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // versionRecord is the per-version fact-set the longitudinal signals

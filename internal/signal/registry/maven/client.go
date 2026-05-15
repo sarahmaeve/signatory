@@ -189,7 +189,13 @@ func (c *Client) HeadTimestamp(ctx context.Context, groupID, artifactID, version
 	}
 	t, perr := http.ParseTime(lm)
 	if perr != nil {
-		return time.Time{}, nil // unparseable — degrade gracefully
+		// Intentional graceful degradation: an unparseable
+		// Last-Modified yields the zero time with a nil error so the
+		// collector falls back ("no timestamp for this version")
+		// instead of one malformed header failing the whole
+		// timestamp-resolution loop. Contract pinned by
+		// TestHeadTimestamp_DegradesOnBadLastModified.
+		return time.Time{}, nil //nolint:nilerr // perr is deliberately swallowed; see comment + test
 	}
 	return t.UTC(), nil
 }
@@ -399,6 +405,56 @@ func parseDevelopers(pomBytes []byte) []string {
 		return nil
 	}
 	return names
+}
+
+// parseDependencies extracts the project's directly-declared
+// dependencies from a POM as Maven groupId:artifactId coordinates.
+// Returns nil if the POM is unparseable or declares none.
+//
+// Uses encoding/xml (consistent with FetchMetadata) rather than the
+// string-scan approach of parseParent/parseSCMURL: dependency
+// extraction must distinguish <project><dependencies> from
+// <dependencyManagement><dependencies> and plugin-level
+// <dependencies>, which path-aware unmarshalling does structurally
+// and a substring scan cannot do reliably.
+//
+// Scope filtering mirrors the dev-exclusion rule used for npm
+// (devDependencies) and cargo (kind=dev): a "test"-scoped dependency
+// is not consumed transitively by downstream and is dropped. Absent
+// scope means Maven's default "compile" and is kept. Optional deps
+// are kept — optional still declares the surface. The returned slice
+// is unsorted; the collector sorts and de-duplicates, mirroring
+// parseDevelopers' raw-return contract.
+func parseDependencies(pomBytes []byte) []string {
+	var p pomForDeps
+	if err := xml.Unmarshal(pomBytes, &p); err != nil {
+		return nil
+	}
+	var out []string
+	for _, d := range p.Dependencies.Dependency {
+		if strings.EqualFold(strings.TrimSpace(d.Scope), "test") {
+			continue
+		}
+		g := strings.TrimSpace(d.GroupID)
+		a := strings.TrimSpace(d.ArtifactID)
+		if g == "" || a == "" {
+			continue
+		}
+		out = append(out, g+":"+a)
+	}
+	return out
+}
+
+// FetchDependencies retrieves the POM for the given version and
+// returns the project's directly-declared dependencies as
+// groupId:artifactId coordinates. Mirrors FetchDevelopers: one POM
+// GET, parse, return; ErrNotFound (wrapped) propagates on 404.
+func (c *Client) FetchDependencies(ctx context.Context, groupID, artifactID, version string) ([]string, error) {
+	body, err := c.fetchPOM(ctx, groupID, artifactID, version)
+	if err != nil {
+		return nil, err
+	}
+	return parseDependencies(body), nil
 }
 
 // FetchDevelopers retrieves the POM for the given version and returns

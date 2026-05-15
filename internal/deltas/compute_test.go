@@ -367,6 +367,40 @@ func TestComputer_CargoDependencyAdded(t *testing.T) {
 	assertDependencyAdded(t, fs, "pkg:cargo/example", "cargo_dependencies", 2, 3, "tokio-macros")
 }
 
+// TestComputer_MavenDependencyAdded: same proof for the maven signal.
+// direct entries are groupId:artifactId coordinates; the byte-
+// identical value shape flows through Compute identically.
+func TestComputer_MavenDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:maven/com.example/thing", "maven_dependencies", "maven-registry",
+		[]string{"com.google.guava:guava", "org.slf4j:slf4j-api"},
+		[]string{"com.google.guava:guava", "com.h2database:h2", "org.slf4j:slf4j-api"})
+	assertDependencyAdded(t, fs, "pkg:maven/com.example/thing", "maven_dependencies", 2, 3, "com.h2database:h2")
+}
+
+// TestComputer_GemDependencyAdded: same proof for the gem signal,
+// confirming the byte-identical value shape flows through Compute
+// identically for the fifth ecosystem.
+func TestComputer_GemDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:gem/example", "gem_dependencies", "gem-registry",
+		[]string{"actionpack", "activesupport"},
+		[]string{"actionpack", "activesupport", "railties"})
+	assertDependencyAdded(t, fs, "pkg:gem/example", "gem_dependencies", 2, 3, "railties")
+}
+
+// TestComputer_PyPIDependencyAdded: same proof for the pypi signal,
+// confirming the byte-identical value shape flows through Compute
+// identically for the sixth ecosystem. Entries are PEP 503-normalized
+// dependency names.
+func TestComputer_PyPIDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:pypi/example", "pypi_dependencies", "pypi-registry",
+		[]string{"certifi", "urllib3"},
+		[]string{"certifi", "charset-normalizer", "urllib3"})
+	assertDependencyAdded(t, fs, "pkg:pypi/example", "pypi_dependencies", 2, 3, "charset-normalizer")
+}
+
 // errFakeStore returns its configured error from every method.
 type errFakeStore struct {
 	err error

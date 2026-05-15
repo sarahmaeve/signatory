@@ -24,6 +24,31 @@ type Versioning struct {
 	LastUpdated string   `xml:"lastUpdated"`
 }
 
+// pomForDeps is the minimal projection of a POM used to extract the
+// project's directly-declared dependencies. The Dependencies field is
+// tagged at the project root, so encoding/xml matches only the
+// <project><dependencies> element — <dependencyManagement><dependencies>
+// (BOM version pins, not real deps) and plugin-level <dependencies>
+// nested under <build> are structurally excluded by path, not by ad
+// hoc string trimming.
+type pomForDeps struct {
+	XMLName      xml.Name `xml:"project"`
+	Dependencies struct {
+		Dependency []pomDependency `xml:"dependency"`
+	} `xml:"dependencies"`
+}
+
+// pomDependency is one <dependency> entry. Scope defaults to "compile"
+// when absent (Maven's rule); only "test" is treated as the
+// non-consumed dev analog. Optional is captured for completeness but
+// optional deps are still part of the declared surface and are kept.
+type pomDependency struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Scope      string `xml:"scope"`
+	Optional   string `xml:"optional"`
+}
+
 // VersionTimestamp pairs a version string with its publish timestamp,
 // obtained via HEAD on the artifact jar.
 type VersionTimestamp struct {

@@ -818,6 +818,84 @@ func TestParseDevelopers(t *testing.T) {
 	}
 }
 
+// TestCollector_MavenDependencies_EmitsUniformShape pins that the
+// maven collector emits maven_dependencies with a value shape
+// byte-identical to go_dependencies / npm_dependencies /
+// cargo_dependencies, so the deltas diff engine surfaces Maven
+// dependency drift through the same set-diff path. direct is the
+// sorted, de-duplicated set of project groupId:artifactId
+// coordinates; test-scoped deps and <dependencyManagement> pins are
+// excluded; indirect_count is always 0.
+func TestCollector_MavenDependencies_EmitsUniformShape(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/maven2/com/google/guava/guava/maven-metadata.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(guavaMetadataXML)) //nolint:errcheck
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar.asc"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodHead && contains(r.URL.Path, ".jar"):
+			if contains(r.URL.Path, "33.2.1-jre") {
+				w.Header().Set("Last-Modified",
+					versionTimestamps["33.2.1-jre"].Format(http.TimeFormat))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/maven2/com/google/guava/guava/33.2.1-jre/guava-33.2.1-jre.pom":
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(pomWithDeps)) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{
+		ID:           "test-guava",
+		CanonicalURI: "pkg:maven/com.google.guava/guava",
+		Ecosystem:    "maven",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.Contains(t, signalMap, "maven_dependencies",
+		"maven_dependencies must be emitted for an artifact with declared deps")
+
+	var dep map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["maven_dependencies"], &dep))
+
+	keys := make([]string, 0, len(dep))
+	for k := range dep {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t,
+		[]string{"direct_count", "indirect_count", "total_count", "direct"},
+		keys,
+		"maven_dependencies value keys must match the other *_dependencies signals exactly")
+
+	assert.EqualValues(t, 3, dep["direct_count"],
+		"guava + slf4j-api + h2 (compile/runtime/optional); junit (test) and the dependencyManagement pin excluded")
+	assert.EqualValues(t, 0, dep["indirect_count"])
+	assert.EqualValues(t, 3, dep["total_count"])
+
+	direct, ok := dep["direct"].([]any)
+	require.True(t, ok, "direct must be a JSON array")
+	assert.Equal(t, []any{
+		"com.google.guava:guava",
+		"com.h2database:h2",
+		"org.slf4j:slf4j-api",
+	}, direct, "direct is the sorted groupId:artifactId coordinate set")
+}
+
 // contains is a test helper for URL path matching.
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)

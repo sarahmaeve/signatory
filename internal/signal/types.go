@@ -283,6 +283,41 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"reflects the latest published version only; a dependency added then removed across intermediate versions is not surfaced",
 		},
 	},
+	"maven_dependencies": {
+		Type:              "maven_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (project <dependencies>, test scope excluded) of the latest release POM, as groupId:artifactId coordinates.",
+		Caveats: []string{
+			"the POM declares only direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"test-scoped dependencies are excluded as they are not consumed transitively by downstream; <dependencyManagement> version pins are excluded as they are not actual dependencies",
+			"version-managed dependencies whose version is inherited from a parent or BOM still surface by coordinate; only the groupId:artifactId identity is tracked, not the resolved version",
+			"reflects the latest release version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"gem_dependencies": {
+		Type:              "gem_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared runtime-dependency surface (development dependencies excluded) of the gem's displayed version, by dependency name.",
+		Caveats: []string{
+			"the rubygems.org gem JSON exposes only the displayed version's directly-declared dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"development dependencies are excluded as they are the gem's own test/build tooling and are not pulled transitively by downstream consumers",
+			"reflects the displayed version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"pypi_dependencies": {
+		Type:              "pypi_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared dependency surface (info.requires_dist, PEP 508 names, PEP 503-normalized) of the project's displayed version.",
+		Caveats: []string{
+			"requires_dist declares only direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"every requires_dist entry is included regardless of environment marker or extra gate; PyPI has no clean runtime/dev partition, and including all entries is the only policy that surfaces a dependency injected under an innocuous extra",
+			"requires_dist is null for some old sdist-only releases, which surface as a zero dependency surface",
+			"reflects the displayed version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
 	"identity_domain_consistency": {
 		Type:              "identity_domain_consistency",
 		Group:             profile.SignalGroupGovernance,

@@ -1944,3 +1944,139 @@ func TestCollector_Collect_LatestAttestationBuilder_PopulatesSourceRevision(t *t
 	assert.Equal(t, "publish", lab["environment"])
 	assert.Equal(t, "ok", lab["extraction_status"])
 }
+
+// ----- pypi_dependencies: PEP 508 name extraction + PEP 503 norm -----
+
+func TestPEP508Name(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		spec string
+		want string
+	}{
+		{"bare", "click", "click"},
+		{"version_specifier_ge", "requests>=2.0", "requests"},
+		{"version_specifier_compatible", "urllib3~=1.26", "urllib3"},
+		{"version_specifier_ne", "idna!=3.0", "idna"},
+		{"space_before_operator", "foo >= 1.0", "foo"},
+		{"extras", "requests[socks]>=2.0", "requests"},
+		{"parenthesized_version", "foo (>=1.0,<2.0)", "foo"},
+		{"environment_marker", "importlib-metadata; python_version < \"3.8\"", "importlib-metadata"},
+		{"extra_gate", "cryptography>=3.4; extra == 'crypto'", "cryptography"},
+		{"direct_url_ref_spaced", "name @ https://example.com/x.whl", "name"},
+		{"direct_url_ref_tight", "name@https://example.com/x.whl", "name"},
+		{"leading_whitespace", "  requests >=2", "requests"},
+		{"dotted_name_normalized", "ruamel.yaml>=0.17", "ruamel-yaml"},
+		{"underscore_name_normalized", "Foo_Bar==1.0", "foo-bar"},
+		{"empty", "", ""},
+		{"garbage_no_name", ";; broken", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, pep508Name(tc.spec))
+		})
+	}
+}
+
+func TestNormalizePEP503(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"Foo_Bar", "foo-bar"},
+		{"foo.bar", "foo-bar"},
+		{"foo--bar", "foo-bar"},
+		{"foo__.--bar", "foo-bar"},
+		{"-foo-", "foo"},
+		{"_foo_", "foo"},
+		{"___", ""},
+		{"AlreadyNormal", "alreadynormal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, normalizePEP503(tc.in))
+		})
+	}
+}
+
+// TestCollector_Collect_PyPIDependencies_EmitsUniformShape pins the
+// confirmed extras-inclusive (b) policy and the value shape shared
+// with the other *_dependencies signals. Every requires_dist entry
+// surfaces regardless of marker or extra gate; names are PEP 503
+// normalized; duplicates (same project via different specs) collapse;
+// indirect_count is always 0.
+func TestCollector_Collect_PyPIDependencies_EmitsUniformShape(t *testing.T) {
+	t.Parallel()
+
+	info := Info{
+		// A login-shaped maintainer so the unrelated maintainer_count
+		// path doesn't record noise; not asserted here.
+		Maintainer: "theforge",
+		RequiresDist: []string{
+			"urllib3>=1.26",
+			"certifi",
+			"charset-normalizer<4",
+			"PySocks!=1.5.7; extra == 'socks'",          // feature extra — included under (b)
+			"pytest>=7.0; extra == 'test'",              // dev-ish extra — still included under (b)
+			"importlib-metadata; python_version < '3.8'", // env marker — included
+			"urllib3[secure]>=1.26",                     // dup of urllib3 via different spec
+			"ruamel.yaml>=0.17",                         // normalizes to ruamel-yaml
+		},
+	}
+	srv := projectInfoServer(t, info)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("requests"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+	require.True(t, hasSignal(result, "pypi_dependencies"))
+
+	dep := getSignalValue(t, result, "pypi_dependencies")
+
+	keys := make([]string, 0, len(dep))
+	for k := range dep {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t,
+		[]string{"direct_count", "indirect_count", "total_count", "direct"},
+		keys, "value keys must match the other *_dependencies signals exactly")
+
+	direct, ok := dep["direct"].([]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{
+		"certifi",
+		"charset-normalizer",
+		"importlib-metadata",
+		"pysocks",
+		"pytest",
+		"ruamel-yaml",
+		"urllib3",
+	}, direct, "extras+markered deps included (policy b), normalized, deduped, sorted")
+	assert.EqualValues(t, 7, dep["direct_count"])
+	assert.EqualValues(t, 0, dep["indirect_count"])
+	assert.EqualValues(t, 7, dep["total_count"])
+}
+
+// TestCollector_Collect_PyPIDependencies_NullRequiresDist_ZeroSurface
+// pins that a project with null/absent requires_dist (old sdist-only
+// releases, or genuinely dependency-free projects like pip) emits a
+// zero-surface signal, not an absence — consistent with the other
+// ecosystems.
+func TestCollector_Collect_PyPIDependencies_NullRequiresDist_ZeroSurface(t *testing.T) {
+	t.Parallel()
+
+	srv := projectInfoServer(t, Info{Maintainer: "theforge"})
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pip"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "pypi_dependencies"))
+	assert.False(t, hasAbsence(result, "pypi_dependencies"))
+	dep := getSignalValue(t, result, "pypi_dependencies")
+	assert.EqualValues(t, 0, dep["direct_count"])
+	assert.EqualValues(t, 0, dep["total_count"])
+}

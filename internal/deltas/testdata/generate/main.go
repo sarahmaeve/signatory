@@ -83,6 +83,9 @@ func run() error {
 		seedMaintainerChurn,
 		seedNpmDependenciesAdded,
 		seedCargoDependenciesAdded,
+		seedMavenDependenciesAdded,
+		seedGemDependenciesAdded,
+		seedPyPIDependenciesAdded,
 		seedRangeWindowProbe,
 	}
 	for _, seed := range scenarios {
@@ -439,5 +442,97 @@ func seedCargoDependenciesAdded(ctx context.Context, s *store.SQLite) error {
 		return err
 	}
 	return appendSignal(ctx, s, id, "cargo_dependencies", "cargo-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 11: maven dependency added ---
+//
+// Same shape as scenarios 9 and 10 for the maven signal. direct
+// entries are groupId:artifactId coordinates; confirms the byte-
+// identical value shape renders an identical CLI transition for the
+// Maven ecosystem too.
+func seedMavenDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:maven/com.example/dependency-added-sample", "dependency-added-sample", "maven")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"com.google.guava:guava", "org.slf4j:slf4j-api"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"com.google.guava:guava", "com.h2database:h2", "org.slf4j:slf4j-api"},
+	}
+	if err := appendSignal(ctx, s, id, "maven_dependencies", "maven-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "maven_dependencies", "maven-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 12: gem dependency added ---
+//
+// Same shape as scenarios 9–11 for the gem signal. direct entries are
+// runtime dependency names; confirms the byte-identical value shape
+// renders an identical CLI transition for the Ruby ecosystem too.
+func seedGemDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:gem/dependency-added-sample", "dependency-added-sample", "gem")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"actionpack", "activesupport"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"actionpack", "activesupport", "railties"},
+	}
+	if err := appendSignal(ctx, s, id, "gem_dependencies", "gem-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "gem_dependencies", "gem-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 13: pypi dependency added ---
+//
+// Same shape as scenarios 9–12 for the pypi signal. direct entries
+// are PEP 503-normalized dependency names; confirms the byte-
+// identical value shape renders an identical CLI transition for the
+// Python ecosystem too.
+func seedPyPIDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:pypi/dependency-added-sample", "dependency-added-sample", "pypi")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"certifi", "urllib3"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"certifi", "charset-normalizer", "urllib3"},
+	}
+	if err := appendSignal(ctx, s, id, "pypi_dependencies", "pypi-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "pypi_dependencies", "pypi-registry",
 		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
 }

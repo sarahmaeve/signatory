@@ -140,6 +140,12 @@ type Info struct {
 	Maintainer      string            `json:"maintainer"`
 	MaintainerEmail string            `json:"maintainer_email"`
 	Maintainers     []Person          `json:"maintainers"`
+
+	// RequiresDist is the project's declared dependencies as PEP 508
+	// requirement strings (e.g. "requests>=2.0",
+	// "cryptography; extra == 'crypto'"). Populated from the latest
+	// version's metadata; null for some old sdist-only releases.
+	RequiresDist []string `json:"requires_dist"`
 }
 
 // Person models one entry in PyPI's PEP 639-style maintainers /

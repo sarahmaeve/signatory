@@ -181,6 +181,46 @@ func TestDeltas_E2E_CargoDependenciesAdded(t *testing.T) {
 		"the newly-added crate must surface as an added entry")
 }
 
+// TestDeltas_E2E_MavenDependenciesAdded: same proof for the maven
+// signal. The added entry is a groupId:artifactId coordinate,
+// confirming the byte-identical value shape renders an identical CLI
+// transition for the Maven ecosystem.
+func TestDeltas_E2E_MavenDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "pkg:maven/com.example/dependency-added-sample", nil)
+
+	assert.Contains(t, got, "maven_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "com.h2database:h2",
+		"the newly-added coordinate must surface as an added entry")
+}
+
+// TestDeltas_E2E_GemDependenciesAdded: same proof for the gem signal,
+// confirming the byte-identical value shape renders an identical CLI
+// transition for the Ruby ecosystem.
+func TestDeltas_E2E_GemDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "pkg:gem/dependency-added-sample", nil)
+
+	assert.Contains(t, got, "gem_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "railties",
+		"the newly-added runtime dependency must surface as an added entry")
+}
+
+// TestDeltas_E2E_PyPIDependenciesAdded: same proof for the pypi
+// signal, confirming the byte-identical value shape renders an
+// identical CLI transition for the Python ecosystem.
+func TestDeltas_E2E_PyPIDependenciesAdded(t *testing.T) {
+	got := runDeltas(t, "pkg:pypi/dependency-added-sample", nil)
+
+	assert.Contains(t, got, "pypi_dependencies",
+		"the dependency signal type appears")
+	assert.Contains(t, got, "2 → 3", "direct_count scalar backstop")
+	assert.Contains(t, got, "charset-normalizer",
+		"the newly-added dependency must surface as an added entry")
+}
+
 // TestDeltas_E2E_JSON exercises the structured JSON output path
 // against a real scenario. Decodes the output and asserts on the
 // top-level shape.

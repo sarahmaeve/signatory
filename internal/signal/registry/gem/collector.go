@@ -92,6 +92,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// Emit signals from gem info.
 	recordRecentDownloads(result, entity.ID, gem, collectedAt)
 	recordMFARequired(result, entity.ID, gem, collectedAt)
+	recordGemDependencies(result, entity.ID, gem, collectedAt)
 
 	// Emit signals from versions (if available).
 	if versionsErr == nil {
@@ -311,6 +312,53 @@ func recordMFARequired(result *signal.CollectionResult, entityID string,
 	result.RecordSignal(entityID, "mfa_required", collectorSource, collectedAt, defaultTTL,
 		map[string]any{
 			"required": gem.MFARequired,
+		})
+}
+
+// recordGemDependencies emits gem_dependencies: the declared
+// runtime-dependency surface of the gem's displayed (latest) version.
+// The value shape is byte-identical to go_dependencies /
+// npm_dependencies / cargo_dependencies / maven_dependencies
+// (direct_count, indirect_count, total_count, direct[]) so the deltas
+// diff engine surfaces gem dependency drift through the same set-diff
+// path with no deltas-side changes.
+//
+// Reuses the GemResponse already fetched via GetGem — no extra
+// request. direct is the sorted, de-duplicated set of runtime
+// dependency names. development dependencies are excluded: they are
+// the gem's own test/build tooling and are not pulled transitively by
+// consumers, mirroring the dev-exclusion rule used for npm
+// (devDependencies), cargo (kind=dev), and maven (test scope).
+//
+// indirect_count is always 0: the gem JSON exposes only the displayed
+// version's directly-declared deps, never the resolved transitive
+// graph. Kept for shape parity rather than omitted so every ecosystem
+// presents an identical key set to downstream diffing.
+//
+// Zero declared runtime dependencies emits a zero-surface signal
+// rather than an absence: "this gem declares no runtime dependencies"
+// is a load-bearing fact, consistent with the other ecosystems.
+func recordGemDependencies(result *signal.CollectionResult, entityID string,
+	gem *GemResponse, collectedAt time.Time) {
+
+	// nil-when-empty, mirroring parseGoModDeps' []string semantics so
+	// the empty case marshals identically across ecosystems.
+	var direct []string
+	for _, d := range gem.Dependencies.Runtime {
+		if d.Name == "" {
+			continue
+		}
+		direct = append(direct, d.Name)
+	}
+	slices.Sort(direct)
+	direct = slices.Compact(direct)
+
+	result.RecordSignal(entityID, "gem_dependencies", collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
 		})
 }
 
