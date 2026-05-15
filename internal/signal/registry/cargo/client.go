@@ -133,6 +133,34 @@ func (c *Client) GetOwners(ctx context.Context, name string) (*OwnersResponse, e
 	return &or, nil
 }
 
+// GetDependencies fetches the directly-declared dependencies for a
+// specific crate version from crates.io. Returns ErrNotFound (wrapped)
+// on 404. Like GetOwners, a non-nil error here does NOT block signal
+// collection — the caller degrades gracefully and records a failure
+// for the dependency-derived signal only.
+//
+// version is registry-sourced (a crates.io version string), not raw
+// user input, but it is still path-escaped before substitution —
+// defense in depth per npm's #90 lesson that any byte substituted
+// into an HTTP URL is an injection surface.
+func (c *Client) GetDependencies(ctx context.Context, name, version string) (*DependenciesResponse, error) {
+	if err := ValidateCrateName(name); err != nil {
+		return nil, fmt.Errorf("get dependencies: %w", err)
+	}
+
+	path := "/api/v1/crates/" + url.PathEscape(name) + "/" + url.PathEscape(version) + "/dependencies"
+	var dr DependenciesResponse
+	err := c.api.GetJSON(ctx, path, &dr,
+		httpx.WithHeader("Accept", "application/json"))
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: dependencies for %s@%s", ErrNotFound, name, version)
+		}
+		return nil, fmt.Errorf("crates.io dependencies request for %q@%q: %w", name, version, err)
+	}
+	return &dr, nil
+}
+
 // ResolveRepoURL is the convenience method Layer 6's resolver wraps.
 // Fetches crate metadata and returns the repository URL (normalized)
 // or empty string if no repository is declared.

@@ -262,6 +262,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"indirect counts include transitive entries forced by minimum-version-selection and may misrepresent the project's intentional surface",
 		},
 	},
+	"cargo_dependencies": {
+		Type:              "cargo_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (normal + build, dev excluded) of the latest non-yanked crates.io version.",
+		Caveats: []string{
+			"crates.io's dependencies endpoint returns only directly-declared edges for the requested version; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"dev-dependencies are excluded as they are not pulled transitively by downstream consumers; build-dependencies are included because build.rs executes at consumer build time",
+			"reflects the latest non-yanked version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
 	"npm_dependencies": {
 		Type:              "npm_dependencies",
 		Group:             profile.SignalGroupGovernance,
