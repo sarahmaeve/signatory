@@ -2018,11 +2018,11 @@ func TestCollector_Collect_PyPIDependencies_EmitsUniformShape(t *testing.T) {
 			"urllib3>=1.26",
 			"certifi",
 			"charset-normalizer<4",
-			"PySocks!=1.5.7; extra == 'socks'",          // feature extra — included under (b)
-			"pytest>=7.0; extra == 'test'",              // dev-ish extra — still included under (b)
+			"PySocks!=1.5.7; extra == 'socks'",           // feature extra — included under (b)
+			"pytest>=7.0; extra == 'test'",               // dev-ish extra — still included under (b)
 			"importlib-metadata; python_version < '3.8'", // env marker — included
-			"urllib3[secure]>=1.26",                     // dup of urllib3 via different spec
-			"ruamel.yaml>=0.17",                         // normalizes to ruamel-yaml
+			"urllib3[secure]>=1.26",                      // dup of urllib3 via different spec
+			"ruamel.yaml>=0.17",                          // normalizes to ruamel-yaml
 		},
 	}
 	srv := projectInfoServer(t, info)
