@@ -273,6 +273,146 @@ func TestComputer_StoreErrorPropagation(t *testing.T) {
 		"arbitrary errors must not be misclassified as not-found")
 }
 
+// depsFakeStore returns a fakeStore preloaded with two observations
+// of a *_dependencies signal on one entity: a prior `direct` array
+// and a current one that adds exactly one entry. Models the real
+// JSON round-trip (counts arrive as float64, arrays as []any) so the
+// test exercises the same value shapes Compute sees in production.
+func depsFakeStore(t *testing.T, uri, sigType, src string,
+	priorDirect, currentDirect []string) *fakeStore {
+	t.Helper()
+	t1 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 12, 15, 0, 0, 0, time.UTC)
+	mk := func(direct []string) json.RawMessage {
+		return mustMarshal(t, map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
+		})
+	}
+	entity := &profile.Entity{ID: "e1", CanonicalURI: uri}
+	signals := []profile.Signal{
+		{
+			ID: "d1", EntityID: "e1", Type: sigType, Source: src,
+			Group: profile.SignalGroupGovernance, CollectedAt: t1,
+			Value: mk(priorDirect),
+		},
+		{
+			ID: "d2", EntityID: "e1", Type: sigType, Source: src,
+			Group: profile.SignalGroupGovernance, CollectedAt: t2,
+			Value: mk(currentDirect),
+		},
+	}
+	return &fakeStore{
+		entityByURI:     map[string]*profile.Entity{uri: entity},
+		signalsByEntity: map[string][]profile.Signal{"e1": signals},
+	}
+}
+
+// assertDependencyAdded pins that a two-observation *_dependencies
+// history surfaces the newly-added dependency as a clean ElementAdded
+// through the full Compute path, with the direct_count scalar as the
+// reliable backstop. This is the end-to-end-through-Compute proof the
+// live dogfood could not produce (real packages did not change deps
+// between observations); TestDiff_* pins the same at the Diff layer.
+func assertDependencyAdded(t *testing.T, fs *fakeStore, uri, sigType string,
+	wantBefore, wantAfter int, wantAdded string) {
+	t.Helper()
+	got, err := New(fs).Compute(context.Background(), Params{
+		Target: uri,
+		Window: TimeWindow{All: true},
+		Type:   sigType,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Groups, 1)
+	assert.Equal(t, sigType, got.Groups[0].Type)
+	require.Len(t, got.Groups[0].PairDiffs, 1,
+		"two observations → exactly one pair-diff")
+
+	diff := got.Groups[0].PairDiffs[0]
+
+	// Backstop: the count scalar always moves when the set changes.
+	require.Contains(t, diff.Changed, "direct_count")
+	assert.Equal(t, float64(wantBefore), diff.Changed["direct_count"].Before)
+	assert.Equal(t, float64(wantAfter), diff.Changed["direct_count"].After)
+
+	// The new dependency surfaces by name via set-diff.
+	require.Contains(t, diff.Changed, "direct")
+	arrayChange := diff.Changed["direct"]
+	assert.Equal(t, ChangeKindArray, arrayChange.Kind)
+	require.Len(t, arrayChange.Elements, 1)
+	assert.Equal(t, ElementAdded, arrayChange.Elements[0].Kind)
+	assert.Equal(t, wantAdded, arrayChange.Elements[0].After)
+}
+
+// TestComputer_NpmDependencyAdded: a new npm dependency surfaces as an
+// ElementAdded through the full Compute path.
+func TestComputer_NpmDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:npm/example", "npm_dependencies", "npm-registry",
+		[]string{"express", "lodash"},
+		[]string{"express", "left-pad", "lodash"})
+	assertDependencyAdded(t, fs, "pkg:npm/example", "npm_dependencies", 2, 3, "left-pad")
+}
+
+// TestComputer_CargoDependencyAdded: same proof for the cargo signal,
+// confirming the byte-identical value shape flows through Compute
+// identically across ecosystems.
+func TestComputer_CargoDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:cargo/example", "cargo_dependencies", "cargo-registry",
+		[]string{"libc", "mio"},
+		[]string{"libc", "mio", "tokio-macros"})
+	assertDependencyAdded(t, fs, "pkg:cargo/example", "cargo_dependencies", 2, 3, "tokio-macros")
+}
+
+// TestComputer_MavenDependencyAdded: same proof for the maven signal.
+// direct entries are groupId:artifactId coordinates; the byte-
+// identical value shape flows through Compute identically.
+func TestComputer_MavenDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:maven/com.example/thing", "maven_dependencies", "maven-registry",
+		[]string{"com.google.guava:guava", "org.slf4j:slf4j-api"},
+		[]string{"com.google.guava:guava", "com.h2database:h2", "org.slf4j:slf4j-api"})
+	assertDependencyAdded(t, fs, "pkg:maven/com.example/thing", "maven_dependencies", 2, 3, "com.h2database:h2")
+}
+
+// TestComputer_GemDependencyAdded: same proof for the gem signal,
+// confirming the byte-identical value shape flows through Compute
+// identically for the fifth ecosystem.
+func TestComputer_GemDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:gem/example", "gem_dependencies", "gem-registry",
+		[]string{"actionpack", "activesupport"},
+		[]string{"actionpack", "activesupport", "railties"})
+	assertDependencyAdded(t, fs, "pkg:gem/example", "gem_dependencies", 2, 3, "railties")
+}
+
+// TestComputer_PyPIDependencyAdded: same proof for the pypi signal,
+// confirming the byte-identical value shape flows through Compute
+// identically for the sixth ecosystem. Entries are PEP 503-normalized
+// dependency names.
+func TestComputer_PyPIDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "pkg:pypi/example", "pypi_dependencies", "pypi-registry",
+		[]string{"certifi", "urllib3"},
+		[]string{"certifi", "charset-normalizer", "urllib3"})
+	assertDependencyAdded(t, fs, "pkg:pypi/example", "pypi_dependencies", 2, 3, "charset-normalizer")
+}
+
+// TestComputer_GoDependencyAdded: parity proof for the pre-existing
+// go signal. Now that parseGoModDeps sorts+dedupes its direct list,
+// go_dependencies flows through Compute through the same set-diff
+// path as the five registry ecosystems. Entries are module paths.
+func TestComputer_GoDependencyAdded(t *testing.T) {
+	t.Parallel()
+	fs := depsFakeStore(t, "repo:github/example/proj", "go_dependencies", "github",
+		[]string{"github.com/pkg/errors", "github.com/stretchr/testify"},
+		[]string{"github.com/pkg/errors", "github.com/spf13/cobra", "github.com/stretchr/testify"})
+	assertDependencyAdded(t, fs, "repo:github/example/proj", "go_dependencies", 2, 3, "github.com/spf13/cobra")
+}
+
 // errFakeStore returns its configured error from every method.
 type errFakeStore struct {
 	err error

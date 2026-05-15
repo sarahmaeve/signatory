@@ -191,6 +191,10 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	c.collectPOMSignals(ctx, result, entity.ID, groupID, artifactID,
 		latestVersion, recentVersions, collectedAt)
 
+	// ----- maven_dependencies (governance, POM-based) -----
+	c.recordMavenDependencies(ctx, result, entity.ID, groupID, artifactID,
+		latestVersion, collectedAt)
+
 	// ----- org entity minting -----
 	c.ensureOrgEntity(ctx, groupID)
 
@@ -376,6 +380,54 @@ func (c *Collector) collectPOMSignals(ctx context.Context, result *signal.Collec
 				"versions_checked":        len(recentVersions),
 			})
 	}
+}
+
+// recordMavenDependencies emits maven_dependencies: the declared
+// direct-dependency surface of the latest release POM, as
+// groupId:artifactId coordinates. The value shape is byte-identical
+// to go_dependencies / npm_dependencies / cargo_dependencies
+// (direct_count, indirect_count, total_count, direct[]) so the deltas
+// diff engine surfaces Maven dependency drift through the same
+// set-diff path with no deltas-side changes.
+//
+// One POM GET for the latest version (the same POM the developers
+// fetch reads; kept as a separate call to mirror FetchDevelopers
+// rather than refactor the existing maintainer_count/author_drift
+// path). A fetch failure records a retryable failure for this signal
+// alone — non-retryable only for ErrNotFound — and never blocks the
+// rest of the collection, mirroring the cargo dependencies endpoint.
+//
+// Zero declared dependencies emits a zero-surface signal rather than
+// an absence: "this artifact declares no dependencies" is a
+// load-bearing fact, consistent with the go/npm/cargo signals.
+func (c *Collector) recordMavenDependencies(ctx context.Context,
+	result *signal.CollectionResult, entityID, groupID, artifactID,
+	latestVersion string, collectedAt time.Time) {
+
+	const sigType = "maven_dependencies"
+
+	deps, err := c.client.FetchDependencies(ctx, groupID, artifactID, latestVersion)
+	if err != nil {
+		retryable := !errors.Is(err, ErrNotFound)
+		result.RecordFailure(entityID, sigType, collectorSource,
+			sanitizeFetchReason(err), retryable, collectedAt)
+		return
+	}
+
+	// nil-when-empty, mirroring parseGoModDeps' []string semantics so
+	// the empty case marshals identically across ecosystems.
+	var direct []string
+	direct = append(direct, deps...)
+	slices.Sort(direct)
+	direct = slices.Compact(direct)
+
+	result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
+		})
 }
 
 // ensureOrgEntity mints an org:maven/<groupID> entity row.

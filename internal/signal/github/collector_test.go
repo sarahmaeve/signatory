@@ -618,6 +618,27 @@ require (
 			wantDirect:   0,
 			wantIndirect: 0,
 		},
+		{
+			// Parity with the registry collectors: direct must be
+			// sorted and de-duplicated, and directCount must reflect
+			// the de-duplicated set, so the deltas Diff engine treats
+			// go_dependencies through the same set-diff path as the
+			// other ecosystems.
+			name: "unsorted and duplicate direct deps are sorted and deduped",
+			content: `module example.com/mymod
+
+require (
+	github.com/zzz/last v1.0.0
+	github.com/aaa/first v1.0.0
+	github.com/zzz/last v1.0.0
+)
+
+require github.com/mmm/middle v1.2.3
+`,
+			wantDirect:    3,
+			wantIndirect:  0,
+			wantDirectPkg: []string{"github.com/aaa/first", "github.com/mmm/middle", "github.com/zzz/last"},
+		},
 	}
 
 	for _, tt := range tests {

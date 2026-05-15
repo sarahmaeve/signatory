@@ -228,3 +228,54 @@ func TestResolveRepoURL_UnsupportedForgeRepository(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, repoURL, "unsupported forges still resolve to empty")
 }
+
+func TestGetDependencies_Success(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/crates/serde/1.0.219/dependencies", r.URL.Path)
+		assert.Contains(t, r.Header.Get("User-Agent"), "signatory")
+
+		resp := DependenciesResponse{
+			Dependencies: []Dependency{
+				{CrateID: "serde_derive", Req: "=1.0.219", Kind: "normal", Optional: false},
+				{CrateID: "syn", Req: "^2", Kind: "build", Optional: false},
+				{CrateID: "trybuild", Req: "^1", Kind: "dev", Optional: false},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	deps, err := client.GetDependencies(context.Background(), "serde", "1.0.219")
+	require.NoError(t, err)
+	require.Len(t, deps.Dependencies, 3)
+	assert.Equal(t, "serde_derive", deps.Dependencies[0].CrateID)
+	assert.Equal(t, "build", deps.Dependencies[1].Kind)
+	assert.Equal(t, "dev", deps.Dependencies[2].Kind)
+}
+
+func TestGetDependencies_NotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	_, err := client.GetDependencies(context.Background(), "serde", "9.9.9")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestGetDependencies_InvalidName(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient()
+	_, err := client.GetDependencies(context.Background(), "../../etc/passwd", "1.0.0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match")
+}

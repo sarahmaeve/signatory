@@ -103,6 +103,14 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- artifact_url (publication, handoff to artifact collector) -----
 	recordArtifactURL(result, entity.ID, packageName, cr, collectedAt)
 
+	// ----- cargo_dependencies (governance) -----
+	//
+	// Separate endpoint (/api/v1/crates/{name}/{version}/dependencies)
+	// — one extra HTTP call per analyze, scoped to the latest non-
+	// yanked version. Failure degrades to a recorded failure for this
+	// signal only; the rest of the set still lands.
+	recordDependencies(ctx, c.client, result, entity.ID, packageName, cr, collectedAt)
+
 	// ----- longitudinal: build_script_introduced + publish_origin_consistency -----
 	recordCrossVersionSignals(result, entity.ID, cr, collectedAt)
 
@@ -284,6 +292,76 @@ func recordArtifactURL(result *signal.CollectionResult, entityID, packageName st
 			"version":   latest.version,
 			"integrity": latest.checksum,
 			"git_head":  "", // crates.io does not expose this; recovered post-fetch from .cargo_vcs_info.json.
+		})
+}
+
+// recordDependencies emits cargo_dependencies: the declared direct-
+// dependency surface of the latest non-yanked version. The value shape
+// is byte-identical to go_dependencies and npm_dependencies
+// (direct_count, indirect_count, total_count, direct[]) so the deltas
+// diff engine surfaces cargo dependency drift through the same set-diff
+// path with no deltas-side changes.
+//
+// direct is the sorted, de-duplicated set of crate_ids whose kind is
+// "normal" or "build". dev-dependencies are excluded — they are never
+// pulled transitively by downstream consumers (mirrors npm excluding
+// devDependencies). build-dependencies ARE included: build.rs runs
+// arbitrary code on the consumer's machine at build time, the same
+// supply-chain reasoning that folds npm optionalDependencies in.
+//
+// indirect_count is always 0: the crates.io dependencies endpoint
+// returns only the directly-declared edges for the requested version,
+// never the resolved transitive graph. Kept for shape parity rather
+// than omitted so every ecosystem presents an identical key set to
+// downstream diffing.
+//
+// Degradation mirrors the owners endpoint: a fetch failure records a
+// retryable failure (non-retryable only for ErrNotFound) for this
+// signal alone and never blocks the rest of the collection.
+func recordDependencies(ctx context.Context, client *Client,
+	result *signal.CollectionResult, entityID, packageName string,
+	cr *CrateResponse, collectedAt time.Time) {
+
+	const sigType = "cargo_dependencies"
+
+	recent := recentVersionsByPublishTime(cr, 1)
+	if len(recent) == 0 {
+		result.RecordAbsence(entityID, sigType, collectorSource,
+			"no orderable non-yanked versions to resolve dependencies for",
+			false, collectedAt)
+		return
+	}
+	latest := recent[0].version
+
+	deps, err := client.GetDependencies(ctx, packageName, latest)
+	if err != nil {
+		retryable := !errors.Is(err, ErrNotFound)
+		result.RecordFailure(entityID, sigType, collectorSource,
+			sanitizeFetchReason(err), retryable, collectedAt)
+		return
+	}
+
+	// nil-when-empty, mirroring parseGoModDeps' []string semantics so
+	// the empty case marshals identically across ecosystems.
+	var direct []string
+	for _, d := range deps.Dependencies {
+		if d.Kind == "dev" {
+			continue
+		}
+		if d.CrateID == "" {
+			continue
+		}
+		direct = append(direct, d.CrateID)
+	}
+	slices.Sort(direct)
+	direct = slices.Compact(direct)
+
+	result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
+		map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
 		})
 }
 

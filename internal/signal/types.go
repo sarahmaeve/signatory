@@ -260,6 +260,64 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 		Description:       "go.mod direct and indirect dependency counts and direct-dependency list.",
 		Caveats: []string{
 			"indirect counts include transitive entries forced by minimum-version-selection and may misrepresent the project's intentional surface",
+			"the direct list excludes entries marked // indirect (those are counted in indirect_count only); it is sorted and de-duplicated so it diffs through the same set-diff path as the other ecosystems' *_dependencies signals",
+			"unlike the registry ecosystems, indirect_count is a real count (go.mod exposes the MVS-forced transitive set via // indirect) rather than always 0; total_count is therefore direct + indirect, not equal to direct_count",
+		},
+	},
+	"cargo_dependencies": {
+		Type:              "cargo_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (normal + build, dev excluded) of the latest non-yanked crates.io version.",
+		Caveats: []string{
+			"crates.io's dependencies endpoint returns only directly-declared edges for the requested version; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"dev-dependencies are excluded as they are not pulled transitively by downstream consumers; build-dependencies are included because build.rs executes at consumer build time",
+			"reflects the latest non-yanked version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"npm_dependencies": {
+		Type:              "npm_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (dependencies + optionalDependencies) of the latest published npm version.",
+		Caveats: []string{
+			"npm packument exposes only declared direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"reflects the latest published version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"maven_dependencies": {
+		Type:              "maven_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (project <dependencies>, test scope excluded) of the latest release POM, as groupId:artifactId coordinates.",
+		Caveats: []string{
+			"the POM declares only direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"test-scoped dependencies are excluded as they are not consumed transitively by downstream; <dependencyManagement> version pins are excluded as they are not actual dependencies",
+			"version-managed dependencies whose version is inherited from a parent or BOM still surface by coordinate; only the groupId:artifactId identity is tracked, not the resolved version",
+			"reflects the latest release version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"gem_dependencies": {
+		Type:              "gem_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared runtime-dependency surface (development dependencies excluded) of the gem's displayed version, by dependency name.",
+		Caveats: []string{
+			"the rubygems.org gem JSON exposes only the displayed version's directly-declared dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"development dependencies are excluded as they are the gem's own test/build tooling and are not pulled transitively by downstream consumers",
+			"reflects the displayed version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
+	"pypi_dependencies": {
+		Type:              "pypi_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared dependency surface (info.requires_dist, PEP 508 names, PEP 503-normalized) of the project's displayed version.",
+		Caveats: []string{
+			"requires_dist declares only direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"every requires_dist entry is included regardless of environment marker or extra gate; PyPI has no clean runtime/dev partition, and including all entries is the only policy that surfaces a dependency injected under an innocuous extra",
+			"requires_dist is null for some old sdist-only releases, which surface as a zero dependency surface",
+			"reflects the displayed version only; a dependency added then removed across intermediate versions is not surfaced",
 		},
 	},
 	"identity_domain_consistency": {

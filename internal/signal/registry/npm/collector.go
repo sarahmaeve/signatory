@@ -170,6 +170,14 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// available" fact rather than inferring from a missing signal.
 	recordArtifactURL(result, entity.ID, pkg, collectedAt)
 
+	// ----- npm_dependencies (governance) -----
+	//
+	// Declared direct-dependency surface of the latest version. Same
+	// wire payload as the signals above (already in pkg) — marginal
+	// cost is parsing, not network. Value shape is byte-identical to
+	// go_dependencies so deltas diffs npm and Go drift uniformly.
+	recordDependencies(result, entity.ID, pkg, collectedAt)
+
 	// ----- weekly_downloads (criticality) -----
 	//
 	// Separate endpoint (api.npmjs.org/downloads) — one extra HTTP
@@ -440,6 +448,69 @@ func recordArtifactURL(result *signal.CollectionResult, entityID string,
 			"version":   latest,
 			"integrity": ver.Dist.Integrity,
 			"git_head":  ver.GitHead,
+		})
+}
+
+// recordDependencies emits npm_dependencies: the declared direct-
+// dependency surface of the latest published version. The value shape
+// is byte-identical to go_dependencies (direct_count, indirect_count,
+// total_count, direct[]) so the deltas diff engine treats npm and Go
+// dependency drift through the same set-diff path.
+//
+// direct is the sorted union of the latest version's dependencies and
+// optionalDependencies. optionalDependencies are folded in because the
+// TanStack/Mini-Shai-Hulud 2026-05-11 injection landed there — a drift
+// signal that ignored that section would be blind to exactly the
+// vector this collector elsewhere catches via git_url_dep_introduced.
+// devDependencies and peerDependencies are not modelled on the wire
+// (see PackageVersion) and are out of scope by construction.
+//
+// indirect_count is always 0: the npm packument exposes only declared
+// direct deps, never the resolved transitive graph. The field is kept
+// for shape parity with go_dependencies rather than omitted, so the
+// two ecosystems present an identical key set to downstream diffing.
+//
+// Absence handling mirrors recordArtifactURL: a missing dist-tags.latest
+// or versions[latest] entry is recorded as an absence so the profile
+// reflects "we looked and the registry shape didn't let us" rather than
+// a silently missing signal.
+func recordDependencies(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	const sigType = "npm_dependencies"
+
+	latest := pkg.DistTags.Latest
+	if latest == "" {
+		result.RecordAbsence(entityID, sigType, source,
+			"registry response has no dist-tags.latest", false, collectedAt)
+		return
+	}
+	ver, ok := pkg.Versions[latest]
+	if !ok {
+		result.RecordAbsence(entityID, sigType, source,
+			fmt.Sprintf("registry response has no versions[%q] entry", latest),
+			true, collectedAt)
+		return
+	}
+
+	// nil-when-empty, mirroring parseGoModDeps' []string semantics so
+	// the empty case marshals identically across ecosystems.
+	var direct []string
+	for name := range ver.Dependencies {
+		direct = append(direct, name)
+	}
+	for name := range ver.OptionalDependencies {
+		direct = append(direct, name)
+	}
+	slices.Sort(direct)
+	direct = slices.Compact(direct)
+
+	result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+		map[string]any{
+			"direct_count":   len(direct),
+			"indirect_count": 0,
+			"total_count":    len(direct),
+			"direct":         direct,
 		})
 }
 

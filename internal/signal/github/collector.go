@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -652,5 +653,18 @@ func parseGoModDeps(content string) (goModDeps, error) {
 			}
 		}
 	}
+
+	// Sort + de-duplicate the direct list and reconcile directCount to
+	// the de-duplicated set. Parity with the registry collectors
+	// (npm/cargo/maven/gem/pypi all slices.Sort + slices.Compact):
+	// canonical order makes two observations of an unchanged go.mod
+	// diff clean regardless of require-block ordering, and dedup keeps
+	// a hand-edited duplicate require from inflating the count. A valid
+	// go.mod has neither, but parseGoModDeps is defensive against
+	// adversarial or hand-mangled upstream content.
+	slices.Sort(deps.direct)
+	deps.direct = slices.Compact(deps.direct)
+	deps.directCount = len(deps.direct)
+
 	return deps, nil
 }

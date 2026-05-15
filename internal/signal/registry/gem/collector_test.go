@@ -582,3 +582,85 @@ func TestCollector_RecordsArtifactURL(t *testing.T) {
 		"rubygems.org does not expose git_head in registry metadata; "+
 			"the artifact collector falls through to tag-match resolution")
 }
+
+// TestCollector_GemDependencies_EmitsUniformShape pins that the gem
+// collector emits gem_dependencies with a value shape byte-identical
+// to the other *_dependencies signals (direct_count, indirect_count,
+// total_count, direct[]), so the deltas diff engine surfaces gem
+// dependency drift through the same set-diff path. direct is the
+// sorted, de-duplicated set of runtime dependency names from the gem
+// JSON's `dependencies` object — already fetched via GetGem, no new
+// request. development dependencies are excluded (the dev analog, not
+// consumed by downstream gems, mirroring npm devDependencies / cargo
+// dev / maven test). indirect_count is always 0: the gem JSON exposes
+// only the displayed version's direct deps, never the resolved graph.
+func TestCollector_GemDependencies_EmitsUniformShape(t *testing.T) {
+	t.Parallel()
+
+	gem := railsFixture()
+	gem.Dependencies = GemDependencies{
+		Runtime: []GemDependency{
+			{Name: "actionpack", Requirements: "= 7.1.3"},
+			{Name: "activesupport", Requirements: "= 7.1.3"},
+			{Name: "actionpack", Requirements: "= 7.1.3"}, // dup → de-duped
+		},
+		Development: []GemDependency{
+			{Name: "rspec", Requirements: ">= 0"},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/gems/rails.json":
+			json.NewEncoder(w).Encode(gem) //nolint:errcheck
+		case "/api/v1/versions/rails.json":
+			json.NewEncoder(w).Encode(railsVersions()) //nolint:errcheck
+		case "/api/v1/gems/rails/owners.json":
+			json.NewEncoder(w).Encode(railsOwners()) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{
+		ID:           "test-rails",
+		CanonicalURI: "pkg:gem/rails",
+		Ecosystem:    "gem",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.Contains(t, signalMap, "gem_dependencies",
+		"gem_dependencies must be emitted for a gem with declared runtime deps")
+
+	var dep map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["gem_dependencies"], &dep))
+
+	keys := make([]string, 0, len(dep))
+	for k := range dep {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t,
+		[]string{"direct_count", "indirect_count", "total_count", "direct"},
+		keys,
+		"gem_dependencies value keys must match the other *_dependencies signals exactly")
+
+	assert.EqualValues(t, 2, dep["direct_count"],
+		"actionpack + activesupport (de-duped); rspec (development) excluded")
+	assert.EqualValues(t, 0, dep["indirect_count"])
+	assert.EqualValues(t, 2, dep["total_count"])
+
+	direct, ok := dep["direct"].([]any)
+	require.True(t, ok, "direct must be a JSON array")
+	assert.Equal(t, []any{"actionpack", "activesupport"}, direct,
+		"direct is the sorted, de-duplicated runtime dependency-name set")
+}

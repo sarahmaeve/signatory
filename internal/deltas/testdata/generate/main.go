@@ -81,6 +81,12 @@ func run() error {
 		seedBotPublisherAppears,
 		seedVersionBurstFlips,
 		seedMaintainerChurn,
+		seedNpmDependenciesAdded,
+		seedCargoDependenciesAdded,
+		seedMavenDependenciesAdded,
+		seedGemDependenciesAdded,
+		seedPyPIDependenciesAdded,
+		seedGoDependenciesAdded,
 		seedRangeWindowProbe,
 	}
 	for _, seed := range scenarios {
@@ -376,4 +382,192 @@ func seedMaintainerChurn(ctx context.Context, s *store.SQLite) error {
 	}
 	return appendSignal(ctx, s, id, "maintainer_count", "npm-registry",
 		profile.SignalGroupGovernance, profile.ForgeryMediumDeclining, current, t2)
+}
+
+// --- Scenario 9: npm dependency added ---
+//
+// Two npm_dependencies observations whose `direct` array gains one
+// entry. Exercises the dependency-drift path end to end through the
+// real `signatory deltas` command — the transition the live dogfood
+// could not produce because real packages did not change deps
+// between observations.
+func seedNpmDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:npm/dependency-added-sample", "dependency-added-sample", "npm")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"express", "lodash"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"express", "left-pad", "lodash"},
+	}
+	if err := appendSignal(ctx, s, id, "npm_dependencies", "npm-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "npm_dependencies", "npm-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 10: cargo dependency added ---
+//
+// Same shape as scenario 9 for the cargo signal, confirming the
+// byte-identical value shape renders an identical transition through
+// the CLI across ecosystems.
+func seedCargoDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:cargo/dependency-added-sample", "dependency-added-sample", "cargo")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"libc", "mio"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"libc", "mio", "tokio-macros"},
+	}
+	if err := appendSignal(ctx, s, id, "cargo_dependencies", "cargo-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "cargo_dependencies", "cargo-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 11: maven dependency added ---
+//
+// Same shape as scenarios 9 and 10 for the maven signal. direct
+// entries are groupId:artifactId coordinates; confirms the byte-
+// identical value shape renders an identical CLI transition for the
+// Maven ecosystem too.
+func seedMavenDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:maven/com.example/dependency-added-sample", "dependency-added-sample", "maven")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"com.google.guava:guava", "org.slf4j:slf4j-api"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"com.google.guava:guava", "com.h2database:h2", "org.slf4j:slf4j-api"},
+	}
+	if err := appendSignal(ctx, s, id, "maven_dependencies", "maven-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "maven_dependencies", "maven-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 12: gem dependency added ---
+//
+// Same shape as scenarios 9–11 for the gem signal. direct entries are
+// runtime dependency names; confirms the byte-identical value shape
+// renders an identical CLI transition for the Ruby ecosystem too.
+func seedGemDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:gem/dependency-added-sample", "dependency-added-sample", "gem")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"actionpack", "activesupport"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"actionpack", "activesupport", "railties"},
+	}
+	if err := appendSignal(ctx, s, id, "gem_dependencies", "gem-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "gem_dependencies", "gem-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 13: pypi dependency added ---
+//
+// Same shape as scenarios 9–12 for the pypi signal. direct entries
+// are PEP 503-normalized dependency names; confirms the byte-
+// identical value shape renders an identical CLI transition for the
+// Python ecosystem too.
+func seedPyPIDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "pkg:pypi/dependency-added-sample", "dependency-added-sample", "pypi")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"certifi", "urllib3"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"certifi", "charset-normalizer", "urllib3"},
+	}
+	if err := appendSignal(ctx, s, id, "pypi_dependencies", "pypi-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "pypi_dependencies", "pypi-registry",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
+}
+
+// --- Scenario 14: go dependency added ---
+//
+// Parity scenario for the pre-existing go signal. Unlike scenarios
+// 9–13, go_dependencies carries a REAL indirect_count (go.mod exposes
+// the MVS-forced transitive set via // indirect), so indirect_count
+// is a non-zero constant across both observations and total_count is
+// direct + indirect, not equal to direct_count. The drift under test
+// is still the direct list gaining one module path; the source is
+// "github" (go_dependencies is emitted by the github collector).
+func seedGoDependenciesAdded(ctx context.Context, s *store.SQLite) error {
+	id, err := mintEntity(ctx, s, "repo:github/example/go-dependency-added-sample", "go-dependency-added-sample", "go")
+	if err != nil {
+		return err
+	}
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(5),
+		"total_count":    float64(7),
+		"direct":         []any{"github.com/pkg/errors", "github.com/stretchr/testify"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(5),
+		"total_count":    float64(8),
+		"direct":         []any{"github.com/pkg/errors", "github.com/spf13/cobra", "github.com/stretchr/testify"},
+	}
+	if err := appendSignal(ctx, s, id, "go_dependencies", "github",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, prior, t1); err != nil {
+		return err
+	}
+	return appendSignal(ctx, s, id, "go_dependencies", "github",
+		profile.SignalGroupGovernance, profile.ForgeryHigh, current, t2)
 }

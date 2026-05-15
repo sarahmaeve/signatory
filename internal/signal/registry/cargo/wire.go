@@ -44,6 +44,28 @@ type User struct {
 	URL   string `json:"url"`
 }
 
+// DependenciesResponse models crates.io's
+// /api/v1/crates/{name}/{version}/dependencies response. crates.io
+// returns only the directly-declared dependencies for that exact
+// version — never the resolved transitive graph — so there is no
+// indirect-dependency surface to model here.
+type DependenciesResponse struct {
+	Dependencies []Dependency `json:"dependencies"`
+}
+
+// Dependency is one declared dependency edge from a crate version.
+// CrateID is the depended-upon crate's name. Kind partitions the
+// edge into "normal" (runtime, shipped to consumers), "build"
+// (compiled and executed at build time via build.rs on the
+// consumer's machine), or "dev" (used only by the crate's own tests
+// and benchmarks, never pulled transitively by consumers).
+type Dependency struct {
+	CrateID  string `json:"crate_id"`
+	Req      string `json:"req"`
+	Kind     string `json:"kind"` // "normal" | "build" | "dev"
+	Optional bool   `json:"optional"`
+}
+
 // OwnersResponse models crates.io's /api/v1/crates/{name}/owners response.
 type OwnersResponse struct {
 	Users []Owner `json:"users"`

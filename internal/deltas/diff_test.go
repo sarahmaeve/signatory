@@ -337,6 +337,44 @@ func TestDiff_MaintainerChurnAdds(t *testing.T) {
 	require.Contains(t, d.Changed, "logins")
 }
 
+// TestDiff_NpmDependencyAdded pins the end-to-end assumption that a
+// newly-added npm dependency surfaces through deltas. The npm collector
+// emits npm_dependencies with a value shape byte-identical to
+// go_dependencies; this test feeds two such snapshots (as they appear
+// after JSON round-trip: float64 counts, []any direct list) and asserts
+// the new dependency name surfaces as a clean ElementAdded, with the
+// count scalar change as the reliable backstop. If this passes, npm
+// dependency drift is observable through the same path Go uses.
+func TestDiff_NpmDependencyAdded(t *testing.T) {
+	t.Parallel()
+	prior := map[string]any{
+		"direct_count":   float64(2),
+		"indirect_count": float64(0),
+		"total_count":    float64(2),
+		"direct":         []any{"express", "lodash"},
+	}
+	current := map[string]any{
+		"direct_count":   float64(3),
+		"indirect_count": float64(0),
+		"total_count":    float64(3),
+		"direct":         []any{"express", "lodash", "left-pad"},
+	}
+	d := Diff(prior, current)
+
+	// Backstop: the count scalars always move when the set changes.
+	require.Contains(t, d.Changed, "direct_count")
+	assert.Equal(t, float64(2), d.Changed["direct_count"].Before)
+	assert.Equal(t, float64(3), d.Changed["direct_count"].After)
+
+	// The new dependency surfaces by name via set-diff.
+	require.Contains(t, d.Changed, "direct")
+	arrayChange := d.Changed["direct"]
+	assert.Equal(t, ChangeKindArray, arrayChange.Kind)
+	require.Len(t, arrayChange.Elements, 1)
+	assert.Equal(t, ElementAdded, arrayChange.Elements[0].Kind)
+	assert.Equal(t, "left-pad", arrayChange.Elements[0].After)
+}
+
 // ------------------------------------------------------------------
 // Object recursion: nested object change
 // ------------------------------------------------------------------

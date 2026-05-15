@@ -645,6 +645,142 @@ func TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions(t *testing.T) {
 			"rather than emitted with a fabricated URL")
 }
 
+// TestCollector_CargoDependencies_EmitsUniformShape pins that the
+// cargo collector emits cargo_dependencies with a value shape byte-
+// identical to go_dependencies and npm_dependencies (direct_count,
+// indirect_count, total_count, direct[]), so the deltas diff engine
+// surfaces cargo dependency drift through the same set-diff path.
+//
+// direct is the sorted unique set of crate_ids whose kind is "normal"
+// or "build". dev-dependencies are excluded because they are never
+// pulled transitively by downstream consumers (mirrors npm excluding
+// devDependencies); build-dependencies ARE included because build.rs
+// executes arbitrary code on the consumer's machine at build time —
+// the same supply-chain reasoning that folds npm optionalDependencies
+// in. indirect_count is always 0: the crates.io dependencies endpoint
+// returns only the directly-declared edges for that version.
+func TestCollector_CargoDependencies_EmitsUniformShape(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/serde":
+			json.NewEncoder(w).Encode(serdeFixture()) //nolint:errcheck
+		case "/api/v1/crates/serde/owners":
+			json.NewEncoder(w).Encode(serdeOwners()) //nolint:errcheck
+		case "/api/v1/crates/serde/1.0.219/dependencies":
+			json.NewEncoder(w).Encode(DependenciesResponse{ //nolint:errcheck
+				Dependencies: []Dependency{
+					{CrateID: "serde_derive", Req: "=1.0.219", Kind: "normal", Optional: true},
+					{CrateID: "syn", Req: "^2", Kind: "build", Optional: false},
+					{CrateID: "trybuild", Req: "^1", Kind: "dev", Optional: false},
+					{CrateID: "serde_derive", Req: "=1.0.219", Kind: "normal", Optional: false},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{
+		ID:           "test-serde",
+		CanonicalURI: "pkg:cargo/serde",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.Contains(t, signalMap, "cargo_dependencies",
+		"cargo_dependencies must be emitted for a crate with declared deps")
+
+	var dep map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["cargo_dependencies"], &dep))
+
+	assert.ElementsMatch(t,
+		[]string{"direct_count", "indirect_count", "total_count", "direct"},
+		mapKeysOf(dep),
+		"cargo_dependencies value keys must match go_dependencies/npm_dependencies exactly")
+
+	assert.EqualValues(t, 2, dep["direct_count"],
+		"normal serde_derive (deduped) + build syn = 2; dev trybuild excluded")
+	assert.EqualValues(t, 0, dep["indirect_count"])
+	assert.EqualValues(t, 2, dep["total_count"])
+
+	direct, ok := dep["direct"].([]any)
+	require.True(t, ok, "direct must be a JSON array")
+	assert.Equal(t, []any{"serde_derive", "syn"}, direct,
+		"direct is the sorted, de-duplicated union of normal+build crate_ids")
+}
+
+// TestCollector_CargoDependencies_EndpointFailureDegrades pins that a
+// failing dependencies endpoint records a retryable failure for
+// cargo_dependencies only and does not poison the rest of the signal
+// set — mirroring the owners-endpoint degradation contract.
+func TestCollector_CargoDependencies_EndpointFailureDegrades(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/serde":
+			json.NewEncoder(w).Encode(serdeFixture()) //nolint:errcheck
+		case "/api/v1/crates/serde/owners":
+			json.NewEncoder(w).Encode(serdeOwners()) //nolint:errcheck
+		case "/api/v1/crates/serde/1.0.219/dependencies":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL(srv.URL)
+	c := NewCollectorWithClient(client)
+	entity := &profile.Entity{
+		ID:           "test-serde",
+		CanonicalURI: "pkg:cargo/serde",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	for _, s := range result.Signals() {
+		assert.NotEqual(t, "cargo_dependencies", s.Type,
+			"a failed dependencies fetch must not emit a cargo_dependencies signal")
+	}
+	require.Len(t, result.Failures, 1)
+	assert.Equal(t, "cargo_dependencies", result.Failures[0].SignalType)
+	assert.True(t, result.Failures[0].Retryable, "a 500 is retryable")
+
+	// Other signals still land — the dependencies failure is isolated.
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	assert.Contains(t, signalMap, "last_publish")
+	assert.Contains(t, signalMap, "maintainer_count")
+}
+
+// mapKeysOf returns the keys of m, for exact-key-set assertions where
+// emission order is irrelevant but the SET of keys is contractual.
+func mapKeysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // mockEntityStore tracks which entity URIs were minted.
 type mockEntityStore struct {
 	minted []string
