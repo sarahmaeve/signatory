@@ -262,6 +262,16 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"indirect counts include transitive entries forced by minimum-version-selection and may misrepresent the project's intentional surface",
 		},
 	},
+	"npm_dependencies": {
+		Type:              "npm_dependencies",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Declared direct-dependency surface (dependencies + optionalDependencies) of the latest published npm version.",
+		Caveats: []string{
+			"npm packument exposes only declared direct dependencies; the resolved transitive graph is never available, so indirect_count is always 0 and total_count equals direct_count",
+			"reflects the latest published version only; a dependency added then removed across intermediate versions is not surfaced",
+		},
+	},
 	"identity_domain_consistency": {
 		Type:              "identity_domain_consistency",
 		Group:             profile.SignalGroupGovernance,

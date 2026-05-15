@@ -127,9 +127,15 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	// single version entry, so the cross-version signals land with
 	// stable-state payloads rather than transition flags, and
 	// version_unpublish_observed lands with unpublished_count=0.)
-	assert.Equal(t, 12, result.SignalCount(),
-		"all twelve signals should land on happy path (5 snapshot + 4 cross-version + version_count + artifact_url + version_unpublish_observed)")
+	assert.Equal(t, 13, result.SignalCount(),
+		"all thirteen signals should land on happy path (5 snapshot + 4 cross-version + version_count + artifact_url + version_unpublish_observed + npm_dependencies)")
 	assert.Equal(t, 0, result.AbsenceCount())
+
+	// npm_dependencies (governance) — sample fixture declares no deps,
+	// so this lands with a zero surface, not an absence.
+	require.True(t, hasSignal(result, "npm_dependencies"))
+	nd := getSignalValue(t, result, "npm_dependencies")
+	assert.EqualValues(t, 0, nd["direct_count"])
 
 	// last_publish
 	require.True(t, hasSignal(result, "last_publish"))
@@ -256,12 +262,12 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Eleven real signals (everything except weekly_downloads), one
+	// Twelve real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
 	// failure must not poison the other signals. The four cross-
-	// version signals plus version_unpublish_observed land from the
-	// same-wire versions map.
-	assert.Equal(t, 11, result.SignalCount())
+	// version signals plus version_unpublish_observed and
+	// npm_dependencies land from the same-wire versions map.
+	assert.Equal(t, 12, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -522,7 +528,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 11, result.SignalCount())
+	assert.Equal(t, 12, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -1444,4 +1450,91 @@ func TestCollector_Collect_VersionUnpublishObserved_IgnoresMetaKeys(t *testing.T
 	vu := getSignalValue(t, result, "version_unpublish_observed")
 	assert.EqualValues(t, 0, vu["unpublished_count"],
 		"created/modified meta-keys must not register as unpublished versions")
+}
+
+// ----- npm_dependencies: declared direct-dependency surface -----
+
+// TestCollector_Collect_NpmDependencies_EmitsUniformShape pins the
+// contract that the npm collector emits npm_dependencies with a value
+// shape byte-identical to go_dependencies (direct_count, indirect_count,
+// total_count, direct[]), so the deltas diff engine treats both
+// ecosystems through the same set-diff path. direct is the sorted union
+// of the latest version's dependencies and optionalDependencies;
+// optionalDependencies are included because the TanStack/Mini-Shai-Hulud
+// injection landed there and a drift signal that ignored them would be
+// blind to that exact vector. indirect_count is always 0: the npm
+// packument exposes only declared direct deps, never the resolved
+// transitive graph.
+func TestCollector_Collect_NpmDependencies_EmitsUniformShape(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+  "name": "withdeps",
+  "dist-tags": {"latest": "2.0.0"},
+  "time": {
+    "created": "2024-01-01T00:00:00Z",
+    "modified": "2024-02-01T00:00:00Z",
+    "2.0.0": "2024-02-01T00:00:00Z"
+  },
+  "maintainers": [{"name": "m"}],
+  "versions": {
+    "2.0.0": {
+      "scripts": {},
+      "dist": {"tarball": "https://registry.npmjs.org/withdeps/-/withdeps-2.0.0.tgz"},
+      "_npmUser": {"name": "m"},
+      "dependencies": {"lodash": "^4.17.21", "express": "^4.18.2"},
+      "optionalDependencies": {"fsevents": "^2.3.2"}
+    }
+  }
+}`
+	downloadsBody := `{"downloads":1,"start":"a","end":"b","package":"withdeps"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("withdeps"))
+	require.NoError(t, err)
+	require.True(t, hasSignal(result, "npm_dependencies"),
+		"npm_dependencies must be emitted for an npm package with declared deps")
+
+	dep := getSignalValue(t, result, "npm_dependencies")
+
+	// Value shape must match go_dependencies exactly so deltas diffs
+	// both ecosystems through the same path.
+	assert.ElementsMatch(t,
+		[]string{"direct_count", "indirect_count", "total_count", "direct"},
+		mapKeys(dep),
+		"npm_dependencies value keys must be byte-identical to go_dependencies")
+
+	assert.EqualValues(t, 3, dep["direct_count"],
+		"2 dependencies + 1 optionalDependency = 3 direct")
+	assert.EqualValues(t, 0, dep["indirect_count"],
+		"npm packument exposes no transitive graph; indirect_count is always 0")
+	assert.EqualValues(t, 3, dep["total_count"],
+		"total_count == direct_count when indirect is unavailable")
+
+	direct, ok := dep["direct"].([]any)
+	require.True(t, ok, "direct must be a JSON array")
+	assert.Equal(t, []any{"express", "fsevents", "lodash"}, direct,
+		"direct is the sorted union of dependencies and optionalDependencies")
+}
+
+// TestCollector_Collect_NpmDependencies_NoDeps_EmitsZeroSurface pins
+// that a package declaring no dependencies still emits the signal with
+// a zero surface, mirroring go_dependencies on a dependency-free
+// module. The signal's absence would be indistinguishable from "we
+// didn't look"; an explicit zero is the load-bearing fact.
+func TestCollector_Collect_NpmDependencies_NoDeps_EmitsZeroSurface(t *testing.T) {
+	t.Parallel()
+
+	srv := newMultiEndpointServer(t, sampleRegistryResponse,
+		`{"downloads":1,"start":"a","end":"b","package":"express"}`)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
+	require.NoError(t, err)
+	require.True(t, hasSignal(result, "npm_dependencies"))
+
+	dep := getSignalValue(t, result, "npm_dependencies")
+	assert.EqualValues(t, 0, dep["direct_count"])
+	assert.EqualValues(t, 0, dep["total_count"])
 }
