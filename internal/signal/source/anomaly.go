@@ -121,5 +121,11 @@ func spikedFeatures(older, newer astfeature.Counts) []string {
 	if older.Base64DecodeCalls == 0 && newer.Base64DecodeCalls > 0 {
 		spiked = append(spiked, "base64_decode_calls")
 	}
+	if older.DynamicEvalCalls == 0 && newer.DynamicEvalCalls > 0 {
+		spiked = append(spiked, "dynamic_eval_calls")
+	}
+	if older.ImportTimeCallSites == 0 && newer.ImportTimeCallSites > 0 {
+		spiked = append(spiked, "import_time_call_sites")
+	}
 	return spiked
 }

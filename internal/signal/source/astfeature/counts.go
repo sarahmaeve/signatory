@@ -82,4 +82,24 @@ type Counts struct {
 	// analytic / logging code that decodes external base64 is rare
 	// in package-init.
 	Base64DecodeCalls int `json:"base64_decode_calls"`
+
+	// DynamicEvalCalls is the number of call sites that execute code
+	// built at runtime from data: Python eval/exec/__import__/compile.
+	// Cross-language by intent (a future JS/Ruby analyzer would count
+	// eval the same way), not Python-only — Go has no such primitive
+	// and leaves this zero. exec(base64.b64decode(...)) at import is
+	// the dominant real PyPI supply-chain payload shape; this field
+	// plus Base64DecodeCalls spiking together across versions is its
+	// fingerprint.
+	DynamicEvalCalls int `json:"dynamic_eval_calls"`
+
+	// ImportTimeCallSites is the number of call sites that run at
+	// import time — module-scope calls, the language-neutral analog
+	// of Go's package init() execution surface. Named generally
+	// rather than reusing InitCount because a Python module-scope
+	// call is not an init() function; mislabeling it init_count in
+	// the emitted JSON would be an analyst-facing lie. Go leaves this
+	// zero today (its import-time surface is InitCount); Python
+	// populates it instead of InitCount.
+	ImportTimeCallSites int `json:"import_time_call_sites"`
 }

