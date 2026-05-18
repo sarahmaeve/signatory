@@ -464,8 +464,9 @@ func Hello() {}
 // source-evolution pipeline off the version_pin_table the pypi
 // collector now emits. The collector must (a) not skip at the
 // ecosystem gate, (b) stream .py via isPythonSourceFile (not .go),
-// (c) use the Python placeholder analyzer so AST stays zero while
-// structural + diff still populate.
+// (c) run the real Python analyzer over a benign fixture and score
+// every AST attack feature zero — the collector-level
+// no-false-positive baseline (AST.md §3).
 func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
 	t.Parallel()
 
@@ -518,7 +519,8 @@ func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
 			"streamed .py LOC must be counted (version %s)", row.Version)
 		if row.AST != nil {
 			assert.Equal(t, astfeature.Counts{}, *row.AST,
-				"Python analyzer is a placeholder — AST stays zero until roadmap #4")
+				"benign Python must score every AST attack feature zero "+
+					"through the real analyzer (no-false-positive baseline)")
 		}
 	}
 
@@ -526,7 +528,8 @@ func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
 	var anomaly AnomalyValue
 	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
 	assert.False(t, anomaly.AnomalyPresent,
-		"AST-blind Python can't spike an AST feature; no anomaly expected")
+		"two benign versions with identical zero AST counts cannot "+
+			"spike a feature; no anomaly expected")
 }
 
 // TestCollector_PyPIWeaponizedProgression_FiresAnomaly is the

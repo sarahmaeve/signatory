@@ -65,9 +65,12 @@ func NewCollector(clonePath string, pinSource VersionPinSource, allowFetch bool)
 // and AST analyzer. ok=false means source-evolution does not support
 // that ecosystem and the collector skips silently.
 //
-// pypi uses python.Analyzer, a placeholder that returns empty Counts
-// until the real Python parser (roadmap item #4); structural and diff
-// signal still flow because they are language-neutral.
+// pypi uses python.Analyzer — the hand-written Python lexer/parser/
+// extractor in internal/signal/source/python; it populates the AST
+// Counts (dynamic-eval, import-time call sites, install-hook
+// overrides, exec/network/base64/sensitive-path) just as
+// golang.Analyzer does for Go. Structural and diff signal are
+// language-neutral and flow for both.
 func languageProfile(ecosystem string) (filter func(path string) bool, analyzer LanguageAnalyzer, ok bool) {
 	switch ecosystem {
 	case "golang", "go":

@@ -300,6 +300,16 @@ func chronoCmpFunc(pub map[string]time.Time) func(a, b string) int {
 			if ta.Before(tb) {
 				return 1
 			}
+			// Equal publish timestamps (common on PyPI: sdist+wheel or
+			// a batch release share a second). Known gap: descSemverCmp
+			// degrades to lexicographic for bare PEP 440 versions
+			// (no "v" prefix), so "1.10.0" sorts before "1.9.0" within
+			// a same-timestamp tie group. The window is narrow — only
+			// adjacent same-second versions — and the failure mode is a
+			// possibly mis-attributed 0->n anomaly between that pair,
+			// never a false positive on a benign package. Accepted as
+			// the same semver-fallback limitation documented in
+			// AST.md section 4; a PEP 440-aware tie-break would close it.
 			return descSemverCmp(a, b)
 		case !za:
 			return -1
@@ -309,16 +319,6 @@ func chronoCmpFunc(pub map[string]time.Time) func(a, b string) int {
 			return descSemverCmp(a, b)
 		}
 	}
-}
-
-// sortSemverDesc returns versions sorted in descending semver
-// order (most-recent first). Invalid semvers cluster at the end
-// regardless of direction; among themselves they sort
-// lexicographically. The original input slice is not mutated.
-func sortSemverDesc(versions []string) []string {
-	sorted := slices.Clone(versions)
-	slices.SortFunc(sorted, descSemverCmp)
-	return sorted
 }
 
 // descSemverCmp is the slices.SortFunc comparator for

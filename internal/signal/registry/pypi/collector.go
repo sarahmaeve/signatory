@@ -816,8 +816,13 @@ type versionPin struct {
 }
 
 type versionPinTableValue struct {
-	ModulePath            string       `json:"module_path"`
-	VersionCountTotal     int          `json:"version_count_total"`
+	ModulePath        string `json:"module_path"`
+	VersionCountTotal int    `json:"version_count_total"`
+	// VersionCountProcessed is gopublish-parity: the number of
+	// versions the attestation sweep inspected (len(checked)), NOT
+	// the SHA-bearing subset. An attested version with no Fulcio
+	// source-repo-digest is processed but not pinned — emitting
+	// len(pins) would misreport "processed" as "succeeded".
 	VersionCountProcessed int          `json:"version_count_processed"`
 	Pins                  []versionPin `json:"pins"`
 	MissingOriginVersions []string     `json:"missing_origin_versions"`
@@ -1077,7 +1082,7 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 			versionPinTableValue{
 				ModulePath:            packageName,
 				VersionCountTotal:     len(versions),
-				VersionCountProcessed: len(pins),
+				VersionCountProcessed: len(checked),
 				Pins:                  pins,
 			})
 	}

@@ -375,9 +375,10 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// opts.Store. For Go that table comes from gopublish; for
 		// pypi from the pypi registry collector's attestation sweep.
 		// The collector itself selects the per-language file filter
-		// and analyzer from entity.Ecosystem (Python analysis is a
-		// placeholder until roadmap #4: structural + diff flow, AST
-		// stays zero).
+		// and analyzer from entity.Ecosystem: Go uses go/parser,
+		// pypi uses the hand-written Python analyzer — both emit the
+		// full AST feature matrix; structural + diff flow for every
+		// supported ecosystem.
 		//
 		// Appended LAST in the dispatch order so by the time it
 		// runs, the orchestrator's in-run accumulator already holds

@@ -970,7 +970,9 @@ func TestCollector_AttestationConsistency_EmitsVersionPinTable(t *testing.T) {
 	assert.EqualValues(t, 3, val["version_count_total"],
 		"version_count_total counts every release in the project metadata")
 	assert.EqualValues(t, 3, val["version_count_processed"],
-		"version_count_processed counts versions the sweep resolved to a SHA")
+		"version_count_processed counts versions the sweep inspected "+
+			"(all 3 here also resolved to a SHA; the swept-not-pinned "+
+			"split is covered by ProcessedCountsSweptNotPinned)")
 
 	pins, ok := val["pins"].([]any)
 	require.True(t, ok, "pins must be a JSON array")
@@ -993,6 +995,60 @@ func TestCollector_AttestationConsistency_EmitsVersionPinTable(t *testing.T) {
 		assert.Equalf(t, w.publishedAt, pin["published_at"],
 			"pin[%d].published_at must be the version's RFC3339 upload time", i)
 	}
+}
+
+// TestCollector_VersionPinTable_ProcessedCountsSweptNotPinned pins
+// gopublish-parity for version_count_processed. gopublish defines it
+// as min(total, window) — every version the sweep *inspected*, with
+// the invariant len(pins)+len(missing)+len(failed) == processed (see
+// gopublish/pintable.go). A version that is attested but whose
+// attestation carries no Fulcio source-repo-digest is inspected but
+// not pinnable; it must still count as processed. Emitting
+// len(pins) here would make "processed" silently mean "succeeded",
+// misreporting sweep coverage to the ecosystem-blind consumer.
+func TestCollector_VersionPinTable_ProcessedCountsSweptNotPinned(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shaLatest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaOldest = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.0.0.tar.gz"}},
+				"1.1.0": {{UploadTimeISO: "2026-02-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.1.0.tar.gz"}},
+				"1.2.0": {{UploadTimeISO: "2026-03-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.2.0.tar.gz"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.2.0": makeAttestationWithSHA(t, "GitHub", "owner/pkg", "release.yml", shaLatest),
+			// Attested, but no Fulcio source-repo-digest in the cert:
+			// swept and inspected, yet not pinnable.
+			"1.1.0": makeAttestation("GitHub", "owner/pkg", "release.yml"),
+			"1.0.0": makeAttestationWithSHA(t, "GitHub", "owner/pkg", "release.yml", shaOldest),
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	val := getSignalValue(t, result, "version_pin_table")
+	assert.EqualValues(t, 3, val["version_count_total"],
+		"every release in project metadata")
+	assert.EqualValues(t, 3, val["version_count_processed"],
+		"all 3 versions were swept/inspected — gopublish parity: "+
+			"processed counts inspected versions, not just SHA-bearing ones")
+
+	pins, ok := val["pins"].([]any)
+	require.True(t, ok, "pins must be a JSON array")
+	require.Len(t, pins, 2,
+		"only the two versions with a Fulcio SHA are pinnable; the "+
+			"attested-but-digest-less version is processed but not pinned")
 }
 
 func TestCollector_AttestationConsistency_OnlyOneVersion_NoSignal(t *testing.T) {
