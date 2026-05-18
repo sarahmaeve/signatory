@@ -110,6 +110,62 @@ func TestExtractFulcioSourceRepoDigest_NilCert(t *testing.T) {
 	assert.Equal(t, "", got)
 }
 
+// TestExtractFulcioSourceRepoDigest_RejectsNonSHAValue is the
+// trust-boundary test. The Fulcio cert chain is NOT cryptographically
+// verified (see extractGitHeadFromAttestation doc), so a malicious
+// PyPI publisher fully controls the bytes in this extension. The
+// recovered value flows verbatim into the version_pin_table SHA and
+// from there into `git ls-tree -r <sha>`, `git cat-file --batch`
+// stdin, and `git diff <sha1> <sha2>` argv. A value that is not a
+// real git object id (flag-shaped, newline-bearing, or simply not
+// hex) must be rejected at this chokepoint exactly like an absent
+// extension — ("", false) — never passed through to a git argv.
+func TestExtractFulcioSourceRepoDigest_RejectsNonSHAValue(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		value string
+		want  string // "" + ok=false expected for every attack shape
+		ok    bool
+	}{
+		{"argv flag injection", "--upload-pack=/tmp/evil", "", false},
+		{"leading dash", "-rf", "", false},
+		{"newline desync", "abc\n0000000000000000000000000000000000000000", "", false},
+		{"space in value", "deadbeef deadbeef", "", false},
+		{"non-hex garbage", "not-a-real-sha", "", false},
+		{"too short to be an oid", "dead", "", false},
+		{"empty", "", "", false},
+		// Regression guard: a real 40-hex SHA-1 and 64-hex SHA-256
+		// must still pass unchanged.
+		{"valid sha1", "ec11c4a93de22cde2abe2bf74d70791033c2464c",
+			"ec11c4a93de22cde2abe2bf74d70791033c2464c", true},
+		{"valid sha256",
+			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			derValue, err := asn1.MarshalWithParams(tc.value, "utf8")
+			require.NoError(t, err)
+			cert := &x509.Certificate{
+				Extensions: []pkix.Extension{
+					{Id: fulcioSourceRepoDigestOID, Value: derValue},
+				},
+			}
+
+			got, ok := extractFulcioSourceRepoDigest(cert)
+			assert.Equal(t, tc.ok, ok,
+				"a non-SHA cert value must be treated like an absent "+
+					"extension so it never reaches a git argv")
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // TestExtractGitHeadFromAttestation_RecoversFromBase64DER pins the
 // end-to-end claim of the PEP 740 → exact_gitHead pipeline: given
 // an AttestationResponse whose bundles[].attestations[].

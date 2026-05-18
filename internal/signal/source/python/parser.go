@@ -286,6 +286,22 @@ var (
 	}
 )
 
+// Adversarial-input work bounds. signatory parses untrusted package
+// source up to the 10 MiB BlobStreamer cap; without these, a crafted
+// file of deeply nested calls makes resolveFirstArg→splitCallArgs
+// O(n^2) (each nested site re-scans to its matching close) and
+// resolveExpr recurse without limit (stack-overflow crash). Both are
+// turned into conservative misses — explicitly acceptable per
+// AST.md §4 ("a benign construct that spikes a false anomaly" is the
+// unacceptable error, never a false negative). A genuinely
+// statically-resolvable first argument (string literal / small
+// path-builder) is tiny and shallow, so neither bound costs a real
+// detection.
+const (
+	maxArgScanTokens = 256
+	maxResolveDepth  = 64
+)
+
 // resolveFirstArg returns the statically-resolved first positional
 // argument of the call whose '(' is at openIdx, or "" if it can't be
 // resolved without executing code.
@@ -294,7 +310,7 @@ func resolveFirstArg(toks []Token, openIdx int) string {
 	if !ok || len(args) == 0 {
 		return ""
 	}
-	s, resolved := resolveExpr(args[0])
+	s, resolved := resolveExpr(args[0], 0)
 	if !resolved {
 		return ""
 	}
@@ -313,6 +329,14 @@ func splitCallArgs(toks []Token) (args [][]Token, closeIdx int, ok bool) {
 	depth := 0
 	var cur []Token
 	for idx, tk := range toks {
+		if idx >= maxArgScanTokens {
+			// Adversarial bound: a statically-resolvable argument is
+			// tiny. Failing to delimit within this many tokens is
+			// treated as not-well-formed (conservative miss), capping
+			// each resolveFirstArg / parseClassHeader at O(1) per call
+			// site so deep call nesting can't go O(n^2).
+			return nil, 0, false
+		}
 		if tk.Kind == TokenOp {
 			switch tk.Value {
 			case "(", "[", "{":
@@ -347,8 +371,12 @@ func splitCallArgs(toks []Token) (args [][]Token, closeIdx int, ok bool) {
 // string. Handles string-literal sequences (implicit concatenation)
 // and a small set of path-builder calls; everything else is
 // unresolved by design.
-func resolveExpr(toks []Token) (string, bool) {
-	if len(toks) == 0 {
+func resolveExpr(toks []Token, depth int) (string, bool) {
+	if depth > maxResolveDepth || len(toks) == 0 {
+		// Depth bound: nested path-builders recurse one frame per
+		// level. Real credential paths are 2–3 deep; capping turns a
+		// crafted deep nest into a conservative miss rather than a
+		// stack-overflow crash.
 		return "", false
 	}
 
@@ -375,16 +403,25 @@ func resolveExpr(toks []Token) (string, bool) {
 	if !ok || after >= len(toks) || toks[after].Kind != TokenOp || toks[after].Value != "(" {
 		return "", false
 	}
+	_, isJoin := pathJoinCallees[name]
+	_, isPass := pathPassthroughCallees[name]
+	if !isJoin && !isPass {
+		// Only path-builder calls are statically foldable. Bail before
+		// the splitCallArgs scan for everything else (the f(f(f(…)))
+		// deep-nest shape) — the result was already "" here, this just
+		// skips the wasted O(n) walk.
+		return "", false
+	}
 	callArgs, closeIdx, wellFormed := splitCallArgs(toks[after:])
 	if !wellFormed || after+closeIdx != len(toks)-1 {
 		// The call must span the whole expression; trailing tokens
 		// (e.g. `join(...) + x`) make it non-static.
 		return "", false
 	}
-	if _, isJoin := pathJoinCallees[name]; isJoin {
+	if isJoin {
 		parts := make([]string, 0, len(callArgs))
 		for _, a := range callArgs {
-			s, ok := resolveExpr(a)
+			s, ok := resolveExpr(a, depth+1)
 			if !ok {
 				return "", false
 			}
@@ -392,8 +429,8 @@ func resolveExpr(toks []Token) (string, bool) {
 		}
 		return strings.Join(parts, "/"), true
 	}
-	if _, isPass := pathPassthroughCallees[name]; isPass && len(callArgs) == 1 {
-		return resolveExpr(callArgs[0])
+	if isPass && len(callArgs) == 1 {
+		return resolveExpr(callArgs[0], depth+1)
 	}
 	return "", false
 }
