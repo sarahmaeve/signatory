@@ -103,6 +103,47 @@ func TestAnalyzer_Analyze_DynamicEvalIsBareBuiltinOnly(t *testing.T) {
 		"only bare exec / compile / __import__ — not re.compile or .eval()")
 }
 
+// TestAnalyzer_Analyze_CredentialHarvest is the adversarial fixture
+// for the dominant *modern* PyPI payload class: reading SSH keys,
+// cloud credentials, and .netrc for exfil. Only resolvable sensitive
+// paths through a read sink count; benign opens and unresolved
+// (runtime-dependent) paths must not — a conservative miss beats a
+// false anomaly.
+func TestAnalyzer_Analyze_CredentialHarvest(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import os, io\n" +
+		"open(os.path.expanduser('~/.ssh/id_rsa'))\n" + // sensitive
+		"open('/home/u/.aws/credentials')\n" + // sensitive
+		"io.open(os.path.join(os.path.expanduser('~'), '.netrc'))\n" + // sensitive
+		"open('config.json')\n" + // benign
+		"open(user_supplied_path)\n" + // unresolved
+		"open(f'{base}/.ssh/id_rsa')\n" // unresolved (f-string)
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "stealer.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 3, counts.SensitivePathReads,
+		"~/.ssh/id_rsa, ~/.aws/credentials, ~/.netrc via open/io.open — "+
+			"config.json + unresolved paths must not count")
+}
+
+func TestAnalyzer_Analyze_BenignOpensScoreZero(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"open('README.md')\n" +
+		"open('/var/log/app.log', 'a')\n" +
+		"io.open('data/cache.bin', 'rb')\n"
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "ok.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 0, counts.SensitivePathReads,
+		"ordinary file opens must never spike SensitivePathReads")
+}
+
 func TestAnalyzer_Analyze_PropagatesUpstreamStreamError(t *testing.T) {
 	t.Parallel()
 	// Same contract as golang.Analyzer: a mid-stream provider error

