@@ -14,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/sarahmaeve/signatory/internal/gitenv"
-	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
 
 // BlobStreamer reads source content from a local git clone via two
@@ -155,15 +155,22 @@ type DiffStat struct {
 // subprocess persists for the streamer's lifetime; call Close to
 // terminate it cleanly.
 //
+// ctx bounds the subprocess: the persistent cat-file child is
+// derived from ctx (via context.WithCancel), so cancelling the
+// caller's context — e.g. an aborted collection run — tears the
+// subprocess down rather than leaking a git process until Close.
+// Close remains the explicit teardown path; ctx cancellation is the
+// implicit one tied to the request lifetime.
+//
 // Fails with ErrNoClone if clonePath is empty. Subprocess startup
 // errors are wrapped with context. Options are applied in order
 // after struct initialization.
-func NewBlobStreamer(clonePath string, opts ...BlobStreamerOption) (*BlobStreamer, error) {
+func NewBlobStreamer(ctx context.Context, clonePath string, opts ...BlobStreamerOption) (*BlobStreamer, error) {
 	if clonePath == "" {
 		return nil, ErrNoClone
 	}
 
-	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCtx, parentCancel := context.WithCancel(ctx)
 	cmd := gitenv.NewCmd(parentCtx, "-C", clonePath, "cat-file", "--batch")
 
 	stdin, err := cmd.StdinPipe()
@@ -385,11 +392,14 @@ func (b *BlobStreamer) listTreeBlobsOnce(ctx context.Context, sha string) ([]Tre
 	return blobs, nil
 }
 
-// EnumerateGoFiles iterates Go source files at the commit SHA,
-// excluding _test.go files and vendored code. Each file's content
-// is fetched on demand from the persistent cat-file subprocess;
-// stopping iteration partway through (yield returns false) is safe
-// and skips the unread blobs.
+// EnumerateSourceFiles iterates source files at the commit SHA. This
+// is the Go-flavored implementation of the language-neutral
+// SourceProvider.EnumerateSourceFiles contract: it filters to Go
+// sources (isGoSourceFile), excluding _test.go files and vendored
+// code. A Python provider would implement the same interface with a
+// .py filter. Each file's content is fetched on demand from the
+// persistent cat-file subprocess; stopping iteration partway through
+// (yield returns false) is safe and skips the unread blobs.
 //
 // Errors are yielded in-band:
 //   - If ListTreeBlobs fails (e.g., ErrSHAMissingFromClone) the
@@ -398,11 +408,11 @@ func (b *BlobStreamer) listTreeBlobsOnce(ctx context.Context, sha string) ([]Tre
 //     empty Content; iteration continues.
 //   - If ctx is cancelled mid-iteration, ctx.Err() is yielded and
 //     iteration stops.
-func (b *BlobStreamer) EnumerateGoFiles(ctx context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
-	return func(yield func(golang.SourceFile, error) bool) {
+func (b *BlobStreamer) EnumerateSourceFiles(ctx context.Context, sha string) iter.Seq2[astfeature.SourceFile, error] {
+	return func(yield func(astfeature.SourceFile, error) bool) {
 		blobs, err := b.ListTreeBlobs(ctx, sha)
 		if err != nil {
-			yield(golang.SourceFile{}, err)
+			yield(astfeature.SourceFile{}, err)
 			return
 		}
 		for _, blob := range blobs {
@@ -410,17 +420,17 @@ func (b *BlobStreamer) EnumerateGoFiles(ctx context.Context, sha string) iter.Se
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				yield(golang.SourceFile{}, err)
+				yield(astfeature.SourceFile{}, err)
 				return
 			}
 			content, err := b.ReadBlob(ctx, blob.SHA)
 			if err != nil {
-				if !yield(golang.SourceFile{Path: blob.Path}, err) {
+				if !yield(astfeature.SourceFile{Path: blob.Path}, err) {
 					return
 				}
 				continue
 			}
-			if !yield(golang.SourceFile{Path: blob.Path, Content: content}, nil) {
+			if !yield(astfeature.SourceFile{Path: blob.Path, Content: content}, nil) {
 				return
 			}
 		}

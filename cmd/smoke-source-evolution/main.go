@@ -654,7 +654,7 @@ type matrixRow struct {
 	DiffFromPrevious  *matrixDiffStat   `json:"diff_from_previous"`
 }
 
-// matrixAST mirrors golang.Features (snake_case JSON tags).
+// matrixAST mirrors astfeature.Counts (snake_case JSON tags).
 type matrixAST struct {
 	InitCount          int `json:"init_count"`
 	NetworkCallSites   int `json:"network_call_sites"`

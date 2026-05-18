@@ -15,7 +15,7 @@ import (
 )
 
 // fakeSourceProvider is a hand-built SourceProvider for matrix
-// tests. Maps SHA → file list (or error) for EnumerateGoFiles, and
+// tests. Maps SHA → file list (or error) for EnumerateSourceFiles, and
 // SHA-pair → DiffStat for DiffStat. Missing entries return
 // ErrSHAMissingFromClone via the iterator.
 //
@@ -32,7 +32,7 @@ type fakeSourceProvider struct {
 	diffsByPair map[[2]string]DiffStat
 }
 
-func (f *fakeSourceProvider) EnumerateGoFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
+func (f *fakeSourceProvider) EnumerateSourceFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
 	return func(yield func(golang.SourceFile, error) bool) {
 		if err, ok := f.errBySHA[sha]; ok {
 			yield(golang.SourceFile{}, err)

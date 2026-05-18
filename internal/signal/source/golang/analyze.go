@@ -37,78 +37,22 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
 
-// SourceFile is one source file's path-and-bytes presented to the
-// analyzer.
-//
-// Path is posix-style relative to the module root and is used only
-// for parser position reporting; the analyzer never opens the path
-// from the filesystem.
-type SourceFile struct {
-	Path    string
-	Content []byte
-}
+// Features is the shared, language-neutral AST construct-count record.
+// It lives in the astfeature package as Counts; this alias keeps the
+// golang analyzer's call sites reading naturally — the analyzer
+// genuinely produces the shared type, it does not own it.
+type Features = astfeature.Counts
 
-// Features is the per-version feature count emitted by Analyze. Each
-// field counts AST occurrences of a specific construct across the
-// entire source tree presented to one Analyze call.
-//
-// Fields grow across commits 4-6 (network call sites, sensitive-path
-// reads, exec calls, lexical features).
-type Features struct {
-	// InitCount is the number of package-level init() functions
-	// across all files. Methods and functions whose names happen to
-	// be "init" but have a receiver are NOT counted — only top-level
-	// init declarations run on import.
-	InitCount int `json:"init_count"`
+// SourceFile is the shared, language-neutral analyzer input. It lives
+// in the astfeature package; this alias keeps the golang analyzer and
+// its tests reading naturally.
+type SourceFile = astfeature.SourceFile
 
-	// NetworkCallSites is the number of package-level call sites
-	// that initiate network egress (matched against
-	// NetworkEgressCallSites in patterns.go). Counts call sites, not
-	// distinct call targets — `http.Get(a); http.Get(b)` is two.
-	NetworkCallSites int `json:"network_call_sites"`
-
-	// SensitivePathReads is the number of call sites in the
-	// SensitivePathReadCallSites catalog whose first argument
-	// statically resolves to a path matching any
-	// SensitivePathPatterns entry. Statically-resolvable paths are
-	// string literals and filepath.Join calls whose arguments are
-	// themselves resolvable; fully dynamic paths are not counted
-	// (documented gap; analyst sees the call-site count via
-	// neighboring features).
-	SensitivePathReads int `json:"sensitive_path_reads"`
-
-	// ExecCalls is the number of call sites in the ExecCallSites
-	// catalog (os/exec.{Command,CommandContext}). Argument content
-	// is NOT inspected — a spike in this field, especially within
-	// init() functions, is the signal; the analyst reads the spike
-	// version's source to interpret intent.
-	ExecCalls int `json:"exec_calls"`
-
-	// XORAssignments is the number of `^=` (token.XOR_ASSIGN)
-	// statements across all files. The BufferZoneCorp F004 finding
-	// cited "systematic XOR + string-split obfuscation"; XOR
-	// assignment in a loop body is the canonical decode pattern.
-	// Conservative heuristic: legitimate Go rarely uses `^=` outside
-	// crypto-adjacent code, so a non-zero count in a non-crypto
-	// package is itself meaningful.
-	//
-	// Gap: `data[i] = data[i] ^ key[i]` (binary XOR inside a regular
-	// `=` assignment) is NOT counted. Closing the gap requires
-	// loop-context analysis to avoid false positives on legitimate
-	// bit-twiddling.
-	XORAssignments int `json:"xor_assignments"`
-
-	// Base64DecodeCalls is the number of call sites in the
-	// Base64DecodeCallSites catalog. Decoding base64 at runtime
-	// within or near init() is a strong obfuscated-payload signal;
-	// analytic / logging code that decodes external base64 is rare
-	// in package-init.
-	Base64DecodeCalls int `json:"base64_decode_calls"`
-}
-
-// Analyzer walks Go source AST and accumulates Features.
+// Analyzer walks Go source AST and accumulates astfeature.Counts.
 //
 // Stateless across calls; safe to reuse. Constructor exists so
 // future commits can add WithPatterns / WithThreshold options

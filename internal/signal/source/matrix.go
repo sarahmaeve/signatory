@@ -9,6 +9,7 @@ import (
 	"path"
 	"slices"
 
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
 )
 
@@ -33,13 +34,13 @@ type MatrixValue struct {
 // missing-origin in proxy, fetch-failed). Analysts read the
 // tag_sha_local_status field to know which case applies.
 type MatrixRow struct {
-	Version           string           `json:"version"`
-	TagSHA            string           `json:"tag_sha"`
-	TagSHASource      string           `json:"tag_sha_source"`
-	TagSHALocalStatus string           `json:"tag_sha_local_status"`
-	AST               *golang.Features `json:"ast"`
-	Structural        *Structural      `json:"structural"`
-	DiffFromPrevious  *DiffStat        `json:"diff_from_previous"`
+	Version           string             `json:"version"`
+	TagSHA            string             `json:"tag_sha"`
+	TagSHASource      string             `json:"tag_sha_source"`
+	TagSHALocalStatus string             `json:"tag_sha_local_status"`
+	AST               *astfeature.Counts `json:"ast"`
+	Structural        *Structural        `json:"structural"`
+	DiffFromPrevious  *DiffStat          `json:"diff_from_previous"`
 }
 
 // Structural captures the file- and shape-level features of a
@@ -103,15 +104,27 @@ const (
 // read source content and compute diffs. BlobStreamer satisfies
 // it implicitly; tests inject hand-built fakes.
 type SourceProvider interface {
-	EnumerateGoFiles(ctx context.Context, sha string) iter.Seq2[golang.SourceFile, error]
+	EnumerateSourceFiles(ctx context.Context, sha string) iter.Seq2[astfeature.SourceFile, error]
 	DiffStat(ctx context.Context, sha1, sha2 string) (DiffStat, error)
 }
 
-// Compile-time assertion that BlobStreamer satisfies SourceProvider.
-// Lives in matrix.go (the consumer's home) so a future BlobStreamer
-// API change that breaks the contract fails build at the consumer
-// rather than silently slipping by.
-var _ SourceProvider = (*BlobStreamer)(nil)
+// LanguageAnalyzer extracts AST construct counts from a stream of
+// source files. Factored out so a second language analyzer (pypi is
+// future work) can be substituted without touching the Assembler.
+// *golang.Analyzer satisfies it unmodified.
+type LanguageAnalyzer interface {
+	Analyze(ctx context.Context, files iter.Seq2[astfeature.SourceFile, error]) (astfeature.Counts, error)
+}
+
+// Compile-time assertions that BlobStreamer satisfies SourceProvider
+// and *golang.Analyzer satisfies LanguageAnalyzer. Live in matrix.go
+// (the consumer's home) so a future implementation change that breaks
+// either contract fails build at the consumer rather than silently
+// slipping by.
+var (
+	_ SourceProvider   = (*BlobStreamer)(nil)
+	_ LanguageAnalyzer = (*golang.Analyzer)(nil)
+)
 
 // Assembler builds a MatrixValue from a PinTable + budget options.
 // Composes a SourceProvider (for reading versions) and a
@@ -120,13 +133,13 @@ var _ SourceProvider = (*BlobStreamer)(nil)
 // Stateless across Build calls; safe to reuse.
 type Assembler struct {
 	provider SourceProvider
-	analyzer *golang.Analyzer
+	analyzer LanguageAnalyzer
 }
 
 // NewAssembler returns an Assembler wired to the given provider
 // and analyzer. Both are required — nil provider or nil analyzer
 // causes Build to return an error rather than panicking later.
-func NewAssembler(provider SourceProvider, analyzer *golang.Analyzer) *Assembler {
+func NewAssembler(provider SourceProvider, analyzer LanguageAnalyzer) *Assembler {
 	return &Assembler{provider: provider, analyzer: analyzer}
 }
 
@@ -358,13 +371,13 @@ func (a *Assembler) buildRowFromPin(ctx context.Context, version string, pin Ver
 // (analyzer + counters): the iter.Seq2 from BlobStreamer is
 // single-pass. Memory cost: typical Go module's .go files total
 // <500KB; not a concern at the budget caps in play.
-func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (golang.Features, Structural, map[string]struct{}, error) {
-	var files []golang.SourceFile
+func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (astfeature.Counts, Structural, map[string]struct{}, error) {
+	var files []astfeature.SourceFile
 	packageDirs := make(map[string]struct{})
 
-	for sf, err := range a.provider.EnumerateGoFiles(ctx, sha) {
+	for sf, err := range a.provider.EnumerateSourceFiles(ctx, sha) {
 		if err != nil {
-			return golang.Features{}, Structural{}, nil, err
+			return astfeature.Counts{}, Structural{}, nil, err
 		}
 		files = append(files, sf)
 		packageDirs[goPackageDir(sf.Path)] = struct{}{}
@@ -372,7 +385,7 @@ func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (golang.Featur
 
 	feats, err := a.analyzer.Analyze(ctx, sliceToErrSeq(files))
 	if err != nil {
-		return golang.Features{}, Structural{}, nil, fmt.Errorf("analyze sha %s: %w", sha, err)
+		return astfeature.Counts{}, Structural{}, nil, fmt.Errorf("analyze sha %s: %w", sha, err)
 	}
 
 	structural := Structural{
@@ -403,7 +416,7 @@ func goPackageDir(filePath string) string {
 // totalLOC returns the sum of line counts across all files.
 // Trailing-newline policy: a file ending without a final newline
 // still has its last line counted (so "foo\nbar" is 2 lines, not 1).
-func totalLOC(files []golang.SourceFile) int {
+func totalLOC(files []astfeature.SourceFile) int {
 	total := 0
 	for _, f := range files {
 		total += countLines(f.Content)
@@ -444,8 +457,8 @@ func setOf(s []string) map[string]struct{} {
 // iter.Seq2[SourceFile, error] shape the analyzer's Analyze method
 // consumes. Always yields (file, nil); errors from the upstream
 // provider are surfaced before this adapter is called.
-func sliceToErrSeq(files []golang.SourceFile) iter.Seq2[golang.SourceFile, error] {
-	return func(yield func(golang.SourceFile, error) bool) {
+func sliceToErrSeq(files []astfeature.SourceFile) iter.Seq2[astfeature.SourceFile, error] {
+	return func(yield func(astfeature.SourceFile, error) bool) {
 		for _, f := range files {
 			if !yield(f, nil) {
 				return

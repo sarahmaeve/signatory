@@ -50,7 +50,7 @@ func initRepoForDiffStat(t *testing.T) (clonePath, sha1, sha2 string) {
 func TestDiffStat_SameSHA_ZeroStats(t *testing.T) {
 	t.Parallel()
 	clonePath, sha1, _ := initRepoForDiffStat(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -62,7 +62,7 @@ func TestDiffStat_SameSHA_ZeroStats(t *testing.T) {
 func TestDiffStat_TwoCommits_FullBreakdown(t *testing.T) {
 	t.Parallel()
 	clonePath, sha1, sha2 := initRepoForDiffStat(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -107,7 +107,7 @@ func TestDiffStat_OnlyFileAdded(t *testing.T) {
 	runGit(t, tmp, "commit", "-m", "second")
 	sha2 := captureGitOutput(t, tmp, "rev-parse", "HEAD")
 
-	bs, err := NewBlobStreamer(tmp)
+	bs, err := NewBlobStreamer(t.Context(), tmp)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -137,7 +137,7 @@ func TestDiffStat_OnlyFileRemoved(t *testing.T) {
 	runGit(t, tmp, "commit", "-m", "second")
 	sha2 := captureGitOutput(t, tmp, "rev-parse", "HEAD")
 
-	bs, err := NewBlobStreamer(tmp)
+	bs, err := NewBlobStreamer(t.Context(), tmp)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -169,7 +169,7 @@ func TestDiffStat_BinaryFileAdded_FilesCountedNoLineCount(t *testing.T) {
 	runGit(t, tmp, "commit", "-m", "added binary")
 	sha2 := captureGitOutput(t, tmp, "rev-parse", "HEAD")
 
-	bs, err := NewBlobStreamer(tmp)
+	bs, err := NewBlobStreamer(t.Context(), tmp)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -183,7 +183,7 @@ func TestDiffStat_BinaryFileAdded_FilesCountedNoLineCount(t *testing.T) {
 func TestDiffStat_MissingSHA_ReturnsErrSHAMissingFromClone(t *testing.T) {
 	t.Parallel()
 	clonePath, sha1, _ := initRepoForDiffStat(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -203,7 +203,7 @@ func TestDiffStat_AfterClose_StillUsable(t *testing.T) {
 	// streamer's blob-read phase has ended. (The two diff
 	// subprocesses are one-shot, gitenv.NewCmd-bounded by ctx.)
 	clonePath, sha1, sha2 := initRepoForDiffStat(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	require.NoError(t, bs.Close())
 

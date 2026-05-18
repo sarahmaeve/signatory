@@ -876,6 +876,125 @@ func makeAttestation(publisher, repo, workflow string) *AttestationResponse {
 	}
 }
 
+// makeAttestationWithSHA is makeAttestation plus a synthesised
+// Sigstore cert carrying the Fulcio source-repo-digest OID
+// (1.3.6.1.4.1.57264.1.13) set to sha. Same cert construction as the
+// inline fixtures in the artifact_url / latest_attestation_builder
+// tests, hoisted to a helper because the version_pin_table sweep
+// needs a *distinct* attested SHA per version and inlining four certs
+// is unreadable.
+func makeAttestationWithSHA(t *testing.T, publisher, repo, workflow, sha string) *AttestationResponse {
+	t.Helper()
+	oidValue, err := asn1.MarshalWithParams(sha, "utf8")
+	require.NoError(t, err)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: fulcioSourceRepoDigestOID, Value: oidValue},
+		},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	return &AttestationResponse{
+		Version: 1,
+		Bundles: []AttestationBundle{
+			{
+				Publisher: AttestationPublisher{
+					Kind:       publisher,
+					Repository: repo,
+					Workflow:   workflow,
+				},
+				Attestations: []SigstoreAttestation{
+					{VerificationMaterial: VerificationMaterial{
+						Certificate: base64.StdEncoding.EncodeToString(certDER),
+					}},
+				},
+			},
+		},
+	}
+}
+
+// TestCollector_AttestationConsistency_EmitsVersionPinTable pins the
+// pypi half of the source-evolution pin contract. gopublish emits a
+// version_pin_table signal for Go modules off proxy.golang.org; the
+// source-evolution collector's pinSourceImpl consumes that signal
+// ecosystem-blind (it matches on sig.Type == "version_pin_table",
+// nothing Go-specific). For pypi there is no proxy — the per-version
+// commit SHA is the Fulcio source-repo-digest already fetched, once
+// per version, by the attestation-consistency sweep. This test
+// asserts the sweep also surfaces those (version, sha, published_at)
+// triples as a byte-shape-identical version_pin_table signal, so the
+// existing pinSourceImpl serves pypi with zero new source code.
+func TestCollector_AttestationConsistency_EmitsVersionPinTable(t *testing.T) {
+	t.Parallel()
+
+	const (
+		shaLatest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaMid    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		shaOldest = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+
+	srv := perVersionAttestationServer(t,
+		Project{
+			Info: Info{Maintainer: "dev"},
+			Releases: map[string][]Distribution{
+				"1.0.0": {{UploadTimeISO: "2026-01-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.0.0.tar.gz"}},
+				"1.1.0": {{UploadTimeISO: "2026-02-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.1.0.tar.gz"}},
+				"1.2.0": {{UploadTimeISO: "2026-03-01T00:00:00Z", PackageType: "sdist", Filename: "pkg-1.2.0.tar.gz"}},
+			},
+		},
+		map[string]*AttestationResponse{
+			"1.0.0": makeAttestationWithSHA(t, "GitHub", "owner/pkg", "release.yml", shaOldest),
+			"1.1.0": makeAttestationWithSHA(t, "GitHub", "owner/pkg", "release.yml", shaMid),
+			"1.2.0": makeAttestationWithSHA(t, "GitHub", "owner/pkg", "release.yml", shaLatest),
+		},
+	)
+	defer srv.Close()
+
+	raw, err := newTestCollector(srv).Collect(t.Context(), pypiEntity("pkg"))
+	require.NoError(t, err)
+	result := wrap(t, raw)
+
+	require.True(t, hasSignal(result, "version_pin_table"),
+		"a pypi package whose recent versions carry PEP 740 attestations "+
+			"with Fulcio source-repo-digest SHAs must emit version_pin_table "+
+			"— source-evolution cannot anchor matrix rows without it")
+
+	val := getSignalValue(t, result, "version_pin_table")
+	assert.Equal(t, "pkg", val["module_path"],
+		"module_path identifies the pypi package the pins belong to")
+	assert.EqualValues(t, 3, val["version_count_total"],
+		"version_count_total counts every release in the project metadata")
+	assert.EqualValues(t, 3, val["version_count_processed"],
+		"version_count_processed counts versions the sweep resolved to a SHA")
+
+	pins, ok := val["pins"].([]any)
+	require.True(t, ok, "pins must be a JSON array")
+	require.Len(t, pins, 3, "one pin per attested version in the sweep window")
+
+	// The sweep's checked[] is newest-first; pins inherit that order so
+	// the source-evolution diff walks recent→older without re-sorting.
+	want := []struct{ version, sha, publishedAt string }{
+		{"1.2.0", shaLatest, "2026-03-01T00:00:00Z"},
+		{"1.1.0", shaMid, "2026-02-01T00:00:00Z"},
+		{"1.0.0", shaOldest, "2026-01-01T00:00:00Z"},
+	}
+	for i, w := range want {
+		pin, ok := pins[i].(map[string]any)
+		require.Truef(t, ok, "pin[%d] must be a JSON object", i)
+		assert.Equalf(t, w.version, pin["version"], "pin[%d].version", i)
+		assert.Equalf(t, w.sha, pin["sha"],
+			"pin[%d].sha must be the Fulcio source-repo-digest for that version, "+
+				"not the latest version's SHA reused", i)
+		assert.Equalf(t, w.publishedAt, pin["published_at"],
+			"pin[%d].published_at must be the version's RFC3339 upload time", i)
+	}
+}
+
 func TestCollector_AttestationConsistency_OnlyOneVersion_NoSignal(t *testing.T) {
 	t.Parallel()
 	// A package with only one version has no history to compare.

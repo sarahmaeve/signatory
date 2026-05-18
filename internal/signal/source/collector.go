@@ -126,7 +126,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	if c.allowFetch {
 		bsOpts = append(bsOpts, WithAllowFetch(true))
 	}
-	bs, err := NewBlobStreamer(c.clonePath, bsOpts...)
+	bs, err := NewBlobStreamer(ctx, c.clonePath, bsOpts...)
 	if err != nil {
 		c.recordFailureBoth(result, entity,
 			fmt.Sprintf("start blob streamer at %q: %v", c.clonePath, err),
