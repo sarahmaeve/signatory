@@ -656,14 +656,15 @@ type matrixRow struct {
 
 // matrixAST mirrors astfeature.Counts (snake_case JSON tags).
 type matrixAST struct {
-	InitCount           int `json:"init_count"`
-	NetworkCallSites    int `json:"network_call_sites"`
-	SensitivePathReads  int `json:"sensitive_path_reads"`
-	ExecCalls           int `json:"exec_calls"`
-	XORAssignments      int `json:"xor_assignments"`
-	Base64DecodeCalls   int `json:"base64_decode_calls"`
-	DynamicEvalCalls    int `json:"dynamic_eval_calls"`
-	ImportTimeCallSites int `json:"import_time_call_sites"`
+	InitCount            int `json:"init_count"`
+	NetworkCallSites     int `json:"network_call_sites"`
+	SensitivePathReads   int `json:"sensitive_path_reads"`
+	ExecCalls            int `json:"exec_calls"`
+	XORAssignments       int `json:"xor_assignments"`
+	Base64DecodeCalls    int `json:"base64_decode_calls"`
+	DynamicEvalCalls     int `json:"dynamic_eval_calls"`
+	ImportTimeCallSites  int `json:"import_time_call_sites"`
+	InstallHookOverrides int `json:"install_hook_overrides"`
 }
 
 // matrixStructural mirrors source.Structural.

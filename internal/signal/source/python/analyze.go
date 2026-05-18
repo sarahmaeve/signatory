@@ -16,6 +16,7 @@ package python
 import (
 	"context"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
@@ -57,20 +58,66 @@ func (a *Analyzer) Analyze(ctx context.Context, files iter.Seq2[astfeature.Sourc
 			// nothing rather than aborting the version's whole tree.
 			continue
 		}
-		accumulate(&c, mod)
+		accumulate(&c, mod, f.Path)
 	}
 	return c, nil
 }
 
-// accumulate folds one parsed module's constructs into c.
-func accumulate(c *astfeature.Counts, mod *Module) {
+// commandBases are the setuptools/distutils lifecycle command names
+// a malicious setup.py subclasses to run code at install/build. The
+// base is matched by exact name (from setuptools.command.install
+// import install → base "install") or by a setuptools.command /
+// distutils.command qualified path.
+var commandBases = map[string]struct{}{
+	"install": {}, "develop": {}, "build_py": {}, "build_ext": {},
+	"build": {}, "egg_info": {}, "sdist": {}, "bdist_egg": {},
+	"bdist_wheel": {}, "easy_install": {}, "test": {},
+}
+
+// isInstallCommandBase reports whether a class base names a
+// setuptools/distutils lifecycle command.
+func isInstallCommandBase(base string) bool {
+	if _, ok := commandBases[base]; ok {
+		return true
+	}
+	return strings.Contains(base, "setuptools.command.") ||
+		strings.Contains(base, "distutils.command.")
+}
+
+// isSetupPy reports whether the posix path's basename is setup.py —
+// the install-hook vector is specifically the build script, not an
+// arbitrary module that happens to subclass a command.
+func isSetupPy(path string) bool {
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base == "setup.py"
+}
+
+// accumulate folds one parsed module's constructs into c. path is the
+// file's posix path, needed only for the setup.py install-hook check.
+func accumulate(c *astfeature.Counts, mod *Module, path string) {
 	c.XORAssignments += mod.XorAssigns
+
+	if isSetupPy(path) {
+		for _, cd := range mod.Classes {
+			if slices.ContainsFunc(cd.Bases, isInstallCommandBase) {
+				c.InstallHookOverrides++
+			}
+		}
+	}
 	for _, call := range mod.Calls {
 		if call.ModuleScope {
 			c.ImportTimeCallSites++
 		}
 		switch {
 		case isDynamicEval(call.Callee):
+			c.DynamicEvalCalls++
+		case matchesCatalog(call.Callee, deserializeCallees):
+			// Deserialization RCE is the same code-from-data threat
+			// class as eval/exec (pickle runs __reduce__; yaml.load
+			// without SafeLoader instantiates arbitrary objects).
 			c.DynamicEvalCalls++
 		case matchesCatalog(call.Callee, processExecCallees):
 			c.ExecCalls++
@@ -165,11 +212,22 @@ var (
 		"httpx.post", "httpx.request", "http.client.HTTPConnection",
 		"http.client.HTTPSConnection", "ftplib.FTP", "smtplib.SMTP",
 	}
+	deserializeCallees = []string{
+		"pickle.loads", "pickle.load", "cPickle.loads", "cPickle.load",
+		"_pickle.loads", "_pickle.load", "marshal.loads", "marshal.load",
+		"dill.loads", "dill.load", "shelve.open", "jsonpickle.decode",
+		"yaml.load", "yaml.unsafe_load",
+	}
 	base64DecodeCallees = []string{
 		"base64.b64decode", "base64.b32decode", "base64.b16decode",
 		"base64.a85decode", "base64.b85decode", "base64.decodebytes",
 		"base64.urlsafe_b64decode", "base64.standard_b64decode",
 		"binascii.a2b_base64", "codecs.decode",
+		// Non-base64 opaque-payload decodes — equally common in
+		// obfuscated droppers (hex blobs, compressed stages).
+		"binascii.unhexlify", "binascii.a2b_hex", "bytes.fromhex",
+		"bytearray.fromhex", "zlib.decompress", "lzma.decompress",
+		"gzip.decompress",
 	}
 )
 

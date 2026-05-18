@@ -127,5 +127,8 @@ func spikedFeatures(older, newer astfeature.Counts) []string {
 	if older.ImportTimeCallSites == 0 && newer.ImportTimeCallSites > 0 {
 		spiked = append(spiked, "import_time_call_sites")
 	}
+	if older.InstallHookOverrides == 0 && newer.InstallHookOverrides > 0 {
+		spiked = append(spiked, "install_hook_overrides")
+	}
 	return spiked
 }

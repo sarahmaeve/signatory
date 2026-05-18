@@ -102,4 +102,14 @@ type Counts struct {
 	// zero today (its import-time surface is InitCount); Python
 	// populates it instead of InitCount.
 	ImportTimeCallSites int `json:"import_time_call_sites"`
+
+	// InstallHookOverrides is the number of classes wired into the
+	// package's install/build lifecycle — today: a setup.py class
+	// subclassing a setuptools/distutils command (install, develop,
+	// build_py, …). The iconic PyPI vector: the payload lives in the
+	// command's run() method and executes at `pip install`, which
+	// import-time call counting cannot see. Cross-language by intent
+	// (any ecosystem with source-level lifecycle hooks reuses it);
+	// Go has no source install hook and leaves this zero.
+	InstallHookOverrides int `json:"install_hook_overrides"`
 }

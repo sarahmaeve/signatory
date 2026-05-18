@@ -23,6 +23,21 @@ type Module struct {
 	// token.XOR_ASSIGN-only scope (binary `^` inside a plain `=` is
 	// the same documented gap there).
 	XorAssigns int
+
+	// Classes is every class declaration with its base names — used
+	// to spot setup.py command-class overrides (the install-hook
+	// vector). Keyword bases (metaclass=…) are dropped.
+	Classes []ClassDef
+}
+
+// ClassDef is a class declaration reduced to what the install-hook
+// check needs: the name, its positional base dotted-names, and
+// whether it sits at module scope.
+type ClassDef struct {
+	Name        string
+	Bases       []string
+	ModuleScope bool
+	Line        int
 }
 
 // Call is one call site: the dotted callee (e.g. "os.system",
@@ -124,9 +139,17 @@ func Parse(src []byte) (*Module, error) {
 				case "from":
 					i = parseFrom(toks, i+1, m)
 					continue
-				case "def", "class":
+				case "def":
 					pendingDefClass = true
 					inHeader = true
+					i++
+					continue
+				case "class":
+					pendingDefClass = true
+					inHeader = true
+					if cd, ok := parseClassHeader(toks, i, !inDefClass()); ok {
+						m.Classes = append(m.Classes, cd)
+					}
 					i++
 					continue
 				}
@@ -402,6 +425,42 @@ func unquotePyString(v string) (string, bool) {
 		return "", false
 	}
 	return inner, true
+}
+
+// parseClassHeader reads `class NAME [( bases )] :` starting at the
+// `class` keyword (toks[i]). It only peeks — the main loop still
+// walks the header tokens — so it must not consume. Positional bases
+// are resolved to dotted names; keyword bases (metaclass=…, anything
+// containing '=') are skipped.
+func parseClassHeader(toks []Token, i int, moduleScope bool) (ClassDef, bool) {
+	if i+1 >= len(toks) || toks[i+1].Kind != TokenName {
+		return ClassDef{}, false
+	}
+	cd := ClassDef{Name: toks[i+1].Value, ModuleScope: moduleScope, Line: toks[i].Line}
+	op := i + 2
+	if op >= len(toks) || toks[op].Kind != TokenOp || toks[op].Value != "(" {
+		return cd, true // no bases (e.g. `class Foo:`)
+	}
+	groups, _, ok := splitCallArgs(toks[op:])
+	if !ok {
+		return cd, true
+	}
+	for _, g := range groups {
+		isKw := false
+		for _, tk := range g {
+			if tk.Kind == TokenOp && tk.Value == "=" {
+				isKw = true
+				break
+			}
+		}
+		if isKw {
+			continue
+		}
+		if name, _, ok := scanDotted(g, 0); ok {
+			cd.Bases = append(cd.Bases, name)
+		}
+	}
+	return cd, true
 }
 
 // skipToStmtEnd advances to the next NEWLINE (or EOF) and stops
