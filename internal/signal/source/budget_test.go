@@ -1,7 +1,6 @@
 package source
 
 import (
-	"slices"
 	"strings"
 	"testing"
 
@@ -142,45 +141,6 @@ func TestCompareSemver_TwoInvalidsCompareLexicographically(t *testing.T) {
 	t.Parallel()
 	got := compareSemver("alpha", "beta")
 	assert.Equal(t, strings.Compare("alpha", "beta"), got)
-}
-
-// ============================================================
-// sortSemverDesc
-// ============================================================
-
-func TestSortSemverDesc_DescendingOrder(t *testing.T) {
-	t.Parallel()
-	in := []string{"v0.1.0", "v0.10.0", "v0.2.0", "v1.0.0", "v0.9.0"}
-	want := []string{"v1.0.0", "v0.10.0", "v0.9.0", "v0.2.0", "v0.1.0"}
-	got := sortSemverDesc(in)
-	assert.Equal(t, want, got)
-}
-
-func TestSortSemverDesc_DoesNotMutateInput(t *testing.T) {
-	t.Parallel()
-	in := []string{"v0.2.0", "v1.0.0", "v0.1.0"}
-	inCopy := slices.Clone(in)
-	_ = sortSemverDesc(in)
-	assert.Equal(t, inCopy, in, "input slice must not be mutated")
-}
-
-func TestSortSemverDesc_InvalidsAtEnd(t *testing.T) {
-	t.Parallel()
-	in := []string{"main", "v0.1.0", "develop", "v1.0.0"}
-	got := sortSemverDesc(in)
-	require.Len(t, got, 4)
-	// Valid versions sort first (descending).
-	assert.Equal(t, "v1.0.0", got[0])
-	assert.Equal(t, "v0.1.0", got[1])
-	// Invalid versions cluster at the tail.
-	assert.ElementsMatch(t, []string{"main", "develop"}, got[2:])
-}
-
-func TestSortSemverDesc_EmptyAndSingle(t *testing.T) {
-	t.Parallel()
-	assert.Empty(t, sortSemverDesc(nil))
-	assert.Empty(t, sortSemverDesc([]string{}))
-	assert.Equal(t, []string{"v1.0.0"}, sortSemverDesc([]string{"v1.0.0"}))
 }
 
 // ============================================================

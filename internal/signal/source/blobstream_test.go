@@ -2,10 +2,12 @@ package source
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -122,14 +124,14 @@ func blobSHAFor(t *testing.T, clonePath, relPath string) string {
 
 func TestBlobStreamer_NoClonePath_ReturnsErrNoClone(t *testing.T) {
 	t.Parallel()
-	_, err := NewBlobStreamer("")
+	_, err := NewBlobStreamer(t.Context(), "")
 	assert.ErrorIs(t, err, ErrNoClone)
 }
 
 func TestBlobStreamer_NewBlobStreamer_StartsSubprocess(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 }
@@ -141,7 +143,7 @@ func TestBlobStreamer_NewBlobStreamer_StartsSubprocess(t *testing.T) {
 func TestBlobStreamer_ReadBlob_KnownBlob_ReturnsContent(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -154,7 +156,7 @@ func TestBlobStreamer_ReadBlob_KnownBlob_ReturnsContent(t *testing.T) {
 func TestBlobStreamer_ReadBlob_MissingSHA_ReturnsErrSHAMissingFromClone(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -167,7 +169,7 @@ func TestBlobStreamer_ReadBlob_MissingSHA_ReturnsErrSHAMissingFromClone(t *testi
 func TestBlobStreamer_ReadBlob_MultipleSequential_AllSucceed(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -192,13 +194,46 @@ func TestBlobStreamer_ReadBlob_MultipleSequential_AllSucceed(t *testing.T) {
 func TestBlobStreamer_ReadBlob_AfterClose_ReturnsClosed(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	require.NoError(t, bs.Close())
 
 	mainSHA := blobSHAFor(t, clonePath, "main.go")
 	_, err = bs.ReadBlob(t.Context(), mainSHA)
 	assert.ErrorIs(t, err, ErrBlobStreamerClosed)
+}
+
+// TestBlobStreamer_ConstructionCtxCancel_TerminatesSubprocess pins
+// the contextcheck fix: the persistent cat-file subprocess is bound
+// to the context passed to NewBlobStreamer, not context.Background().
+// Cancelling the caller's context (an aborted collection run) must
+// tear the subprocess down so reads fail fast, rather than leaking a
+// git process whose lifetime is divorced from the request. Close is
+// still the explicit path; this is the implicit, request-scoped one.
+func TestBlobStreamer_ConstructionCtxCancel_TerminatesSubprocess(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	bs, err := NewBlobStreamer(ctx, clonePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	// Subprocess is live while the construction ctx is live.
+	mainSHA := blobSHAFor(t, clonePath, "main.go")
+	_, err = bs.ReadBlob(t.Context(), mainSHA)
+	require.NoError(t, err)
+
+	// Cancelling the construction ctx kills the subprocess. The kill
+	// is asynchronous (the os/exec context goroutine signals the
+	// process), so poll until a read fails rather than asserting once.
+	cancel()
+	require.Eventually(t, func() bool {
+		_, rerr := bs.ReadBlob(t.Context(), mainSHA)
+		return rerr != nil
+	}, 5*time.Second, 10*time.Millisecond,
+		"ReadBlob must fail once the construction ctx is cancelled — "+
+			"the cat-file subprocess is derived from that ctx")
 }
 
 // ============================================================
@@ -208,7 +243,7 @@ func TestBlobStreamer_ReadBlob_AfterClose_ReturnsClosed(t *testing.T) {
 func TestBlobStreamer_ListTreeBlobs_ReturnsAllBlobs(t *testing.T) {
 	t.Parallel()
 	clonePath, headSHA := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -232,7 +267,7 @@ func TestBlobStreamer_ListTreeBlobs_ReturnsAllBlobs(t *testing.T) {
 func TestBlobStreamer_ListTreeBlobs_BlobsHaveValidSHAs(t *testing.T) {
 	t.Parallel()
 	clonePath, headSHA := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -251,7 +286,7 @@ func TestBlobStreamer_ListTreeBlobs_BlobsHaveValidSHAs(t *testing.T) {
 func TestBlobStreamer_ListTreeBlobs_MissingSHA_ReturnsErrSHAMissingFromClone(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -261,19 +296,19 @@ func TestBlobStreamer_ListTreeBlobs_MissingSHA_ReturnsErrSHAMissingFromClone(t *
 }
 
 // ============================================================
-// EnumerateGoFiles
+// EnumerateSourceFiles
 // ============================================================
 
-func TestBlobStreamer_EnumerateGoFiles_OnlyReturnsGoSources(t *testing.T) {
+func TestBlobStreamer_EnumerateSourceFiles_OnlyReturnsGoSources(t *testing.T) {
 	t.Parallel()
 	clonePath, headSHA := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
 	var paths []string
 	contents := make(map[string]string)
-	for sf, ferr := range bs.EnumerateGoFiles(t.Context(), headSHA) {
+	for sf, ferr := range bs.EnumerateSourceFiles(t.Context(), headSHA) {
 		require.NoError(t, ferr)
 		paths = append(paths, sf.Path)
 		contents[sf.Path] = string(sf.Content)
@@ -293,17 +328,85 @@ func TestBlobStreamer_EnumerateGoFiles_OnlyReturnsGoSources(t *testing.T) {
 	assert.Contains(t, contents["internal/util/util.go"], "internal helper")
 }
 
-func TestBlobStreamer_EnumerateGoFiles_MissingSHA_YieldsErrorAndStops(t *testing.T) {
+func TestIsPythonSourceFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"pkg/mod.py", true},
+		{"__init__.py", true},
+		{"a/b/c.py", true},
+		{"setup.py", true},
+		{"README.md", false},
+		{"mod.go", false},
+		{"mod.pyc", false},
+		{"mod.pyi", false}, // stub, not importable runtime source
+		{"test_mod.py", false},
+		{"mod_test.py", false},
+		{"conftest.py", false},
+		{"tests/test_x.py", false},
+		{"pkg/tests/helper.py", false},
+		{"test/x.py", false},
+		{"vendor/dep.py", false},
+		{"pkg/_vendor/dep.py", false},
+		{".venv/lib/x.py", false},
+		{"venv/lib/x.py", false},
+		{"pkg/site-packages/dep.py", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isPythonSourceFile(tc.path))
+		})
+	}
+}
+
+// TestBlobStreamer_WithSourceFileFilter_OverridesDefault pins the
+// per-language seam: EnumerateSourceFiles must honor the filter
+// supplied at construction rather than the hardwired Go default, so
+// a pypi entity streams .py instead of .go.
+func TestBlobStreamer_WithSourceFileFilter_OverridesDefault(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runGit(t, tmp, "init", "-b", "main", "-q")
+	runGit(t, tmp, "config", "user.email", "test@example.invalid")
+	runGit(t, tmp, "config", "user.name", "Test")
+	runGit(t, tmp, "config", "commit.gpgsign", "false")
+	writeFile(t, tmp, "pkg/__init__.py", "VERSION = '1'\n")
+	writeFile(t, tmp, "pkg/core.py", "def f():\n    return 1\n")
+	writeFile(t, tmp, "pkg/test_core.py", "def test_f():\n    assert True\n")
+	writeFile(t, tmp, "helper.go", "package x\n")
+	writeFile(t, tmp, "README.md", "docs\n")
+	runGit(t, tmp, "add", ".")
+	runGit(t, tmp, "commit", "-m", "init")
+	headSHA := captureGitOutput(t, tmp, "rev-parse", "HEAD")
+
+	bs, err := NewBlobStreamer(t.Context(), tmp, WithSourceFileFilter(isPythonSourceFile))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	var paths []string
+	for sf, ferr := range bs.EnumerateSourceFiles(t.Context(), headSHA) {
+		require.NoError(t, ferr)
+		paths = append(paths, sf.Path)
+	}
+	// Only importable .py: helper.go (Go), test_core.py (test),
+	// README.md (not .py) excluded.
+	assert.ElementsMatch(t, []string{"pkg/__init__.py", "pkg/core.py"}, paths)
+}
+
+func TestBlobStreamer_EnumerateSourceFiles_MissingSHA_YieldsErrorAndStops(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
 	const fakeSHA = "0000000000000000000000000000000000000000"
 	var yielded []golang.SourceFile
 	var firstErr error
-	for sf, ferr := range bs.EnumerateGoFiles(t.Context(), fakeSHA) {
+	for sf, ferr := range bs.EnumerateSourceFiles(t.Context(), fakeSHA) {
 		yielded = append(yielded, sf)
 		if firstErr == nil {
 			firstErr = ferr
@@ -313,15 +416,15 @@ func TestBlobStreamer_EnumerateGoFiles_MissingSHA_YieldsErrorAndStops(t *testing
 	assert.ErrorIs(t, firstErr, ErrSHAMissingFromClone)
 }
 
-func TestBlobStreamer_EnumerateGoFiles_StopsOnYieldFalse(t *testing.T) {
+func TestBlobStreamer_EnumerateSourceFiles_StopsOnYieldFalse(t *testing.T) {
 	t.Parallel()
 	clonePath, headSHA := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
 	count := 0
-	for range bs.EnumerateGoFiles(t.Context(), headSHA) {
+	for range bs.EnumerateSourceFiles(t.Context(), headSHA) {
 		count++
 		if count == 1 {
 			break
@@ -381,7 +484,7 @@ func setupFetchableFixture(t *testing.T) (localPath, missingBlobSHA, expectedCon
 func TestBlobStreamer_AllowFetch_DefaultIsFalse(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 	assert.False(t, bs.allowFetch)
@@ -390,7 +493,7 @@ func TestBlobStreamer_AllowFetch_DefaultIsFalse(t *testing.T) {
 func TestBlobStreamer_AllowFetch_OptionEnables(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath, WithAllowFetch(true))
+	bs, err := NewBlobStreamer(t.Context(), clonePath, WithAllowFetch(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 	assert.True(t, bs.allowFetch)
@@ -399,7 +502,7 @@ func TestBlobStreamer_AllowFetch_OptionEnables(t *testing.T) {
 func TestBlobStreamer_ReadBlob_NoFetchByDefault_StillReturnsErrSHAMissingFromClone(t *testing.T) {
 	t.Parallel()
 	localPath, missingSHA, _ := setupFetchableFixture(t)
-	bs, err := NewBlobStreamer(localPath)
+	bs, err := NewBlobStreamer(t.Context(), localPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -411,7 +514,7 @@ func TestBlobStreamer_ReadBlob_NoFetchByDefault_StillReturnsErrSHAMissingFromClo
 func TestBlobStreamer_ReadBlob_AllowFetch_RecoversMissingSHA(t *testing.T) {
 	t.Parallel()
 	localPath, missingSHA, expectedContent := setupFetchableFixture(t)
-	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	bs, err := NewBlobStreamer(t.Context(), localPath, WithAllowFetch(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -424,7 +527,7 @@ func TestBlobStreamer_ReadBlob_AllowFetch_RecoversMissingSHA(t *testing.T) {
 func TestBlobStreamer_ReadBlob_AllowFetch_FetchRunsAtMostOnce(t *testing.T) {
 	t.Parallel()
 	localPath, missingSHA, _ := setupFetchableFixture(t)
-	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	bs, err := NewBlobStreamer(t.Context(), localPath, WithAllowFetch(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -467,7 +570,7 @@ func TestBlobStreamer_ListTreeBlobs_AllowFetch_RecoversMissingSHA(t *testing.T) 
 	runGit(t, source, "commit", "-m", "second")
 	newCommitSHA := captureGitOutput(t, source, "rev-parse", "HEAD")
 
-	bs, err := NewBlobStreamer(localPath, WithAllowFetch(true))
+	bs, err := NewBlobStreamer(t.Context(), localPath, WithAllowFetch(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -512,7 +615,7 @@ func TestBlobStreamer_ReadBlob_RejectsBlobOverCap(t *testing.T) {
 	// any allocation. The size value (10) is well under the
 	// fixture; the production default (defaultMaxBlobSize) is
 	// 10 MiB and is exercised implicitly by every other test.
-	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(10))
+	bs, err := NewBlobStreamer(t.Context(), clonePath, WithMaxBlobSize(10))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -533,7 +636,7 @@ func TestBlobStreamer_ReadBlob_AllowsBlobUnderCap(t *testing.T) {
 	clonePath, _ := initRepoForBlobStream(t)
 
 	// 1 KiB cap is well above the fixture blob's ~30 bytes.
-	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(1024))
+	bs, err := NewBlobStreamer(t.Context(), clonePath, WithMaxBlobSize(1024))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -554,7 +657,7 @@ func TestBlobStreamer_WithMaxBlobSize_NonPositiveKeepsDefault(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
 
-	bs, err := NewBlobStreamer(clonePath, WithMaxBlobSize(0))
+	bs, err := NewBlobStreamer(t.Context(), clonePath, WithMaxBlobSize(0))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bs.Close() })
 
@@ -570,7 +673,7 @@ func TestBlobStreamer_WithMaxBlobSize_NonPositiveKeepsDefault(t *testing.T) {
 func TestBlobStreamer_Close_AllowsDoubleClose(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)
-	bs, err := NewBlobStreamer(clonePath)
+	bs, err := NewBlobStreamer(t.Context(), clonePath)
 	require.NoError(t, err)
 	require.NoError(t, bs.Close())
 	require.NoError(t, bs.Close(), "second Close should be a no-op")

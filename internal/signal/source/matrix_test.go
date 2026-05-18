@@ -15,7 +15,7 @@ import (
 )
 
 // fakeSourceProvider is a hand-built SourceProvider for matrix
-// tests. Maps SHA → file list (or error) for EnumerateGoFiles, and
+// tests. Maps SHA → file list (or error) for EnumerateSourceFiles, and
 // SHA-pair → DiffStat for DiffStat. Missing entries return
 // ErrSHAMissingFromClone via the iterator.
 //
@@ -32,7 +32,7 @@ type fakeSourceProvider struct {
 	diffsByPair map[[2]string]DiffStat
 }
 
-func (f *fakeSourceProvider) EnumerateGoFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
+func (f *fakeSourceProvider) EnumerateSourceFiles(_ context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
 	return func(yield func(golang.SourceFile, error) bool) {
 		if err, ok := f.errBySHA[sha]; ok {
 			yield(golang.SourceFile{}, err)
@@ -106,8 +106,8 @@ func TestAssemble_SinglePinnedVersion_RowHasASTAndStructural(t *testing.T) {
 	assert.Equal(t, 1, row.AST.InitCount, "main.go's init() should be counted")
 
 	require.NotNil(t, row.Structural)
-	assert.Equal(t, 2, row.Structural.GoFileCount)
-	assert.Greater(t, row.Structural.GoLOC, 0)
+	assert.Equal(t, 2, row.Structural.FileCount)
+	assert.Greater(t, row.Structural.LOC, 0)
 	// Commit 12 leaves these empty; commit 13 fills NewTopLevelPackages.
 	assert.Empty(t, row.Structural.NewTopLevelPackages)
 	assert.Empty(t, row.Structural.NewSymbolExports)
@@ -440,7 +440,7 @@ func TestAssemble_LongPinTable_RespectsBudget_SingleMajor(t *testing.T) {
 		// Empty file list per SHA — we don't care about per-row
 		// AST contents, just budget cardinality. The assembler
 		// still emits a row per selected version with
-		// Structural{GoFileCount:0, GoLOC:0}.
+		// Structural{FileCount:0, LOC:0}.
 		filesBySHA[sha] = nil
 	}
 

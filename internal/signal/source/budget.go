@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // BudgetOpts controls how Select picks a version subset from
@@ -27,6 +28,16 @@ type BudgetOpts struct {
 	// HardCap bounds the total selection size. Protects against
 	// pathologically long histories. Default 20.
 	HardCap int
+
+	// publishedAt maps version -> release publish time, sourced from
+	// the version_pin_table. When present, it is the chronological
+	// axis for recency selection and row order — ecosystem-neutral,
+	// unlike semver parsing which is Go-module-shaped (v-prefixed)
+	// and rejects bare PyPI / PEP 440 versions. Versions absent here
+	// (or with a zero time) fall back to semver-descending, so the
+	// no-timestamp path is byte-for-byte the original behavior. Set
+	// by the Assembler from the pin table, not by external callers.
+	publishedAt map[string]time.Time
 }
 
 // defaults applies the v0.1 defaults to any non-positive fields,
@@ -63,8 +74,10 @@ const SelectionStrategyV1 = "last_n_plus_major_leaves"
 // Select picks up to opts.HardCap versions from the input list,
 // biased toward recency plus cross-major coverage:
 //
-//  1. Sort all versions in descending semver order. Invalid
-//     semvers (non-canonical strings) cluster at the end.
+//  1. Sort all versions newest-first. When the pin table supplies
+//     publish timestamps (opts.publishedAt) that is the axis;
+//     otherwise descending semver, with invalid semvers clustered
+//     at the end (the original Go-only behavior, unchanged).
 //  2. Pick the first opts.LastN as the "recent core."
 //  3. Walk the remainder, adding the highest version per unique
 //     major NOT already represented in the core. Add up to
@@ -90,7 +103,9 @@ func Select(versions []string, opts BudgetOpts) Selection {
 		return sel
 	}
 
-	sorted := sortSemverDesc(versions)
+	cmp := chronoCmpFunc(opts.publishedAt)
+	sorted := slices.Clone(versions)
+	slices.SortFunc(sorted, cmp)
 
 	// Step 2: recent core.
 	coreCount := min(opts.LastN, len(sorted))
@@ -130,8 +145,8 @@ func Select(versions []string, opts BudgetOpts) Selection {
 
 	// Re-sort selected: leaves were appended after the core in
 	// encounter order, so the combined list isn't strictly
-	// descending until we sort it.
-	slices.SortFunc(selected, descSemverCmp)
+	// newest-first until we sort it.
+	slices.SortFunc(selected, cmp)
 	sel.SelectedVersions = selected
 
 	// Skipped is everything in `sorted` not in `selected`,
@@ -256,14 +271,54 @@ func clampSign(n int) int {
 	}
 }
 
-// sortSemverDesc returns versions sorted in descending semver
-// order (most-recent first). Invalid semvers cluster at the end
-// regardless of direction; among themselves they sort
-// lexicographically. The original input slice is not mutated.
-func sortSemverDesc(versions []string) []string {
-	sorted := slices.Clone(versions)
-	slices.SortFunc(sorted, descSemverCmp)
-	return sorted
+// chronoCmpFunc returns the newest-first comparator used for budget
+// recency and row order. Publish time is the primary axis because it
+// is ecosystem-neutral; semver parsing is Go-module-shaped and treats
+// every bare PyPI / PEP 440 version as invalid, which silently
+// destroys pypi anomaly chronology.
+//
+// Rules, given pub (may be nil):
+//   - both versions have a non-zero publish time: later first; ties
+//     broken by descSemverCmp for determinism.
+//   - exactly one has a publish time: the timestamped one first (a
+//     pinned, analyzable version outranks a bare missing-origin /
+//     fetch-failed string with no time).
+//   - neither has one: descSemverCmp — identical to the original
+//     behavior, so the no-timestamp path (and every budget_test
+//     case, which passes no timestamps) is unchanged.
+func chronoCmpFunc(pub map[string]time.Time) func(a, b string) int {
+	return func(a, b string) int {
+		ta, oka := pub[a]
+		tb, okb := pub[b]
+		za := !oka || ta.IsZero()
+		zb := !okb || tb.IsZero()
+		switch {
+		case !za && !zb:
+			if ta.After(tb) {
+				return -1
+			}
+			if ta.Before(tb) {
+				return 1
+			}
+			// Equal publish timestamps (common on PyPI: sdist+wheel or
+			// a batch release share a second). Known gap: descSemverCmp
+			// degrades to lexicographic for bare PEP 440 versions
+			// (no "v" prefix), so "1.10.0" sorts before "1.9.0" within
+			// a same-timestamp tie group. The window is narrow — only
+			// adjacent same-second versions — and the failure mode is a
+			// possibly mis-attributed 0->n anomaly between that pair,
+			// never a false positive on a benign package. Accepted as
+			// the same semver-fallback limitation documented in
+			// AST.md section 4; a PEP 440-aware tie-break would close it.
+			return descSemverCmp(a, b)
+		case !za:
+			return -1
+		case !zb:
+			return 1
+		default:
+			return descSemverCmp(a, b)
+		}
+	}
 }
 
 // descSemverCmp is the slices.SortFunc comparator for

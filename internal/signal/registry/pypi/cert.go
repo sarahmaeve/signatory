@@ -32,7 +32,16 @@ var fulcioSourceRepoDigestOIDProd = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 5726
 //     identity, or for a Sigstore identity whose builder doesn't
 //     populate this claim);
 //   - the extension value isn't a DER-decodable string (corrupt
-//     cert, format drift, or attacker-supplied garbage).
+//     cert, format drift, or attacker-supplied garbage);
+//   - the decoded value is not a syntactically valid git object id
+//     (40-hex SHA-1 or 64-hex SHA-256). The Fulcio cert chain is NOT
+//     cryptographically verified here, so this string is fully
+//     attacker-controlled; it flows verbatim into `git ls-tree`,
+//     `git cat-file --batch` stdin, and `git diff` argv downstream
+//     (via the version_pin_table SHA). Anything that is not a bare
+//     object id — flag-shaped, whitespace/newline-bearing, or
+//     non-hex — is rejected at this trust boundary rather than
+//     handed to a git subprocess.
 //
 // Silent fall-through is the contract: the caller (PyPI registry
 // collector emitting artifact_url) treats absence as "no exact
@@ -49,7 +58,7 @@ func extractFulcioSourceRepoDigest(cert *x509.Certificate) (string, bool) {
 			continue
 		}
 		var s string
-		if rest, err := asn1.Unmarshal(ext.Value, &s); err == nil && len(rest) == 0 {
+		if rest, err := asn1.Unmarshal(ext.Value, &s); err == nil && len(rest) == 0 && isGitObjectID(s) {
 			return s, true
 		}
 		// Format drift defense: pre-v1.3 Fulcio emitted raw bytes
@@ -61,6 +70,31 @@ func extractFulcioSourceRepoDigest(cert *x509.Certificate) (string, bool) {
 		return "", false
 	}
 	return "", false
+}
+
+// isGitObjectID reports whether s is a syntactically valid git
+// object name: a lowercase-or-uppercase hex string of exactly SHA-1
+// (40) or SHA-256 (64) length. This is the shape git itself accepts
+// as a full object id; abbreviated ids are intentionally rejected
+// because Fulcio always stamps the full commit SHA, and accepting a
+// short prefix would only widen what attacker-controlled bytes we
+// forward to git. No allocation, no regexp — a tight constant-time
+// scan on the trust-boundary hot path.
+func isGitObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // extractGitHeadFromAttestation walks a PEP 740 AttestationResponse

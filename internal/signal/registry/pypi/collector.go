@@ -795,6 +795,40 @@ func recordLatestAttestationBuilder(result *signal.CollectionResult,
 // costs an HTTP call to the Integrity API.
 const attestationWindow = 5
 
+// pinSourcePyPIAttestation is the Source stamped on every pypi
+// VersionPin: the commit SHA is recovered from the version's PEP 740
+// Fulcio source-repo-digest, not from a module proxy. The analog of
+// gopublish's "proxy.golang.org".
+const pinSourcePyPIAttestation = "pypi-attestation"
+
+// versionPin / versionPinTableValue mirror gopublish's
+// VersionPin / VersionPinTableValue JSON shape exactly (json tags
+// verbatim). They are intentionally an independent definition: the
+// source-evolution consumer (source.pinTableFromSignals) matches on
+// signal type "version_pin_table" and is ecosystem-blind, so pypi
+// emitting this shape is served by the existing pinSourceImpl with
+// zero new code. published_at is RFC3339 UTC, parsed by the consumer.
+type versionPin struct {
+	Version     string `json:"version"`
+	SHA         string `json:"sha"`
+	Source      string `json:"source"`
+	PublishedAt string `json:"published_at"`
+}
+
+type versionPinTableValue struct {
+	ModulePath        string `json:"module_path"`
+	VersionCountTotal int    `json:"version_count_total"`
+	// VersionCountProcessed is gopublish-parity: the number of
+	// versions the attestation sweep inspected (len(checked)), NOT
+	// the SHA-bearing subset. An attested version with no Fulcio
+	// source-repo-digest is processed but not pinned — emitting
+	// len(pins) would misreport "processed" as "succeeded".
+	VersionCountProcessed int          `json:"version_count_processed"`
+	Pins                  []versionPin `json:"pins"`
+	MissingOriginVersions []string     `json:"missing_origin_versions"`
+	FetchFailedVersions   []string     `json:"fetch_failed_versions"`
+}
+
 // recordAttestationConsistency checks whether PEP 740 attestations are
 // consistent across recent versions. Detects the broken-chain
 // fingerprint: a package that was continuously attested then publishes
@@ -848,9 +882,11 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 	}
 
 	type versionAttest struct {
-		version   string
-		attested  bool
-		publisher publisherID
+		version     string
+		attested    bool
+		publisher   publisherID
+		sha         string
+		publishedAt time.Time
 	}
 
 	extractPublisher := func(attest *AttestationResponse) publisherID {
@@ -861,9 +897,31 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 		return publisherID{kind: pub.Kind, repository: pub.Repository, workflow: pub.Workflow}
 	}
 
+	// extractSHA recovers the Fulcio source-repo-digest from the same
+	// *AttestationResponse the sweep already fetched per version. The
+	// sweep paid the HTTP cost and held the response only to read the
+	// publisher; pulling the SHA here is the difference between a
+	// usable pin table and discarding data already in hand.
+	extractSHA := func(attest *AttestationResponse) string {
+		sha, _ := extractGitHeadFromAttestation(attest)
+		return sha
+	}
+
 	checked := []versionAttest{
-		{version: versions[0].version, attested: latestHas, publisher: extractPublisher(latestAttest)},
-		{version: firstPrior.version, attested: firstPriorHas, publisher: extractPublisher(firstAttest)},
+		{
+			version:     versions[0].version,
+			attested:    latestHas,
+			publisher:   extractPublisher(latestAttest),
+			sha:         extractSHA(latestAttest),
+			publishedAt: versions[0].ts,
+		},
+		{
+			version:     firstPrior.version,
+			attested:    firstPriorHas,
+			publisher:   extractPublisher(firstAttest),
+			sha:         extractSHA(firstAttest),
+			publishedAt: firstPrior.ts,
+		},
 	}
 
 	// Check remaining prior versions (bounded to attestationWindow total).
@@ -879,9 +937,11 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 			continue
 		}
 		checked = append(checked, versionAttest{
-			version:   vf.version,
-			attested:  attest != nil,
-			publisher: extractPublisher(attest),
+			version:     vf.version,
+			attested:    attest != nil,
+			publisher:   extractPublisher(attest),
+			sha:         extractSHA(attest),
+			publishedAt: vf.ts,
 		})
 	}
 
@@ -997,6 +1057,35 @@ func (c *Collector) recordAttestationConsistency(ctx context.Context, result *si
 	}
 
 	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL, value)
+
+	// Byproduct of the sweep: the (version, sha, published_at) triples
+	// the source-evolution collector needs to anchor matrix rows. The
+	// sweep already fetched every attestation in the window; emitting
+	// them as the gopublish-shaped version_pin_table signal lets the
+	// existing ecosystem-blind pinSourceImpl serve pypi unchanged.
+	// checked[] is newest-first; pins inherit that order. Only
+	// versions whose attestation yielded a Fulcio SHA are pinnable.
+	pins := make([]versionPin, 0, len(checked))
+	for _, r := range checked {
+		if r.sha == "" {
+			continue
+		}
+		pins = append(pins, versionPin{
+			Version:     r.version,
+			SHA:         r.sha,
+			Source:      pinSourcePyPIAttestation,
+			PublishedAt: r.publishedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	if len(pins) > 0 {
+		result.RecordSignal(entityID, "version_pin_table", source, collectedAt, defaultTTL,
+			versionPinTableValue{
+				ModulePath:            packageName,
+				VersionCountTotal:     len(versions),
+				VersionCountProcessed: len(checked),
+				Pins:                  pins,
+			})
+	}
 }
 
 // recordPublisherAccountClass emits a per-package classification of

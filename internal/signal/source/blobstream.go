@@ -14,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/sarahmaeve/signatory/internal/gitenv"
-	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
 
 // BlobStreamer reads source content from a local git clone via two
@@ -72,6 +72,12 @@ type BlobStreamer struct {
 	// override via WithMaxBlobSize for tests or for callers that
 	// know their content fits a smaller envelope.
 	maxBlobSize int
+
+	// sourceFileFilter decides which tree paths EnumerateSourceFiles
+	// yields. Defaults to isGoSourceFile; WithSourceFileFilter swaps
+	// in a language-appropriate predicate (e.g. isPythonSourceFile
+	// for pypi entities) so the same streamer serves any ecosystem.
+	sourceFileFilter func(path string) bool
 }
 
 // defaultMaxBlobSize is the per-blob allocation cap applied to
@@ -124,6 +130,20 @@ func WithMaxBlobSize(n int) BlobStreamerOption {
 	}
 }
 
+// WithSourceFileFilter overrides the predicate EnumerateSourceFiles
+// uses to decide which tree paths to yield. The default is
+// isGoSourceFile; the source-evolution collector passes
+// isPythonSourceFile for pypi entities. A nil filter is ignored
+// (the Go default stays) rather than yielding every blob — an
+// unfiltered stream would feed non-source into the analyzer.
+func WithSourceFileFilter(filter func(path string) bool) BlobStreamerOption {
+	return func(b *BlobStreamer) {
+		if filter != nil {
+			b.sourceFileFilter = filter
+		}
+	}
+}
+
 // TreeBlob is one entry from `git ls-tree -r`. Mode is the git
 // file mode (e.g., "100644"); SHA is the blob's git object hash;
 // Path is posix-style, relative to the tree root.
@@ -155,15 +175,22 @@ type DiffStat struct {
 // subprocess persists for the streamer's lifetime; call Close to
 // terminate it cleanly.
 //
+// ctx bounds the subprocess: the persistent cat-file child is
+// derived from ctx (via context.WithCancel), so cancelling the
+// caller's context — e.g. an aborted collection run — tears the
+// subprocess down rather than leaking a git process until Close.
+// Close remains the explicit teardown path; ctx cancellation is the
+// implicit one tied to the request lifetime.
+//
 // Fails with ErrNoClone if clonePath is empty. Subprocess startup
 // errors are wrapped with context. Options are applied in order
 // after struct initialization.
-func NewBlobStreamer(clonePath string, opts ...BlobStreamerOption) (*BlobStreamer, error) {
+func NewBlobStreamer(ctx context.Context, clonePath string, opts ...BlobStreamerOption) (*BlobStreamer, error) {
 	if clonePath == "" {
 		return nil, ErrNoClone
 	}
 
-	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCtx, parentCancel := context.WithCancel(ctx)
 	cmd := gitenv.NewCmd(parentCtx, "-C", clonePath, "cat-file", "--batch")
 
 	stdin, err := cmd.StdinPipe()
@@ -185,14 +212,15 @@ func NewBlobStreamer(clonePath string, opts ...BlobStreamerOption) (*BlobStreame
 	}
 
 	bs := &BlobStreamer{
-		clonePath:    clonePath,
-		cmd:          cmd,
-		stdin:        stdin,
-		stdout:       bufio.NewReader(stdout),
-		stderr:       &stderr,
-		parentCtx:    parentCtx,
-		parentCancel: parentCancel,
-		maxBlobSize:  defaultMaxBlobSize,
+		clonePath:        clonePath,
+		cmd:              cmd,
+		stdin:            stdin,
+		stdout:           bufio.NewReader(stdout),
+		stderr:           &stderr,
+		parentCtx:        parentCtx,
+		parentCancel:     parentCancel,
+		maxBlobSize:      defaultMaxBlobSize,
+		sourceFileFilter: isGoSourceFile,
 	}
 	// Options apply after the defaults so a caller's WithMaxBlobSize
 	// (or future tunables) overrides the const baked into the struct
@@ -385,11 +413,14 @@ func (b *BlobStreamer) listTreeBlobsOnce(ctx context.Context, sha string) ([]Tre
 	return blobs, nil
 }
 
-// EnumerateGoFiles iterates Go source files at the commit SHA,
-// excluding _test.go files and vendored code. Each file's content
-// is fetched on demand from the persistent cat-file subprocess;
-// stopping iteration partway through (yield returns false) is safe
-// and skips the unread blobs.
+// EnumerateSourceFiles iterates source files at the commit SHA. This
+// is the Go-flavored implementation of the language-neutral
+// SourceProvider.EnumerateSourceFiles contract: it filters to Go
+// sources (isGoSourceFile), excluding _test.go files and vendored
+// code. A Python provider would implement the same interface with a
+// .py filter. Each file's content is fetched on demand from the
+// persistent cat-file subprocess; stopping iteration partway through
+// (yield returns false) is safe and skips the unread blobs.
 //
 // Errors are yielded in-band:
 //   - If ListTreeBlobs fails (e.g., ErrSHAMissingFromClone) the
@@ -398,29 +429,29 @@ func (b *BlobStreamer) listTreeBlobsOnce(ctx context.Context, sha string) ([]Tre
 //     empty Content; iteration continues.
 //   - If ctx is cancelled mid-iteration, ctx.Err() is yielded and
 //     iteration stops.
-func (b *BlobStreamer) EnumerateGoFiles(ctx context.Context, sha string) iter.Seq2[golang.SourceFile, error] {
-	return func(yield func(golang.SourceFile, error) bool) {
+func (b *BlobStreamer) EnumerateSourceFiles(ctx context.Context, sha string) iter.Seq2[astfeature.SourceFile, error] {
+	return func(yield func(astfeature.SourceFile, error) bool) {
 		blobs, err := b.ListTreeBlobs(ctx, sha)
 		if err != nil {
-			yield(golang.SourceFile{}, err)
+			yield(astfeature.SourceFile{}, err)
 			return
 		}
 		for _, blob := range blobs {
-			if !isGoSourceFile(blob.Path) {
+			if !b.sourceFileFilter(blob.Path) {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				yield(golang.SourceFile{}, err)
+				yield(astfeature.SourceFile{}, err)
 				return
 			}
 			content, err := b.ReadBlob(ctx, blob.SHA)
 			if err != nil {
-				if !yield(golang.SourceFile{Path: blob.Path}, err) {
+				if !yield(astfeature.SourceFile{Path: blob.Path}, err) {
 					return
 				}
 				continue
 			}
-			if !yield(golang.SourceFile{Path: blob.Path, Content: content}, nil) {
+			if !yield(astfeature.SourceFile{Path: blob.Path, Content: content}, nil) {
 				return
 			}
 		}
@@ -640,6 +671,44 @@ func isGoSourceFile(path string) bool {
 	}
 	if strings.Contains(path, "/vendor/") {
 		return false
+	}
+	return true
+}
+
+// isPythonSourceFile reports whether the given posix-style path is a
+// Python source file the source-evolution analyzer wants to consume.
+// The Python analog of isGoSourceFile — same intent: the package's
+// own importable runtime source, not tests or bundled third-party
+// code. Excludes:
+//   - non-.py files (incl. .pyc bytecode and .pyi type stubs, which
+//     are not importable runtime source)
+//   - test files: test_*.py, *_test.py, conftest.py — they don't run
+//     on import
+//   - tests/ and test/ directories at any depth
+//   - vendored / virtual-env trees: vendor/, _vendor/, site-packages/,
+//     .venv/, venv/ at any depth
+//
+// Heuristic, deliberately conservative. Python lacks Go's single
+// vendor/ convention, so the exclude set is a best guess refined
+// when the Python analyzer (and real-data comparability) lands.
+func isPythonSourceFile(path string) bool {
+	if !strings.HasSuffix(path, ".py") {
+		return false
+	}
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "conftest.py" ||
+		strings.HasPrefix(base, "test_") ||
+		strings.HasSuffix(base, "_test.py") {
+		return false
+	}
+	for seg := range strings.SplitSeq(path, "/") {
+		switch seg {
+		case "tests", "test", "vendor", "_vendor", "site-packages", ".venv", "venv":
+			return false
+		}
 	}
 	return true
 }

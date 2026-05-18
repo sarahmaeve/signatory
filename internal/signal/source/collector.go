@@ -9,6 +9,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
+	"github.com/sarahmaeve/signatory/internal/signal/source/python"
 )
 
 // collectorSource is the value that lands in profile.Signal.Source
@@ -22,41 +23,62 @@ const collectorSource = "source-evolution"
 const collectorTTL = 24 * time.Hour
 
 // Collector is the source-evolution collector. Composes:
-//   - VersionPinSource     — reads gopublish's version_pin_table
+//   - VersionPinSource     — reads the version_pin_table signal
+//     (gopublish for Go; the pypi registry collector for pypi)
 //   - BlobStreamer         — reads source bytes from the local clone
-//   - golang.Analyzer      — extracts AST features per version
+//   - LanguageAnalyzer     — extracts AST features per version
+//     (golang.Analyzer for Go; python.Analyzer for pypi)
 //   - Assembler            — builds MatrixValue
 //   - DetectAnomaly        — derives the anomaly summary
 //
-// Emits two signals per Go-ecosystem entity:
+// Emits two signals per supported-ecosystem entity:
 //   - source_evolution_matrix  (compound per-version table)
 //   - source_evolution_anomaly (boolean + pointer summary)
 //
-// Non-Go entities skip silently (empty result, no error). Go
-// entities with missing pin table or clone produce absences with
-// clear reasons rather than failures.
+// The file filter and analyzer are selected per entity by
+// languageProfile. Unsupported ecosystems skip silently (empty
+// result, no error). Supported entities with a missing pin table or
+// clone produce absences with clear reasons rather than failures.
 //
-// Implements signal.Collector. Constructed and registered into
-// dispatch by cmd/signatory/collectors.go for Ecosystem="golang"
-// (or legacy "go") entities — wiring lands in commit 16.
+// Implements signal.Collector. Registered into dispatch by
+// cmd/signatory/collectors.go for the supported ecosystems.
 type Collector struct {
 	clonePath  string
 	pinSource  VersionPinSource
-	analyzer   *golang.Analyzer
 	allowFetch bool
 }
 
-// NewCollector returns a Collector with the given clone path,
-// pin source, and fetch policy. The analyzer is constructed
-// internally with default pattern catalogs. Pass allowFetch=true
-// to enable the BlobStreamer's opt-in fetch-on-missing-SHA path
-// (--allow-fetch CLI flag).
+// NewCollector returns a Collector with the given clone path, pin
+// source, and fetch policy. The per-language analyzer and source-file
+// filter are chosen at Collect time from the entity's ecosystem (see
+// languageProfile). Pass allowFetch=true to enable the BlobStreamer's
+// opt-in fetch-on-missing-SHA path (--allow-fetch CLI flag).
 func NewCollector(clonePath string, pinSource VersionPinSource, allowFetch bool) *Collector {
 	return &Collector{
 		clonePath:  clonePath,
 		pinSource:  pinSource,
-		analyzer:   golang.NewAnalyzer(),
 		allowFetch: allowFetch,
+	}
+}
+
+// languageProfile maps an entity ecosystem to its source-file filter
+// and AST analyzer. ok=false means source-evolution does not support
+// that ecosystem and the collector skips silently.
+//
+// pypi uses python.Analyzer — the hand-written Python lexer/parser/
+// extractor in internal/signal/source/python; it populates the AST
+// Counts (dynamic-eval, import-time call sites, install-hook
+// overrides, exec/network/base64/sensitive-path) just as
+// golang.Analyzer does for Go. Structural and diff signal are
+// language-neutral and flow for both.
+func languageProfile(ecosystem string) (filter func(path string) bool, analyzer LanguageAnalyzer, ok bool) {
+	switch ecosystem {
+	case "golang", "go":
+		return isGoSourceFile, golang.NewAnalyzer(), true
+	case "pypi":
+		return isPythonSourceFile, python.NewAnalyzer(), true
+	default:
+		return nil, nil, false
 	}
 }
 
@@ -73,7 +95,7 @@ func (c *Collector) Name() string { return collectorSource }
 // are recorded as absences inside the CollectionResult.
 //
 // Outcome cases:
-//   - entity == nil OR ecosystem != "golang"/"go" — empty result.
+//   - entity == nil OR unsupported ecosystem — empty result.
 //   - pin source nil OR pin table not available — both signals
 //     emit as absences (non-retryable; the operator must run
 //     gopublish first).
@@ -89,7 +111,8 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	if entity == nil {
 		return result, nil
 	}
-	if entity.Ecosystem != "golang" && entity.Ecosystem != "go" {
+	srcFilter, analyzer, ok := languageProfile(entity.Ecosystem)
+	if !ok {
 		return result, nil
 	}
 
@@ -122,11 +145,11 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	var bsOpts []BlobStreamerOption
+	bsOpts := []BlobStreamerOption{WithSourceFileFilter(srcFilter)}
 	if c.allowFetch {
 		bsOpts = append(bsOpts, WithAllowFetch(true))
 	}
-	bs, err := NewBlobStreamer(c.clonePath, bsOpts...)
+	bs, err := NewBlobStreamer(ctx, c.clonePath, bsOpts...)
 	if err != nil {
 		c.recordFailureBoth(result, entity,
 			fmt.Sprintf("start blob streamer at %q: %v", c.clonePath, err),
@@ -135,7 +158,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	}
 	defer func() { _ = bs.Close() }()
 
-	assembler := NewAssembler(bs, c.analyzer)
+	assembler := NewAssembler(bs, analyzer)
 	matrix, err := assembler.Build(ctx, pinTable, BudgetOpts{})
 	if err != nil {
 		c.recordFailureBoth(result, entity,

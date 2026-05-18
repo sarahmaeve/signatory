@@ -1,6 +1,6 @@
 package source
 
-import "github.com/sarahmaeve/signatory/internal/signal/source/golang"
+import "github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 
 // AnomalyValue is the JSON-marshaled value of the
 // source_evolution_anomaly signal. Boolean+pointer summary derived
@@ -33,7 +33,7 @@ type AnomalyValue struct {
 	// SpikedFeatures lists the snake_case feature names that
 	// crossed from zero in PreviousVersion to non-zero in
 	// FirstAnomalousVersion. Sorted by appearance in the
-	// canonical golang.Features field order so output is stable.
+	// canonical astfeature.Counts field order so output is stable.
 	SpikedFeatures []string `json:"spiked_features,omitempty"`
 }
 
@@ -99,9 +99,9 @@ func DetectAnomaly(rows []MatrixRow) AnomalyValue {
 
 // spikedFeatures returns the snake_case feature names that crossed
 // from zero in older to non-zero in newer. Order matches the
-// golang.Features field declaration order so the output is stable
+// astfeature.Counts field declaration order so the output is stable
 // and matches the analyst-facing JSON tag names.
-func spikedFeatures(older, newer golang.Features) []string {
+func spikedFeatures(older, newer astfeature.Counts) []string {
 	var spiked []string
 	if older.InitCount == 0 && newer.InitCount > 0 {
 		spiked = append(spiked, "init_count")
@@ -120,6 +120,15 @@ func spikedFeatures(older, newer golang.Features) []string {
 	}
 	if older.Base64DecodeCalls == 0 && newer.Base64DecodeCalls > 0 {
 		spiked = append(spiked, "base64_decode_calls")
+	}
+	if older.DynamicEvalCalls == 0 && newer.DynamicEvalCalls > 0 {
+		spiked = append(spiked, "dynamic_eval_calls")
+	}
+	if older.ImportTimeCallSites == 0 && newer.ImportTimeCallSites > 0 {
+		spiked = append(spiked, "import_time_call_sites")
+	}
+	if older.InstallHookOverrides == 0 && newer.InstallHookOverrides > 0 {
+		spiked = append(spiked, "install_hook_overrides")
 	}
 	return spiked
 }
