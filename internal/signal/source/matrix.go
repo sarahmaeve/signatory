@@ -8,6 +8,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"time"
 
 	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
@@ -208,6 +209,16 @@ func (a *Assembler) Build(ctx context.Context, pinTable PinTable, opts BudgetOpt
 	}
 	allVersions = append(allVersions, pinTable.MissingOriginVersions...)
 	allVersions = append(allVersions, pinTable.FetchFailedVersions...)
+
+	// Chronological axis for budget recency + row order comes from
+	// the pin table's publish times (ecosystem-neutral). Only pinned
+	// versions carry a time; missing-origin / fetch-failed strings
+	// have none and fall back to semver via chronoCmpFunc.
+	pub := make(map[string]time.Time, len(pinTable.Pins))
+	for _, p := range pinTable.Pins {
+		pub[p.Version] = p.PublishedAt
+	}
+	opts.publishedAt = pub
 
 	sel := Select(allVersions, opts)
 
