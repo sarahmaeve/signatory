@@ -328,6 +328,74 @@ func TestBlobStreamer_EnumerateSourceFiles_OnlyReturnsGoSources(t *testing.T) {
 	assert.Contains(t, contents["internal/util/util.go"], "internal helper")
 }
 
+func TestIsPythonSourceFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"pkg/mod.py", true},
+		{"__init__.py", true},
+		{"a/b/c.py", true},
+		{"setup.py", true},
+		{"README.md", false},
+		{"mod.go", false},
+		{"mod.pyc", false},
+		{"mod.pyi", false}, // stub, not importable runtime source
+		{"test_mod.py", false},
+		{"mod_test.py", false},
+		{"conftest.py", false},
+		{"tests/test_x.py", false},
+		{"pkg/tests/helper.py", false},
+		{"test/x.py", false},
+		{"vendor/dep.py", false},
+		{"pkg/_vendor/dep.py", false},
+		{".venv/lib/x.py", false},
+		{"venv/lib/x.py", false},
+		{"pkg/site-packages/dep.py", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isPythonSourceFile(tc.path))
+		})
+	}
+}
+
+// TestBlobStreamer_WithSourceFileFilter_OverridesDefault pins the
+// per-language seam: EnumerateSourceFiles must honor the filter
+// supplied at construction rather than the hardwired Go default, so
+// a pypi entity streams .py instead of .go.
+func TestBlobStreamer_WithSourceFileFilter_OverridesDefault(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	runGit(t, tmp, "init", "-b", "main", "-q")
+	runGit(t, tmp, "config", "user.email", "test@example.invalid")
+	runGit(t, tmp, "config", "user.name", "Test")
+	runGit(t, tmp, "config", "commit.gpgsign", "false")
+	writeFile(t, tmp, "pkg/__init__.py", "VERSION = '1'\n")
+	writeFile(t, tmp, "pkg/core.py", "def f():\n    return 1\n")
+	writeFile(t, tmp, "pkg/test_core.py", "def test_f():\n    assert True\n")
+	writeFile(t, tmp, "helper.go", "package x\n")
+	writeFile(t, tmp, "README.md", "docs\n")
+	runGit(t, tmp, "add", ".")
+	runGit(t, tmp, "commit", "-m", "init")
+	headSHA := captureGitOutput(t, tmp, "rev-parse", "HEAD")
+
+	bs, err := NewBlobStreamer(t.Context(), tmp, WithSourceFileFilter(isPythonSourceFile))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	var paths []string
+	for sf, ferr := range bs.EnumerateSourceFiles(t.Context(), headSHA) {
+		require.NoError(t, ferr)
+		paths = append(paths, sf.Path)
+	}
+	// Only importable .py: helper.go (Go), test_core.py (test),
+	// README.md (not .py) excluded.
+	assert.ElementsMatch(t, []string{"pkg/__init__.py", "pkg/core.py"}, paths)
+}
+
 func TestBlobStreamer_EnumerateSourceFiles_MissingSHA_YieldsErrorAndStops(t *testing.T) {
 	t.Parallel()
 	clonePath, _ := initRepoForBlobStream(t)

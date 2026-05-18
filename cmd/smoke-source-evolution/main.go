@@ -666,8 +666,8 @@ type matrixAST struct {
 
 // matrixStructural mirrors source.Structural.
 type matrixStructural struct {
-	GoFileCount         int      `json:"go_file_count"`
-	GoLOC               int      `json:"go_loc"`
+	FileCount           int      `json:"file_count"`
+	LOC                 int      `json:"loc"`
 	NewTopLevelPackages []string `json:"new_top_level_packages"`
 	NewSymbolExports    []string `json:"new_symbol_exports"`
 }

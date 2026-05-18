@@ -53,8 +53,12 @@ type MatrixRow struct {
 // per-version package-set diffs. NewSymbolExports remains a
 // future-work field.
 type Structural struct {
-	GoFileCount         int      `json:"go_file_count"`
-	GoLOC               int      `json:"go_loc"`
+	// FileCount and LOC count the source files the per-language
+	// filter streamed (Go .go or Python .py), not Go specifically —
+	// the names were Go-only until pypi support; the json keys are
+	// language-neutral so a pypi matrix doesn't read as "go_loc".
+	FileCount           int      `json:"file_count"`
+	LOC                 int      `json:"loc"`
 	NewTopLevelPackages []string `json:"new_top_level_packages"`
 	NewSymbolExports    []string `json:"new_symbol_exports"`
 }
@@ -109,11 +113,30 @@ type SourceProvider interface {
 }
 
 // LanguageAnalyzer extracts AST construct counts from a stream of
-// source files. Factored out so a second language analyzer (pypi is
-// future work) can be substituted without touching the Assembler.
-// *golang.Analyzer satisfies it unmodified.
+// source files and names the language it analyzes. Factored out so a
+// second language analyzer can be substituted without touching the
+// Assembler. Language() feeds MatrixValue.Language/Ecosystem so the
+// emitted matrix self-describes instead of hardwiring "go".
+// *golang.Analyzer and *python.Analyzer satisfy it.
 type LanguageAnalyzer interface {
 	Analyze(ctx context.Context, files iter.Seq2[astfeature.SourceFile, error]) (astfeature.Counts, error)
+	Language() string
+}
+
+// ecosystemForLanguage maps an analyzer's language to the registry
+// ecosystem whose version_pin_table anchors the matrix. Narrow on
+// purpose: source-evolution supports exactly these today, and a
+// missing case should surface (empty string in the signal) rather
+// than be silently mislabeled.
+func ecosystemForLanguage(language string) string {
+	switch language {
+	case "go":
+		return "go"
+	case "python":
+		return "pypi"
+	default:
+		return ""
+	}
 }
 
 // Compile-time assertions that BlobStreamer satisfies SourceProvider
@@ -209,10 +232,11 @@ func (a *Assembler) Build(ctx context.Context, pinTable PinTable, opts BudgetOpt
 	// Pass 2: cross-version diff + new-packages population.
 	a.applyCrossVersion(ctx, rows, auxByIdx)
 
+	language := a.analyzer.Language()
 	return MatrixValue{
 		ModulePath: pinTable.ModulePath,
-		Ecosystem:  "go",
-		Language:   "go",
+		Ecosystem:  ecosystemForLanguage(language),
+		Language:   language,
 		Budget:     sel,
 		Rows:       rows,
 	}, nil
@@ -389,8 +413,8 @@ func (a *Assembler) analyzeAtSHA(ctx context.Context, sha string) (astfeature.Co
 	}
 
 	structural := Structural{
-		GoFileCount: len(files),
-		GoLOC:       totalLOC(files),
+		FileCount: len(files),
+		LOC:       totalLOC(files),
 		// NewTopLevelPackages is filled by applyCrossVersion (pass
 		// 2) when the previous-version's package set is known.
 		// NewSymbolExports remains future work.

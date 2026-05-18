@@ -64,6 +64,11 @@ func NewAnalyzer() *Analyzer {
 	return &Analyzer{}
 }
 
+// Language names the language this analyzer handles. Feeds
+// MatrixValue.Language/Ecosystem so the emitted matrix self-describes
+// instead of hardwiring "go".
+func (a *Analyzer) Language() string { return "go" }
+
 // Analyze parses the iterator of source files and returns aggregated
 // Features.
 //

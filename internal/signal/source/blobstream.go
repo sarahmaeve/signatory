@@ -72,6 +72,12 @@ type BlobStreamer struct {
 	// override via WithMaxBlobSize for tests or for callers that
 	// know their content fits a smaller envelope.
 	maxBlobSize int
+
+	// sourceFileFilter decides which tree paths EnumerateSourceFiles
+	// yields. Defaults to isGoSourceFile; WithSourceFileFilter swaps
+	// in a language-appropriate predicate (e.g. isPythonSourceFile
+	// for pypi entities) so the same streamer serves any ecosystem.
+	sourceFileFilter func(path string) bool
 }
 
 // defaultMaxBlobSize is the per-blob allocation cap applied to
@@ -120,6 +126,20 @@ func WithMaxBlobSize(n int) BlobStreamerOption {
 	return func(b *BlobStreamer) {
 		if n > 0 {
 			b.maxBlobSize = n
+		}
+	}
+}
+
+// WithSourceFileFilter overrides the predicate EnumerateSourceFiles
+// uses to decide which tree paths to yield. The default is
+// isGoSourceFile; the source-evolution collector passes
+// isPythonSourceFile for pypi entities. A nil filter is ignored
+// (the Go default stays) rather than yielding every blob — an
+// unfiltered stream would feed non-source into the analyzer.
+func WithSourceFileFilter(filter func(path string) bool) BlobStreamerOption {
+	return func(b *BlobStreamer) {
+		if filter != nil {
+			b.sourceFileFilter = filter
 		}
 	}
 }
@@ -192,14 +212,15 @@ func NewBlobStreamer(ctx context.Context, clonePath string, opts ...BlobStreamer
 	}
 
 	bs := &BlobStreamer{
-		clonePath:    clonePath,
-		cmd:          cmd,
-		stdin:        stdin,
-		stdout:       bufio.NewReader(stdout),
-		stderr:       &stderr,
-		parentCtx:    parentCtx,
-		parentCancel: parentCancel,
-		maxBlobSize:  defaultMaxBlobSize,
+		clonePath:        clonePath,
+		cmd:              cmd,
+		stdin:            stdin,
+		stdout:           bufio.NewReader(stdout),
+		stderr:           &stderr,
+		parentCtx:        parentCtx,
+		parentCancel:     parentCancel,
+		maxBlobSize:      defaultMaxBlobSize,
+		sourceFileFilter: isGoSourceFile,
 	}
 	// Options apply after the defaults so a caller's WithMaxBlobSize
 	// (or future tunables) overrides the const baked into the struct
@@ -416,7 +437,7 @@ func (b *BlobStreamer) EnumerateSourceFiles(ctx context.Context, sha string) ite
 			return
 		}
 		for _, blob := range blobs {
-			if !isGoSourceFile(blob.Path) {
+			if !b.sourceFileFilter(blob.Path) {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
@@ -650,6 +671,44 @@ func isGoSourceFile(path string) bool {
 	}
 	if strings.Contains(path, "/vendor/") {
 		return false
+	}
+	return true
+}
+
+// isPythonSourceFile reports whether the given posix-style path is a
+// Python source file the source-evolution analyzer wants to consume.
+// The Python analog of isGoSourceFile — same intent: the package's
+// own importable runtime source, not tests or bundled third-party
+// code. Excludes:
+//   - non-.py files (incl. .pyc bytecode and .pyi type stubs, which
+//     are not importable runtime source)
+//   - test files: test_*.py, *_test.py, conftest.py — they don't run
+//     on import
+//   - tests/ and test/ directories at any depth
+//   - vendored / virtual-env trees: vendor/, _vendor/, site-packages/,
+//     .venv/, venv/ at any depth
+//
+// Heuristic, deliberately conservative. Python lacks Go's single
+// vendor/ convention, so the exclude set is a best guess refined
+// when the Python analyzer (and real-data comparability) lands.
+func isPythonSourceFile(path string) bool {
+	if !strings.HasSuffix(path, ".py") {
+		return false
+	}
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "conftest.py" ||
+		strings.HasPrefix(base, "test_") ||
+		strings.HasSuffix(base, "_test.py") {
+		return false
+	}
+	for seg := range strings.SplitSeq(path, "/") {
+		switch seg {
+		case "tests", "test", "vendor", "_vendor", "site-packages", ".venv", "venv":
+			return false
+		}
 	}
 	return true
 }

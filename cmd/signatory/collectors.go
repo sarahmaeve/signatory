@@ -370,14 +370,19 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		)
 
 		// Source-evolution: per-version AST feature matrix.
-		// Requires clonePath AND a Go ecosystem classification —
-		// depends on gopublish's version_pin_table emission via
-		// opts.InRunResult / opts.Store.
+		// Requires clonePath AND a supported ecosystem — depends on
+		// the version_pin_table signal via opts.InRunResult /
+		// opts.Store. For Go that table comes from gopublish; for
+		// pypi from the pypi registry collector's attestation sweep.
+		// The collector itself selects the per-language file filter
+		// and analyzer from entity.Ecosystem (Python analysis is a
+		// placeholder until roadmap #4: structural + diff flow, AST
+		// stays zero).
 		//
 		// Appended LAST in the dispatch order so by the time it
-		// runs, the orchestrator's in-run accumulator already
-		// holds gopublish's version_pin_table from the same run.
-		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" {
+		// runs, the orchestrator's in-run accumulator already holds
+		// the version_pin_table emitted earlier in the same run.
+		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" || entity.Ecosystem == "pypi" {
 			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
 			collectors = append(collectors,
 				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),

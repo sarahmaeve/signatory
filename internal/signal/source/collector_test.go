@@ -13,6 +13,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
 
 // fakePinSource is a hand-built VersionPinSource for collector
@@ -97,6 +98,19 @@ func goEntity(modulePath string) *profile.Entity {
 		Type:         profile.EntityPackage,
 		Ecosystem:    "golang",
 		ShortName:    modulePath,
+	}
+}
+
+// pypiEntity returns a pypi-ecosystem profile.Entity. Source has
+// already been resolved to a clone by the time the source-evolution
+// collector runs, so only Ecosystem drives dispatch here.
+func pypiEntity(pkg string) *profile.Entity {
+	return &profile.Entity{
+		ID:           "ent-pypi-" + pkg,
+		CanonicalURI: "pkg:pypi/" + pkg,
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		ShortName:    pkg,
 	}
 }
 
@@ -442,6 +456,76 @@ func Hello() {}
 	var anomaly AnomalyValue
 	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
 	assert.False(t, anomaly.AnomalyPresent, "single-version matrix can't have a spike")
+}
+
+// TestCollector_PyPIEntity_EmitsBothSignals is the load-bearing
+// test for items #1+#2: a pypi entity must run the full
+// source-evolution pipeline off the version_pin_table the pypi
+// collector now emits. The collector must (a) not skip at the
+// ecosystem gate, (b) stream .py via isPythonSourceFile (not .go),
+// (c) use the Python placeholder analyzer so AST stays zero while
+// structural + diff still populate.
+func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
+	t.Parallel()
+
+	const v1 = "def f():\n    return 1\n"
+	const v2 = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"pkg/__init__.py": "VERSION = '1.0.0'\n",
+			"pkg/core.py":     v1,
+			// Decoys that must NOT be streamed: a .go file and a test.
+			"pkg/test_core.py": "def test_f():\n    assert True\n",
+			"setup.go":         "package x\n",
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"pkg/__init__.py": "VERSION = '1.1.0'\n",
+			"pkg/core.py":     v2,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "pypi-attestation"},
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "pypi-attestation"},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), pypiEntity("demo"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.SignalCount(),
+		"pypi entity must emit matrix + anomaly, not skip at the gate")
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+
+	assert.Equal(t, "pypi", matrix.Ecosystem,
+		"matrix must label a pypi entity as pypi, not the hardwired go")
+	assert.Equal(t, "python", matrix.Language,
+		"language must reflect the selected analyzer, not the hardwired go")
+
+	for _, row := range matrix.Rows {
+		require.NotNil(t, row.Structural, "structural pass must run for pypi (version %s)", row.Version)
+		assert.Positive(t, row.Structural.LOC,
+			"streamed .py LOC must be counted (version %s)", row.Version)
+		if row.AST != nil {
+			assert.Equal(t, astfeature.Counts{}, *row.AST,
+				"Python analyzer is a placeholder — AST stays zero until roadmap #4")
+		}
+	}
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.False(t, anomaly.AnomalyPresent,
+		"AST-blind Python can't spike an AST feature; no anomaly expected")
 }
 
 // TestCollector_Name_IsSourceEvolution pins the source-tracking
