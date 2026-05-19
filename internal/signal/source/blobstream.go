@@ -713,6 +713,60 @@ func isPythonSourceFile(path string) bool {
 	return true
 }
 
+// isNodeSourceFile reports whether the given posix-style path is a
+// JS/TS source file the source-evolution analyzer wants to consume.
+// The Node analog of isGoSourceFile / isPythonSourceFile — same
+// intent: the package's own authored runtime source, not tests, type
+// declarations, vendored deps, or build output. Excludes:
+//   - non-source extensions (only .js/.mjs/.cjs/.ts/.tsx/.jsx)
+//   - .d.ts TypeScript declaration files — types, not runtime source
+//   - .min.js — minified bundle output, not authored source
+//   - test/spec files: *.test.* and *.spec.* (any of the above exts)
+//   - __tests__/, test/, tests/ directories at any depth
+//   - node_modules/ (vendored), and dist/ build/ out/ build output
+//     trees at any depth
+//
+// Heuristic and deliberately conservative — JS has no single vendor
+// convention, so the exclude set is a best effort refined against
+// real-data comparability (mirrors the isPythonSourceFile note).
+func isNodeSourceFile(path string) bool {
+	// .d.ts is a declaration file even though it ends in .ts — check
+	// before the extension allowlist so it isn't admitted as TS.
+	if strings.HasSuffix(path, ".d.ts") {
+		return false
+	}
+	ext := false
+	for _, suf := range []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"} {
+		if strings.HasSuffix(path, suf) {
+			ext = true
+			break
+		}
+	}
+	if !ext {
+		return false
+	}
+	if strings.HasSuffix(path, ".min.js") {
+		return false
+	}
+
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	// test/spec file: a ".test." or ".spec." segment in the basename
+	// (foo.test.js, bar.spec.tsx).
+	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
+		return false
+	}
+	for seg := range strings.SplitSeq(path, "/") {
+		switch seg {
+		case "__tests__", "test", "tests", "node_modules", "dist", "build", "out":
+			return false
+		}
+	}
+	return true
+}
+
 // isMissingObjectMessage reports whether the stderr text from a
 // failing git command contains a phrasing that indicates the
 // requested SHA is unknown or unresolvable. Conservative: matches
