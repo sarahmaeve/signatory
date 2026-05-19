@@ -307,13 +307,23 @@ var (
 	}
 )
 
-// matchesCatalog reports whether callee equals a catalog entry or ends
-// with a "." boundary + an entry, so dotted suffixes match but
-// substrings don't (foo_https.get won't match https.get). Identical
-// semantics to the python analyzer's matcher.
+// matchesCatalog reports whether callee equals a catalog entry, or —
+// for DOTTED catalog entries only — ends with a "." boundary + the
+// entry. The bare/dotted split is the specificity contract AST.md §4
+// requires: a method merely named `.fetch` on an LRU cache, or any
+// object's `.atob`, is not the global fetch/atob and must not spike
+// the catalog. Dotted entries (`http.get`, `child_process.execSync`)
+// still suffix-match so an alias-resolved call from a require/import
+// binding (`cp.execSync` → `child_process.execSync`) lands.
+// Substrings without a "." boundary still don't match
+// (foo_https.get won't match https.get). Mirrors the python
+// analyzer's matcher with the same bare-entry discipline.
 func matchesCatalog(callee string, catalog []string) bool {
 	for _, entry := range catalog {
-		if callee == entry || strings.HasSuffix(callee, "."+entry) {
+		if callee == entry {
+			return true
+		}
+		if strings.Contains(entry, ".") && strings.HasSuffix(callee, "."+entry) {
 			return true
 		}
 	}

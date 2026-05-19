@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestParse_AdversarialInput_TerminatesAndDoesNotPanic is the
@@ -86,23 +85,42 @@ func TestParse_AdversarialInput_TerminatesAndDoesNotPanic(t *testing.T) {
 		},
 	}
 
+	// Result carries the goroutine's outcome back to the test goroutine.
+	// require.* must only be called from the test goroutine itself
+	// (testing package contract); ferrying (m, err, panicked) out via
+	// a channel keeps the assertions where t.FailNow is allowed and
+	// avoids the subtle bug where a future Parse-returns-error change
+	// would Goexit the inner goroutine and silently pass the outer
+	// select.
+	type result struct {
+		m        *Module
+		err      error
+		panicked any
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			done := make(chan struct{})
-			var panicked any
+			done := make(chan result, 1)
 			go func() {
-				defer func() { panicked = recover(); close(done) }()
-				m, err := Parse([]byte(tc.src))
-				// Lenient contract: never error, always a partial Module.
-				require.NoError(t, err)
-				require.NotNil(t, m)
+				var r result
+				defer func() {
+					r.panicked = recover()
+					done <- r
+				}()
+				r.m, r.err = Parse([]byte(tc.src))
 			}()
 			select {
-			case <-done:
-				assert.Nil(t, panicked,
-					"Parse panicked on %d-byte adversarial input (%s) — "+
-						"violates the AST.md §4 leniency contract", len(tc.src), tc.name)
+			case r := <-done:
+				if r.panicked != nil {
+					t.Fatalf("Parse panicked on %d-byte adversarial input (%s): %v — "+
+						"violates the AST.md §4 leniency contract",
+						len(tc.src), tc.name, r.panicked)
+				}
+				// Lenient contract: never error, always a partial Module.
+				assert.NoError(t, r.err,
+					"Parse must be lenient on adversarial input — AST.md §4")
+				assert.NotNil(t, r.m,
+					"Parse must return a best-effort partial Module — AST.md §4")
 			case <-time.After(deadline):
 				t.Fatalf("Parse did not terminate within %s on %d-byte "+
 					"adversarial input (%s) — super-linear blowup / unbounded "+

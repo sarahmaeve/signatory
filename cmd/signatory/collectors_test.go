@@ -889,6 +889,39 @@ func TestCollectorsFor_NpmEcosystem_NoGoPublishButSourceEvolution(t *testing.T) 
 			"collector's version_pin_table to emit the AST matrix + anomaly")
 }
 
+// TestCollectorsFor_PypiEcosystem_NoGoPublishButSourceEvolution pins
+// the pypi dispatch boundary, symmetric to the npm pin above. The
+// source-evolution collector consumes the pypi-registry collector's
+// attestation-derived version_pin_table; a regression that re-narrows
+// the source-evolution guard back to Go-only (or removes the "pypi"
+// arm of the four-ecosystem condition in collectorsFor) trips here.
+// gopublish must stay absent — proxy.golang.org is Go-specific.
+func TestCollectorsFor_PypiEcosystem_NoGoPublishButSourceEvolution(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/psf/requests")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:pypi/requests",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		URL:          "https://github.com/psf/requests",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, c := range collectors {
+		names[c.Name()] = true
+	}
+	assert.False(t, names["go-publish"],
+		"gopublish collector must NOT dispatch for pypi — it is proxy.golang.org-specific")
+	assert.True(t, names["source-evolution"],
+		"source-evolution MUST dispatch for pypi — it consumes the pypi-registry "+
+			"collector's attestation-derived version_pin_table to emit the AST matrix + anomaly")
+}
+
 // TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector pins the
 // post-Phase-E wiring: a pkg:pypi/ entity with no resolved github
 // URL still gets the pypi-registry collector (so publisher entities

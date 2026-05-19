@@ -137,6 +137,40 @@ func TestExtractSourceRepoDigest_RejectsNonSHAValue(t *testing.T) {
 	}
 }
 
+// TestExtractSourceRepoDigest_RejectsRawBytes is the format-drift
+// regression guard. The production code at fulcio.go intentionally
+// returns ("", false) when ext.Value is NOT a DER-wrapped string —
+// pre-v1.3 Fulcio emitted some claims as raw bytes, and admitting raw
+// bytes here would mean shipping potentially-garbage prefix octets
+// alongside the SHA into git argv. asn1.Unmarshal fails on raw bytes
+// because the first byte is treated as an unknown ASN.1 tag.
+//
+// Revert proof: change ExtractSourceRepoDigest to return the raw
+// bytes instead of ("", false) on Unmarshal failure; this test fails
+// because the helper extracts the SHA when it shouldn't.
+func TestExtractSourceRepoDigest_RejectsRawBytes(t *testing.T) {
+	t.Parallel()
+
+	const sha = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+	// Raw ASCII bytes — not DER-wrapped. A valid DER UTF8String for the
+	// same SHA would start with 0x0c (UTF8String tag) + length; raw
+	// bytes start with 'e' (0x65). asn1.Unmarshal sees the unknown tag
+	// and returns an error, which is exactly what the format-drift
+	// defense relies on.
+	cert := &x509.Certificate{
+		Extensions: []pkix.Extension{
+			{Id: sourceRepoDigestOID, Value: []byte(sha)},
+		},
+	}
+
+	got, ok := ExtractSourceRepoDigest(cert)
+	assert.False(t, ok,
+		"a raw-bytes (non-DER) extension value must be treated like an "+
+			"absent extension — admitting it would ship potentially-"+
+			"garbage prefix octets into git argv downstream")
+	assert.Equal(t, "", got)
+}
+
 // TestIsGitObjectID covers the shape gate directly: only 40-hex
 // (SHA-1) or 64-hex (SHA-256), any case, nothing else.
 func TestIsGitObjectID(t *testing.T) {
@@ -156,6 +190,15 @@ func TestIsGitObjectID(t *testing.T) {
 		{"newline", "ec11c4a93de22cde2abe2bf74d70791033c2464\n", false},
 		{"non-hex", "g3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", false},
 		{"41 hex", "ec11c4a93de22cde2abe2bf74d70791033c2464cc", false},
+		// Fencepost-minus-one for both supported lengths. A regression
+		// that changed the length check to `< 40` rather than `!= 40`
+		// would admit the 39-char case; the `!= 64` check has the same
+		// fencepost on the SHA-256 side. All-hex content isolates the
+		// length check from the byte check so we know what's failing.
+		{"sha1 minus 1 (39 hex)", strings.Repeat("a", 39), false},
+		{"sha256 minus 1 (63 hex)", strings.Repeat("a", 63), false},
+		// Between the two supported lengths: 41–63 are all rejected.
+		{"between sha1 and sha256 (50 hex)", strings.Repeat("a", 50), false},
 	}
 
 	for _, tc := range cases {

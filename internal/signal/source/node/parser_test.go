@@ -163,18 +163,27 @@ func TestParse_OpaqueLiteralsAreNotCalls(t *testing.T) {
 }
 
 // TestParse_LenientOnMalformed: adversarial/truncated input yields a
-// best-effort partial Module, never an error or panic.
+// best-effort partial Module, never an error or panic. Named subtests
+// so a single failing case can be re-run via -run
+// TestParse_LenientOnMalformed/<name>.
 func TestParse_LenientOnMalformed(t *testing.T) {
 	t.Parallel()
-	for _, src := range []string{
-		"function (",
-		"const = = =;",
-		"require(",
-		"})(){}{(",
-		"`unterminated ${ ",
-	} {
-		m, err := Parse([]byte(src))
-		require.NoError(t, err, "src=%q", src)
-		require.NotNil(t, m, "src=%q", src)
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"unclosed function header", "function ("},
+		{"triple equals sequence", "const = = =;"},
+		{"unclosed require call", "require("},
+		{"unbalanced punctuation soup", "})(){}{("},
+		{"unterminated template interpolation", "`unterminated ${ "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, err := Parse([]byte(tc.src))
+			require.NoError(t, err)
+			require.NotNil(t, m)
+		})
 	}
 }
