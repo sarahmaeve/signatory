@@ -45,6 +45,14 @@ type Call struct {
 	// with interpolation, names, and call results are unresolved by
 	// design (documented conservative gap). Feeds SensitivePathReads.
 	FirstArg string
+
+	// SecondArg is the statically-resolved second positional argument
+	// (same resolver/limits as FirstArg), or "". Needed because the
+	// dominant npm payload-decode primitive — Buffer.from(data,
+	// 'base64') — encodes the "this is a decode" intent in its
+	// SECOND argument, not the first. Feeds Base64DecodeCalls for the
+	// Buffer.from case.
+	SecondArg string
 }
 
 // jsNonCallKeywords are names that, standing alone before '(', are a
@@ -221,6 +229,7 @@ func (p *parser) run() {
 				ModuleScope: !p.inFunc(),
 				Line:        t.Line,
 				FirstArg:    resolveFirstArg(p.toks, next),
+				SecondArg:   resolveArgN(p.toks, next, 1),
 			})
 			i = next
 			continue
@@ -423,6 +432,7 @@ func (p *parser) parseRequireExpr(i int, _ string) (int, bool) {
 				ModuleScope: !p.inFunc(),
 				Line:        p.toks[i].Line,
 				FirstArg:    resolveFirstArg(p.toks, next),
+				SecondArg:   resolveArgN(p.toks, next, 1),
 			})
 			return next, true
 		}
@@ -443,6 +453,7 @@ func (p *parser) parseNew(i int) (int, bool) {
 		ModuleScope: !p.inFunc(),
 		Line:        p.toks[i].Line,
 		FirstArg:    resolveFirstArg(p.toks, next),
+		SecondArg:   resolveArgN(p.toks, next, 1),
 	})
 	return next, true
 }
@@ -535,11 +546,18 @@ func stringArg(toks []Token, i int) (spec string, closeIdx int, ok bool) {
 // resolveFirstArg returns the statically-resolved first positional
 // argument of the call whose '(' is at openIdx, or "".
 func resolveFirstArg(toks []Token, openIdx int) string {
+	return resolveArgN(toks, openIdx, 0)
+}
+
+// resolveArgN returns the statically-resolved n-th (0-based)
+// positional argument of the call whose '(' is at openIdx, or "".
+// Same resolver and adversarial bounds as resolveFirstArg.
+func resolveArgN(toks []Token, openIdx, n int) string {
 	args, _, ok := splitCallArgs(toks[openIdx:])
-	if !ok || len(args) == 0 {
+	if !ok || n >= len(args) {
 		return ""
 	}
-	s, resolved := resolveExpr(args[0], 0)
+	s, resolved := resolveExpr(args[n], 0)
 	if !resolved {
 		return ""
 	}

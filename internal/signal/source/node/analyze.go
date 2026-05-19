@@ -76,6 +76,14 @@ func accumulate(c *astfeature.Counts, mod *Module) {
 			c.NetworkCallSites++
 		case matchesCatalog(call.Callee, base64DecodeCallees):
 			c.Base64DecodeCalls++
+		case isBufferDecode(call):
+			// Buffer.from(data, 'base64') is THE npm payload-decode
+			// primitive — but the decode intent lives in the SECOND
+			// arg, so it needs the resolved encoding, not just the
+			// callee. Text encodings (utf8/ascii/latin1/…) are
+			// ordinary buffer construction and must NOT count, so the
+			// no-false-positive property holds.
+			c.Base64DecodeCalls++
 		case matchesCatalog(call.Callee, pathReadCallees) && isSensitivePath(call.FirstArg):
 			c.SensitivePathReads++
 		}
@@ -99,6 +107,28 @@ func isDynamicEval(callee string) bool {
 		return true
 	}
 	return false
+}
+
+// bufferDecodeEncodings are the Buffer.from second-arg values that
+// mean "decode an opaque payload" rather than "construct a buffer
+// from text". Text encodings (utf8/ascii/latin1/binary/utf16le/ucs2)
+// are deliberately excluded so ordinary Buffer.from(str,'utf8') and
+// Buffer.from(array) never count — the no-false-positive contract.
+var bufferDecodeEncodings = map[string]struct{}{
+	"base64": {}, "base64url": {}, "hex": {},
+}
+
+// isBufferDecode reports whether call is Buffer.from(data, <enc>)
+// where <enc> statically resolves to an opaque-payload decode
+// encoding. Scoped to the exact `Buffer.from` callee (Buffer is a
+// global; a method merely named .from on something else reaches here
+// as ".from" and never matches) so the specificity is the signal.
+func isBufferDecode(call Call) bool {
+	if call.Callee != "Buffer.from" {
+		return false
+	}
+	_, ok := bufferDecodeEncodings[call.SecondArg]
+	return ok
 }
 
 // The dotted-suffix catalogs. Module names are post-normalization

