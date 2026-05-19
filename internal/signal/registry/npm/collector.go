@@ -235,6 +235,17 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// HTTP call each to upgrade their pin to the Fulcio-cert SHA.
 	c.recordVersionPinTable(ctx, result, entity.ID, pkg, collectedAt)
 
+	// ----- attestation provenance (publication) -----
+	//
+	// trusted_publishing only reports attestation PRESENCE. The
+	// TanStack careful-variant keeps every version attested but
+	// changes the attesting workflow ref (out-of-band publish with a
+	// scraped OIDC token). This sweep extracts the Fulcio build-signer
+	// identity per recent attested version and emits the same
+	// latest_attestation_builder + attestation_consistency shape pypi
+	// does, so the store schema is uniform across ecosystems.
+	c.recordAttestationProvenance(ctx, result, entity.ID, pkg, collectedAt)
+
 	return result, nil
 }
 
@@ -1310,6 +1321,119 @@ func (c *Collector) upgradePinsFromAttestations(ctx context.Context,
 		})
 		idx[r.version] = len(*pins) - 1
 	}
+}
+
+// npmAttestationWindow bounds how many recent versions the
+// attestation-consistency sweep fetches. Matches pypi's
+// attestationWindow (5): enough to see a workflow-ref transition
+// without paying a GetAttestation round-trip for deep history.
+const npmAttestationWindow = 5
+
+// recordAttestationProvenance sweeps the recent attested versions,
+// recovers each one's Fulcio build identity, and emits
+// latest_attestation_builder + attestation_consistency in the same
+// shape the pypi collector uses (uniform store schema). Emits nothing
+// when no recent version advertises an attestation — trusted_publishing
+// already covers the never-adopted case, and a sweep with no data
+// would be noise.
+//
+// Bounded HTTP: at most npmAttestationWindow GetAttestation calls,
+// only for versions whose packument entry advertises an attestation.
+func (c *Collector) recordAttestationProvenance(ctx context.Context,
+	result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	recent := recentVersionsByPublishTime(pkg, npmAttestationWindow)
+
+	type entry struct {
+		version  string
+		attested bool
+		sha      string
+		builder  fulcio.BuilderIdentity
+	}
+	checked := make([]entry, 0, len(recent))
+	anyAttested := false
+	for _, r := range recent {
+		e := entry{version: r.version}
+		if r.hasAttestation {
+			if resp, err := c.client.GetAttestation(ctx, pkg.Name, r.version); err == nil {
+				if sha, b, ok := extractProvenanceFromNpmAttestation(resp); ok {
+					e.attested = true
+					e.sha = sha
+					e.builder = b
+					anyAttested = true
+				}
+			}
+		}
+		checked = append(checked, e)
+	}
+	if len(checked) == 0 || !anyAttested {
+		return // never adopted trusted publishing — nothing to compare
+	}
+
+	// workflowRefs is newest-first, "" where unattested/unknown.
+	workflowRefs := make([]string, len(checked))
+	uniq := map[string]struct{}{}
+	attestedCount, unattestedCount := 0, 0
+	for i, e := range checked {
+		workflowRefs[i] = e.builder.BuildSignerURI
+		if e.builder.BuildSignerURI != "" {
+			uniq[e.builder.BuildSignerURI] = struct{}{}
+		}
+		if e.attested {
+			attestedCount++
+		} else {
+			unattestedCount++
+		}
+	}
+	// Adjacent-pair transitions: any flip (presence or workflow ref),
+	// "" ↔ "X" included — the axios presence loss and the TanStack
+	// workflow-ref change both surface here.
+	transitions := 0
+	for i := 1; i < len(workflowRefs); i++ {
+		if workflowRefs[i-1] != workflowRefs[i] {
+			transitions++
+		}
+		if checked[i-1].attested != checked[i].attested {
+			// presence flip not already counted via a ref change
+			if workflowRefs[i-1] == workflowRefs[i] {
+				transitions++
+			}
+		}
+	}
+	consistent := len(uniq) <= 1 && unattestedCount == 0
+	transitionDetected := transitions > 0
+
+	latest := checked[0]
+	builderKind := ""
+	extractionStatus := "no_attestation"
+	if latest.attested {
+		extractionStatus = "ok"
+		builderKind = "GitHub" // Fulcio GHA OIDC; the only npm provenance issuer today
+	}
+	result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present":           latest.attested,
+			"version_checked":   latest.version,
+			"builder_kind":      builderKind,
+			"source_repository": latest.builder.SourceRepoURI,
+			"source_revision":   latest.sha,
+			"workflow":          latest.builder.BuildSignerURI,
+			"extraction_status": extractionStatus,
+		})
+
+	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL,
+		map[string]any{
+			"consistent":               consistent,
+			"versions_checked":         len(checked),
+			"versions_attested":        attestedCount,
+			"versions_unattested":      unattestedCount,
+			"transition_detected":      transitionDetected,
+			"workflow_refs":            workflowRefs,
+			"latest_workflow_ref":      workflowRefs[0],
+			"unique_workflow_refs":     len(uniq),
+			"workflow_ref_transitions": transitions,
+		})
 }
 
 // sanitizeFetchReason converts a fetch error into a reason string

@@ -76,6 +76,80 @@ func ExtractSourceRepoDigest(cert *x509.Certificate) (string, bool) {
 	return "", false
 }
 
+// GitHub-Actions OIDC build-claim OIDs (Fulcio v1.3+ registry). These
+// describe WHICH workflow at WHICH ref built the artifact — the
+// identity presence-only attestation can't see. Unlike the source-
+// repo-digest these are not git object ids; they are URI/ref strings
+// that flow into a persisted signal value and analyst JSON (never a
+// git argv), so they get a printable-safe gate, not IsGitObjectID.
+var (
+	sourceRepoURIOID  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 12}
+	sourceRepoRefOID  = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 14}
+	buildSignerURIOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 9}
+)
+
+// BuilderIdentity is the publisher-side build provenance recovered
+// from a Fulcio cert: which repository, at which ref, via which
+// workflow file. A change in BuildSignerURI across attested versions
+// is the TanStack careful-variant tell (every version attested, but
+// the attesting workflow changed) that a presence-only boolean misses.
+type BuilderIdentity struct {
+	SourceRepoURI  string
+	SourceRepoRef  string
+	BuildSignerURI string
+}
+
+// maxClaimLen bounds a build-claim string. Real values are short URIs;
+// anything larger is malformed or hostile (the cert is not verified
+// here) and is dropped rather than persisted.
+const maxClaimLen = 512
+
+// safeClaim returns the DER-unwrapped extension string if it is a
+// single printable line within the length bound, else ("", false).
+// Rejects newline/control-char injection and absurd lengths so an
+// attacker-controlled cert can't corrupt the persisted signal or
+// analyst-facing JSON.
+func safeClaim(cert *x509.Certificate, id asn1.ObjectIdentifier) (string, bool) {
+	for _, ext := range cert.Extensions {
+		if !ext.Id.Equal(id) {
+			continue
+		}
+		var s string
+		if rest, err := asn1.Unmarshal(ext.Value, &s); err != nil || len(rest) != 0 {
+			return "", false
+		}
+		if s == "" || len(s) > maxClaimLen {
+			return "", false
+		}
+		for i := 0; i < len(s); i++ {
+			if s[i] < 0x20 || s[i] == 0x7f {
+				return "", false // control char / newline
+			}
+		}
+		return s, true
+	}
+	return "", false
+}
+
+// ExtractBuilderIdentity recovers the GitHub-Actions build claims from
+// cert. Returns ok=true if at least one of source-repo URI or
+// build-signer URI is present and safe; individual unsafe/absent
+// claims are left empty rather than failing the whole extraction
+// (silent degradation, same contract as ExtractSourceRepoDigest).
+func ExtractBuilderIdentity(cert *x509.Certificate) (BuilderIdentity, bool) {
+	if cert == nil {
+		return BuilderIdentity{}, false
+	}
+	var id BuilderIdentity
+	id.SourceRepoURI, _ = safeClaim(cert, sourceRepoURIOID)
+	id.SourceRepoRef, _ = safeClaim(cert, sourceRepoRefOID)
+	id.BuildSignerURI, _ = safeClaim(cert, buildSignerURIOID)
+	if id.SourceRepoURI == "" && id.BuildSignerURI == "" {
+		return BuilderIdentity{}, false
+	}
+	return id, true
+}
+
 // IsGitObjectID reports whether s is a syntactically valid git object
 // name: a lowercase-or-uppercase hex string of exactly SHA-1 (40) or
 // SHA-256 (64) length. This is the shape git itself accepts as a full

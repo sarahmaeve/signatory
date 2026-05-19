@@ -60,20 +60,39 @@ func newProvenanceServer(t *testing.T, registryBody, downloadsBody, attestBody s
 // only the extension matters for the extraction path under test.
 func npmProvenanceBody(t *testing.T, wantSHA string) string {
 	t.Helper()
+	return npmProvenanceBodyFull(t, wantSHA, "", "", "")
+}
 
-	oidValue, err := asn1.MarshalWithParams(wantSHA, "utf8")
-	require.NoError(t, err)
+// npmProvenanceBodyFull synthesizes a provenance envelope whose Fulcio
+// cert carries the source-repo digest (.1.13) plus, when non-empty,
+// the GitHub-Actions build claims: source-repo URI (.1.12), source
+// ref (.1.14), build-signer/workflow URI (.1.9).
+func npmProvenanceBodyFull(t *testing.T, wantSHA, repoURI, ref, workflowURI string) string {
+	t.Helper()
+
+	exts := []pkix.Extension{}
+	add := func(n int, v string) {
+		if v == "" {
+			return
+		}
+		der, err := asn1.MarshalWithParams(v, "utf8")
+		require.NoError(t, err)
+		exts = append(exts, pkix.Extension{
+			Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, n}, Value: der,
+		})
+	}
+	add(13, wantSHA)
+	add(12, repoURI)
+	add(14, ref)
+	add(9, workflowURI)
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		ExtraExtensions: []pkix.Extension{
-			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 13}, Value: oidValue},
-		},
+		SerialNumber:    big.NewInt(1),
+		NotBefore:       time.Now().Add(-time.Hour),
+		NotAfter:        time.Now().Add(time.Hour),
+		ExtraExtensions: exts,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	require.NoError(t, err)
@@ -93,6 +112,33 @@ func npmProvenanceBody(t *testing.T, wantSHA string) string {
 	    }
 	  ]
 	}`
+}
+
+// newProvenanceServerByVersion routes the attestation endpoint per
+// version: the request path is /-/npm/v1/attestations/<name>@<ver>,
+// so it serves bodyByVersion[ver] for the first version key whose
+// "@<ver>" appears in the path. A version with no entry 404s.
+func newProvenanceServerByVersion(t *testing.T, registryBody, downloadsBody string,
+	bodyByVersion map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/-/npm/v1/attestations/"):
+			for ver, body := range bodyByVersion {
+				if strings.Contains(r.URL.Path, "@"+ver) {
+					fmt.Fprint(w, body)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
+		case strings.HasPrefix(r.URL.Path, "/downloads/"):
+			fmt.Fprint(w, downloadsBody)
+		default:
+			fmt.Fprint(w, registryBody)
+		}
+	}))
 }
 
 // newMultiEndpointServer builds an httptest server that handles both
@@ -2007,4 +2053,84 @@ func TestCollector_Collect_MaintainerEmailSet_HashedNoPII(t *testing.T) {
 		"raw email domain must never appear in the persisted signal (PII)")
 	assert.NotContains(t, string(raw), "bob@",
 		"raw email local-part must never appear in the persisted signal")
+}
+
+// TestCollector_Collect_AttestationConsistency_WorkflowRefChange is
+// the TanStack careful-variant: every version is attested (presence
+// alone is clean) but the attesting workflow ref changes on the
+// latest publish. The boolean trusted_publishing can't see this;
+// attestation_consistency must, by tracking the Fulcio build-signer
+// URI across the window. latest_attestation_builder must surface the
+// latest version's builder identity.
+func TestCollector_Collect_AttestationConsistency_WorkflowRefChange(t *testing.T) {
+	t.Parallel()
+
+	const (
+		repo   = "https://github.com/acme/widget"
+		wfMain = "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/main"
+		wfEvil = "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/attacker"
+		sha    = "feedface00000000000000000000000000000000"
+	)
+	registryBody := `{
+	  "name": "widget",
+	  "dist-tags": {"latest": "1.2.0"},
+	  "time": {
+	    "1.0.0": "2026-01-01T00:00:00Z",
+	    "1.1.0": "2026-02-01T00:00:00Z",
+	    "1.2.0": "2026-03-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "acme"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "dist": {"attestations": {"url": "x"}}},
+	    "1.1.0": {"scripts": {}, "dist": {"attestations": {"url": "x"}}},
+	    "1.2.0": {"scripts": {}, "dist": {"attestations": {"url": "x"}}}
+	  }
+	}`
+	bodies := map[string]string{
+		"1.0.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/main", wfMain),
+		"1.1.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/main", wfMain),
+		"1.2.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/attacker", wfEvil),
+	}
+	srv := newProvenanceServerByVersion(t, registryBody,
+		`{"downloads":1,"package":"widget"}`, bodies)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("widget"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "latest_attestation_builder"))
+	b := getSignalValue(t, result, "latest_attestation_builder")
+	assert.Equal(t, true, b["present"])
+	assert.Equal(t, "1.2.0", b["version_checked"])
+	assert.Equal(t, repo, b["source_repository"])
+	assert.Equal(t, wfEvil, b["workflow"],
+		"the latest builder must reflect the changed (attacker) workflow ref")
+
+	require.True(t, hasSignal(result, "attestation_consistency"))
+	c := getSignalValue(t, result, "attestation_consistency")
+	assert.EqualValues(t, 3, c["versions_checked"])
+	assert.EqualValues(t, 3, c["versions_attested"])
+	assert.EqualValues(t, 2, c["unique_workflow_refs"],
+		"two distinct workflow refs across the window")
+	assert.Positive(t, c["workflow_ref_transitions"],
+		"the main→attacker workflow flip is a transition presence-only "+
+			"attestation is blind to")
+	assert.Equal(t, true, c["transition_detected"])
+
+	// Stable baseline: identical workflow every version → no transition.
+	stable := map[string]string{
+		"1.0.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/main", wfMain),
+		"1.1.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/main", wfMain),
+		"1.2.0": npmProvenanceBodyFull(t, sha, repo, "refs/heads/main", wfMain),
+	}
+	srv2 := newProvenanceServerByVersion(t, registryBody,
+		`{"downloads":1,"package":"widget"}`, stable)
+	defer srv2.Close()
+	res2, err := newTestCollector(srv2).Collect(context.Background(), npmEntity("widget"))
+	require.NoError(t, err)
+	c2 := getSignalValue(t, res2, "attestation_consistency")
+	assert.EqualValues(t, 1, c2["unique_workflow_refs"])
+	assert.EqualValues(t, 0, c2["workflow_ref_transitions"])
+	assert.Equal(t, false, c2["transition_detected"],
+		"a stable workflow across the window is the healthy shape")
 }

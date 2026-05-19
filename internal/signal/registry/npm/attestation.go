@@ -104,3 +104,54 @@ func extractGitHeadFromNpmAttestation(resp *AttestationsResponse) (string, bool)
 	}
 	return "", false
 }
+
+// npmAttestationCerts walks the envelope and returns every parsed
+// leaf/chain certificate, in encounter order. Shared by the
+// digest-only and full-provenance extractors so the bundle-shape
+// handling lives in one place.
+func npmAttestationCerts(resp *AttestationsResponse) []*x509.Certificate {
+	if resp == nil {
+		return nil
+	}
+	var certs []*x509.Certificate
+	for _, att := range resp.Attestations {
+		vm := att.Bundle.VerificationMaterial
+		var raws []string
+		if vm.Certificate != nil && vm.Certificate.RawBytes != "" {
+			raws = append(raws, vm.Certificate.RawBytes)
+		}
+		if vm.X509CertificateChain != nil {
+			for _, c := range vm.X509CertificateChain.Certificates {
+				if c.RawBytes != "" {
+					raws = append(raws, c.RawBytes)
+				}
+			}
+		}
+		for _, raw := range raws {
+			der, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil {
+				continue
+			}
+			if cert, err := x509.ParseCertificate(der); err == nil {
+				certs = append(certs, cert)
+			}
+		}
+	}
+	return certs
+}
+
+// extractProvenanceFromNpmAttestation recovers BOTH the source-repo
+// digest and the GitHub-Actions builder identity from the first cert
+// that yields a digest. ok is true when a digest was found; the
+// BuilderIdentity may be partially or wholly empty (silent
+// degradation — a digest with no build claims still anchors the pin
+// and the consistency signal records "builder unknown").
+func extractProvenanceFromNpmAttestation(resp *AttestationsResponse) (string, fulcio.BuilderIdentity, bool) {
+	for _, cert := range npmAttestationCerts(resp) {
+		if sha, ok := fulcio.ExtractSourceRepoDigest(cert); ok {
+			builder, _ := fulcio.ExtractBuilderIdentity(cert)
+			return sha, builder, true
+		}
+	}
+	return "", fulcio.BuilderIdentity{}, false
+}
