@@ -2,18 +2,95 @@ package npm
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 )
+
+// newProvenanceServer extends newMultiEndpointServer with the npm
+// provenance attestation endpoint. Any request under
+// /-/npm/v1/attestations/ is served attestBody; downloads and the
+// packument route as before. The attestation tail (name@version) is
+// not matched precisely — these tests serve a single version's
+// attestation, so prefix routing is enough to exercise the
+// client→parse→extract→upgrade path.
+func newProvenanceServer(t *testing.T, registryBody, downloadsBody, attestBody string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/-/npm/v1/attestations/"):
+			if attestBody == "" {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"error":"not found"}`)
+				return
+			}
+			fmt.Fprint(w, attestBody)
+		case strings.HasPrefix(r.URL.Path, "/downloads/"):
+			fmt.Fprint(w, downloadsBody)
+		default:
+			fmt.Fprint(w, registryBody)
+		}
+	}))
+}
+
+// npmProvenanceBody synthesizes an npm provenance attestation
+// envelope whose leaf cert carries the Fulcio source-repo-digest OID
+// set to wantSHA. Mirrors pypi/cert_test's self-signed-cert approach:
+// only the extension matters for the extraction path under test.
+func npmProvenanceBody(t *testing.T, wantSHA string) string {
+	t.Helper()
+
+	oidValue, err := asn1.MarshalWithParams(wantSHA, "utf8")
+	require.NoError(t, err)
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 13}, Value: oidValue},
+		},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	b64 := base64.StdEncoding.EncodeToString(der)
+
+	return `{
+	  "attestations": [
+	    {
+	      "predicateType": "https://slsa.dev/provenance/v1",
+	      "bundle": {
+	        "verificationMaterial": {
+	          "x509CertificateChain": {
+	            "certificates": [ { "rawBytes": "` + b64 + `" } ]
+	          }
+	        }
+	      }
+	    }
+	  ]
+	}`
+}
 
 // newMultiEndpointServer builds an httptest server that handles both
 // the registry package endpoint (/<name>) and the downloads endpoint
@@ -1537,4 +1614,341 @@ func TestCollector_Collect_NpmDependencies_NoDeps_EmitsZeroSurface(t *testing.T)
 	dep := getSignalValue(t, result, "npm_dependencies")
 	assert.EqualValues(t, 0, dep["direct_count"])
 	assert.EqualValues(t, 0, dep["total_count"])
+}
+
+// ----- version_pin_table: per-version (version, sha, published_at)
+// triples the source-evolution collector anchors its matrix on.
+//
+// npm carries the publisher-stamped commit SHA per version directly
+// in the packument (versions[v].gitHead), so unlike pypi — which has
+// to recover SHAs from a separate Fulcio attestation sweep — the npm
+// pin table is a pure re-parse of data GetPackage already fetched.
+// The emitted value mirrors gopublish's version_pin_table JSON shape
+// verbatim so the ecosystem-blind source.pinTableFromSignals consumer
+// serves npm with zero new code.
+
+// TestCollector_Collect_VersionPinTable_FromGitHead pins the happy
+// path: every version with a usable gitHead AND a time entry becomes
+// a pin, stamped source "npm-gitHead", newest-first by publish time.
+func TestCollector_Collect_VersionPinTable_FromGitHead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sha100 = "1111111111111111111111111111111111111111"
+		sha110 = "2222222222222222222222222222222222222222"
+		sha200 = "3333333333333333333333333333333333333333"
+	)
+	registryBody := `{
+	  "name": "pinned-pkg",
+	  "dist-tags": {"latest": "2.0.0"},
+	  "time": {
+	    "1.0.0": "2026-01-01T00:00:00Z",
+	    "1.1.0": "2026-02-01T00:00:00Z",
+	    "2.0.0": "2026-03-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "gitHead": "` + sha100 + `", "dist": {}},
+	    "1.1.0": {"scripts": {}, "gitHead": "` + sha110 + `", "dist": {}},
+	    "2.0.0": {"scripts": {}, "gitHead": "` + sha200 + `", "dist": {}}
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "pinned-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("pinned-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"),
+		"version_pin_table must land when versions carry gitHead — it is "+
+			"the per-version SHA anchor the source-evolution matrix needs")
+	v := getSignalValue(t, result, "version_pin_table")
+
+	assert.Equal(t, "pinned-pkg", v["module_path"],
+		"module_path is the npm package name (gopublish-shape parity)")
+	assert.EqualValues(t, 3, v["version_count_total"],
+		"version_count_total is the full versions-map size")
+	assert.EqualValues(t, 3, v["version_count_processed"],
+		"all three versions had an orderable time entry, so all were processed")
+
+	pins, ok := v["pins"].([]any)
+	require.True(t, ok, "pins must be a JSON array")
+	require.Len(t, pins, 3, "every version with a valid gitHead is pinned")
+
+	// Newest-first: 2.0.0, 1.1.0, 1.0.0.
+	want := []struct{ version, sha, published string }{
+		{"2.0.0", sha200, "2026-03-01T00:00:00Z"},
+		{"1.1.0", sha110, "2026-02-01T00:00:00Z"},
+		{"1.0.0", sha100, "2026-01-01T00:00:00Z"},
+	}
+	for i, w := range want {
+		p := pins[i].(map[string]any)
+		assert.Equal(t, w.version, p["version"], "pin %d version", i)
+		assert.Equal(t, w.sha, p["sha"], "pin %d sha is the verbatim gitHead", i)
+		assert.Equal(t, "npm-gitHead", p["source"],
+			"pin %d source label records gitHead provenance (low forgery "+
+				"resistance — publisher-asserted)", i)
+		assert.Equal(t, w.published, p["published_at"],
+			"pin %d published_at is the registry time entry, RFC3339 UTC", i)
+	}
+}
+
+// TestCollector_Collect_VersionPinTable_SkipsUnusableVersions pins the
+// processed-vs-pinned accounting: a version with no time entry can't
+// be ordered on the matrix's chronological axis (skipped entirely);
+// a version with a time entry but no gitHead is processed-but-not-
+// pinned. Mirrors pypi's "attested but no Fulcio SHA" semantics.
+func TestCollector_Collect_VersionPinTable_SkipsUnusableVersions(t *testing.T) {
+	t.Parallel()
+
+	const goodSHA = "abcabcabcabcabcabcabcabcabcabcabcabcabca"
+	registryBody := `{
+	  "name": "partial-pkg",
+	  "dist-tags": {"latest": "3.0.0"},
+	  "time": {
+	    "1.0.0": "2026-01-01T00:00:00Z",
+	    "2.0.0": "2026-02-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "gitHead": "` + goodSHA + `", "dist": {}},
+	    "2.0.0": {"scripts": {}, "dist": {}},
+	    "3.0.0": {"scripts": {}, "gitHead": "` + goodSHA + `", "dist": {}}
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "partial-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("partial-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"),
+		"one usable pin (1.0.0) is enough to emit the table")
+	v := getSignalValue(t, result, "version_pin_table")
+
+	assert.EqualValues(t, 3, v["version_count_total"],
+		"total counts every version in the map, usable or not")
+	assert.EqualValues(t, 2, v["version_count_processed"],
+		"3.0.0 has no time entry (unorderable, skipped); 1.0.0 and 2.0.0 "+
+			"have time and were processed")
+
+	pins := v["pins"].([]any)
+	require.Len(t, pins, 1,
+		"only 1.0.0 had both a time entry and a valid gitHead; 2.0.0 was "+
+			"processed but not pinned (no gitHead)")
+	assert.Equal(t, "1.0.0", pins[0].(map[string]any)["version"])
+}
+
+// TestCollector_Collect_VersionPinTable_AbsentWhenNoUsablePins pins
+// the no-signal case: a package whose versions carry no gitHead at
+// all (npm v<5 publishes, certain CI) emits no version_pin_table —
+// the source-evolution collector then records its own absence with a
+// clear reason rather than building an empty matrix.
+func TestCollector_Collect_VersionPinTable_AbsentWhenNoUsablePins(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "ancient-pkg",
+	  "dist-tags": {"latest": "0.2.0"},
+	  "time": {
+	    "0.1.0": "2014-01-01T00:00:00Z",
+	    "0.2.0": "2014-06-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "old-timer"}],
+	  "versions": {
+	    "0.1.0": {"scripts": {}, "dist": {}},
+	    "0.2.0": {"scripts": {}, "dist": {}}
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "ancient-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("ancient-pkg"))
+	require.NoError(t, err)
+
+	assert.False(t, hasSignal(result, "version_pin_table"),
+		"no version carried a gitHead, so there is nothing to pin — the "+
+			"signal must not be emitted with an empty pins array")
+}
+
+// TestCollector_Collect_VersionPinTable_RejectsMalformedGitHead is the
+// trust-boundary test. gitHead is publisher-asserted and unverified;
+// the value flows verbatim from the pin table into `git ls-tree
+// -r <sha>`, `git cat-file --batch` stdin, and `git diff <a> <b>`
+// argv inside the source-evolution collector. A gitHead that is not a
+// real git object id — flag-shaped, newline-bearing, non-hex,
+// abbreviated — must be rejected here exactly like an absent gitHead
+// (version processed, not pinned) so a forged value never reaches a
+// git subprocess. A real 40-hex SHA-1 alongside the attack shapes
+// must still pin (regression guard).
+func TestCollector_Collect_VersionPinTable_RejectsMalformedGitHead(t *testing.T) {
+	t.Parallel()
+
+	const validSHA = "feed00000000000000000000000000000000beef"
+	registryBody := `{
+	  "name": "hostile-pkg",
+	  "dist-tags": {"latest": "9.0.0"},
+	  "time": {
+	    "1.0.0": "2026-01-01T00:00:00Z",
+	    "2.0.0": "2026-02-01T00:00:00Z",
+	    "3.0.0": "2026-03-01T00:00:00Z",
+	    "4.0.0": "2026-04-01T00:00:00Z",
+	    "5.0.0": "2026-05-01T00:00:00Z",
+	    "9.0.0": "2026-09-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "attacker"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "gitHead": "--upload-pack=/tmp/evil", "dist": {}},
+	    "2.0.0": {"scripts": {}, "gitHead": "-rf", "dist": {}},
+	    "3.0.0": {"scripts": {}, "gitHead": "feed0000\n0000000000000000000000000000beef", "dist": {}},
+	    "4.0.0": {"scripts": {}, "gitHead": "not-a-real-sha", "dist": {}},
+	    "5.0.0": {"scripts": {}, "gitHead": "feed00", "dist": {}},
+	    "9.0.0": {"scripts": {}, "gitHead": "` + validSHA + `", "dist": {}}
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "hostile-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("hostile-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"),
+		"the one valid gitHead (9.0.0) still produces a usable pin")
+	v := getSignalValue(t, result, "version_pin_table")
+
+	assert.EqualValues(t, 6, v["version_count_total"])
+	assert.EqualValues(t, 6, v["version_count_processed"],
+		"all six versions had a time entry — all processed; the five "+
+			"malformed gitHeads are processed-but-not-pinned, not skipped")
+
+	pins := v["pins"].([]any)
+	require.Len(t, pins, 1,
+		"only the syntactically valid git object id is pinned; the five "+
+			"attack-shaped gitHeads must be rejected at the trust boundary")
+	p := pins[0].(map[string]any)
+	assert.Equal(t, "9.0.0", p["version"])
+	assert.Equal(t, validSHA, p["sha"],
+		"a forged gitHead must never appear as a pin SHA — it would flow "+
+			"into git ls-tree / cat-file / diff argv downstream")
+}
+
+// ----- version_pin_table: attestation SHA upgrade.
+//
+// gitHead is publisher-asserted (low forgery resistance). When a
+// version also carries an npm provenance attestation, the Fulcio
+// source-repo-digest in the attestation's cert is a higher-confidence
+// SHA: only Fulcio's CA can issue it, against a real CI OIDC token.
+// The pin upgrades to that SHA and stamps the stronger "npm-attestation"
+// source label so an analyst reading the matrix can tell the two
+// provenance strengths apart. Versions without an attestation keep
+// their gitHead pin.
+
+func findPin(t *testing.T, v map[string]any, version string) map[string]any {
+	t.Helper()
+	for _, raw := range v["pins"].([]any) {
+		p := raw.(map[string]any)
+		if p["version"] == version {
+			return p
+		}
+	}
+	t.Fatalf("no pin for version %q", version)
+	return nil
+}
+
+// TestCollector_Collect_VersionPinTable_AttestationUpgrade pins the
+// upgrade: the attested version's pin SHA is the Fulcio cert digest
+// (not its gitHead), stamped "npm-attestation"; the unattested
+// version keeps its gitHead pin stamped "npm-gitHead".
+func TestCollector_Collect_VersionPinTable_AttestationUpgrade(t *testing.T) {
+	t.Parallel()
+
+	const (
+		gitHead100 = "1010101010101010101010101010101010101010"
+		gitHead200 = "2020202020202020202020202020202020202020"
+		attestSHA  = "ec11c4a93de22cde2abe2bf74d70791033c2464c"
+	)
+	registryBody := `{
+	  "name": "attested-pkg",
+	  "dist-tags": {"latest": "2.0.0"},
+	  "time": {
+	    "1.0.0": "2026-01-01T00:00:00Z",
+	    "2.0.0": "2026-02-01T00:00:00Z"
+	  },
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "gitHead": "` + gitHead100 + `", "dist": {}},
+	    "2.0.0": {
+	      "scripts": {}, "gitHead": "` + gitHead200 + `",
+	      "dist": {"attestations": {"url": "https://x/attestations/attested-pkg@2.0.0"}}
+	    }
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "attested-pkg"}`
+	attestBody := npmProvenanceBody(t, attestSHA)
+	srv := newProvenanceServer(t, registryBody, downloadsBody, attestBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("attested-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"))
+	v := getSignalValue(t, result, "version_pin_table")
+	require.Len(t, v["pins"].([]any), 2)
+
+	upgraded := findPin(t, v, "2.0.0")
+	assert.Equal(t, attestSHA, upgraded["sha"],
+		"the attested version's pin must be the Fulcio source-repo-digest, "+
+			"not the publisher-asserted gitHead")
+	assert.Equal(t, "npm-attestation", upgraded["source"],
+		"the stronger source label records that this SHA came from a "+
+			"Fulcio-issued cert, not gitHead")
+
+	plain := findPin(t, v, "1.0.0")
+	assert.Equal(t, gitHead100, plain["sha"],
+		"a version with no attestation keeps its gitHead SHA")
+	assert.Equal(t, "npm-gitHead", plain["source"])
+}
+
+// TestCollector_Collect_VersionPinTable_AttestationFetchFails pins the
+// graceful-degradation contract: when a version advertises an
+// attestation but the endpoint 404s (or yields no recoverable Fulcio
+// SHA), the pin falls back to the gitHead value and the gitHead source
+// label — never dropped, never errored.
+func TestCollector_Collect_VersionPinTable_AttestationFetchFails(t *testing.T) {
+	t.Parallel()
+
+	const gitHead200 = "2020202020202020202020202020202020202020"
+	registryBody := `{
+	  "name": "flaky-attest-pkg",
+	  "dist-tags": {"latest": "2.0.0"},
+	  "time": {"2.0.0": "2026-02-01T00:00:00Z"},
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {
+	    "2.0.0": {
+	      "scripts": {}, "gitHead": "` + gitHead200 + `",
+	      "dist": {"attestations": {"url": "https://x/attestations/flaky-attest-pkg@2.0.0"}}
+	    }
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "flaky-attest-pkg"}`
+	// Empty attestBody → server returns 404 for the attestation path.
+	srv := newProvenanceServer(t, registryBody, downloadsBody, "")
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("flaky-attest-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"),
+		"a failed attestation fetch must not drop the pin — gitHead still anchors it")
+	v := getSignalValue(t, result, "version_pin_table")
+	p := findPin(t, v, "2.0.0")
+	assert.Equal(t, gitHead200, p["sha"],
+		"attestation unrecoverable → fall back to the gitHead SHA")
+	assert.Equal(t, "npm-gitHead", p["source"],
+		"source label must reflect the SHA actually used (gitHead), not "+
+			"claim attestation provenance the fetch never confirmed")
 }
