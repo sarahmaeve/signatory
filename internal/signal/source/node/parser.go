@@ -222,12 +222,29 @@ func (p *parser) run() {
 			// body as a function scope so its inner calls aren't
 			// counted as import-time. Mirrors the python analyzer's
 			// def-header handling.
+			//
+			// M1 evasion carveout: the dynamic-eval primitives — bare
+			// eval / Function / require / import — at statement
+			// position name a real call, not a definition.
+			// `eval(payload) { /*dummy*/ };` is two statements via
+			// ASI (call + block scope); a real engine runs the eval.
+			// Silencing this is the documented-but-trivially-evaded
+			// detection AST.md §4 forbids. The carveout suppresses
+			// itself inside a class body (innermostIsClass) — a class
+			// method named eval/require/etc. IS a definition, and the
+			// existing heuristic path keeps silencing it there.
 			if _, closeIdx, balanced := splitCallArgs(p.toks[next:]); balanced {
 				if after := next + closeIdx + 1; after < len(p.toks) &&
 					p.toks[after].Kind == TokenOp && p.toks[after].Value == "{" {
-					p.pendingFunc = true
-					i++
-					continue
+					if p.innermostIsClass() || !isEvasionCarveoutName(name) {
+						p.pendingFunc = true
+						i++
+						continue
+					}
+					// Carveout: fall through to record the call. The
+					// trailing `{ }` is a plain block scope; pushBrace
+					// will give it a generic frame because pendingFunc
+					// stays false.
 				}
 			}
 			// A NAME reached via '.'/'?.' is a method on an expression
@@ -582,6 +599,21 @@ func soleNonCall(dotted string) bool {
 	}
 	_, isKw := jsNonCallKeywords[dotted]
 	return isKw
+}
+
+// isEvasionCarveoutName reports whether a bare callee name is in the
+// M1 evasion-carveout set — the dynamic-eval primitives whose
+// `NAME(args){` at statement position is a real call, never a
+// definition. Bare names only: a dotted callee (vm.runInThisContext,
+// db.eval, etc.) goes through scanDotted's joined "vm.runInThisContext"
+// form and isn't matched here. The class-body silencer suppresses the
+// carveout — class methods of these names ARE definitions.
+func isEvasionCarveoutName(name string) bool {
+	switch name {
+	case "eval", "Function", "require", "import":
+		return true
+	}
+	return false
 }
 
 // matchBrace returns the index of the '}' matching the '{' at i, or

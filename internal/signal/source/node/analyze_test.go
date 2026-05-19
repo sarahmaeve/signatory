@@ -582,6 +582,98 @@ func TestThreat_CloudMetadataPivot(t *testing.T) {
 		"an ordinary API call is generic network egress, not metadata")
 }
 
+// TestThreat_DeclarationHeuristicEvasion pins M1 from the
+// adversarial review. The parser's declaration heuristic at
+// parser.go:215-231 treats any `NAME(args){` as a function / method
+// / getter definition and silences the call — but a real engine
+// runs `eval(payload) { /*dummy*/ }` as two statements via ASI
+// (eval call + block scope). The shape evades silencing for
+// `require(computed){...}` (computed-require dropper) and
+// `import(name){...}` too. A carveout for the dynamic-eval
+// primitives (bare eval / Function / require / import) at statement
+// position keeps the existing class-method silencing intact while
+// closing the evasion. AST.md §4: a documented detection that's
+// trivially evadable by a syntactic dummy block is the same failure
+// mode as missing the detection altogether.
+func TestThreat_DeclarationHeuristicEvasion(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		src             string
+		wantDynamicEval int
+		wantMinDecode   int // 0 means do not assert
+	}{
+		{
+			name:            "eval(payload) followed by block is not a method def",
+			src:             "eval(payload) { /* dummy block */ };\n",
+			wantDynamicEval: 1,
+		},
+		{
+			name:            "eval(atob(blob)) {} — outer eval and inner decode both fire",
+			src:             "eval(atob(blob)) { };\n",
+			wantDynamicEval: 1,
+			wantMinDecode:   1,
+		},
+		{
+			name:            "require(computed) followed by block — dynamic require dropper",
+			src:             "require(computedName) { };\n",
+			wantDynamicEval: 1,
+		},
+		{
+			name:            "import(attackerControlled) followed by block",
+			src:             "import(attackerControlled) { };\n",
+			wantDynamicEval: 1,
+		},
+		{
+			name:            "Function(decodedCode) followed by block",
+			src:             "Function(decodedCode) { };\n",
+			wantDynamicEval: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := counts(t, tc.src)
+			assert.Equal(t, tc.wantDynamicEval, c.DynamicEvalCalls,
+				"the security-sensitive call at statement position must "+
+					"NOT be silenced by the declaration heuristic; src=%q", tc.src)
+			if tc.wantMinDecode > 0 {
+				assert.GreaterOrEqual(t, c.Base64DecodeCalls, tc.wantMinDecode,
+					"inner decode call still fires; src=%q", tc.src)
+			}
+		})
+	}
+}
+
+// TestThreat_DeclarationHeuristicEvasion_ClassMethodsStaySilent pins
+// the other side of the M1 carveout: a class method named eval /
+// Function / require / import is a method DEFINITION, not a call.
+// The carveout must NOT fire inside a class body (innermostIsClass
+// is the unambiguous method-definition context). Mirrors AST.md §4
+// no-false-positive baseline.
+func TestThreat_DeclarationHeuristicEvasion_ClassMethodsStaySilent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"class method eval", "class K { eval(x) { return x; } }"},
+		{"class method require", "class Loader { require(name) { return modules[name]; } }"},
+		{"class method import", "class K { import(x) { return x; } }"},
+		{"class method Function", "class K { Function(x) { return x; } }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := counts(t, tc.src)
+			assert.Equal(t, 0, c.DynamicEvalCalls,
+				"a class method named eval/require/import/Function is a "+
+					"method DEFINITION; innermostIsClass must keep the "+
+					"declaration heuristic firing; src=%q", tc.src)
+		})
+	}
+}
+
 // TestThreat_DynamicRequireIsCodeFromData: require()/import() of a
 // non-literal is the same code-from-data indirection as eval — the
 // obfuscated-dropper shape — and counts as DynamicEvalCalls. A static
