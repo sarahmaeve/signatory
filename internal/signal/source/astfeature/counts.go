@@ -112,4 +112,43 @@ type Counts struct {
 	// (any ecosystem with source-level lifecycle hooks reuses it);
 	// Go has no source install hook and leaves this zero.
 	InstallHookOverrides int `json:"install_hook_overrides"`
+
+	// EnvCredentialReads is the number of call/access sites that read
+	// a process-environment entry whose name matches a credential /
+	// cloud-token / CI-secret catalog (AWS_SECRET_ACCESS_KEY,
+	// NPM_TOKEN, GITHUB_TOKEN, VAULT_TOKEN, ACTIONS_ID_TOKEN_REQUEST_*,
+	// …). Cross-language by intent — JS `process.env.X`, Go
+	// `os.Getenv`, Python `os.environ` are the same primitive; only
+	// the node analyzer populates it today, others leave it zero.
+	// Reading a named secret out of the environment at import time is
+	// the dominant npm credential-harvest primitive (TanStack,
+	// litellm, bufferzonecorp) and is invisible to SensitivePathReads
+	// (which only sees on-disk credential paths). Catalog-matched, not
+	// "any env read", so ordinary config reads do not spike it.
+	EnvCredentialReads int `json:"env_credential_reads"`
+
+	// SensitivePathWrites is the write analog of SensitivePathReads:
+	// the number of file-write sinks whose statically-resolved path
+	// targets a persistence / credential-tampering location
+	// (~/.ssh/authorized_keys, shell rc files, crontab, systemd user
+	// units, agent/IDE config dirs like .claude/.vscode, git hook
+	// dirs). The recurring post-exploitation step in TanStack,
+	// node-ipc, and bufferzonecorp; a read-only model is blind to it.
+	// Cross-language by intent; node populates it via the fs
+	// write-sink family, others leave it zero. Statically-resolvable
+	// paths only — a runtime-built path is a conservative miss, never
+	// a false spike.
+	SensitivePathWrites int `json:"sensitive_path_writes"`
+
+	// CloudMetadataCalls is the number of network call sites whose
+	// statically-resolved destination is a cloud instance-metadata or
+	// SSRF-pivot endpoint (AWS/GCP/Azure IMDS 169.254.169.254, ECS
+	// 169.254.170.2, GKE metadata.google.internal, in-cluster Vault).
+	// A near-zero-false-positive spike: legitimate package code almost
+	// never contacts the metadata service at import time, while
+	// credential-theft payloads (TanStack, litellm) do it to mint
+	// cloud tokens. Distinct from NetworkCallSites (which counts any
+	// egress) because the destination class IS the signal. Cross-
+	// language; node populates it, others leave it zero.
+	CloudMetadataCalls int `json:"cloud_metadata_calls"`
 }

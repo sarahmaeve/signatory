@@ -798,6 +798,9 @@ type matrixAST struct {
 	DynamicEvalCalls     int `json:"dynamic_eval_calls"`
 	ImportTimeCallSites  int `json:"import_time_call_sites"`
 	InstallHookOverrides int `json:"install_hook_overrides"`
+	EnvCredentialReads   int `json:"env_credential_reads"`
+	SensitivePathWrites  int `json:"sensitive_path_writes"`
+	CloudMetadataCalls   int `json:"cloud_metadata_calls"`
 }
 
 // matrixStructural mirrors source.Structural.

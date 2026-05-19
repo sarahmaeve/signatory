@@ -23,6 +23,14 @@ type Module struct {
 	// analyzers (binary `^` in a plain `=` is the same documented
 	// gap there).
 	XorAssigns int
+
+	// EnvReads is every process-environment entry name read via
+	// `process.env.NAME`, `process.env['NAME']`, or destructured
+	// `const { NAME } = process.env`. The analyzer matches these
+	// against a credential catalog (EnvCredentialReads). Receiver-flow
+	// (`const e = process.env; e.NAME`) is a documented conservative
+	// gap, consistent with the analyzer's no-receiver-flow model.
+	EnvReads []string
 }
 
 // Call is one call site: the (alias-resolved) dotted callee, whether
@@ -194,6 +202,14 @@ func (p *parser) run() {
 			}
 		}
 
+		// process.env.<NAME> / process.env['NAME'] access (not a call).
+		if !precededByDot {
+			if envNext, ok := p.tryEnvRead(i); ok {
+				i = envNext
+				continue
+			}
+		}
+
 		// General call detection: DOTTED '(' .
 		name, next, ok := scanDotted(p.toks, i)
 		if ok && isCallOpen(p.toks, next) && !soleNonCall(name) {
@@ -268,9 +284,17 @@ func (p *parser) pushBrace(i int) {
 func (p *parser) parseImport(i int) (int, bool) {
 	// Dynamic import( ... ) — not a static import statement.
 	if isCallOpen(p.toks, i+1) {
-		if spec, _, ok := stringArg(p.toks, i+1); ok {
+		if spec, close, ok := stringArg(p.toks, i+1); ok {
+			// Literal dynamic import — an ordinary lazy dependency
+			// load. Record the import and CONSUME it so it doesn't
+			// fall through and get recorded as an `import` call (which
+			// would misread a benign lazy import as dynamic eval).
 			p.m.Imports = append(p.m.Imports, spec)
+			return close + 1, true
 		}
+		// Non-literal import(expr): code-from-data module load. Don't
+		// consume — fall through so general detection records an
+		// `import` call that isDynamicEval matches.
 		return i + 1, false
 	}
 
@@ -360,6 +384,15 @@ func (p *parser) parseBinding(i int) (int, bool) {
 			return i, false
 		}
 		eq := close + 1
+		// Destructured env harvest: `const { A, B } = process.env`.
+		if envEnd, ok := matchProcessEnv(p.toks, eq); ok {
+			for k := i + 1; k < close; k++ {
+				if p.toks[k].Kind == TokenName && p.toks[k].Value != "as" {
+					p.m.EnvReads = append(p.m.EnvReads, p.toks[k].Value)
+				}
+			}
+			return envEnd, true
+		}
 		spec, end, ok := requireAfterEq(p.toks, eq)
 		if !ok {
 			return i, false
@@ -496,6 +529,51 @@ func scanDotted(toks []Token, i int) (name string, next int, ok bool) {
 
 func isCallOpen(toks []Token, i int) bool {
 	return i < len(toks) && toks[i].Kind == TokenOp && toks[i].Value == "("
+}
+
+// matchProcessEnv reports whether toks[i:] begins with `= process . env`
+// (the RHS of a destructured env-harvest binding) and returns the
+// index just past `env`.
+func matchProcessEnv(toks []Token, i int) (int, bool) {
+	if i+3 < len(toks) &&
+		toks[i].Kind == TokenOp && toks[i].Value == "=" &&
+		toks[i+1].Kind == TokenName && toks[i+1].Value == "process" &&
+		toks[i+2].Kind == TokenOp && toks[i+2].Value == "." &&
+		toks[i+3].Kind == TokenName && toks[i+3].Value == "env" {
+		return i + 4, true
+	}
+	return i, false
+}
+
+// tryEnvRead detects a `process.env.NAME` or `process.env['NAME']`
+// access at toks[i] and records NAME in m.EnvReads. Returns
+// (indexPastIt, true) on a `process.env` match (consuming the prefix
+// so it isn't re-walked), (i, false) otherwise. A bare `process.env`
+// with no member is consumed but records nothing: whole-env capture
+// (`{...process.env}`, passing process.env to a child_process spawn)
+// is pervasive in benign code, so counting it would false-positive —
+// only a named, catalog-matched read is the signal.
+func (p *parser) tryEnvRead(i int) (int, bool) {
+	t := p.toks
+	if i+2 >= len(t) ||
+		t[i].Kind != TokenName || t[i].Value != "process" ||
+		t[i+1].Kind != TokenOp || t[i+1].Value != "." ||
+		t[i+2].Kind != TokenName || t[i+2].Value != "env" {
+		return i, false
+	}
+	j := i + 3
+	if j+1 < len(t) && t[j].Kind == TokenOp && t[j].Value == "." && t[j+1].Kind == TokenName {
+		p.m.EnvReads = append(p.m.EnvReads, t[j+1].Value)
+		return j + 2, true
+	}
+	if j+2 < len(t) && t[j].Kind == TokenOp && t[j].Value == "[" && t[j+1].Kind == TokenString {
+		if name, ok := unquoteJS(t[j+1].Value); ok &&
+			t[j+2].Kind == TokenOp && t[j+2].Value == "]" {
+			p.m.EnvReads = append(p.m.EnvReads, name)
+			return j + 3, true
+		}
+	}
+	return j, true // bare process.env — consumed, nothing recorded
 }
 
 func soleNonCall(dotted string) bool {
