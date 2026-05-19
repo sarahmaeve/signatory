@@ -5,15 +5,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -204,8 +207,8 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 	// single version entry, so the cross-version signals land with
 	// stable-state payloads rather than transition flags, and
 	// version_unpublish_observed lands with unpublished_count=0.)
-	assert.Equal(t, 13, result.SignalCount(),
-		"all thirteen signals should land on happy path (5 snapshot + 4 cross-version + version_count + artifact_url + version_unpublish_observed + npm_dependencies)")
+	assert.Equal(t, 14, result.SignalCount(),
+		"all fourteen signals should land on happy path (5 snapshot + 4 cross-version + version_count + artifact_url + version_unpublish_observed + npm_dependencies + maintainer_email_set)")
 	assert.Equal(t, 0, result.AbsenceCount())
 
 	// npm_dependencies (governance) — sample fixture declares no deps,
@@ -339,12 +342,13 @@ func TestCollector_Collect_DownloadsNotFound_AbsenceOnly(t *testing.T) {
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
 	require.NoError(t, err)
 
-	// Twelve real signals (everything except weekly_downloads), one
+	// Thirteen real signals (everything except weekly_downloads), one
 	// absence for weekly_downloads. No short-circuit — downloads
 	// failure must not poison the other signals. The four cross-
-	// version signals plus version_unpublish_observed and
-	// npm_dependencies land from the same-wire versions map.
-	assert.Equal(t, 12, result.SignalCount())
+	// version signals plus version_unpublish_observed,
+	// npm_dependencies, and maintainer_email_set land from the
+	// same-wire versions/maintainers data.
+	assert.Equal(t, 13, result.SignalCount())
 	assert.True(t, hasAbsence(result, "weekly_downloads"))
 	assert.True(t, hasSignal(result, "last_publish"))
 	assert.True(t, hasSignal(result, "maintainer_count"))
@@ -605,7 +609,7 @@ func TestCollector_Collect_ScopedPackage_AllEndpointsUseFullName(t *testing.T) {
 
 	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("@types/node"))
 	require.NoError(t, err)
-	assert.Equal(t, 12, result.SignalCount())
+	assert.Equal(t, 13, result.SignalCount())
 
 	assert.Equal(t, "/@types/node", registryPath,
 		"registry request should preserve scope")
@@ -1951,4 +1955,56 @@ func TestCollector_Collect_VersionPinTable_AttestationFetchFails(t *testing.T) {
 	assert.Equal(t, "npm-gitHead", p["source"],
 		"source label must reflect the SHA actually used (gitHead), not "+
 			"claim attestation provenance the fetch never confirmed")
+}
+
+// TestCollector_Collect_MaintainerEmailSet_HashedNoPII pins the
+// axios-shape ATO precursor: a maintainer's associated email changing
+// to an attacker address. The signal carries SHA-256 hashes of the
+// lowercased emails (sorted, deterministic) — never the raw address —
+// so `deltas` surfaces the change without persisting PII.
+func TestCollector_Collect_MaintainerEmailSet_HashedNoPII(t *testing.T) {
+	t.Parallel()
+
+	registryBody := `{
+	  "name": "emailed-pkg",
+	  "dist-tags": {"latest": "1.0.0"},
+	  "time": {"1.0.0": "2026-01-01T00:00:00Z"},
+	  "maintainers": [
+	    {"name": "alice", "email": "Alice@Example.com"},
+	    {"name": "bob", "email": "bob@example.org"}
+	  ],
+	  "versions": {"1.0.0": {"scripts": {}, "dist": {}}}
+	}`
+	downloadsBody := `{"downloads": 1, "package": "emailed-pkg"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("emailed-pkg"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "maintainer_email_set"),
+		"maintainer_email_set must be emitted so deltas can detect an "+
+			"email change (axios ATO precursor)")
+	v := getSignalValue(t, result, "maintainer_email_set")
+
+	hashes, ok := v["email_hashes"].([]any)
+	require.True(t, ok, "email_hashes must be a JSON array")
+	require.Len(t, hashes, 2)
+
+	// Lowercased-then-SHA256: "Alice@Example.com" → sha256("alice@example.com").
+	aliceSum := sha256.Sum256([]byte("alice@example.com"))
+	bobSum := sha256.Sum256([]byte("bob@example.org"))
+	want := []string{hex.EncodeToString(aliceSum[:]), hex.EncodeToString(bobSum[:])}
+	slices.Sort(want)
+	got := []string{hashes[0].(string), hashes[1].(string)}
+	assert.Equal(t, want, got,
+		"hashes are sha256(lowercased email), sorted for deterministic deltas")
+	assert.EqualValues(t, 2, v["count"])
+
+	// No raw email anywhere in the marshaled value.
+	raw, _ := json.Marshal(v)
+	assert.NotContains(t, string(raw), "example.com",
+		"raw email domain must never appear in the persisted signal (PII)")
+	assert.NotContains(t, string(raw), "bob@",
+		"raw email local-part must never appear in the persisted signal")
 }

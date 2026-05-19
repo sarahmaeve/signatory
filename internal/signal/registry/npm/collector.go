@@ -3,6 +3,8 @@ package npm
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -154,6 +156,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 
 	// ----- maintainer_count (governance) -----
 	recordMaintainerCount(result, entity.ID, pkg, collectedAt)
+	recordMaintainerEmailSet(result, entity.ID, pkg, collectedAt)
 
 	// ----- postinstall_present + trusted_publishing (publication) -----
 	//
@@ -355,6 +358,38 @@ func recordMaintainerCount(result *signal.CollectionResult, entityID string,
 		map[string]any{
 			"count":  len(pkg.Maintainers),
 			"logins": logins,
+		})
+}
+
+// recordMaintainerEmailSet emits SHA-256 hashes of the maintainers'
+// lowercased email addresses, sorted for deterministic output. The
+// axios compromise's earliest registry-visible tell was a maintainer's
+// associated email flipping to an attacker address; deltas diffs this
+// hash set across observations and surfaces that change. Hashes, never
+// raw addresses: the email is PII and the signal only needs change
+// detection, not the value. A maintainer with no email contributes
+// nothing (npm allows email-less maintainer entries); the signal still
+// emits (possibly empty) so its later appearance/growth is itself a
+// diffable transition rather than a missing-signal ambiguity.
+func recordMaintainerEmailSet(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	hashes := make([]string, 0, len(pkg.Maintainers))
+	for _, m := range pkg.Maintainers {
+		e := strings.ToLower(strings.TrimSpace(m.Email))
+		if e == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(e))
+		hashes = append(hashes, hex.EncodeToString(sum[:]))
+	}
+	slices.Sort(hashes)
+	hashes = slices.Compact(hashes)
+
+	result.RecordSignal(entityID, "maintainer_email_set", source, collectedAt, defaultTTL,
+		map[string]any{
+			"count":        len(hashes),
+			"email_hashes": hashes,
 		})
 }
 
