@@ -273,10 +273,17 @@ Pick a dogfood target whose registry JSON is < 10 MiB
   residual is documented). Template **and** regex literals are
   *opaque* tokens — a call/keyword spelled inside one must never
   tokenize; this is the security property the lexer test asserts
-  end-to-end. **TypeScript: do not model the type system.** Lex type
-  syntax leniently, let the parser ignore it. Modelling types buys
-  zero trust signal and `<T>`-vs-JSX is a tar pit. Say so in the
-  package doc so nobody "fixes" it.
+  end-to-end. **TypeScript: full file coverage, no type-system
+  model.** This is the scope that was explicitly chosen (the parser-
+  scope decision): `.ts/.tsx/.jsx` *files* are streamed and parsed
+  for the security-relevant subset (calls, imports, scope, strings) —
+  that is what "full coverage" means. What is *not* modelled is TS's
+  *type system* (annotations, generics, `as`/`satisfies`): type
+  syntax is lexed leniently and the parser ignores it. Modelling
+  types buys zero trust signal and `<T>`-vs-JSX is a tar pit. The two
+  are not in tension — covering TS code ≠ understanding TS types.
+  Say so in the package doc so nobody "fixes" it, and don't let the
+  shorthand "don't model TS" be misread as "TS out of scope".
 - **`NAME(params){` is a declaration, not a call** — the JS analog of
   python's def-header skip. Without it every function/method
   definition inflates `import_time_call_sites` and records phantom
