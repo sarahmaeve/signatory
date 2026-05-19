@@ -1,7 +1,13 @@
 # Source-Evolution AST Analysis — Orientation & Lessons Learned
 
-Status: written after bringing **pypi** to parity with **Go** (PR #143).
-Audience: whoever adds the next ecosystem (npm / cargo / gem / …).
+Status: written after pypi→Go parity (PR #143); updated after **npm**
+parity + the threat-landscape signal expansion (branch `npm-ast`).
+Audience: whoever adds the next ecosystem (cargo / gem / maven / …).
+
+Done so far: **Go**, **pypi**, **npm/TypeScript**. The smoke driver
+is now ecosystem-agnostic. If you are adding cargo/gem, the pattern
+below is fully worn in — read §4's npm lessons first, they are the
+freshest and the most transferable.
 
 The single most important thing to internalize first:
 
@@ -41,8 +47,11 @@ BlobStreamer ──filter──▶ astfeature.SourceFile stream
 ```
 
 - **`LanguageAnalyzer`** (interface in `matrix.go`): `Analyze(...)` +
-  `Language() string`. `golang.Analyzer` and `python.Analyzer`
-  implement it. The Assembler is otherwise language-blind.
+  `Language() string`. `golang.Analyzer`, `python.Analyzer`, and
+  `node.Analyzer` implement it. The Assembler is otherwise
+  language-blind. `node` covers JS **and** TypeScript — one analyzer,
+  `Language() == "javascript"`, `ecosystemForLanguage` maps it to
+  `npm`.
 - **`astfeature`** package: the shared, language-neutral `Counts`
   (the per-version feature tally) and `SourceFile` (path+bytes). Every
   consumer (anomaly, matrix JSON, store, deltas) stays language-blind
@@ -75,8 +84,27 @@ Bounded. In rough order:
    `fetch_failed_versions`). Go: gopublish off proxy.golang.org.
    pypi: the pypi registry collector synthesizes it from the PEP 740
    attestation sweep it was *already running* (per-version Fulcio
-   SHAs it had been discarding). **Look for SHAs the ecosystem's
-   collector already fetches before adding new acquisition.**
+   SHAs it had been discarding). npm: the packument the npm registry
+   collector *already fetches* carries `versions[v].gitHead`
+   per-version — zero new acquisition for the base table. **Look for
+   SHAs the ecosystem's collector already fetches before adding new
+   acquisition.** npm is the strongest case of this: the SHA was
+   sitting in a field already parsed for `artifact_url`.
+   - **Provenance-strength labelling.** npm pins are stamped
+     `npm-gitHead` (publisher-asserted, low forgery resistance) and
+     upgraded to `npm-attestation` (Fulcio source-repo-digest, medium)
+     when a provenance attestation exists for that version — a bounded
+     extra fetch over the recent window only. The `source` field on
+     each pin records which, so an analyst reads provenance strength
+     off the row. Reuse this two-tier pattern for any ecosystem whose
+     cheap SHA is weaker than its attested SHA.
+   - **Trust boundary (load-bearing).** A registry-supplied SHA is
+     attacker-controlled and flows verbatim into `git ls-tree` /
+     `cat-file` / `diff` argv. It MUST pass
+     `fulcio.IsGitObjectID` at emission (npm gitHead is gated exactly
+     like the pypi Fulcio value). The cert→OID→DER-unwrap→git-argv
+     gate now lives once in **`internal/sigstore/fulcio`**; pypi and
+     npm both consume it — do not copy it a third time.
 2. **Analyzer package** `internal/signal/source/<lang>/`: an
    `Analyzer` implementing `LanguageAnalyzer`. Preserve
    `golang.Analyzer`'s error/ctx contract exactly (a mid-stream
@@ -105,18 +133,39 @@ pattern (don't re-litigate it each time, but surface it):
 
 - **One new field on the shared `Counts`**, named **generically /
   cross-language** (`dynamic_eval_calls`, `import_time_call_sites`,
-  `install_hook_overrides`) even if only one language populates it
+  `install_hook_overrides`, and from the npm work
+  `env_credential_reads`, `sensitive_path_writes`,
+  `cloud_metadata_calls`) even if only one language populates it
   today. Other ecosystems leave it zero.
 - Do **not** reuse a field whose name lies for the new language
   (reusing `init_count` for Python module-scope calls would mislabel
   the JSON — exactly the `go_loc`→`loc` wart we had to undo).
-- Every new field must be wired in **three** places or the signal is
-  half-built:
+- Every new `Counts` field must be wired in **three** places or the
+  signal is half-built:
   1. `astfeature/counts.go` — field + doc.
   2. `anomaly.go` `spikedFeatures` — the 0→n crossing check
      (**without this the anomaly never fires for the new field**).
   3. `cmd/smoke-source-evolution/main.go` — the `matrixAST` mirror
-     struct.
+     struct. (The smoke driver is now ecosystem-agnostic, but this
+     mirror is still hand-maintained — a missing field here makes the
+     end-to-end JSON assertion silently ignore it.)
+- **The fixture must come first, and from a real incident.** The
+  three npm fields were each demanded by a named-incident fixture
+  (env-cred → TanStack/litellm; persistence-write → node-ipc/
+  bufferzonecorp; cloud-metadata → TanStack IMDS). Process worth
+  repeating per ecosystem: read `design/threat-landscape`, turn each
+  *mechanically-observable* technique into a red fixture (true
+  positive + benign twin scoring zero), and let the failing fixture
+  justify the field. Do not add a field speculatively.
+- **New *signal types* (registry side) have their own "or it's
+  half-built" rule:** a new `result.RecordSignal(type, …)` panics at
+  runtime unless `type` is registered in
+  **`internal/signal/types.go`** (group + forgery resistance +
+  caveats). This bit us on `maintainer_email_set`. The npm
+  attestation signals (`latest_attestation_builder`,
+  `attestation_consistency`) deliberately reuse pypi's *already-
+  registered* type names so the store schema and synthesis treat
+  ecosystems uniformly — emit the same shape, register nothing new.
 
 ---
 
@@ -165,11 +214,32 @@ go run ./cmd/signatory analyze pkg:<eco>/<name> --refresh --clone -v
   `dynamic_eval`.
 - A package with real history shows the matrix populated, rows
   pin-anchored, `ecosystem`/`language` correct.
-- **Regression**: also dogfood a Go target (`pkg:golang/...`)
-  `analyze` + `deltas` to prove the shared path didn't regress.
-- `cmd/smoke-source-evolution` is the Go-only end-to-end driver
-  (kong/go-retryablehttp baselines); not yet generalized per
-  ecosystem.
+- **Regression**: any change to the shared `Counts` struct or the
+  shared assembler/anomaly path must be dogfooded on **all** live
+  ecosystems — `pkg:golang/…`, `pkg:pypi/…`, **and** `pkg:npm/…` —
+  `analyze` + `deltas`, to prove the additive change didn't regress
+  the others (a new `Counts` field must show present-and-zero on the
+  ecosystems that don't populate it). The 3-field npm expansion was
+  validated this way on fresh targets (chalk, google/uuid,
+  packaging).
+- **npm provenance**: pick a target you *know* publishes with npm
+  provenance (e.g. `pkg:npm/tuf-js`, `pkg:npm/sigstore`) to exercise
+  `attestation_consistency` / `latest_attestation_builder` against
+  real Fulcio certs — a healthy package must show `consistent=true`,
+  `transition_detected=false`. A `npm-gitHead`-only package (e.g.
+  `chalk`) correctly emits **no** attestation signal: that silence
+  is correct, not a bug.
+- `cmd/smoke-source-evolution` is now **ecosystem-agnostic**:
+  `profileForTarget` derives an `ecosystemProfile` from the target's
+  purl prefix (`pkg:golang/`, `pkg:npm/`, `pkg:pypi/`) carrying the
+  per-ecosystem expectations — matrix ecosystem/language, accepted
+  pin sources, accepted SHA hex lengths (SHA-1 or, for Fulcio
+  digests, SHA-256), and which count invariants apply (the gopublish
+  processed-cap and bucket-exhaustion are **Go-only**; npm/pypi have
+  processed-but-not-pinned versions by construction). Run it on a
+  small target of any supported ecosystem:
+  `go run ./cmd/smoke-source-evolution -target pkg:npm/ms`. A new
+  ecosystem adds one `profileForTarget` case, not a new driver.
 
 Pick a dogfood target whose registry JSON is < 10 MiB
 (`pydantic-core` blows the cap — large compiled wheel matrices).
@@ -177,6 +247,91 @@ Pick a dogfood target whose registry JSON is < 10 MiB
 ---
 
 ## 4. Lessons learned & caveats
+
+### npm / TypeScript (newest — most transferable to cargo/gem)
+
+- **The map held.** The §1 claim ("resolution, acquisition, provenance
+  are generic; the new work is a bounded leaf") was true again. The
+  hand-written JS/TS lexer+parser was ~90% of the effort; the wiring
+  (`languageProfile`, `ecosystemForLanguage`, file filter, dispatch
+  gate) was the predicted ~5 lines each. Do not spike infra you think
+  is missing — re-read §1 instead.
+- **Port `robustness_test.go` *first*, and bound every self-recursive
+  scan.** Go/python had `maxArgScanTokens` / `maxResolveDepth`. node's
+  `scanTemplate` recursed through nested `` `${`…`}` `` with **no**
+  cap — a ~3M-level file under the 10 MiB BlobStreamer cap
+  stack-overflows and aborts the whole collection (a DoS *and* an
+  evasion). The robustness test (parity with python's) caught it
+  before any real input did; fix = `maxTemplateDepth`, over the cap a
+  nested backtick is an ordinary byte (bounded, conservative, never a
+  false call). For any new hand-written parser: write the adversarial
+  test first, then prove every recursion has a bound.
+- **JS lexical hazards, decided once:** regex-literal-vs-division by
+  previous-significant-token (erring toward division is *not* always
+  safe — `/eval(x)/` mis-lexed as division would surface a false
+  call; the standard heuristic handles the common forms and the
+  residual is documented). Template **and** regex literals are
+  *opaque* tokens — a call/keyword spelled inside one must never
+  tokenize; this is the security property the lexer test asserts
+  end-to-end. **TypeScript: full file coverage, no type-system
+  model.** This is the scope that was explicitly chosen (the parser-
+  scope decision): `.ts/.tsx/.jsx` *files* are streamed and parsed
+  for the security-relevant subset (calls, imports, scope, strings) —
+  that is what "full coverage" means. What is *not* modelled is TS's
+  *type system* (annotations, generics, `as`/`satisfies`): type
+  syntax is lexed leniently and the parser ignores it. Modelling
+  types buys zero trust signal and `<T>`-vs-JSX is a tar pit. The two
+  are not in tension — covering TS code ≠ understanding TS types.
+  Say so in the package doc so nobody "fixes" it, and don't let the
+  shorthand "don't model TS" be misread as "TS out of scope".
+- **`NAME(params){` is a declaration, not a call** — the JS analog of
+  python's def-header skip. Without it every function/method
+  definition inflates `import_time_call_sites` and records phantom
+  callees. Disambiguator: a real call's `)` is followed by
+  `;`/`.`/`)`/`,`; a definition's by `{` (an arrow body's `{` is
+  *inside* the parens). A whole false-positive class, caught only by
+  the benign-baseline fixture — every language needs its equivalent
+  of this skip.
+- **Alias/receiver resolution is higher-value in JS than python.**
+  `const cp = require('child_process'); cp.exec()` and the inline
+  `require('cp').exec()` chain are the *dominant* shapes, not edges.
+  Decide alias handling by how pervasive aliasing is in the language's
+  idiom, up front. Bare receiver-flow (`const e = process.env; e.X`)
+  is a deliberate documented gap.
+- **Some intent lives in argument 2.** `Buffer.from(x,'base64')` is
+  THE npm decode primitive but, unlike python's `base64.b64decode`
+  (a plain callee), the decode intent is the *second* arg. A
+  callee-name catalog is not always sufficient; `resolveArgN` + a
+  value catalog is the fix — added only because the event-stream
+  fixture demanded it.
+- **Extract trust-boundary code before copying it.** The
+  cert→OID→git-argv gate moved to `internal/sigstore/fulcio` so pypi
+  and npm share one audited copy. npm extended it
+  (`ExtractBuilderIdentity`, GHA OIDC OIDs) with a *different* gate —
+  `printable-safe`, not `IsGitObjectID`, because builder URIs flow
+  into persisted JSON, not a git argv. Keep the gate matched to where
+  the value flows.
+- **Prefer a sibling ecosystem's registered signal shape over a new
+  one.** npm emits pypi's exact `attestation_consistency` /
+  `latest_attestation_builder` — no new registered types, no synthesis
+  change, ecosystem-uniform store. Only `maintainer_email_set` was
+  genuinely new (and hashed: PII discipline — store change-detection,
+  never the raw value; always-emit so first appearance is a diffable
+  transition, not a missing-signal ambiguity).
+- **Test-staleness from success: repurpose, never silence.** Adding
+  npm as *supported* invalidated "npm skips source-evolution" tests;
+  an always-emitted signal invalidated exact-count assertions. The
+  premises were broken *by the feature working*. Faithful fixes:
+  point the unsupported-skip test at a still-unsupported ecosystem
+  (cargo), flip the dispatch assertion mirroring the existing pypi
+  flipped-assertion precedent, bump counts with an honest comment.
+- **Bucket every threat as AST / registry / both / neither before
+  promising coverage.** The `design/threat-landscape` review drove
+  the 3 new `Counts` fields *and* honestly scoped out what these
+  methods structurally cannot see: CI/workflow posture, OIDC-from-
+  process-memory, identity clusters / cross-ecosystem correlation,
+  tarball-vs-git divergence (a *third* collector, not this one).
+  Write the "neither" list down so it isn't re-litigated.
 
 ### Architecture
 
@@ -262,3 +417,32 @@ Each is a *false negative*, never a false positive:
 - Fully dynamic values (f-strings with interpolation, `.format`, `%`,
   names, call results) are unresolved by the static arg resolver by
   design.
+
+**node / JS-TS specifically** (each a false negative, never a false
+positive):
+
+- `=> expr` arrow bodies (no brace) count as module scope — inflates
+  the `import_time_call_sites` *spike metric* only (absolute is not
+  load-bearing per §4 Architecture), so accepted.
+- Variable-bound receiver-flow: `const e = process.env; e.NPM_TOKEN`
+  and `const w = fs.writeFile; w('~/.ssh/authorized_keys')` are
+  missed — only the direct `process.env.X` / `fs.writeFile(...)`
+  shapes resolve. Same conservative posture as python's `pathlib`
+  receiver gap.
+- Chained calls on expression results (`getThing().exec()`) — the
+  `.exec` is recorded as `.exec` (dot-prefixed) and so never matches
+  the bare/qualified catalogs. Shared with python.
+- Code inside template-literal `${ }` interpolations is not
+  tokenized (the lexer treats the whole template as opaque), and
+  template nesting past `maxTemplateDepth` collapses to one opaque
+  string. Both are deliberate bounded misses.
+- Whole-environment capture (`{...process.env}`, passing `process.env`
+  to a `child_process` spawn) is **not** counted — it is pervasive in
+  benign code, so only a *named*, catalog-matched env read is the
+  signal. A payload that captures the whole env and filters names at
+  runtime is a documented miss (the alternative is a false-positive
+  flood).
+- `InitCount` / `InstallHookOverrides` stay 0 for node by design:
+  npm install hooks are `package.json` scripts, already covered by
+  the npm registry collector's `postinstall_*` signals — counting a
+  source construct here would double-report and mislabel the vector.

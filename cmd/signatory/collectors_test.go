@@ -732,6 +732,8 @@ func TestCollectorsFor_NpmEntityWithResolvedURL_IncludesAll(t *testing.T) {
 	assert.True(t, names["git"], "git collector should be present after URL resolution")
 	assert.True(t, names["openssf-scorecard"],
 		"openssf-scorecard collector should also dispatch once an npm package has a resolved github URL — it caches scorecard data for the resolved repo")
+	assert.True(t, names["source-evolution"],
+		"source-evolution collector should dispatch for an npm package with a resolved github URL — it consumes the npm-registry version_pin_table to emit the AST matrix")
 }
 
 // TestCollectorsFor_GoModuleEntity_IncludesGoPublishAndSourceEvolution
@@ -851,13 +853,17 @@ func TestCollectorsFor_GoModuleLegacyEcosystem_IncludesGoPublish(t *testing.T) {
 		"source-evolution collector must dispatch for legacy Ecosystem=\"go\"")
 }
 
-// TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution is
-// the negative counterpart: an npm entity must NOT receive either
-// the gopublish collector OR the source-evolution collector. A
-// regression that broadens either dispatch case (e.g., adding
-// "default:" by accident, or moving source-evolution outside the
-// Go-ecosystem guard) would catch on this assertion.
-func TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution(t *testing.T) {
+// TestCollectorsFor_NpmEcosystem_NoGoPublishButSourceEvolution pins
+// the npm dispatch boundary. gopublish is proxy.golang.org-specific
+// and must NEVER dispatch for npm. source-evolution, by contrast,
+// now DOES dispatch for npm (it consumes the npm-registry collector's
+// gitHead/attestation version_pin_table) — this assertion used to
+// require its absence; flipping it is the wiring-shipped signal that
+// step 2 (npm AST analyzer) landed, the same pattern as the pypi
+// flip below. A regression that re-narrows the source-evolution
+// guard back to Go-only, or that broadens gopublish to non-Go, trips
+// here.
+func TestCollectorsFor_NpmEcosystem_NoGoPublishButSourceEvolution(t *testing.T) {
 	t.Parallel()
 
 	src := initSourceRepo(t, "https://github.com/expressjs/express")
@@ -872,12 +878,48 @@ func TestCollectorsFor_NonGoEcosystem_NoGoPublishOrSourceEvolution(t *testing.T)
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
 
+	names := map[string]bool{}
 	for _, c := range collectors {
-		assert.NotEqualf(t, "go-publish", c.Name(),
-			"gopublish collector must NOT dispatch for non-Go ecosystem (got it for Ecosystem=%q)", entity.Ecosystem)
-		assert.NotEqualf(t, "source-evolution", c.Name(),
-			"source-evolution collector must NOT dispatch for non-Go ecosystem (got it for Ecosystem=%q)", entity.Ecosystem)
+		names[c.Name()] = true
 	}
+	assert.False(t, names["go-publish"],
+		"gopublish collector must NOT dispatch for npm — it is proxy.golang.org-specific")
+	assert.True(t, names["source-evolution"],
+		"source-evolution MUST dispatch for npm — it consumes the npm-registry "+
+			"collector's version_pin_table to emit the AST matrix + anomaly")
+}
+
+// TestCollectorsFor_PypiEcosystem_NoGoPublishButSourceEvolution pins
+// the pypi dispatch boundary, symmetric to the npm pin above. The
+// source-evolution collector consumes the pypi-registry collector's
+// attestation-derived version_pin_table; a regression that re-narrows
+// the source-evolution guard back to Go-only (or removes the "pypi"
+// arm of the four-ecosystem condition in collectorsFor) trips here.
+// gopublish must stay absent — proxy.golang.org is Go-specific.
+func TestCollectorsFor_PypiEcosystem_NoGoPublishButSourceEvolution(t *testing.T) {
+	t.Parallel()
+
+	src := initSourceRepo(t, "https://github.com/psf/requests")
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:pypi/requests",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		URL:          "https://github.com/psf/requests",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: src, Cleanups: testCleanups(t)})
+	require.NoError(t, err)
+
+	names := map[string]bool{}
+	for _, c := range collectors {
+		names[c.Name()] = true
+	}
+	assert.False(t, names["go-publish"],
+		"gopublish collector must NOT dispatch for pypi — it is proxy.golang.org-specific")
+	assert.True(t, names["source-evolution"],
+		"source-evolution MUST dispatch for pypi — it consumes the pypi-registry "+
+			"collector's attestation-derived version_pin_table to emit the AST matrix + anomaly")
 }
 
 // TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector pins the

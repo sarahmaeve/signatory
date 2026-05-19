@@ -375,15 +375,20 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// opts.Store. For Go that table comes from gopublish; for
 		// pypi from the pypi registry collector's attestation sweep.
 		// The collector itself selects the per-language file filter
-		// and analyzer from entity.Ecosystem: Go uses go/parser,
-		// pypi uses the hand-written Python analyzer — both emit the
-		// full AST feature matrix; structural + diff flow for every
-		// supported ecosystem.
+		// and analyzer from entity.Ecosystem: Go uses go/parser, pypi
+		// the hand-written Python analyzer, npm the hand-written
+		// JS/TS analyzer — all emit the full AST feature matrix;
+		// structural + diff flow for every supported ecosystem. The
+		// npm pin table comes from the npm registry collector's
+		// gitHead/attestation synthesis (same in-run accumulator
+		// path as gopublish for Go and the attestation sweep for
+		// pypi).
 		//
 		// Appended LAST in the dispatch order so by the time it
 		// runs, the orchestrator's in-run accumulator already holds
 		// the version_pin_table emitted earlier in the same run.
-		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" || entity.Ecosystem == "pypi" {
+		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" ||
+			entity.Ecosystem == "pypi" || entity.Ecosystem == "npm" {
 			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
 			collectors = append(collectors,
 				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),

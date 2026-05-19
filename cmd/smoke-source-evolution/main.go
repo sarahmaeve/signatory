@@ -1,34 +1,42 @@
 // Command smoke-source-evolution drives an end-to-end test against
-// a freshly-built `signatory analyze` for a real Go module,
-// verifying that the THREE source-evolution signals land with their
-// expected schemas:
+// a freshly-built `signatory analyze` for a real package, verifying
+// that the THREE source-evolution signals land with their expected
+// schemas. It is ecosystem-agnostic: the target's purl prefix
+// (pkg:golang/, pkg:npm/, pkg:pypi/) selects an ecosystemProfile that
+// carries the per-ecosystem expectations (matrix ecosystem/language,
+// pin-table signal source, accepted pin sources, SHA hex lengths, and
+// which count invariants apply). The Go path is unchanged; npm and
+// pypi reuse the same assertion spine.
 //
-//   - version_pin_table       (gopublish-emitted)
-//   - source_evolution_matrix (source-collector-emitted)
+//   - version_pin_table        (gopublish / npm-registry / pypi-registry)
+//   - source_evolution_matrix  (source-collector-emitted)
 //   - source_evolution_anomaly (source-collector-emitted)
 //
 // What it proves (in order):
 //
 //  1. The signatory binary builds cleanly from cmd/signatory/.
-//  2. `signatory analyze pkg:golang/<module> --refresh --clone --json`
+//  2. `signatory analyze <target> --refresh --clone --json`
 //     returns valid JSON containing a signals[] array.
 //  3. signals[] contains all three source-evolution signals — proving
-//     the gopublish dispatch + source-evolution dispatch + ordering
-//     constraint (gopublish before source-evolution) all hold under
-//     real network + real git.
-//  4. version_pin_table schema (cap=12, pin shape, RFC3339 timestamps,
-//     bucket invariants).
+//     the registry dispatch + source-evolution dispatch + ordering
+//     constraint (pin-table emitter before source-evolution) all hold
+//     under real network + real git.
+//  4. version_pin_table schema: universal count invariants always;
+//     the gopublish cap (processed==12) and bucket-exhaustion
+//     invariant only for Go (npm/pypi have processed-but-not-pinned
+//     versions by construction); pin shape, RFC3339 timestamps, and
+//     ecosystem-appropriate pin source + SHA length.
 //  5. source_evolution_matrix schema:
-//     - module_path matches target
-//     - rows count > 0 and bounded by budget (LastN+MajorLeaves
-//     under HardCap; for kong's single-major v1.x history,
-//     exactly LastN=12)
+//     - module_path matches target; ecosystem + language match the
+//     profile (go/go, npm/javascript, pypi/python)
+//     - rows count > 0 and bounded by budget (HardCap=20)
 //     - present rows have AST + Structural populated
-//     - present rows' tag_sha is 40-char lowercase hex
+//     - present rows' tag_sha is lowercase hex of an accepted length
+//     and tag_sha_source is in the ecosystem's accepted set
 //     - tag_sha values appear in version_pin_table.pins (cross-
-//     signal consistency: matrix anchors to gopublish's pin)
+//     signal consistency: matrix anchors to the pin table)
 //  6. source_evolution_anomaly schema:
-//     - For a healthy library (kong is the canonical baseline):
+//     - For a healthy library/package baseline:
 //     AnomalyPresent == false (no false-positive on legitimate
 //     evolution). This is the load-bearing check that the
 //     multi-feature joint threshold is conservative enough.
@@ -54,8 +62,9 @@
 // Usage (from repo root):
 //
 //	go run ./cmd/smoke-source-evolution
-//	go run ./cmd/smoke-source-evolution -target pkg:golang/github.com/google/uuid
 //	go run ./cmd/smoke-source-evolution -target pkg:golang/github.com/hashicorp/go-retryablehttp
+//	go run ./cmd/smoke-source-evolution -target pkg:npm/ms
+//	go run ./cmd/smoke-source-evolution -target pkg:pypi/sigstore
 //
 // The hashicorp/go-retryablehttp run is particularly meaningful: it's
 // the canonical legitimate ancestor that the BufferZoneCorp campaign
@@ -72,9 +81,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -88,8 +99,87 @@ const defaultTarget = "pkg:golang/github.com/alecthomas/kong"
 
 // expectedProcessedCount is the gopublish collector's hardcoded
 // maxPinFetches cap. Lifted as a constant so a future cap change
-// requires updating exactly one place.
+// requires updating exactly one place. Only applies to the Go
+// ecosystem (see ecosystemProfile.capApplies) — npm emits a pin per
+// gitHead/attestation version with no such cap, pypi caps on its own
+// attestation window.
 const expectedProcessedCount = 12
+
+// ecosystemProfile carries the per-ecosystem expectations the smoke's
+// assertions vary on, so the driver is ecosystem-agnostic instead of
+// hardwired to Go. Derived once from the target's purl prefix by
+// profileForTarget.
+type ecosystemProfile struct {
+	// matrixEcosystem / matrixLanguage are the self-describing labels
+	// the source_evolution_matrix must carry for this ecosystem.
+	matrixEcosystem string
+	matrixLanguage  string
+
+	// pinSignalSource is the collector Source stamped on the
+	// version_pin_table signal (go-publish / npm-registry /
+	// pypi-registry).
+	pinSignalSource string
+
+	// pinValueSources is the set of acceptable per-pin / per-row
+	// tag_sha_source values for this ecosystem.
+	pinValueSources map[string]bool
+
+	// shaHexLens is the set of acceptable git-object-id hex lengths:
+	// {40} for Go (proxy SHA-1), {40,64} where a Fulcio
+	// source-repo-digest (SHA-1 or SHA-256) can appear.
+	shaHexLens map[int]bool
+
+	// capApplies is true only for Go: gopublish caps processed at
+	// maxPinFetches, so processed==cap when total>=cap.
+	capApplies bool
+
+	// bucketsExhaust is true only for Go: every processed version
+	// lands in exactly one of pins / missing-origin / fetch-failed,
+	// so the buckets sum to processed. npm/pypi have
+	// processed-but-not-pinned versions (no gitHead / no Fulcio SHA)
+	// that sit in no bucket, so the invariant does not hold there.
+	bucketsExhaust bool
+}
+
+// profileForTarget parses the target's purl prefix, returning the
+// module/package path (prefix stripped) and the ecosystem profile.
+// An unsupported prefix is an error rather than a silent Go default —
+// the smoke must not pretend to validate an ecosystem it has no
+// expectations for.
+func profileForTarget(target string) (string, ecosystemProfile, error) {
+	switch {
+	case strings.HasPrefix(target, "pkg:golang/") || strings.HasPrefix(target, "pkg:go/"):
+		mp := strings.TrimPrefix(strings.TrimPrefix(target, "pkg:golang/"), "pkg:go/")
+		return mp, ecosystemProfile{
+			matrixEcosystem: "go", matrixLanguage: "go",
+			pinSignalSource: "go-publish",
+			pinValueSources: map[string]bool{"proxy.golang.org": true},
+			shaHexLens:      map[int]bool{shaHexLen: true},
+			capApplies:      true,
+			bucketsExhaust:  true,
+		}, nil
+	case strings.HasPrefix(target, "pkg:npm/"):
+		return strings.TrimPrefix(target, "pkg:npm/"), ecosystemProfile{
+			matrixEcosystem: "npm", matrixLanguage: "javascript",
+			pinSignalSource: "npm-registry",
+			pinValueSources: map[string]bool{"npm-gitHead": true, "npm-attestation": true},
+			shaHexLens:      map[int]bool{shaHexLen: true, sha256HexLen: true},
+			capApplies:      false,
+			bucketsExhaust:  false,
+		}, nil
+	case strings.HasPrefix(target, "pkg:pypi/"):
+		return strings.TrimPrefix(target, "pkg:pypi/"), ecosystemProfile{
+			matrixEcosystem: "pypi", matrixLanguage: "python",
+			pinSignalSource: "pypi-registry",
+			pinValueSources: map[string]bool{"pypi-attestation": true},
+			shaHexLens:      map[int]bool{shaHexLen: true, sha256HexLen: true},
+			capApplies:      false,
+			bucketsExhaust:  false,
+		}, nil
+	}
+	return "", ecosystemProfile{}, fmt.Errorf(
+		"unsupported target %q: expected pkg:golang/, pkg:go/, pkg:npm/, or pkg:pypi/ prefix", target)
+}
 
 // analyzeTimeout bounds how long the analyze command can run.
 // Includes clone + 12 sequential GetVersionInfo calls with
@@ -99,13 +189,17 @@ const expectedProcessedCount = 12
 // magnitude headroom for typical runs.
 const analyzeTimeout = 10 * time.Minute
 
-// shaHexLen is the length of a git object SHA in hex form.
-const shaHexLen = 40
+// shaHexLen is the length of a SHA-1 git object id in hex form;
+// sha256HexLen the SHA-256 form a Fulcio source-repo-digest may use.
+const (
+	shaHexLen    = 40
+	sha256HexLen = 64
+)
 
 func main() {
 	var target string
 	flag.StringVar(&target, "target", defaultTarget,
-		"Go module canonical URI to analyze (pkg:golang/<module-path>)")
+		"package canonical URI to analyze (pkg:golang/… , pkg:npm/… , or pkg:pypi/…)")
 	flag.Parse()
 
 	if err := run(target); err != nil {
@@ -156,15 +250,18 @@ func run(target string) error {
 	}
 	rep.pass("parsed; %d signals reported", len(result.Signals))
 
-	wantModulePath := strings.TrimPrefix(target, "pkg:golang/")
-	wantModulePath = strings.TrimPrefix(wantModulePath, "pkg:go/")
+	wantModulePath, prof, err := profileForTarget(target)
+	if err != nil {
+		return err
+	}
+	rep.note("ecosystem: %s (language=%s)", prof.matrixEcosystem, prof.matrixLanguage)
 
-	pinTable, err := validatePinTable(result, wantModulePath, rep)
+	pinTable, err := validatePinTable(result, wantModulePath, prof, rep)
 	if err != nil {
 		return err
 	}
 
-	matrix, presentCount, err := validateSourceMatrix(result, wantModulePath, rep)
+	matrix, presentCount, err := validateSourceMatrix(result, wantModulePath, prof, rep)
 	if err != nil {
 		return err
 	}
@@ -201,51 +298,66 @@ func validateMetadata(s analyzeSignal, group, forgery, source string) error {
 // validatePinTableCounts checks the version_pin_table count
 // invariants: total > 0, processed bounded by total, cap engaged
 // when total >= cap, sum of buckets == processed.
-func validatePinTableCounts(pt pinTableValue) error {
+func validatePinTableCounts(pt pinTableValue, prof ecosystemProfile) error {
+	// Universal invariants — hold for every ecosystem.
 	if pt.VersionCountTotal <= 0 {
 		return fmt.Errorf("expected version_count_total > 0, got %d", pt.VersionCountTotal)
 	}
-	if pt.VersionCountProcessed > pt.VersionCountTotal {
-		return fmt.Errorf("processed=%d > total=%d (impossible)",
-			pt.VersionCountProcessed, pt.VersionCountTotal)
+	if pt.VersionCountProcessed <= 0 || pt.VersionCountProcessed > pt.VersionCountTotal {
+		return fmt.Errorf("expected 0 < processed <= total=%d, got processed=%d",
+			pt.VersionCountTotal, pt.VersionCountProcessed)
 	}
-	if pt.VersionCountTotal >= expectedProcessedCount {
-		if pt.VersionCountProcessed != expectedProcessedCount {
-			return fmt.Errorf("expected processed=%d (cap) when total=%d, got %d",
-				expectedProcessedCount, pt.VersionCountTotal, pt.VersionCountProcessed)
-		}
-	} else {
-		if pt.VersionCountProcessed != pt.VersionCountTotal {
+	if len(pt.Pins) > pt.VersionCountProcessed {
+		return fmt.Errorf("pins=%d exceeds processed=%d (impossible)",
+			len(pt.Pins), pt.VersionCountProcessed)
+	}
+
+	// gopublish-only: processed is capped at maxPinFetches, and below
+	// the cap every version is processed.
+	if prof.capApplies {
+		if pt.VersionCountTotal >= expectedProcessedCount {
+			if pt.VersionCountProcessed != expectedProcessedCount {
+				return fmt.Errorf("expected processed=%d (cap) when total=%d, got %d",
+					expectedProcessedCount, pt.VersionCountTotal, pt.VersionCountProcessed)
+			}
+		} else if pt.VersionCountProcessed != pt.VersionCountTotal {
 			return fmt.Errorf("expected processed=total=%d when below cap, got processed=%d",
 				pt.VersionCountTotal, pt.VersionCountProcessed)
 		}
 	}
-	bucketTotal := len(pt.Pins) + len(pt.MissingOriginVersions) + len(pt.FetchFailedVersions)
-	if bucketTotal != pt.VersionCountProcessed {
-		return fmt.Errorf("buckets sum to %d (pins=%d, missing-origin=%d, fetch-failed=%d), expected %d",
-			bucketTotal, len(pt.Pins), len(pt.MissingOriginVersions),
-			len(pt.FetchFailedVersions), pt.VersionCountProcessed)
+
+	// gopublish-only: every processed version lands in exactly one
+	// bucket. npm/pypi have processed-but-not-pinned versions (no
+	// gitHead / no Fulcio SHA) that sit in no bucket, so this
+	// invariant is Go-specific by construction.
+	if prof.bucketsExhaust {
+		bucketTotal := len(pt.Pins) + len(pt.MissingOriginVersions) + len(pt.FetchFailedVersions)
+		if bucketTotal != pt.VersionCountProcessed {
+			return fmt.Errorf("buckets sum to %d (pins=%d, missing-origin=%d, fetch-failed=%d), expected %d",
+				bucketTotal, len(pt.Pins), len(pt.MissingOriginVersions),
+				len(pt.FetchFailedVersions), pt.VersionCountProcessed)
+		}
 	}
 	return nil
 }
 
 // validatePinShape walks every pin and asserts version, source,
 // SHA hex form, and RFC3339 published_at.
-func validatePinShape(pins []pinTablePin) error {
+func validatePinShape(pins []pinTablePin, prof ecosystemProfile) error {
 	if len(pins) == 0 {
-		return fmt.Errorf("expected at least one successful pin for a healthy module; got 0")
+		return fmt.Errorf("expected at least one successful pin for a healthy package; got 0")
 	}
 	for i, pin := range pins {
 		if pin.Version == "" {
 			return fmt.Errorf("pin[%d]: empty version", i)
 		}
-		if pin.Source != "proxy.golang.org" {
-			return fmt.Errorf("pin[%d] (%s): expected source=proxy.golang.org, got %q",
-				i, pin.Version, pin.Source)
+		if !prof.pinValueSources[pin.Source] {
+			return fmt.Errorf("pin[%d] (%s): source %q not in expected set %v for ecosystem %s",
+				i, pin.Version, pin.Source, sortedKeys(prof.pinValueSources), prof.matrixEcosystem)
 		}
-		if len(pin.SHA) != shaHexLen {
-			return fmt.Errorf("pin[%d] (%s): expected %d-char SHA, got %d (%q)",
-				i, pin.Version, shaHexLen, len(pin.SHA), pin.SHA)
+		if !prof.shaHexLens[len(pin.SHA)] {
+			return fmt.Errorf("pin[%d] (%s): SHA length %d not in expected set %v (%q)",
+				i, pin.Version, len(pin.SHA), sortedIntKeys(prof.shaHexLens), pin.SHA)
 		}
 		if !isHexLower(pin.SHA) {
 			return fmt.Errorf("pin[%d] (%s): SHA contains non-hex characters: %q",
@@ -277,7 +389,7 @@ func enumerateMissingSignal(result analyzeJSON, expected string) error {
 // Returns the parsed pinTableValue for use by the cross-signal
 // anchor check that runs once both pin table and matrix are
 // in hand.
-func validatePinTable(result analyzeJSON, wantModulePath string, rep *reporter) (pinTableValue, error) {
+func validatePinTable(result analyzeJSON, wantModulePath string, prof ecosystemProfile, rep *reporter) (pinTableValue, error) {
 	rep.step("find version_pin_table signal")
 	sig, ok := result.findSignal("version_pin_table")
 	if !ok {
@@ -286,10 +398,10 @@ func validatePinTable(result analyzeJSON, wantModulePath string, rep *reporter) 
 	rep.pass("version_pin_table present")
 
 	rep.step("validate version_pin_table metadata")
-	if err := validateMetadata(sig, "publication", "very-high", "go-publish"); err != nil {
+	if err := validateMetadata(sig, "publication", "very-high", prof.pinSignalSource); err != nil {
 		return pinTableValue{}, err
 	}
-	rep.pass("metadata: group=publication forgery=very-high source=go-publish")
+	rep.pass("metadata: group=publication forgery=very-high source=%s", prof.pinSignalSource)
 
 	rep.step("validate version_pin_table value shape")
 	var pt pinTableValue
@@ -299,15 +411,20 @@ func validatePinTable(result analyzeJSON, wantModulePath string, rep *reporter) 
 	if pt.ModulePath != wantModulePath {
 		return pinTableValue{}, fmt.Errorf("expected module_path=%q, got %q", wantModulePath, pt.ModulePath)
 	}
-	if err := validatePinTableCounts(pt); err != nil {
+	if err := validatePinTableCounts(pt, prof); err != nil {
 		return pinTableValue{}, err
 	}
-	if err := validatePinShape(pt.Pins); err != nil {
+	if err := validatePinShape(pt.Pins, prof); err != nil {
 		return pinTableValue{}, err
 	}
-	rep.pass("counts: total=%d processed=%d (cap=%d), %d pins all valid",
-		pt.VersionCountTotal, pt.VersionCountProcessed,
-		expectedProcessedCount, len(pt.Pins))
+	if prof.capApplies {
+		rep.pass("counts: total=%d processed=%d (cap=%d), %d pins all valid",
+			pt.VersionCountTotal, pt.VersionCountProcessed,
+			expectedProcessedCount, len(pt.Pins))
+	} else {
+		rep.pass("counts: total=%d processed=%d (no cap), %d pins all valid",
+			pt.VersionCountTotal, pt.VersionCountProcessed, len(pt.Pins))
+	}
 	return pt, nil
 }
 
@@ -317,7 +434,7 @@ func validatePinTable(result analyzeJSON, wantModulePath string, rep *reporter) 
 // to focused helpers. Returns the parsed matrix and the count of
 // rows whose TagSHALocalStatus is "present" — the latter is needed
 // by the summary printer and by the cross-signal anchor check.
-func validateSourceMatrix(result analyzeJSON, wantModulePath string, rep *reporter) (matrixValue, int, error) {
+func validateSourceMatrix(result analyzeJSON, wantModulePath string, prof ecosystemProfile, rep *reporter) (matrixValue, int, error) {
 	rep.step("find source_evolution_matrix signal")
 	sig, ok := result.findSignal("source_evolution_matrix")
 	if !ok {
@@ -339,11 +456,16 @@ func validateSourceMatrix(result analyzeJSON, wantModulePath string, rep *report
 	if m.ModulePath != wantModulePath {
 		return matrixValue{}, 0, fmt.Errorf("matrix.module_path: expected %q, got %q", wantModulePath, m.ModulePath)
 	}
-	if m.Ecosystem != "go" {
-		return matrixValue{}, 0, fmt.Errorf("matrix.ecosystem: expected \"go\", got %q", m.Ecosystem)
+	if m.Ecosystem != prof.matrixEcosystem {
+		return matrixValue{}, 0, fmt.Errorf("matrix.ecosystem: expected %q, got %q",
+			prof.matrixEcosystem, m.Ecosystem)
+	}
+	if m.Language != prof.matrixLanguage {
+		return matrixValue{}, 0, fmt.Errorf("matrix.language: expected %q, got %q",
+			prof.matrixLanguage, m.Language)
 	}
 	if len(m.Rows) == 0 {
-		return matrixValue{}, 0, fmt.Errorf("matrix has zero rows; expected > 0 for a healthy module")
+		return matrixValue{}, 0, fmt.Errorf("matrix has zero rows; expected > 0 for a healthy package")
 	}
 	// LastN=12 default. For a single-major history (kong is all
 	// v1.x in its recent 12), MajorLeaves contributes 0 and
@@ -351,16 +473,16 @@ func validateSourceMatrix(result analyzeJSON, wantModulePath string, rep *report
 	if len(m.Rows) > 20 {
 		return matrixValue{}, 0, fmt.Errorf("matrix has %d rows; HardCap=20 should bound this", len(m.Rows))
 	}
-	rep.pass("matrix: module_path=%s ecosystem=go rows=%d",
-		m.ModulePath, len(m.Rows))
+	rep.pass("matrix: module_path=%s ecosystem=%s language=%s rows=%d",
+		m.ModulePath, m.Ecosystem, m.Language, len(m.Rows))
 
 	rep.step("validate matrix row shape")
-	presentCount, err := validateMatrixRows(m.Rows)
+	presentCount, err := validateMatrixRows(m.Rows, prof)
 	if err != nil {
 		return matrixValue{}, 0, err
 	}
 	if presentCount == 0 {
-		return matrixValue{}, 0, fmt.Errorf("matrix has %d rows but none are present; expected most rows present for a healthy module", len(m.Rows))
+		return matrixValue{}, 0, fmt.Errorf("matrix has %d rows but none are present; expected most rows present for a healthy package", len(m.Rows))
 	}
 	rep.pass("rows: %d total, %d present, all status enum values valid",
 		len(m.Rows), presentCount)
@@ -382,7 +504,7 @@ func validateSourceMatrix(result analyzeJSON, wantModulePath string, rep *report
 // rows where analysis blocks may be nil — no further shape
 // constraints at this level. Returns the count of "present" rows
 // so the caller can assert "at least one fresh row" downstream.
-func validateMatrixRows(rows []matrixRow) (int, error) {
+func validateMatrixRows(rows []matrixRow, prof ecosystemProfile) (int, error) {
 	presentCount := 0
 	for i, r := range rows {
 		if r.Version == "" {
@@ -400,16 +522,16 @@ func validateMatrixRows(rows []matrixRow) (int, error) {
 			if r.Structural == nil {
 				return 0, fmt.Errorf("row[%d] (%s, present): Structural is nil", i, r.Version)
 			}
-			if len(r.TagSHA) != shaHexLen {
-				return 0, fmt.Errorf("row[%d] (%s): expected %d-char tag_sha, got %d (%q)",
-					i, r.Version, shaHexLen, len(r.TagSHA), r.TagSHA)
+			if !prof.shaHexLens[len(r.TagSHA)] {
+				return 0, fmt.Errorf("row[%d] (%s): tag_sha length %d not in expected set %v (%q)",
+					i, r.Version, len(r.TagSHA), sortedIntKeys(prof.shaHexLens), r.TagSHA)
 			}
 			if !isHexLower(r.TagSHA) {
 				return 0, fmt.Errorf("row[%d] (%s): tag_sha contains non-hex: %q", i, r.Version, r.TagSHA)
 			}
-			if r.TagSHASource != "proxy.golang.org" {
-				return 0, fmt.Errorf("row[%d] (%s): expected tag_sha_source=proxy.golang.org, got %q",
-					i, r.Version, r.TagSHASource)
+			if !prof.pinValueSources[r.TagSHASource] {
+				return 0, fmt.Errorf("row[%d] (%s): tag_sha_source %q not in expected set %v for ecosystem %s",
+					i, r.Version, r.TagSHASource, sortedKeys(prof.pinValueSources), prof.matrixEcosystem)
 			}
 		case "missing_from_clone", "missing_origin", "fetch_failed":
 			// Partial row — analysis blocks may be nil. No
@@ -573,6 +695,17 @@ func runAnalyze(ctx context.Context, binPath, dbPath, target, clonePath string) 
 	return out, nil
 }
 
+// sortedKeys / sortedIntKeys give deterministic set renderings for
+// the ecosystem-mismatch error messages (map iteration order would
+// otherwise make the diagnostics non-reproducible).
+func sortedKeys(m map[string]bool) []string {
+	return slices.Sorted(maps.Keys(m))
+}
+
+func sortedIntKeys(m map[int]bool) []int {
+	return slices.Sorted(maps.Keys(m))
+}
+
 // isHexLower reports whether s is all hex digits 0-9 + a-f.
 func isHexLower(s string) bool {
 	for _, c := range s {
@@ -665,6 +798,9 @@ type matrixAST struct {
 	DynamicEvalCalls     int `json:"dynamic_eval_calls"`
 	ImportTimeCallSites  int `json:"import_time_call_sites"`
 	InstallHookOverrides int `json:"install_hook_overrides"`
+	EnvCredentialReads   int `json:"env_credential_reads"`
+	SensitivePathWrites  int `json:"sensitive_path_writes"`
+	CloudMetadataCalls   int `json:"cloud_metadata_calls"`
 }
 
 // matrixStructural mirrors source.Structural.

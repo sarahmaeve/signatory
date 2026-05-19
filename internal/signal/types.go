@@ -391,6 +391,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"low count (bus-factor 1) is a governance concern independent of the individual maintainer's trustworthiness",
 		},
 	},
+	"maintainer_email_set": {
+		Type:              "maintainer_email_set",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "SHA-256 hashes of the maintainers' lowercased email addresses (sorted, no raw PII). Diffed by deltas to surface the axios-shape ATO precursor: a maintainer's associated email flipping to an attacker address.",
+		Caveats: []string{
+			"hashed for privacy — detects change, not identity; a benign email correction also registers as a transition and needs human triage",
+			"npm exposes maintainer email in the packument and the owner controls it; absence of email on a maintainer entry is normal and contributes no hash",
+			"an attacker who keeps the same email while compromising the account is invisible to this signal (pair with publish_origin_consistency / attestation_consistency)",
+		},
+	},
 	"analyst_self_correction": {
 		Type:              "analyst_self_correction",
 		Group:             profile.SignalGroupGovernance,

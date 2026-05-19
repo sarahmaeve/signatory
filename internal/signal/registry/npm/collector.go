@@ -3,6 +3,8 @@ package npm
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	"github.com/sarahmaeve/signatory/internal/sigstore/fulcio"
 )
 
 // crossVersionWindow bounds the number of recent versions consulted
@@ -153,6 +156,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 
 	// ----- maintainer_count (governance) -----
 	recordMaintainerCount(result, entity.ID, pkg, collectedAt)
+	recordMaintainerEmailSet(result, entity.ID, pkg, collectedAt)
 
 	// ----- postinstall_present + trusted_publishing (publication) -----
 	//
@@ -220,6 +224,27 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// Skipped silently when no EntityStore was wired (pre-Path-C
 	// tests construct collectors without one and continue to work).
 	c.ensurePublisherEntities(ctx, pkg)
+
+	// ----- version_pin_table (source-evolution anchor) -----
+	//
+	// Per-version (version, sha, published_at) triples the
+	// source-evolution collector needs to anchor its AST matrix. The
+	// SHA comes from versions[v].gitHead — already parsed above for
+	// artifact_url — so the base table is a pure re-parse. Recent
+	// versions that advertise a provenance attestation get one extra
+	// HTTP call each to upgrade their pin to the Fulcio-cert SHA.
+	c.recordVersionPinTable(ctx, result, entity.ID, packageName, pkg, collectedAt)
+
+	// ----- attestation provenance (publication) -----
+	//
+	// trusted_publishing only reports attestation PRESENCE. The
+	// TanStack careful-variant keeps every version attested but
+	// changes the attesting workflow ref (out-of-band publish with a
+	// scraped OIDC token). This sweep extracts the Fulcio build-signer
+	// identity per recent attested version and emits the same
+	// latest_attestation_builder + attestation_consistency shape pypi
+	// does, so the store schema is uniform across ecosystems.
+	c.recordAttestationProvenance(ctx, result, entity.ID, pkg, collectedAt)
 
 	return result, nil
 }
@@ -301,11 +326,18 @@ func recordLastPublish(result *signal.CollectionResult, entityID string,
 		return fmt.Errorf("registry response has no time entry for latest version %q", pkg.DistTags.Latest)
 	}
 
+	// days_ago is a non-negative staleness convenience: a future-dated
+	// `time[<latest>]` (publisher-controlled, attacker-influenceable)
+	// would otherwise yield a large negative integer that downstream
+	// consumers comparing `< 30` silently treat as "fresh." published_at
+	// carries the absolute timestamp — any consumer that needs the raw
+	// value still has it.
+	daysAgo := max(int(collectedAt.Sub(t).Hours()/24), 0)
 	result.RecordSignal(entityID, "last_publish", source, collectedAt, defaultTTL,
 		map[string]any{
 			"latest_version": pkg.DistTags.Latest,
 			"published_at":   t.UTC().Format(time.RFC3339),
-			"days_ago":       int(collectedAt.Sub(t).Hours() / 24),
+			"days_ago":       daysAgo,
 		})
 	return nil
 }
@@ -344,6 +376,38 @@ func recordMaintainerCount(result *signal.CollectionResult, entityID string,
 		map[string]any{
 			"count":  len(pkg.Maintainers),
 			"logins": logins,
+		})
+}
+
+// recordMaintainerEmailSet emits SHA-256 hashes of the maintainers'
+// lowercased email addresses, sorted for deterministic output. The
+// axios compromise's earliest registry-visible tell was a maintainer's
+// associated email flipping to an attacker address; deltas diffs this
+// hash set across observations and surfaces that change. Hashes, never
+// raw addresses: the email is PII and the signal only needs change
+// detection, not the value. A maintainer with no email contributes
+// nothing (npm allows email-less maintainer entries); the signal still
+// emits (possibly empty) so its later appearance/growth is itself a
+// diffable transition rather than a missing-signal ambiguity.
+func recordMaintainerEmailSet(result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	hashes := make([]string, 0, len(pkg.Maintainers))
+	for _, m := range pkg.Maintainers {
+		e := strings.ToLower(strings.TrimSpace(m.Email))
+		if e == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(e))
+		hashes = append(hashes, hex.EncodeToString(sum[:]))
+	}
+	slices.Sort(hashes)
+	hashes = slices.Compact(hashes)
+
+	result.RecordSignal(entityID, "maintainer_email_set", source, collectedAt, defaultTTL,
+		map[string]any{
+			"count":        len(hashes),
+			"email_hashes": hashes,
 		})
 }
 
@@ -1075,6 +1139,315 @@ func recordVersionUnpublishObserved(result *signal.CollectionResult, entityID st
 	}
 
 	result.RecordSignal(entityID, "version_unpublish_observed", source, collectedAt, defaultTTL, value)
+}
+
+// pinSourceNpmGitHead is the Source stamped on every npm VersionPin
+// whose SHA was recovered from the packument's versions[v].gitHead.
+// The analog of gopublish's "proxy.golang.org" and pypi's
+// "pypi-attestation". gitHead is publisher-asserted (the maintainer's
+// npm CLI stamps it at publish; the registry does not vouch for it),
+// so this label carries lower forgery resistance than an
+// attestation-recovered SHA — a future npm-attestation upgrade path
+// stamps a distinct, stronger label so an analyst reading the matrix
+// can tell the two provenance strengths apart.
+const pinSourceNpmGitHead = "npm-gitHead"
+
+// pinSourceNpmAttestation is the Source stamped on a pin whose SHA
+// was recovered from the version's npm provenance attestation (the
+// Fulcio source-repo-digest in the signing cert). Higher forgery
+// resistance than gitHead: only Fulcio's CA can mint a cert with
+// that claim, and only against a real CI OIDC token. The distinct
+// label lets an analyst reading the matrix tell publisher-asserted
+// (gitHead) from CA-vouched (attestation) provenance per row.
+const pinSourceNpmAttestation = "npm-attestation"
+
+// versionPin / versionPinTableValue mirror gopublish's
+// VersionPin / VersionPinTableValue JSON shape verbatim (json tags
+// included). Intentionally an independent definition: the
+// source-evolution consumer (source.pinTableFromSignals) matches on
+// signal type "version_pin_table" and is ecosystem-blind, so npm
+// emitting this shape is served by the existing pinSourceImpl with
+// zero new code — and npm-registry stays free of any dependency on
+// the pypi or source packages. published_at is RFC3339 UTC, parsed
+// by the consumer.
+type versionPin struct {
+	Version     string `json:"version"`
+	SHA         string `json:"sha"`
+	Source      string `json:"source"`
+	PublishedAt string `json:"published_at"`
+}
+
+type versionPinTableValue struct {
+	ModulePath        string `json:"module_path"`
+	VersionCountTotal int    `json:"version_count_total"`
+	// VersionCountProcessed is gopublish-parity: the number of
+	// versions inspected for a pin (those with an orderable time
+	// entry), NOT the SHA-bearing subset. A version with a time entry
+	// but no gitHead is processed but not pinned — reporting len(pins)
+	// here would misreport "processed" as "succeeded".
+	VersionCountProcessed int          `json:"version_count_processed"`
+	Pins                  []versionPin `json:"pins"`
+	MissingOriginVersions []string     `json:"missing_origin_versions"`
+	FetchFailedVersions   []string     `json:"fetch_failed_versions"`
+}
+
+// recordVersionPinTable synthesizes the gopublish-shaped
+// version_pin_table from the packument. A version is *processed* when
+// it carries an orderable time entry (published_at is the
+// source-evolution matrix's chronological axis — a version we can't
+// place in time is one we can't anchor a row on, mirroring
+// recentVersionsByPublishTime's "a version we can't order is a
+// version we don't emit signals about"). A processed version is
+// *pinned* when it also carries a gitHead.
+//
+// gitHead is gated by fulcio.IsGitObjectID — the same trust-boundary
+// shape check pypi applies to attestation-recovered SHAs — so a
+// forged value never reaches a git subprocess argv.
+//
+// Upgrade pass: each recent version (bounded to crossVersionWindow)
+// that advertises a provenance attestation gets one GetAttestation
+// call; if its signing cert yields a Fulcio source-repo-digest, that
+// version's pin is upgraded to the cert SHA and re-stamped
+// pinSourceNpmAttestation. An attestation can also pin a version
+// whose gitHead was absent or rejected. A failed/empty attestation
+// fetch silently leaves the gitHead pin intact. The bound keeps a
+// popular package's hundreds of versions from becoming hundreds of
+// HTTP calls — gitHead alone anchors the long tail.
+//
+// Emits nothing when no version yields a pin — the source-evolution
+// collector then records its own absence with a clear reason rather
+// than building a matrix off an empty table.
+func (c *Collector) recordVersionPinTable(ctx context.Context,
+	result *signal.CollectionResult, entityID, packageName string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	processed := 0
+	pins := make([]versionPin, 0, len(pkg.Versions))
+	for ver, pv := range pkg.Versions {
+		t, ok := pkg.Time[ver]
+		if !ok || t.IsZero() {
+			continue // unorderable on the chronological axis — skip
+		}
+		processed++
+		// Trust boundary: gitHead is publisher-asserted and the
+		// registry does not vouch for it. It flows verbatim into
+		// `git ls-tree`/`git cat-file`/`git diff` argv inside the
+		// source-evolution collector via this pin's SHA. Reject
+		// anything that is not a bare git object id (flag-shaped,
+		// whitespace/newline-bearing, non-hex, abbreviated) here —
+		// such a version is processed but not pinnable, exactly like
+		// one with no gitHead at all.
+		if !fulcio.IsGitObjectID(pv.GitHead) {
+			continue
+		}
+		pins = append(pins, versionPin{
+			Version:     ver,
+			SHA:         pv.GitHead,
+			Source:      pinSourceNpmGitHead,
+			PublishedAt: t.UTC().Format(time.RFC3339),
+		})
+	}
+
+	c.upgradePinsFromAttestations(ctx, pkg, &pins)
+
+	if len(pins) == 0 {
+		return
+	}
+
+	// Newest-first by publish time, lex-greater version as the
+	// tiebreaker — identical ordering discipline to
+	// recentVersionsByPublishTime so pin output is deterministic
+	// across runs even when the underlying map iteration order varies.
+	// (The source-evolution Assembler re-sorts by published_at anyway,
+	// so order is not load-bearing for correctness — only for stable
+	// signal payloads and deltas diffs.)
+	slices.SortStableFunc(pins, func(a, b versionPin) int {
+		if a.PublishedAt == b.PublishedAt {
+			return cmp.Compare(b.Version, a.Version)
+		}
+		return cmp.Compare(b.PublishedAt, a.PublishedAt)
+	})
+
+	// ModulePath is the trust-boundary-validated entity name
+	// (extractNpmPackageName already gated pkg:npm/<name> on the
+	// purl grammar), NOT pkg.Name from the response body — which is
+	// publisher-controlled and could be a mismatched / control-char-
+	// bearing string that would poison the persisted signal value.
+	// The validated identifier is what downstream source-evolution
+	// renders into module_path.
+	result.RecordSignal(entityID, "version_pin_table", source, collectedAt, defaultTTL,
+		versionPinTableValue{
+			ModulePath:            packageName,
+			VersionCountTotal:     len(pkg.Versions),
+			VersionCountProcessed: processed,
+			Pins:                  pins,
+		})
+}
+
+// upgradePinsFromAttestations walks the recent-version window
+// (newest-first, bounded to crossVersionWindow) and, for each version
+// that advertises a provenance attestation, fetches it and tries to
+// recover the Fulcio source-repo-digest. On success the version's pin
+// is upgraded in place to the cert SHA and re-stamped
+// pinSourceNpmAttestation; a version with an attestation SHA but no
+// prior (gitHead) pin gets a new pin appended — the attestation alone
+// is a sufficient, higher-confidence anchor. Every failure mode
+// (fetch error, 404, unrecoverable cert) is a silent no-op that
+// leaves any existing gitHead pin untouched, so attestation strictly
+// upgrades and never weakens the table.
+//
+// Recent attested versions necessarily carry a time entry
+// (recentVersionsByPublishTime skips unorderable ones), so they were
+// already counted in recordVersionPinTable's processed tally — this
+// pass never adjusts it.
+func (c *Collector) upgradePinsFromAttestations(ctx context.Context,
+	pkg *RegistryPackage, pins *[]versionPin) {
+
+	idx := make(map[string]int, len(*pins))
+	for i, p := range *pins {
+		idx[p.Version] = i
+	}
+
+	for _, r := range recentVersionsByPublishTime(pkg, crossVersionWindow) {
+		if !r.hasAttestation {
+			continue
+		}
+		resp, err := c.client.GetAttestation(ctx, pkg.Name, r.version)
+		if err != nil {
+			continue // no attestation / fetch failed — keep gitHead pin
+		}
+		sha, ok := extractGitHeadFromNpmAttestation(resp)
+		if !ok {
+			continue // no recoverable Fulcio SHA — keep gitHead pin
+		}
+		if i, exists := idx[r.version]; exists {
+			(*pins)[i].SHA = sha
+			(*pins)[i].Source = pinSourceNpmAttestation
+			continue
+		}
+		// Attested version with no usable gitHead: the attestation is
+		// its only — and a strong — anchor.
+		*pins = append(*pins, versionPin{
+			Version:     r.version,
+			SHA:         sha,
+			Source:      pinSourceNpmAttestation,
+			PublishedAt: r.publishedAt.UTC().Format(time.RFC3339),
+		})
+		idx[r.version] = len(*pins) - 1
+	}
+}
+
+// npmAttestationWindow bounds how many recent versions the
+// attestation-consistency sweep fetches. Matches pypi's
+// attestationWindow (5): enough to see a workflow-ref transition
+// without paying a GetAttestation round-trip for deep history.
+const npmAttestationWindow = 5
+
+// recordAttestationProvenance sweeps the recent attested versions,
+// recovers each one's Fulcio build identity, and emits
+// latest_attestation_builder + attestation_consistency in the same
+// shape the pypi collector uses (uniform store schema). Emits nothing
+// when no recent version advertises an attestation — trusted_publishing
+// already covers the never-adopted case, and a sweep with no data
+// would be noise.
+//
+// Bounded HTTP: at most npmAttestationWindow GetAttestation calls,
+// only for versions whose packument entry advertises an attestation.
+func (c *Collector) recordAttestationProvenance(ctx context.Context,
+	result *signal.CollectionResult, entityID string,
+	pkg *RegistryPackage, collectedAt time.Time) {
+
+	recent := recentVersionsByPublishTime(pkg, npmAttestationWindow)
+
+	type entry struct {
+		version  string
+		attested bool
+		sha      string
+		builder  fulcio.BuilderIdentity
+	}
+	checked := make([]entry, 0, len(recent))
+	anyAttested := false
+	for _, r := range recent {
+		e := entry{version: r.version}
+		if r.hasAttestation {
+			if resp, err := c.client.GetAttestation(ctx, pkg.Name, r.version); err == nil {
+				if sha, b, ok := extractProvenanceFromNpmAttestation(resp); ok {
+					e.attested = true
+					e.sha = sha
+					e.builder = b
+					anyAttested = true
+				}
+			}
+		}
+		checked = append(checked, e)
+	}
+	if len(checked) == 0 || !anyAttested {
+		return // never adopted trusted publishing — nothing to compare
+	}
+
+	// workflowRefs is newest-first, "" where unattested/unknown.
+	workflowRefs := make([]string, len(checked))
+	uniq := map[string]struct{}{}
+	attestedCount, unattestedCount := 0, 0
+	for i, e := range checked {
+		workflowRefs[i] = e.builder.BuildSignerURI
+		if e.builder.BuildSignerURI != "" {
+			uniq[e.builder.BuildSignerURI] = struct{}{}
+		}
+		if e.attested {
+			attestedCount++
+		} else {
+			unattestedCount++
+		}
+	}
+	// Adjacent-pair transitions: any flip (presence or workflow ref),
+	// "" ↔ "X" included — the axios presence loss and the TanStack
+	// workflow-ref change both surface here.
+	transitions := 0
+	for i := 1; i < len(workflowRefs); i++ {
+		if workflowRefs[i-1] != workflowRefs[i] {
+			transitions++
+		}
+		if checked[i-1].attested != checked[i].attested {
+			// presence flip not already counted via a ref change
+			if workflowRefs[i-1] == workflowRefs[i] {
+				transitions++
+			}
+		}
+	}
+	consistent := len(uniq) <= 1 && unattestedCount == 0
+	transitionDetected := transitions > 0
+
+	latest := checked[0]
+	builderKind := ""
+	extractionStatus := "no_attestation"
+	if latest.attested {
+		extractionStatus = "ok"
+		builderKind = "GitHub" // Fulcio GHA OIDC; the only npm provenance issuer today
+	}
+	result.RecordSignal(entityID, "latest_attestation_builder", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present":           latest.attested,
+			"version_checked":   latest.version,
+			"builder_kind":      builderKind,
+			"source_repository": latest.builder.SourceRepoURI,
+			"source_revision":   latest.sha,
+			"workflow":          latest.builder.BuildSignerURI,
+			"extraction_status": extractionStatus,
+		})
+
+	result.RecordSignal(entityID, "attestation_consistency", source, collectedAt, defaultTTL,
+		map[string]any{
+			"consistent":               consistent,
+			"versions_checked":         len(checked),
+			"versions_attested":        attestedCount,
+			"versions_unattested":      unattestedCount,
+			"transition_detected":      transitionDetected,
+			"workflow_refs":            workflowRefs,
+			"latest_workflow_ref":      workflowRefs[0],
+			"unique_workflow_refs":     len(uniq),
+			"workflow_ref_transitions": transitions,
+		})
 }
 
 // sanitizeFetchReason converts a fetch error into a reason string
