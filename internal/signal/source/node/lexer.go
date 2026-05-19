@@ -206,16 +206,31 @@ func scanString(src []byte, i int) int {
 	return n
 }
 
+// maxTemplateDepth bounds scanTemplate's recursion through nested
+// template literals. signatory lexes untrusted source up to the
+// BlobStreamer's 10 MiB cap; without a cap, a crafted file of ~3M
+// `${` levels recurses one Go frame per level and stack-overflows —
+// aborting the whole collection for that version (a DoS and an
+// evasion). Over the cap, a nested backtick is treated as an
+// ordinary byte instead of recursing: the worst case is the rest of
+// the file collapsing into one opaque STRING token — a conservative
+// miss, never a false call (AST.md §4). 256 matches maxArgScanTokens.
+const maxTemplateDepth = 256
+
 // scanTemplate consumes a `...` template literal as one opaque token,
 // returning the index just past the closing backtick and the number
 // of embedded newlines (to keep line numbers accurate). It tracks
-// ${ } interpolation brace depth and recurses through nested template
-// literals and skips interior strings so a backtick or brace inside
-// an interpolation's string/nested-template doesn't end the outer
-// literal. Code inside ${} is deliberately NOT tokenized — a
-// documented conservative miss (AST.md §4). Lenient: unterminated
-// ends at EOF.
+// ${ } interpolation brace depth and recurses (depth-bounded by
+// maxTemplateDepth) through nested template literals and skips
+// interior strings so a backtick or brace inside an interpolation's
+// string/nested-template doesn't end the outer literal. Code inside
+// ${} is deliberately NOT tokenized — a documented conservative miss
+// (AST.md §4). Lenient: unterminated ends at EOF.
 func scanTemplate(src []byte, i int) (end, newlines int) {
+	return scanTemplateDepth(src, i, 0)
+}
+
+func scanTemplateDepth(src []byte, i, depth int) (end, newlines int) {
 	n := len(src)
 	j := i + 1 // past opening backtick
 	for j < n {
@@ -229,8 +244,8 @@ func scanTemplate(src []byte, i int) (end, newlines int) {
 			return j + 1, newlines
 		case src[j] == '$' && j+1 < n && src[j+1] == '{':
 			j += 2
-			depth := 1
-			for j < n && depth > 0 {
+			d := 1
+			for j < n && d > 0 {
 				switch src[j] {
 				case '\\':
 					j += 2
@@ -238,13 +253,19 @@ func scanTemplate(src []byte, i int) (end, newlines int) {
 					newlines++
 					j++
 				case '{':
-					depth++
+					d++
 					j++
 				case '}':
-					depth--
+					d--
 					j++
 				case '`':
-					sub, nl := scanTemplate(src, j)
+					if depth >= maxTemplateDepth {
+						// Recursion cap: treat the nested backtick as
+						// an ordinary byte. Bounded, conservative.
+						j++
+						continue
+					}
+					sub, nl := scanTemplateDepth(src, j, depth+1)
 					newlines += nl
 					j = sub
 				case '\'', '"':
