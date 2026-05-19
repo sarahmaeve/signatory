@@ -233,7 +233,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// artifact_url — so the base table is a pure re-parse. Recent
 	// versions that advertise a provenance attestation get one extra
 	// HTTP call each to upgrade their pin to the Fulcio-cert SHA.
-	c.recordVersionPinTable(ctx, result, entity.ID, pkg, collectedAt)
+	c.recordVersionPinTable(ctx, result, entity.ID, packageName, pkg, collectedAt)
 
 	// ----- attestation provenance (publication) -----
 	//
@@ -326,11 +326,18 @@ func recordLastPublish(result *signal.CollectionResult, entityID string,
 		return fmt.Errorf("registry response has no time entry for latest version %q", pkg.DistTags.Latest)
 	}
 
+	// days_ago is a non-negative staleness convenience: a future-dated
+	// `time[<latest>]` (publisher-controlled, attacker-influenceable)
+	// would otherwise yield a large negative integer that downstream
+	// consumers comparing `< 30` silently treat as "fresh." published_at
+	// carries the absolute timestamp — any consumer that needs the raw
+	// value still has it.
+	daysAgo := max(int(collectedAt.Sub(t).Hours()/24), 0)
 	result.RecordSignal(entityID, "last_publish", source, collectedAt, defaultTTL,
 		map[string]any{
 			"latest_version": pkg.DistTags.Latest,
 			"published_at":   t.UTC().Format(time.RFC3339),
-			"days_ago":       int(collectedAt.Sub(t).Hours() / 24),
+			"days_ago":       daysAgo,
 		})
 	return nil
 }
@@ -1211,7 +1218,7 @@ type versionPinTableValue struct {
 // collector then records its own absence with a clear reason rather
 // than building a matrix off an empty table.
 func (c *Collector) recordVersionPinTable(ctx context.Context,
-	result *signal.CollectionResult, entityID string,
+	result *signal.CollectionResult, entityID, packageName string,
 	pkg *RegistryPackage, collectedAt time.Time) {
 
 	processed := 0
@@ -1261,9 +1268,16 @@ func (c *Collector) recordVersionPinTable(ctx context.Context,
 		return cmp.Compare(b.PublishedAt, a.PublishedAt)
 	})
 
+	// ModulePath is the trust-boundary-validated entity name
+	// (extractNpmPackageName already gated pkg:npm/<name> on the
+	// purl grammar), NOT pkg.Name from the response body — which is
+	// publisher-controlled and could be a mismatched / control-char-
+	// bearing string that would poison the persisted signal value.
+	// The validated identifier is what downstream source-evolution
+	// renders into module_path.
 	result.RecordSignal(entityID, "version_pin_table", source, collectedAt, defaultTTL,
 		versionPinTableValue{
-			ModulePath:            pkg.Name,
+			ModulePath:            packageName,
 			VersionCountTotal:     len(pkg.Versions),
 			VersionCountProcessed: processed,
 			Pins:                  pins,

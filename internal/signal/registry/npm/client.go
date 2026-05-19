@@ -270,12 +270,23 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// containsControlChars reports whether s includes any ASCII control
-// character (0x00–0x1F) other than horizontal tab (0x09). These never
-// appear in legitimate registry URLs or identifiers.
+// containsControlChars reports whether s includes any byte / rune
+// that legitimate registry URLs and identifiers never carry. Rejects:
+//   - ASCII C0 controls (0x00–0x1F) except horizontal tab (0x09)
+//   - DEL (0x7F) — fulcio.safeClaim already rejects this; same line
+//   - U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) — JS
+//     treats both as line terminators and many log aggregators split
+//     on them, so they're an injection vector for any downstream
+//     renderer or log pipeline.
+//
+// The range loop iterates as runes, so the multi-byte UTF-8 forms of
+// U+2028 / U+2029 are matched directly rather than byte-by-byte.
 func containsControlChars(s string) bool {
 	for _, r := range s {
 		if r < 0x20 && r != '\t' {
+			return true
+		}
+		if r == 0x7F || r == ' ' || r == ' ' {
 			return true
 		}
 	}

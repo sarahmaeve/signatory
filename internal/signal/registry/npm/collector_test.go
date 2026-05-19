@@ -303,6 +303,52 @@ func TestCollector_Collect_HappyPath_EmitsFullSignalSet(t *testing.T) {
 		"sample response has one version entry")
 }
 
+// TestCollector_Collect_LastPublish_FutureDated_ClampsDaysAgo pins M5.
+// `days_ago` is computed as `int(collectedAt.Sub(t).Hours() / 24)`,
+// which goes NEGATIVE for a future-dated `time[<latest>]` entry. The
+// registry response is publisher-controlled; a malicious or buggy
+// packument that stamps a future timestamp poisons the signal: any
+// downstream consumer that applies a threshold like `< 30 days`
+// against `days_ago` would treat a future-dated package as "actively
+// maintained today." Clamp at 0 — `published_at` is also emitted and
+// carries the absolute date if a consumer needs it.
+func TestCollector_Collect_LastPublish_FutureDated_ClampsDaysAgo(t *testing.T) {
+	t.Parallel()
+
+	// Stamp a publish time five years from any plausible test wallclock —
+	// guarantees collectedAt.Sub(t) < 0 even if the test clock drifts.
+	registryBody := `{
+	  "name": "future-dated",
+	  "dist-tags": {"latest": "1.0.0"},
+	  "time": {"1.0.0": "2099-01-01T00:00:00Z"},
+	  "maintainers": [{"name": "publisher"}],
+	  "versions": {"1.0.0": {"scripts": {}, "dist": {}}}
+	}`
+	downloadsBody := `{"downloads": 1, "package": "future-dated"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("future-dated"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "last_publish"))
+	lp := getSignalValue(t, result, "last_publish")
+	assert.Equal(t, "2099-01-01T00:00:00Z", lp["published_at"],
+		"published_at carries the registry's literal timestamp — consumers "+
+			"that need the absolute value still have it")
+	// days_ago is a non-negative convenience integer (decoded as
+	// float64 by the JSON round-trip helper, matching the rest of
+	// this suite's numeric assertions). The clamp prevents downstream
+	// consumers from misreading a negative value as a small absolute
+	// — e.g., `staleness > 30` would silently treat -3000 as "fresh".
+	daysAgo, ok := lp["days_ago"].(float64)
+	require.True(t, ok, "days_ago must be a number; got %T", lp["days_ago"])
+	assert.GreaterOrEqual(t, daysAgo, float64(0),
+		"days_ago must never be negative — a future-dated registry "+
+			"timestamp is attacker-influenced; consumers compare against "+
+			"this field without anticipating sign-flipped values")
+}
+
 // ----- non-npm entity: empty result, no HTTP calls -----
 
 func TestCollector_Collect_NonNpmEntity_ReturnsEmpty(t *testing.T) {
@@ -1884,6 +1930,54 @@ func TestCollector_Collect_VersionPinTable_RejectsMalformedGitHead(t *testing.T)
 	assert.Equal(t, validSHA, p["sha"],
 		"a forged gitHead must never appear as a pin SHA — it would flow "+
 			"into git ls-tree / cat-file / diff argv downstream")
+}
+
+// TestCollector_Collect_VersionPinTable_ModulePathUsesEntityName is
+// the M2 trust-boundary test. `pkg.Name` lives in the registry-
+// response JSON and is fully publisher-controlled: a malicious or
+// mismatched response can carry a different name than the one the
+// caller asked for. The validated entity name (extractNpmPackageName
+// already gates pkg:npm/<name>) is the trusted identifier and must
+// be what lands in version_pin_table.module_path — downstream
+// source-evolution consumers render module_path verbatim and must
+// not see attacker-influenced bytes.
+//
+// Red test: today recordVersionPinTable uses pkg.Name directly; this
+// test serves a packument whose response-side "name" disagrees with
+// the requested package and asserts module_path is the request name.
+func TestCollector_Collect_VersionPinTable_ModulePathUsesEntityName(t *testing.T) {
+	t.Parallel()
+
+	const validSHA = "feed00000000000000000000000000000000beef"
+	// The packument's "name" field is attacker-controlled. The caller
+	// asked for "express"; the registry returns a different name
+	// (could be a different package — registry confusion — or could
+	// be control-character-bearing). Either way, module_path must
+	// reflect the trust-boundary-validated entity name, not the JSON.
+	registryBody := `{
+	  "name": "evil-shadow-package\nInjected: line",
+	  "dist-tags": {"latest": "1.0.0"},
+	  "time": {"1.0.0": "2026-01-01T00:00:00Z"},
+	  "maintainers": [{"name": "attacker"}],
+	  "versions": {
+	    "1.0.0": {"scripts": {}, "gitHead": "` + validSHA + `", "dist": {}}
+	  }
+	}`
+	downloadsBody := `{"downloads": 1, "package": "express"}`
+	srv := newMultiEndpointServer(t, registryBody, downloadsBody)
+	defer srv.Close()
+
+	result, err := newTestCollector(srv).Collect(context.Background(), npmEntity("express"))
+	require.NoError(t, err)
+
+	require.True(t, hasSignal(result, "version_pin_table"))
+	v := getSignalValue(t, result, "version_pin_table")
+
+	assert.Equal(t, "express", v["module_path"],
+		"module_path must be the validated entity name, not pkg.Name "+
+			"from the attacker-controlled response body — a registry "+
+			"that returns a different (or pollution-bearing) name field "+
+			"would otherwise poison the persisted signal value")
 }
 
 // ----- version_pin_table: attestation SHA upgrade.
