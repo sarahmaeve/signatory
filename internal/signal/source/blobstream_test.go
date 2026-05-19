@@ -389,7 +389,16 @@ func TestIsNodeSourceFile(t *testing.T) {
 		{"dist/bundle.js", false},            // build output
 		{"build/x.js", false},
 		{"out/x.js", false},
-		{"lib/index.min.js", false}, // minified bundle, not authored source
+		{"lib/index.min.js", false},  // minified bundle, not authored source
+		{"lib/index.min.mjs", false}, // ESM bundle, same intent as .min.js
+		{"lib/index.min.cjs", false}, // CJS bundle, same intent as .min.js
+		// Minified TypeScript output (rare but seen in some libs) — the
+		// intent of `.min.` is "build output, not authored source"
+		// regardless of which extension follows. The filter must be
+		// language-side-agnostic, not .js-specific.
+		{"lib/index.min.ts", false},
+		{"lib/index.min.tsx", false},
+		{"lib/index.min.jsx", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
