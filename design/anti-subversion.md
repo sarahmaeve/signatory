@@ -18,19 +18,48 @@ relay).
   bidi controls, tag block, markdown HTML comments, markdown image
   syntax, lexical injection patterns, encoded base-N blobs) with
   TDD on Trapdoor-shaped malicious + benign twins.
-- First consumer landed: [`internal/signal/repofiles/`](../internal/signal/repofiles/)
-  scans AI-instruction files (`.cursorrules`, `CLAUDE.md`,
-  `AGENTS.md`, `.claude/`, `.cursor/rules/`, `.aider.conf.yml`,
-  `.zed/`, `.continue/`, `.windsurfrules`) via `AgentConfigFamilies()`
-  and content-inspects each match. Emits two signals:
+- AI-agent locus taxonomy unified at
+  [`internal/agentconfig/`](../internal/agentconfig/) — single
+  source of truth pairing the file-detector shape (Family) with
+  runtime-path substring patterns. Resolved a drift bug where
+  `/.codex/` had landed in the source-AST persistence-write
+  catalog but lacked a corresponding Family for inventory and
+  content-injection scanning.
+- Layer 1 (repofiles content awareness) landed:
+  [`internal/signal/repofiles/`](../internal/signal/repofiles/)
+  scans AI-instruction files via `AgentConfigFamilies()` (now
+  derived from `agentconfig.Loci()`) and content-inspects each
+  match. Emits two always-on signals:
   `agent_config_files` (the Layer-1 inventory signal per §"Where
-  AI-instruction files fit" below) and `agent_config_content_injection`
-  (the `content-injection-surface` findings on those files).
-- Remaining work: README / PR / release-notes consumers (§"What to
-  detect" applies to those surfaces too); the egress-fence
-  consumer per `hardening.md §1`; the AI-instruction-file hash-pin
-  posture extension (§"Open question" below); the file-role
-  weighting table (§"Open design questions" multi-file scoring).
+  AI-instruction files fit" below) and
+  `agent_config_content_injection` (the
+  `content-injection-surface` findings on those files).
+- Layer 2 (artifact-vs-repo categorization) landed:
+  [`internal/signal/artifact/`](../internal/signal/artifact/)
+  classifies dropped-in-tarball agent-config files under a new
+  `CategoryAgentConfig` bucket, surfaced through the existing
+  `artifact_repo_divergence` signal. The xz-precedent applied to
+  AI-config injection. Consumes the same `agentconfig` taxonomy
+  via `repofiles.IsAgentConfigPath`.
+- Layer 3 (source-AST runtime-write detection) landed:
+  OS/credential-store-shape catalogs (`SensitivePathPatterns`,
+  `PersistencePathPatterns`, `CredentialEnvNames`,
+  `CloudMetadataHosts`) extracted to
+  [`internal/signal/source/astfeature/catalogs.go`](../internal/signal/source/astfeature/catalogs.go),
+  with the AI-agent runtime prefixes derived from
+  `agentconfig.RuntimePersistencePrefixes()` at init. Trapdoor
+  additions (wallet-keystore reads, AI-agent persistence writes)
+  fire on the node analyzer today. Python wiring is a separate
+  parity task; cargo and gem source-AST analyzers don't yet exist
+  but inherit the shared catalogs when they land.
+- Remaining work: README / PR / release-notes consumers of the
+  `contentinjection` primitive (§"What to detect" applies to
+  those surfaces too); the egress-fence consumer per
+  `hardening.md §1`; the AI-instruction-file hash-pin posture
+  extension (§"Open question" below); the file-role weighting
+  table (§"Open design questions" multi-file scoring); python
+  `SensitivePathWrites` wiring; cargo and gem source-AST
+  analyzers.
 
 ## The product opportunity
 

@@ -225,60 +225,75 @@ What this catches *cross-ecosystem*:
   primitive package — same Scan call, different file roles.
 
 **Layer 2 (cross-ecosystem at the tarball boundary): artifact
-categorization.** The artifact-vs-repo collector at
-`internal/signal/artifact/` already extracts release tarballs
-across npm / PyPI sdist / cargo .crate / gem / GitHub releases
-and surfaces `files_extra_in_tarball` (the xz-utils-shaped
-"in tarball but not in git" signal). Trapdoor adds a category to
-that machinery: an agent-config file shipped *in the tarball
-only* — not in the source repo at that SHA — is the xz-utils
-shape applied to AI-agent injection.
+categorization — LANDED.** The artifact-vs-repo collector at
+[`internal/signal/artifact/`](../../internal/signal/artifact/)
+already extracts release tarballs across npm / PyPI sdist /
+cargo .crate / gem / GitHub releases and surfaces
+`files_extra_in_tarball` (the xz-utils-shaped "in tarball but
+not in git" signal). Trapdoor added a category to that
+machinery: an agent-config file shipped *in the tarball only* —
+not in the source repo at that SHA — is the xz-utils shape
+applied to AI-agent injection.
 
-Concretely: extend `internal/signal/artifact/categorize.go` with
-a `categoryAgentConfig` bucket and a matcher driven by the same
-Layer 1 family detectors. The signal payload already has the
-`extras_in_tarball_sample` field with a `ClassifiedEntry`
-category — adding a new category is a pure extension of an
-existing emission, no new signal type needed.
+Implementation:
+
+- [`internal/signal/artifact/categorize.go`](../../internal/signal/artifact/categorize.go)
+  declares `CategoryAgentConfig` and inserts it in the
+  `classify()` order after `suspicious_path` but before
+  `generated` / `vendored` / `build_glue` / `binary_in_tests` /
+  `other`. A path matching the agent-config taxonomy lands in
+  the new bucket; the rest stays as before.
+- The categorizer consults `repofiles.IsAgentConfigPath` (which
+  itself delegates to `agentconfig.IsConfigPath` — see Layer 3
+  notes on the unification refactor) so the agent-config
+  taxonomy has one source of truth, not two parallel lists.
+- No new signal type required: the existing
+  `artifact_repo_divergence` payload's `ClassifiedEntry.category`
+  field carries the new value. The signal type's caveat list in
+  [`internal/signal/types.go`](../../internal/signal/types.go)
+  documents the new bucket and cites Trapdoor as the motivating
+  campaign.
 
 **Layer 3 (per-language, source-AST runtime-write detection):
-shared-catalog refactor.** A *runtime-write* signal — catching
+shared-catalog refactor — LANDED (two commits: refactor + add).**
+A *runtime-write* signal — catching
 `fs.writeFileSync('.cursorrules', payload)` *inside the dep's
-own code* — is the source-AST layer's job, and lives in
-`persistencePathPatterns` per the existing TanStack-era pattern.
-But the catalog is currently a node-only copy of what its own
-comment at `analyze.go:333–336` declares language-neutral; the
-python analyzer carries an identical literal `sensitivePathPatterns`
-at `python/analyze.go:147–156`. The duplication is a structural
-defect the existing code already documented.
+own code* — is the source-AST layer's job, and lives in the
+`PersistencePathPatterns` catalog. The catalog was previously a
+node-only copy of what its own comment declared language-neutral;
+the python analyzer carried an identical literal copy of
+`SensitivePathPatterns`. The duplication is a structural defect
+the existing code already documented and the refactor closed.
 
-The right move before adding Trapdoor entries to this catalog
-is to extract the OS/credential-store-shape catalogs
-(`sensitivePathPatterns`, `persistencePathPatterns`,
-`credentialEnvNames`, `cloudMetadataHosts`) into shared
-`internal/signal/source/astfeature/`. The API-name-shape catalogs
-(`writeSinkCallees`, `processExecCallees`, `networkCallees`,
-`base64DecodeCallees`, `pathReadCallees`) stay per-language —
-those genuinely vary by ecosystem. The split is between
-*what the payload targets* (OS-shape, shared) and *how the
-payload calls it* (language-shape, per-analyzer).
+The shared catalogs now live in
+[`internal/signal/source/astfeature/catalogs.go`](../../internal/signal/source/astfeature/catalogs.go):
 
-With shared catalogs in place, the Trapdoor-shape additions are
-single-place edits to two of the shared lists:
+- `SensitivePathPatterns` + `IsSensitivePath`
+- `PersistencePathPatterns` + `IsPersistencePath`
+- `CredentialEnvNames` + `IsCredentialEnvName`
+- `CloudMetadataHosts` + `IsCloudMetadataURL`
 
-`PersistencePathPatterns` — AI-agent config files and dirs that
-extend the existing `.claude/` / `.vscode/` / `.cursor/`
-substring catalog:
+The API-name-shape catalogs (`writeSinkCallees`,
+`processExecCallees`, `networkCallees`, `base64DecodeCallees`,
+`pathReadCallees`) stayed per-language because those genuinely
+vary by ecosystem. The split between *what the payload targets*
+(OS-shape, shared) and *how the payload calls it* (language-
+shape, per-analyzer) is now reified in the codebase.
 
-- `/.cursorrules`, `/CLAUDE.md`, `/AGENTS.md` (file substrings)
-- `/.aider`, `/.zed/`, `/.codex/`, `/.continue/`, `/.windsurf/`
-  (sibling agent/IDE config dirs)
+The Trapdoor-shape additions landed in the same package:
 
 `SensitivePathPatterns` — wallet-software keystore reads
 (Trapdoor's cargo payload class):
 
-- `/.sui/`, `/.config/solana/`, `/.aptos/`, `/.ethereum/keystore/`,
-  `wallet.dat` — Sui, Solana, Aptos, Ethereum keystore, Bitcoin
+- `/.sui/`, `/.config/solana/`, `/.aptos/`,
+  `/.ethereum/keystore/`, `wallet.dat` — Sui, Solana, Aptos,
+  Ethereum keystore, Bitcoin.
+
+`PersistencePathPatterns` — AI-agent loci are now derived (see
+unification note below) from `agentconfig.RuntimePersistencePrefixes()`,
+which currently expands to: `/.cursorrules`, `/CLAUDE.md`,
+`/AGENTS.md`, `/.claude/`, `/.cursor/`, `/.aider/`, `/.zed/`,
+`/.codex/`, `/.continue/`, `/.windsurfrules`, `/.windsurf/`.
 
 Layer 3 reach is limited today: node is the only analyzer that
 populates `SensitivePathWrites`. Python wiring is a separate
@@ -286,15 +301,36 @@ parity task; cargo and gem source-AST analyzers don't exist
 (though both ecosystems are first-class everywhere else —
 registry collectors, manifest parsers, artifact-vs-repo, and
 repofiles all carry them). The shared-catalog refactor unblocks
-all four when their respective wiring lands, but does **not** by
-itself produce cross-ecosystem coverage — Layers 1 and 2 do
-that.
+all four when their respective wiring lands; until then,
+Layers 1 and 2 carry the cross-ecosystem coverage.
 
-**Sequencing:** Layer 1 lands first (biggest cross-ecosystem
-coverage win per LOC, no refactor blocker). Layer 2 follows
-(small extension to an existing emission, depends on Layer 1's
-family declarations). Layer 3 can land in parallel with 1/2
-since it touches different files, but only affects node today.
+**Unification refactor (follow-on, LANDED):** During Layer 3
+dogfooding, an asymmetry surfaced — the new `/.codex/` entry
+sat in the runtime-substring catalog but had no corresponding
+Family in `repofiles.AgentConfigFamilies`. The fix introduced
+[`internal/agentconfig/`](../../internal/agentconfig/) as the
+single source of truth for the AI-agent locus taxonomy:
+
+- `Locus` pairs the file-detector shape (`Dirs`, `Detector`,
+  `Preferred`) with `RuntimePathPrefixes`. One declaration, two
+  consumer shapes.
+- `agentconfig.Loci()` returns the 11-entry canonical list
+  (the 10 prior Families plus the now-properly-declared
+  `codex_instructions` Locus that closes the divergence bug).
+- `repofiles.AgentConfigFamilies()` maps `Loci()` to `Family`
+  records for the in-repo scanner.
+- `astfeature.PersistencePathPatterns` is an init-built slice
+  with the non-AI patterns from the literal plus
+  `agentconfig.RuntimePersistencePrefixes()` appended. Adding
+  a new AI-agent toolchain is now one declaration; the prior
+  dual-update bug is structurally impossible at test time
+  (`TestLoci_AllFieldsDeclared` requires every Locus to declare
+  `RuntimePathPrefixes`).
+
+**Sequencing:** Landed in order — Layer 1, Layer 2, Layer 3
+(refactor commit then additions commit), then the unification
+refactor that consolidated the AI-agent locus taxonomy in
+`agentconfig`.
 
 ### Cargo source AST is the dominant cargo-side gap
 
@@ -371,17 +407,19 @@ add/modify `.cursorrules`, `CLAUDE.md`, `.claude/`, `.cursor/`,
 commit history on the repo. New collection surface; defer behind
 the catalog-addition and content-inspector work above.
 
-### Wallet-software keystore paths are not yet in the read-side catalog
+### Wallet-software keystore paths in the read-side catalog (LANDED)
 
-Folded into the catalog-sharing work above: wallet-software
-keystore paths (Sui, Solana, Aptos, Ethereum keystore, Bitcoin)
-land in the shared `SensitivePathPatterns` alongside the
-existing SSH/AWS/PyPI/npm/GnuPG/Docker/Kube/gcloud/Azure entries,
-so any analyzer that wires up `SensitivePathReads` gets them.
-Recorded separately here because the *class* of credential is
-distinct (wallet keystores aren't standard developer credentials)
-and worth being explicit about as a separately-introduced
-catalog category.
+The Layer 3 additions placed `/.sui/`, `/.config/solana/`,
+`/.aptos/`, `/.ethereum/keystore/`, and `wallet.dat` in the
+shared `SensitivePathPatterns` alongside the existing
+SSH/AWS/PyPI/npm/GnuPG/Docker/Kube/gcloud/Azure entries. Any
+analyzer that wires up `SensitivePathReads` gets the wallet
+keystores automatically. The category is kept as a named
+membership group in the catalog test
+([`TestCatalog_SensitivePath_Membership`](../../internal/signal/source/astfeature/catalogs_test.go))
+because wallet keystores are a structurally distinct credential
+class — not standard developer credentials, present specifically
+because of the Trapdoor cargo-payload target shape.
 
 ## Empirical: what the current signal model says
 
@@ -456,23 +494,31 @@ mirror surface) that should drive TDD when the work lands.
 
 ## Open questions
 
-- Should the Layer 3 catalog-sharing extraction (move
-  `sensitivePathPatterns`, `persistencePathPatterns`,
-  `credentialEnvNames`, `cloudMetadataHosts` from each analyzer
-  into `internal/signal/source/astfeature/`) ship as a
-  refactor-only commit *before* the Trapdoor-shape additions, or
-  as a single combined commit (extract + add)? Refactor-first is
-  safer for blame and bisect; default refactor-first.
+- **(Resolved 2026-05-24.)** Should the Layer 3 catalog-sharing
+  extraction (move `sensitivePathPatterns`,
+  `persistencePathPatterns`, `credentialEnvNames`,
+  `cloudMetadataHosts` from each analyzer into
+  `internal/signal/source/astfeature/`) ship as a refactor-only
+  commit *before* the Trapdoor-shape additions, or as a single
+  combined commit (extract + add)? **Outcome:** refactor-first
+  (commit `79ae194`), Trapdoor entries followed (commit
+  `a4acfc0`). Bisect-friendly and made the catalog-membership
+  drift that surfaced in dogfood (`/.codex/`) easier to attribute
+  and fix.
 - **(Resolved 2026-05-24.)** Where does the Layer 1
   content-inspector belong —
   inside `repofiles/` (extending presence collection with
   content peek for one specific file family), or as a sibling
-  collector under `internal/signal/`? The repofiles collector
-  is presence-only by design today; a content peek would
-  change its contract. A sibling collector
-  (`internal/signal/agentconfig/`) that reuses the repofiles
-  family declaration for file discovery but emits its own
-  signal types may be the cleaner split.
+  collector under `internal/signal/`? **Outcome:** the
+  content-inspection primitive package landed at
+  [`internal/contentinjection/`](../../internal/contentinjection/)
+  (top-level under `internal/`, since the design doc notes it's
+  shared with the hardening egress side); `repofiles` consumes
+  it via `detectAgentConfig`. The AI-agent locus taxonomy
+  itself landed separately at
+  [`internal/agentconfig/`](../../internal/agentconfig/) as the
+  single source of truth for both the in-repo Family detectors
+  and the runtime-write substring catalog.
 - Does Trapdoor's PR-against-legit-AI-project vector belong
   inside the consumer-side posture surface
   [prt-scan](example-prtscan-attack.md) opened, or under a
@@ -509,57 +555,60 @@ mirror surface) that should drive TDD when the work lands.
 - [`example-axios-attack.md`](example-axios-attack.md) —
   detection-cadence lesson 16; Trapdoor's 5m27s median
   reinforces the cross-correlation composition.
-- `internal/signal/source/node/analyze.go:214–226`
-  (`persistencePathPatterns`), `:333–348` (`sensitivePathPatterns`),
-  `:139–153` (`credentialEnvNames`), `:172–179`
-  (`cloudMetadataHosts`) — OS/credential-store-shape catalogs
-  that should move out of the node analyzer into shared
-  `internal/signal/source/astfeature/` before any Trapdoor-shape
-  additions land. The comment on the node `sensitivePathPatterns`
-  block explicitly declares the catalog language-neutral; the
-  python analyzer's copy at `python/analyze.go:147–156`
-  confirms the duplication that the extraction would consolidate.
-- `internal/signal/source/python/analyze.go:147–156`
-  (`sensitivePathPatterns`) — literal duplicate of node's
-  catalog; consumed by python's `isSensitivePath` for
-  `SensitivePathReads` population. Confirms the catalog content
-  is language-neutral in practice as well as in intent.
-- `internal/signal/source/astfeature/counts.go:130–141`
-  (`SensitivePathWrites` field comment) — documents the
-  cross-language-by-intent contract these catalogs underpin and
-  acknowledges that only node populates the field today.
-  Cross-language wiring is a future task; cross-language catalog
-  membership should be in place before that wiring lands.
-- `internal/signal/source/node/analyze_test.go:535`
-  (`TestThreat_PersistenceWrites`) — TDD template for the
-  Trapdoor-shape catalog tests (incident-shaped true positive +
-  benign twin).
-- `internal/signal/registry/cargo/collector.go:494`
-  (`recordBuildScriptIntroduced`) — registry-side
-  `build_script_introduced` signal that Trapdoor's cargo
-  packages would fire today, even without the source-AST
-  analyzer.
-- `internal/signal/source/astfeature/counts.go` — the
-  cross-language Counts contract that a future cargo source-AST
-  analyzer would populate (fourth ecosystem after Go, Python,
-  Node).
-- [`../anti-subversion.md`](../anti-subversion.md) — promoted from
-  `design/potential/` on 2026-05-24; specs the
+- [`../anti-subversion.md`](../anti-subversion.md) — promoted
+  from `design/potential/` on 2026-05-24; specs the
   `content-injection-surface` signal class. AI-instruction files
   are the first consumer; README / PR / release-notes are next.
   Cites Trapdoor as the motivating campaign.
+- [`../../internal/agentconfig/`](../../internal/agentconfig/)
+  — single source of truth for the AI-agent locus taxonomy.
+  `Locus` pairs the file-detector shape with the runtime-path
+  substring patterns; `Loci()`, `IsConfigPath(p)`, and
+  `RuntimePersistencePrefixes()` serve the two consumer surfaces
+  without duplicated declarations.
 - [`../../internal/contentinjection/`](../../internal/contentinjection/)
   — the shared primitive package (invisible Unicode, bidi
   controls, tag block, markdown HTML comments, markdown image
   syntax, lexical injection phrases, encoded base-N blobs).
-  Anti-subversion §"What to detect" implementation.
+  Anti-subversion §"What to detect" implementation. Top-level
+  under `internal/` because the design doc notes it's shared
+  with the hardening egress side.
+- [`../../internal/signal/source/astfeature/catalogs.go`](../../internal/signal/source/astfeature/catalogs.go)
+  — the shared OS/credential-store-shape catalogs extracted
+  from the node and python analyzers:
+  `SensitivePathPatterns` + `IsSensitivePath` (now includes the
+  Trapdoor wallet-keystore entries), `PersistencePathPatterns`
+  + `IsPersistencePath` (AI-agent loci derived from
+  `agentconfig.RuntimePersistencePrefixes()`),
+  `CredentialEnvNames` + `IsCredentialEnvName`,
+  `CloudMetadataHosts` + `IsCloudMetadataURL`.
+- [`../../internal/signal/source/astfeature/counts.go`](../../internal/signal/source/astfeature/counts.go)
+  — the cross-language Counts contract. Documents the per-
+  language wiring state for `SensitivePathWrites` and friends.
+  Cargo and gem source-AST analyzers don't yet exist; when they
+  do, they inherit the shared catalogs automatically.
 - [`../../internal/signal/repofiles/agent_config_families.go`](../../internal/signal/repofiles/agent_config_families.go)
-  — agent-config family declarations (`.cursorrules`, `CLAUDE.md`,
-  `AGENTS.md`, `.claude/`, `.cursor/rules/`, `.aider.conf.yml`,
-  `.zed/`, `.continue/`, `.windsurfrules`).
+  — `AgentConfigFamilies()` derived from `agentconfig.Loci()`;
+  `IsAgentConfigPath(p)` delegated to `agentconfig.IsConfigPath`.
 - [`../../internal/signal/repofiles/collector.go`](../../internal/signal/repofiles/collector.go)
-  `detectAgentConfig` — the sibling probe emitting
-  `agent_config_files` and `agent_config_content_injection`.
+  `detectAgentConfig` — the sibling probe emitting the two
+  always-on signals `agent_config_files` (hygiene inventory) and
+  `agent_config_content_injection` (content-injection findings).
+- [`../../internal/signal/artifact/categorize.go`](../../internal/signal/artifact/categorize.go)
+  — `CategoryAgentConfig` bucket added to the artifact-vs-repo
+  categorizer; consults `repofiles.IsAgentConfigPath` so the
+  Layer 1 / Layer 2 paths share the same taxonomy via
+  `agentconfig`.
+- [`../../internal/signal/source/node/analyze_test.go`](../../internal/signal/source/node/analyze_test.go)
+  `TestThreat_AIAgentConfigWrites` /
+  `TestThreat_WalletKeystoreReads` — incident-shaped TDD for
+  the Trapdoor catalog additions (true positive + benign twin
+  per the project's TDD policy).
+- [`../../internal/signal/registry/cargo/collector.go`](../../internal/signal/registry/cargo/collector.go)
+  `recordBuildScriptIntroduced` — registry-side
+  `build_script_introduced` signal that Trapdoor's cargo
+  packages would fire today, even without the source-AST
+  analyzer.
 - [`../trust-model.md`](../trust-model.md) §"Signals must be
   weighted by forgery resistance" — install-time hook
   execution is at the **High** tier, not Very High; cargo's
