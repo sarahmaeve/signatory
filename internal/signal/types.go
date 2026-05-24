@@ -919,6 +919,31 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"detection is from source (Cargo.toml [lib] proc-macro = true); not available without a clone",
 		},
 	},
+	"agent_config_files": {
+		Type:              "agent_config_files",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryLowDeclining,
+		Description:       "Inventory of AI-agent configuration files present in the repo (CLAUDE.md, AGENTS.md, .cursorrules, .claude/settings.json, .cursor/rules/*.mdc, .aider.conf.yml, .zed/settings.json, .continue/config.json, .windsurfrules). Cross-ecosystem: emitted on any cloned repo regardless of language.",
+		Caveats: []string{
+			"presence is hygiene-neutral by default — many legitimate projects ship per-repo agent instructions to standardize tool behavior",
+			"the signal pairs with agent_config_content_injection: presence makes the file visible to analysts; the content-injection signal flags concerns about contents",
+			"absence is a meaningful positive — the project does not direct AI agents at repo level, so any agent that scans this repo operates from its built-in priors only",
+			"new since 2026-05 in response to the Trapdoor crypto-stealer campaign (design/threat-landscape/2026-05-24-trapdoor-crypto-stealer.md), which weaponized .cursorrules and CLAUDE.md as zero-width-Unicode prompt-injection carriers",
+		},
+	},
+	"agent_config_content_injection": {
+		Type:              "agent_config_content_injection",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Content-injection-surface findings on AI-agent configuration files: invisible Unicode (zero-width family, bidi controls, tag block), markdown HTML comments with imperative-mood prose, parameterized image URLs, lexical injection patterns, and long base-N encoded blobs. Per design/anti-subversion.md the primitives are byte-level / regex structural signals an attacker cannot decouple from a functional payload.",
+		Caveats: []string{
+			"empty findings is a positive observation — the scanner ran on every detected agent-config file and found no structural injection primitive",
+			"lexical_injection has the highest false-positive rate of the primitives; a project whose own topic is prompt-injection research will fire repeatedly. The analyst weights by file role and project topic",
+			"markdown_comment heuristic fires on imperative-shape prose (first word is a catalog verb, or two-plus catalog verbs in the body) above a 32-char threshold; it does not catch every prompt-injection comment shape",
+			"encoded_blob thresholds are calibrated to skip SHA-256/SHA-512 hashes, Ed25519/RSA signatures, and JWT signatures; the false-negative tradeoff is real for legitimate-looking shorter payloads",
+			"Truncated=true on a per-file entry means the file exceeded contentinjection.MaxScanFileBytes; findings reflect the in-cap prefix only",
+		},
+	},
 	"mfa_required": {
 		Type:              "mfa_required",
 		Group:             profile.SignalGroupGovernance,
