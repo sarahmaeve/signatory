@@ -64,10 +64,21 @@ func scanMarkdownComment(content []byte) Finding {
 // The verbs here all carry an "act on the world" intent that
 // markdown comments — invisible to humans, visible to LLM ingestion
 // — would not legitimately direct.
+//
+// Calibration is per-verb. "harvest", "siphon", "egress", "reveal",
+// and "decrypt" were added in the 2026-05 catalog enrichment;
+// each has near-zero legitimate use in markdown comments. "scrape"
+// was added with awareness that some research / tooling READMEs
+// discuss web scraping as a topic — but markdown-comment use of
+// "scrape" remains rare even there.
 var imperativeVerbCatalog = []string{
 	"ignore", "fetch", "run", "execute", "install", "download",
 	"summarize", "output", "print", "send", "exfiltrate", "leak",
 	"upload", "post", "submit", "transmit", "exec", "eval",
+	// Catalog enrichment 2026-05: data-extraction / exfil verbs the
+	// design doc's adversarial-variants enumeration named as
+	// frequent in real attacks but absent from the v0 catalog.
+	"harvest", "scrape", "siphon", "egress", "reveal", "decrypt",
 }
 
 // catalogVerbPattern matches any catalog verb as a word-bounded

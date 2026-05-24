@@ -21,6 +21,23 @@ relay).
   primitive suppression via `ScanOptions.SuppressPrimitives` so
   consumers can skip primitives they know to be noisy on the file
   class they're scanning.
+- Cognitive-hazards corpus + fixture-driven harness landed at
+  [`internal/contentinjection/testdata/cognitivehazards/`](../internal/contentinjection/testdata/cognitivehazards/):
+  46 fixtures across 9 directories verify each primitive against
+  real-world attack shapes (Trojan Source PoC, tag-block ASCII
+  smuggling, Trapdoor-shaped agent-config carriers, CamoLeak
+  image-exfil shape) and against real-world benign content (this
+  repo's own CLAUDE.md, the openai/codex AGENTS.md, ordinary Go
+  README). The 17 KB codex AGENTS.md passes strict-zero baseline —
+  meaningful validation that the markdown_comment heuristic does
+  not blanket-flag every directive-style document.
+- Catalog enrichment 2026-05: imperative-verb catalog gained
+  `harvest`, `scrape`, `siphon`, `egress`, `reveal`, `decrypt`;
+  lexical phrase catalog gained the "forget previous/prior/the
+  above" parallel to the "ignore" family, plus `disregard your`
+  and `bypass your safety`. Closes one row of the adversarial-
+  variants enumeration; the synonym-evasion class is more bounded
+  now.
 - AI-agent locus taxonomy unified at
   [`internal/agentconfig/`](../internal/agentconfig/) — single
   source of truth pairing the file-detector shape (Family) with
@@ -98,6 +115,31 @@ relay).
   - Recursive scan of `.github/instructions/` subdirectories
     (the Copilot docs note subdirectories are allowed; v0.1 scans
     only the flat directory).
+- **Adversarial gaps the corpus did NOT yet cover** (named for
+  future work):
+  - **Codepoint catalog gaps**: Hangul fillers (U+115F, U+1160,
+    U+3164), Mongolian vowel separator (U+180E), LTR/RTL marks
+    (U+200E/U+200F), variation selectors (U+FE00–U+FE0F,
+    U+E0100–U+E01EF). All are invisible in many renderers and
+    not in our invisible/bidi/tag catalogs.
+  - **Markdown-comment single-verb mid-sentence**: a comment with
+    one catalog verb mid-sentence and no leading-verb structure
+    slips past the "first-word OR density" heuristic. Real
+    attack vector that the catalog enrichment doesn't address.
+  - **Unicode-confusable evasion**: catalog substring matches are
+    defeated by Cyrillic / fullwidth / Greek substitutions
+    ("Іgnore" with Cyrillic І; `system：` with U+FF1A fullwidth
+    colon). LLM tokenizers still see the original phrase.
+  - **Non-English lexical phrases**: catalogs are English-only;
+    LLMs honor multilingual injection.
+  - **Many-short-URL aggregation** ("dictionary of pixels") for
+    `markdown_image`: each image below the threshold, aggregate
+    exfiltrates substantial data.
+  - **Sub-threshold encoded blobs** for `encoded_blob`: 900-char
+    base64 stays under the 1024 threshold. Whitespace-broken runs
+    similarly evade.
+  - **HTML `<img>` tags** in markdown documents: our regex is
+    markdown-syntax-only.
 
 ## The product opportunity
 

@@ -14,12 +14,22 @@ import (
 // Entries are deliberately phrasal (multi-word or distinctively
 // formed): "system" alone would flood, but "<|im_start|>" or
 // "ignore previous" carry the injection-shape uniquely.
+//
+// Catalog enrichment 2026-05: the "forget" parallel to the "ignore"
+// family ("forget previous" / "forget prior" / "forget the above"),
+// the persona-override prefix "disregard your", and the safety-
+// bypass phrase "bypass your safety" address the synonym-evasion
+// class the design doc's adversarial-variants enumeration named.
 var lexicalPhraseCatalog = []string{
 	"ignore previous",
 	"ignore prior",
 	"ignore the above",
+	"forget previous",
+	"forget prior",
+	"forget the above",
 	"disregard previous",
 	"disregard the above",
+	"disregard your",
 	"you are now",
 	"act as",
 	"pretend to be",
@@ -30,6 +40,7 @@ var lexicalPhraseCatalog = []string{
 	"</prompt>",
 	"</instructions>",
 	"override your",
+	"bypass your safety",
 	"your new instructions",
 	"do not reveal",
 	"do not mention",
