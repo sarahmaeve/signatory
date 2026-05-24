@@ -125,7 +125,7 @@ func accumulate(c *astfeature.Counts, mod *Module, path string) {
 			c.NetworkCallSites++
 		case matchesCatalog(call.Callee, base64DecodeCallees):
 			c.Base64DecodeCalls++
-		case matchesCatalog(call.Callee, pathReadCallees) && isSensitivePath(call.FirstArg):
+		case matchesCatalog(call.Callee, pathReadCallees) && astfeature.IsSensitivePath(call.FirstArg):
 			c.SensitivePathReads++
 		}
 	}
@@ -138,44 +138,6 @@ func accumulate(c *astfeature.Counts, mod *Module, path string) {
 // read_text's) and is a documented conservative gap.
 var pathReadCallees = []string{
 	"open", "io.open", "os.open", "codecs.open", "os.fdopen",
-}
-
-// sensitivePathPatterns are credential / secret-material fragments.
-// Tight on purpose: this must not fire on ordinary file I/O. Matched
-// as substrings against the backslash-normalized resolved path, so
-// "~/.ssh/id_rsa" and "/home/u/.ssh/id_rsa" both hit "/.ssh/".
-var sensitivePathPatterns = []string{
-	"/.ssh/", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-	".aws/credentials", ".aws/config", "/.netrc", ".pypirc", ".npmrc",
-	".git-credentials", "/.gnupg/", ".docker/config.json",
-	"/.kube/config", "/.config/gcloud", "/.azure/", "/etc/shadow",
-	"/etc/passwd", ".bash_history", ".zsh_history",
-	// Browser / OS credential stores.
-	"Login Data", "Cookies", "key4.db", "logins.json",
-	"cookies.sqlite", "Local State", "Library/Keychains",
-}
-
-// isSensitivePath reports whether a statically-resolved path targets
-// credential or secret material. The empty string (unresolved arg)
-// is never sensitive — a runtime-built path is a conservative miss,
-// not a guess.
-func isSensitivePath(p string) bool {
-	if p == "" {
-		return false
-	}
-	norm := strings.ReplaceAll(p, "\\", "/")
-	for _, pat := range sensitivePathPatterns {
-		if strings.Contains(norm, pat) {
-			return true
-		}
-	}
-	// Bare dotenv file: basename exactly ".env" (avoid matching
-	// "environment.cfg" or ".envrc").
-	base := norm
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	return base == ".env"
 }
 
 // isDynamicEval matches the code-from-data primitives — but only the
