@@ -151,11 +151,23 @@ func (c *Collector) detectAgentConfig(result *signal.CollectionResult, entityID 
 			"family_count": len(files),
 		})
 
+	// Per design/anti-subversion.md §"Where AI-instruction files
+	// fit" §2: imperative-mood prose IS the expected content on
+	// these files, so the markdown_comment primitive is useless
+	// here. Suppress it; the other six primitives carry the load
+	// (zero-width Unicode, bidi controls, tag block, exfil-shaped
+	// markdown images, lexical injection phrases, encoded blobs).
+	scanOpts := contentinjection.ScanOptions{
+		SuppressPrimitives: []contentinjection.Primitive{
+			contentinjection.PrimitiveMarkdownComment,
+		},
+	}
+
 	injections := make([]agentConfigInjectionEntry, 0)
 	totalFindings := 0
 	for _, m := range matches {
 		absPath := filepath.Join(c.path, m.Path)
-		scan, err := contentinjection.ScanFile(absPath)
+		scan, err := contentinjection.ScanFileWithOptions(absPath, scanOpts)
 		if err != nil {
 			// Per-file IO failure: skip the injection scan for this
 			// file but keep the inventory entry. A symlink to outside

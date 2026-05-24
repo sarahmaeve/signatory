@@ -27,10 +27,16 @@ var ErrEmptyPath = errors.New("contentinjection: empty file path")
 
 // ScanFile opens path, reads up to MaxScanFileBytes, runs Scan on
 // the prefix, and returns the result with Truncated set if the file
-// exceeded the cap. Errors from the underlying file IO are wrapped
-// with context for the caller; the ScanResult is the zero value on
-// error.
+// exceeded the cap. Equivalent to
+// ScanFileWithOptions(path, ScanOptions{}).
 func ScanFile(path string) (ScanResult, error) {
+	return ScanFileWithOptions(path, ScanOptions{})
+}
+
+// ScanFileWithOptions reads the file and runs the primitives with
+// caller-supplied options. Errors from the underlying file IO are
+// wrapped with context; the ScanResult is the zero value on error.
+func ScanFileWithOptions(path string, opts ScanOptions) (ScanResult, error) {
 	if path == "" {
 		return ScanResult{}, ErrEmptyPath
 	}
@@ -49,13 +55,13 @@ func ScanFile(path string) (ScanResult, error) {
 	case err == nil:
 		// Read the full buffer; file is at least MaxScanFileBytes+1
 		// bytes — strictly beyond the cap.
-		result := Scan(buf[:MaxScanFileBytes])
+		result := ScanWithOptions(buf[:MaxScanFileBytes], opts)
 		result.Truncated = true
 		return result, nil
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
 		// Read less than MaxScanFileBytes+1 — file fits inside the
 		// cap.
-		return Scan(buf[:n]), nil
+		return ScanWithOptions(buf[:n], opts), nil
 	default:
 		return ScanResult{}, fmt.Errorf("contentinjection: read %q: %w", path, err)
 	}

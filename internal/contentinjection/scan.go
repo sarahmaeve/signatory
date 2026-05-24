@@ -1,8 +1,30 @@
 package contentinjection
 
+// ScanOptions tunes Scan / ScanFile behavior. Default zero value is
+// equivalent to the pre-options behavior — every primitive runs.
+type ScanOptions struct {
+	// SuppressPrimitives lists primitives the caller wants skipped
+	// entirely. Useful when the caller knows a particular primitive
+	// produces noise on the file class being scanned — e.g.
+	// PrimitiveMarkdownComment is useless on AI-instruction files
+	// (CLAUDE.md, AGENTS.md, .cursorrules, …) because imperative
+	// prose IS the expected content there, per
+	// design/anti-subversion.md §"Where AI-instruction files fit"
+	// §2. Suppressed primitives are not executed (compute saving)
+	// and do not appear in ScanResult.Findings even with Count 0.
+	SuppressPrimitives []Primitive
+}
+
 // Scan runs every primitive over content and returns the aggregated
-// result. Findings is the list of primitives that fired with Count > 0;
-// primitives with no occurrences are omitted from Findings.
+// result. Equivalent to ScanWithOptions(content, ScanOptions{}).
+func Scan(content []byte) ScanResult {
+	return ScanWithOptions(content, ScanOptions{})
+}
+
+// ScanWithOptions runs the primitives over content with the given
+// options. Findings is the list of primitives that fired with
+// Count > 0; primitives with no occurrences, and primitives the
+// caller suppressed, are both omitted from Findings.
 //
 // The seven primitives are evaluated in this order:
 //
@@ -19,23 +41,53 @@ package contentinjection
 // design doc's grouping (rune-scan family first, regex family next,
 // length-distribution family last) but carries no semantic weight
 // beyond presentation.
-func Scan(content []byte) ScanResult {
+func ScanWithOptions(content []byte, opts ScanOptions) ScanResult {
+	suppressed := make(map[Primitive]struct{}, len(opts.SuppressPrimitives))
+	for _, p := range opts.SuppressPrimitives {
+		suppressed[p] = struct{}{}
+	}
+	suppress := func(p Primitive) bool {
+		_, ok := suppressed[p]
+		return ok
+	}
+
 	var result ScanResult
 
-	invisible, bidi, tag := scanRuneFamily(content)
-	for _, f := range []Finding{invisible, bidi, tag} {
-		if f.Count > 0 {
-			result.Findings = append(result.Findings, f)
+	// Rune-scan family: one pass over content. Suppressed
+	// primitives are computed (the cost is shared) but their
+	// findings are dropped before append.
+	if !suppress(PrimitiveInvisibleUnicode) ||
+		!suppress(PrimitiveBidiControl) ||
+		!suppress(PrimitiveTagBlock) {
+		invisible, bidi, tag := scanRuneFamily(content)
+		if !suppress(PrimitiveInvisibleUnicode) && invisible.Count > 0 {
+			result.Findings = append(result.Findings, invisible)
+		}
+		if !suppress(PrimitiveBidiControl) && bidi.Count > 0 {
+			result.Findings = append(result.Findings, bidi)
+		}
+		if !suppress(PrimitiveTagBlock) && tag.Count > 0 {
+			result.Findings = append(result.Findings, tag)
 		}
 	}
 
-	for _, f := range []Finding{
-		scanMarkdownComment(content),
-		scanMarkdownImage(content),
-		scanLexicalInjection(content),
-		scanEncodedBlob(content),
-	} {
-		if f.Count > 0 {
+	if !suppress(PrimitiveMarkdownComment) {
+		if f := scanMarkdownComment(content); f.Count > 0 {
+			result.Findings = append(result.Findings, f)
+		}
+	}
+	if !suppress(PrimitiveMarkdownImage) {
+		if f := scanMarkdownImage(content); f.Count > 0 {
+			result.Findings = append(result.Findings, f)
+		}
+	}
+	if !suppress(PrimitiveLexicalInjection) {
+		if f := scanLexicalInjection(content); f.Count > 0 {
+			result.Findings = append(result.Findings, f)
+		}
+	}
+	if !suppress(PrimitiveEncodedBlob) {
+		if f := scanEncodedBlob(content); f.Count > 0 {
 			result.Findings = append(result.Findings, f)
 		}
 	}

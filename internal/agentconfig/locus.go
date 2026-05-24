@@ -134,14 +134,52 @@ var loci = []Locus{
 		RuntimePathPrefixes: []string{"/CLAUDE.md"},
 	},
 	{
-		// AGENTS.md — cross-tool convention (Codex CLI and others)
-		// for per-repo agent instructions. Same carrier shape as
-		// CLAUDE.md.
+		// AGENTS.md — cross-tool convention (Codex CLI, GitHub
+		// Copilot per-agent override, and others) for per-repo
+		// agent instructions. Same carrier shape as CLAUDE.md.
 		Name:                "agents_md",
 		Dirs:                []string{"."},
 		Detector:            stemWithExt("AGENTS"),
 		Preferred:           []string{"AGENTS.md"},
 		RuntimePathPrefixes: []string{"/AGENTS.md"},
+	},
+	{
+		// GEMINI.md — Google Gemini agent's per-repo instruction
+		// file (also read by GitHub Copilot as a per-agent override
+		// per the Copilot docs). Same carrier shape as CLAUDE.md.
+		Name:                "gemini_md",
+		Dirs:                []string{"."},
+		Detector:            stemWithExt("GEMINI"),
+		Preferred:           []string{"GEMINI.md"},
+		RuntimePathPrefixes: []string{"/GEMINI.md"},
+	},
+	{
+		// .github/copilot-instructions.md — GitHub Copilot's
+		// repository-wide custom instructions. Loaded automatically
+		// into every Copilot request once present. Single fixed
+		// filename at a fixed path; see
+		// https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/add-custom-instructions/add-repository-instructions
+		Name:                "copilot_repo_instructions",
+		Dirs:                []string{".github"},
+		Detector:            exact("copilot-instructions.md"),
+		Preferred:           []string{"copilot-instructions.md"},
+		RuntimePathPrefixes: []string{"/.github/copilot-instructions.md"},
+	},
+	{
+		// .github/instructions/*.instructions.md — GitHub Copilot's
+		// path-scoped instructions. Filename pattern is
+		// "<name>.instructions.md"; required YAML frontmatter
+		// applyTo field controls which files the instructions apply
+		// to. Multiple files per project; Preferred is nil because
+		// no single canonical name exists. The Copilot docs note
+		// optional subdirectories under .github/instructions/ —
+		// v0.1 scans only the flat directory (subdirectory walking
+		// is a documented conservative gap).
+		Name:                "copilot_path_instructions",
+		Dirs:                []string{".github/instructions"},
+		Detector:            regexp.MustCompile(`(?i)^.+\.instructions\.md$`),
+		Preferred:           nil,
+		RuntimePathPrefixes: []string{"/.github/instructions/"},
 	},
 	{
 		// .claude/settings.json — Claude Code's per-repo settings
