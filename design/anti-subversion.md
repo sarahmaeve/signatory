@@ -1,10 +1,36 @@
 # Anti-subversion: detecting AI-targeted prompt injection in supply-chain content
 
-**Status:** potential / not yet on the roadmap. Captured as a product
-opportunity surfaced during the CamoLeak (CVE-2025-59145) threat
-discussion. Companion to `design/hardening.md §1`, which addresses
-the same attack class from the egress side (preventing signatory
-itself from becoming a relay).
+**Status:** active. Promoted from `design/potential/` on 2026-05-24
+in response to the Trapdoor crypto-stealer campaign
+([`design/threat-landscape/2026-05-24-trapdoor-crypto-stealer.md`](threat-landscape/2026-05-24-trapdoor-crypto-stealer.md)),
+which weaponized `.cursorrules` and `CLAUDE.md` as zero-width-Unicode
+prompt-injection carriers across npm, PyPI, and crates.io.
+Originally captured as a product opportunity surfaced during the
+CamoLeak (CVE-2025-59145) threat discussion. Companion to
+`design/hardening.md §1`, which addresses the same attack class
+from the egress side (preventing signatory itself from becoming a
+relay).
+
+**Implementation status (2026-05-24):**
+
+- Primitive package landed: [`internal/contentinjection/`](../internal/contentinjection/).
+  All seven design-doc primitives implemented (invisible Unicode,
+  bidi controls, tag block, markdown HTML comments, markdown image
+  syntax, lexical injection patterns, encoded base-N blobs) with
+  TDD on Trapdoor-shaped malicious + benign twins.
+- First consumer landed: [`internal/signal/repofiles/`](../internal/signal/repofiles/)
+  scans AI-instruction files (`.cursorrules`, `CLAUDE.md`,
+  `AGENTS.md`, `.claude/`, `.cursor/rules/`, `.aider.conf.yml`,
+  `.zed/`, `.continue/`, `.windsurfrules`) via `AgentConfigFamilies()`
+  and content-inspects each match. Emits two signals:
+  `agent_config_files` (the Layer-1 inventory signal per §"Where
+  AI-instruction files fit" below) and `agent_config_content_injection`
+  (the `content-injection-surface` findings on those files).
+- Remaining work: README / PR / release-notes consumers (§"What to
+  detect" applies to those surfaces too); the egress-fence
+  consumer per `hardening.md §1`; the AI-instruction-file hash-pin
+  posture extension (§"Open question" below); the file-role
+  weighting table (§"Open design questions" multi-file scoring).
 
 ## The product opportunity
 
