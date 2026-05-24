@@ -1,0 +1,10 @@
+// Allowed origin check
+
+The URL allowlist:
+  - ‎https://safe.example.com‏/admin/exfil
+  - ‎https://trusted.local‏
+
+The LRM (U+200E) and RLM (U+200F) characters above act as
+directional marks that visually rearrange portions of the URL,
+making what is logically /admin/exfil appear at a different point
+in the visible string.

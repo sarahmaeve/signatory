@@ -59,10 +59,25 @@ func scanRuneFamily(content []byte) (invisible, bidi, tag Finding) {
 }
 
 // isInvisibleUnicode reports whether r is in the zero-width family.
-// Per design/potential/anti-subversion.md table row 2: U+200B–U+200D,
-// U+FEFF, U+2060. The U+2060 row is extended through U+2064 in
-// practice — every codepoint in the WORD-JOINER-and-friends block
-// is invisible by the same mechanism.
+// Per design/anti-subversion.md the canonical codepoints are
+// U+200B–U+200D, U+FEFF, U+2060. The U+2060 row is extended through
+// U+2064 in practice — every codepoint in the WORD-JOINER-and-
+// friends block is invisible by the same mechanism.
+//
+// Catalog enrichment 2026-05 added codepoints that the v0 catalog
+// missed: the Hangul fillers (U+115F/U+1160/U+3164/U+FFA0) and the
+// Mongolian Vowel Separator (U+180E). All are invisible in most
+// non-CJK/non-Mongolian fonts and have narrow legitimate-use spaces
+// (rare in non-Korean / non-Mongolian source). False-positive risk
+// is documented per design/anti-subversion.md §"Adversarial gaps".
+//
+// NOT included (deferred): variation selectors U+FE00–U+FE0F and
+// U+E0100–U+E01EF. U+FE0F is the emoji-presentation variation
+// selector, common after every emoji in modern UTF-8 text; adding
+// the range would fire on essentially every emoji-containing file.
+// Contextual handling (allow VS when preceded by emoji) is a
+// follow-up; for now we accept that VS-based steganography evades
+// detection.
 func isInvisibleUnicode(r rune) bool {
 	switch {
 	case r >= 0x200B && r <= 0x200D:
@@ -76,13 +91,27 @@ func isInvisibleUnicode(r rune) bool {
 		// Zero-width no-break space. Caller is responsible for the
 		// leading-BOM position-anchored exclusion.
 		return true
+	case r == 0x115F || r == 0x1160:
+		// Hangul Choseong / Jungseong filler. Used as syllable-
+		// alignment fillers; invisible in non-Korean fonts.
+		return true
+	case r == 0x3164 || r == 0xFFA0:
+		// Hangul filler (full-width and half-width). Same pattern.
+		return true
+	case r == 0x180E:
+		// Mongolian Vowel Separator. Default-ignorable until
+		// Unicode 6.3; older renderers still treat as invisible.
+		return true
 	}
 	return false
 }
 
 // isBidiControl reports whether r is in the bidirectional formatting
-// control set. Per design doc table row 3.
+// control set. Per design doc table row 3 plus the catalog
+// enrichment 2026-05 (LTR/RTL marks).
 //
+//   - U+200E LRM (left-to-right mark)
+//   - U+200F RLM (right-to-left mark)
 //   - U+202A LRE (left-to-right embedding)
 //   - U+202B RLE
 //   - U+202C PDF (pop directional formatting)
@@ -92,8 +121,20 @@ func isInvisibleUnicode(r rune) bool {
 //   - U+2067 RLI
 //   - U+2068 FSI (first-strong isolate)
 //   - U+2069 PDI (pop directional isolate)
+//
+// LRM/RLM (U+200E/U+200F) are directional MARKS rather than overrides
+// or isolates — they influence the embedding direction of adjacent
+// neutrals but don't impose a hard reorder. The Trojan Source
+// research treats them as part of the bidi-family attack surface
+// because they enable lower-aggression directional manipulation
+// that can still produce visible/logical mismatches in code review.
+// They are classified as bidi_control here rather than
+// invisible_unicode because their threat shape is directional.
 func isBidiControl(r rune) bool {
 	switch {
+	case r == 0x200E || r == 0x200F:
+		// LTR / RTL marks — lower-aggression directional influence.
+		return true
 	case r >= 0x202A && r <= 0x202E:
 		return true
 	case r >= 0x2066 && r <= 0x2069:

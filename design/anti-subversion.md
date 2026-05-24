@@ -117,11 +117,17 @@ relay).
     only the flat directory).
 - **Adversarial gaps the corpus did NOT yet cover** (named for
   future work):
-  - **Codepoint catalog gaps**: Hangul fillers (U+115F, U+1160,
-    U+3164), Mongolian vowel separator (U+180E), LTR/RTL marks
-    (U+200E/U+200F), variation selectors (U+FE00–U+FE0F,
-    U+E0100–U+E01EF). All are invisible in many renderers and
-    not in our invisible/bidi/tag catalogs.
+  - **Codepoint catalog** (partially closed 2026-05): added LTR/RTL
+    marks U+200E/U+200F to the bidi family, and Hangul fillers
+    (U+115F, U+1160, U+3164, U+FFA0) plus Mongolian vowel separator
+    (U+180E) to the invisible family. **Still open:** variation
+    selectors U+FE00–U+FE0F (basic) and U+E0100–U+E01EF (supplement)
+    — deliberately deferred because U+FE0F is the emoji-presentation
+    variation selector, common after virtually every emoji in
+    modern UTF-8 text. Adding the range would fire on essentially
+    every emoji-containing file. Closing this gap needs contextual
+    detection (allow VS when preceded by an emoji codepoint),
+    which is a non-trivial sub-design.
   - **Markdown-comment single-verb mid-sentence**: a comment with
     one catalog verb mid-sentence and no leading-verb structure
     slips past the "first-word OR density" heuristic. Real
