@@ -44,7 +44,18 @@ type BlobStreamer struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
-	stderr *bytes.Buffer
+	// stderr is the cat-file subprocess's captured stderr.
+	// os/exec's internal stderr-pump goroutine writes to it for the
+	// subprocess's lifetime (from cmd.Start until cmd.Wait returns).
+	// readBlobOnce reads it via String() when a mid-flight stdin/
+	// stdout op fails (subprocess died, broken pipe, ctx cancelled)
+	// to include the subprocess's last words in the error. On a
+	// plain *bytes.Buffer those reads race the pump goroutine's
+	// writes (surfaced by -race in
+	// TestBlobStreamer_ConstructionCtxCancel_TerminatesSubprocess
+	// during teardown), so we wrap with the small mutex-protected
+	// safeBuffer below.
+	stderr *safeBuffer
 
 	parentCtx    context.Context
 	parentCancel context.CancelFunc
@@ -78,6 +89,32 @@ type BlobStreamer struct {
 	// in a language-appropriate predicate (e.g. isPythonSourceFile
 	// for pypi entities) so the same streamer serves any ecosystem.
 	sourceFileFilter func(path string) bool
+}
+
+// safeBuffer is a bytes.Buffer with a mutex around Write and String
+// so the os/exec stderr-pump goroutine and concurrent readers
+// (readBlobOnce formatting a mid-flight error) don't race on the
+// long-lived cat-file subprocess stderr. os/exec spawns the pump
+// goroutine when cmd.Start runs and joins it when cmd.Wait returns —
+// any read in between needs the lock. One-shot exec.Cmd invocations
+// (ListTreeBlobs, DiffStat, fetchOrigin) collect stderr into a stack
+// *bytes.Buffer and read it only after cmd.Run returns, which is
+// safe; safeBuffer is only used for the persistent stderr.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // defaultMaxBlobSize is the per-blob allocation cap applied to
@@ -203,8 +240,8 @@ func NewBlobStreamer(ctx context.Context, clonePath string, opts ...BlobStreamer
 		parentCancel()
 		return nil, fmt.Errorf("cat-file stdout pipe: %w", err)
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &safeBuffer{}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		parentCancel()
@@ -216,7 +253,7 @@ func NewBlobStreamer(ctx context.Context, clonePath string, opts ...BlobStreamer
 		cmd:              cmd,
 		stdin:            stdin,
 		stdout:           bufio.NewReader(stdout),
-		stderr:           &stderr,
+		stderr:           stderr,
 		parentCtx:        parentCtx,
 		parentCancel:     parentCancel,
 		maxBlobSize:      defaultMaxBlobSize,
@@ -707,6 +744,68 @@ func isPythonSourceFile(path string) bool {
 	for seg := range strings.SplitSeq(path, "/") {
 		switch seg {
 		case "tests", "test", "vendor", "_vendor", "site-packages", ".venv", "venv":
+			return false
+		}
+	}
+	return true
+}
+
+// isNodeSourceFile reports whether the given posix-style path is a
+// JS/TS source file the source-evolution analyzer wants to consume.
+// The Node analog of isGoSourceFile / isPythonSourceFile — same
+// intent: the package's own authored runtime source, not tests, type
+// declarations, vendored deps, or build output. Excludes:
+//   - non-source extensions (only .js/.mjs/.cjs/.ts/.tsx/.jsx)
+//   - .d.ts TypeScript declaration files — types, not runtime source
+//   - .min.js — minified bundle output, not authored source
+//   - test/spec files: *.test.* and *.spec.* (any of the above exts)
+//   - __tests__/, test/, tests/ directories at any depth
+//   - node_modules/ (vendored), and dist/ build/ out/ build output
+//     trees at any depth
+//
+// Heuristic and deliberately conservative — JS has no single vendor
+// convention, so the exclude set is a best effort refined against
+// real-data comparability (mirrors the isPythonSourceFile note).
+func isNodeSourceFile(path string) bool {
+	// .d.ts is a declaration file even though it ends in .ts — check
+	// before the extension allowlist so it isn't admitted as TS.
+	if strings.HasSuffix(path, ".d.ts") {
+		return false
+	}
+	ext := false
+	for _, suf := range []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"} {
+		if strings.HasSuffix(path, suf) {
+			ext = true
+			break
+		}
+	}
+	if !ext {
+		return false
+	}
+
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	// Minified bundle: any `.min.` segment in the BASENAME means the
+	// file is build output, not authored source. The intent of `.min.`
+	// is language-side-agnostic — bundlers emit `.min.mjs` and
+	// `.min.cjs` for ESM/CJS targets and (rarely) `.min.ts` for TS
+	// minifiers — so the suffix-on-the-whole-path `.min.js` check that
+	// shipped previously missed every variant other than plain `.js`.
+	// Basename-scoped to avoid matching `.min.` in directory components
+	// like a hypothetical `vendor/.min.dir/foo.js`.
+	if strings.Contains(base, ".min.") {
+		return false
+	}
+	// test/spec file: a ".test." or ".spec." segment in the basename
+	// (foo.test.js, bar.spec.tsx).
+	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
+		return false
+	}
+	for seg := range strings.SplitSeq(path, "/") {
+		switch seg {
+		case "__tests__", "test", "tests", "node_modules", "dist", "build", "out":
 			return false
 		}
 	}

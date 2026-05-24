@@ -12,6 +12,7 @@ import (
 
 	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
+	"github.com/sarahmaeve/signatory/internal/signal/source/node"
 )
 
 // MatrixValue is the JSON-marshaled value of the
@@ -135,6 +136,8 @@ func ecosystemForLanguage(language string) string {
 		return "go"
 	case "python":
 		return "pypi"
+	case "javascript":
+		return "npm"
 	default:
 		return ""
 	}
@@ -148,6 +151,7 @@ func ecosystemForLanguage(language string) string {
 var (
 	_ SourceProvider   = (*BlobStreamer)(nil)
 	_ LanguageAnalyzer = (*golang.Analyzer)(nil)
+	_ LanguageAnalyzer = (*node.Analyzer)(nil)
 )
 
 // Assembler builds a MatrixValue from a PinTable + budget options.

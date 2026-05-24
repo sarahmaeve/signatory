@@ -44,7 +44,37 @@ const maxPackageNameLength = 214
 var (
 	npmUnscopedName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	npmScopedName   = regexp.MustCompile(`^@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	// npmVersion is the shape gate for the {version} segment of the
+	// attestation URL. Covers semver including pre-release and build
+	// metadata (1.2.3-rc.1+build.5) while excluding anything that
+	// could escape the path component. Same #90 discipline as
+	// ValidatePackageName: validate user-influenced URL bytes at the
+	// function boundary, not after building the URL.
+	npmVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
 )
+
+// maxVersionLength bounds the {version} path segment. npm has no
+// formally published ceiling; 256 is generous for any real semver
+// string and keeps a malformed packument from driving an unbounded
+// URL.
+const maxVersionLength = 256
+
+// ValidateVersion enforces the version grammar before it is
+// substituted into the attestation URL path. Mirrors
+// ValidatePackageName's boundary-validation contract.
+func ValidateVersion(version string) error {
+	if version == "" {
+		return fmt.Errorf("version is empty")
+	}
+	if len(version) > maxVersionLength {
+		return fmt.Errorf("version exceeds %d-byte maximum (got %d)",
+			maxVersionLength, len(version))
+	}
+	if !npmVersion.MatchString(version) {
+		return fmt.Errorf("version %q contains disallowed characters", version)
+	}
+	return nil
+}
 
 // ValidatePackageName enforces the package-name grammar before any
 // URL construction. Per #90's lesson: user-influenced bytes that get
@@ -240,12 +270,23 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// containsControlChars reports whether s includes any ASCII control
-// character (0x00–0x1F) other than horizontal tab (0x09). These never
-// appear in legitimate registry URLs or identifiers.
+// containsControlChars reports whether s includes any byte / rune
+// that legitimate registry URLs and identifiers never carry. Rejects:
+//   - ASCII C0 controls (0x00–0x1F) except horizontal tab (0x09)
+//   - DEL (0x7F) — fulcio.safeClaim already rejects this; same line
+//   - U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) — JS
+//     treats both as line terminators and many log aggregators split
+//     on them, so they're an injection vector for any downstream
+//     renderer or log pipeline.
+//
+// The range loop iterates as runes, so the multi-byte UTF-8 forms of
+// U+2028 / U+2029 are matched directly rather than byte-by-byte.
 func containsControlChars(s string) bool {
 	for _, r := range s {
 		if r < 0x20 && r != '\t' {
+			return true
+		}
+		if r == 0x7F || r == ' ' || r == ' ' {
 			return true
 		}
 	}
@@ -277,6 +318,48 @@ func (c *Client) GetPackage(ctx context.Context, name string) (*RegistryPackage,
 		return nil, fmt.Errorf("npm registry request for %q: %w", name, err)
 	}
 	return &pkg, nil
+}
+
+// attestationsMaxSize bounds the provenance attestation response.
+// Sigstore bundles are small (a leaf cert plus a DSSE envelope —
+// single-digit KiB); 1 MiB is a generous abuse cap, far below the
+// registry endpoint's 10 MiB default since the legitimate payload is
+// orders of magnitude smaller.
+const attestationsMaxSize = 1024 * 1024
+
+// GetAttestation fetches the npm provenance attestation envelope for
+// a specific (name, version) from registry.npmjs.org's
+// /-/npm/v1/attestations/<name>@<version> endpoint. Returns
+// ErrNotFound (wrapped) on 404 — the common case for a version that
+// never published with provenance — which the caller treats as "no
+// upgrade available", not a hard error.
+//
+// The returned envelope is presence-and-extraction material only: the
+// DSSE signature, Rekor inclusion proof, and Fulcio chain are NOT
+// verified here (signatory's trust posture — see internal/sigstore/
+// fulcio). The recovered SHA is gated by fulcio.IsGitObjectID before
+// it can reach a git argv downstream.
+func (c *Client) GetAttestation(ctx context.Context, name, version string) (*AttestationsResponse, error) {
+	if err := ValidatePackageName(name); err != nil {
+		return nil, fmt.Errorf("get attestation: %w", err)
+	}
+	if err := ValidateVersion(version); err != nil {
+		return nil, fmt.Errorf("get attestation: %w", err)
+	}
+
+	var resp AttestationsResponse
+	path := "/-/npm/v1/attestations/" + url.PathEscape(name) + "@" + url.PathEscape(version)
+	err := c.registryAPI.GetJSON(ctx, path, &resp,
+		httpx.WithHeader("Accept", "application/json"),
+		httpx.WithRequestMaxBytes(attestationsMaxSize),
+	)
+	if err != nil {
+		if errors.Is(err, httpx.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %s@%s (no attestation)", ErrNotFound, name, version)
+		}
+		return nil, fmt.Errorf("npm attestation request for %q@%q: %w", name, version, err)
+	}
+	return &resp, nil
 }
 
 // downloadsResponse models the api.npmjs.org downloads endpoint.

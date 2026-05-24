@@ -9,6 +9,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
+	"github.com/sarahmaeve/signatory/internal/signal/source/node"
 	"github.com/sarahmaeve/signatory/internal/signal/source/python"
 )
 
@@ -65,18 +66,20 @@ func NewCollector(clonePath string, pinSource VersionPinSource, allowFetch bool)
 // and AST analyzer. ok=false means source-evolution does not support
 // that ecosystem and the collector skips silently.
 //
-// pypi uses python.Analyzer — the hand-written Python lexer/parser/
-// extractor in internal/signal/source/python; it populates the AST
-// Counts (dynamic-eval, import-time call sites, install-hook
-// overrides, exec/network/base64/sensitive-path) just as
+// pypi uses python.Analyzer and npm uses node.Analyzer — the
+// hand-written lexer/parser/extractors in internal/signal/source/
+// {python,node}; each populates the shared AST Counts (dynamic-eval,
+// import-time call sites, exec/network/base64/sensitive-path) just as
 // golang.Analyzer does for Go. Structural and diff signal are
-// language-neutral and flow for both.
+// language-neutral and flow for all three.
 func languageProfile(ecosystem string) (filter func(path string) bool, analyzer LanguageAnalyzer, ok bool) {
 	switch ecosystem {
 	case "golang", "go":
 		return isGoSourceFile, golang.NewAnalyzer(), true
 	case "pypi":
 		return isPythonSourceFile, python.NewAnalyzer(), true
+	case "npm":
+		return isNodeSourceFile, node.NewAnalyzer(), true
 	default:
 		return nil, nil, false
 	}

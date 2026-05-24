@@ -130,5 +130,14 @@ func spikedFeatures(older, newer astfeature.Counts) []string {
 	if older.InstallHookOverrides == 0 && newer.InstallHookOverrides > 0 {
 		spiked = append(spiked, "install_hook_overrides")
 	}
+	if older.EnvCredentialReads == 0 && newer.EnvCredentialReads > 0 {
+		spiked = append(spiked, "env_credential_reads")
+	}
+	if older.SensitivePathWrites == 0 && newer.SensitivePathWrites > 0 {
+		spiked = append(spiked, "sensitive_path_writes")
+	}
+	if older.CloudMetadataCalls == 0 && newer.CloudMetadataCalls > 0 {
+		spiked = append(spiked, "cloud_metadata_calls")
+	}
 	return spiked
 }

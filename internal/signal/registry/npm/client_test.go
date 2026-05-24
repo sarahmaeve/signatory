@@ -215,6 +215,176 @@ func TestValidatePackageName_Rejects(t *testing.T) {
 	}
 }
 
+// TestContainsControlChars pins the M3 gate. The function reports
+// whether a string carries any byte / rune that legitimate registry
+// URLs and identifiers never include. Tab (0x09) is the only allowed
+// exception. Pre-fix the check used `r < 0x20 && r != '\t'`, which
+// missed DEL (0x7F) and the Unicode line/paragraph separators
+// U+2028 / U+2029 — bytes/runes that JS treats as line terminators
+// and that log aggregators commonly split on, so they're an
+// injection vector for any consumer that renders the value.
+// fulcio.safeClaim in the same codebase rejects 0x7F already;
+// containsControlChars must hold the same line.
+func TestContainsControlChars(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		// Caught by both pre- and post-fix.
+		{"plain ascii url", "https://github.com/x/y", false},
+		{"plain ascii with safe punctuation", "git+https://github.com/expressjs/express.git", false},
+		{"empty", "", false},
+		{"tab is allowed (whitespace, not a control)", "git+https://x\ty", false},
+		{"NUL byte (0x00)", "evil\x00trail", true},
+		{"newline (0x0a)", "evil\nInjected: log line", true},
+		{"carriage return (0x0d)", "evil\rPart-2", true},
+		{"unit separator (0x1f)", "evil\x1fpart", true},
+		// New: pre-fix these would all incorrectly return false.
+		{"DEL (0x7F)", "evil\x7fpart", true},
+		{"line separator (U+2028)", "evil Injected", true},
+		{"paragraph separator (U+2029)", "evil Injected", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, containsControlChars(tc.in),
+				"containsControlChars(%q)", tc.in)
+		})
+	}
+}
+
+// TestRepositoryUnmarshalJSON_RejectsLineSeparator pins the gate at
+// the integration point — a registry response whose repository URL
+// carries U+2028 (or any control char from the M3 set) must fail
+// JSON decode. Belt-and-suspenders: even if containsControlChars
+// gets refactored, this test continues to pin the trust boundary
+// where the bytes actually enter the system.
+func TestRepositoryUnmarshalJSON_RejectsLineSeparator(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// "url" field carries a literal U+2028 (  is the JSON
+		// escape, decoded to the U+2028 rune in the Go string).
+		fmt.Fprint(w, `{"name":"x","repository":{"type":"git","url":"https://github.com/x/y Injected"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := newClientWithBaseURL(srv.URL).GetPackage(context.Background(), "x")
+	require.Error(t, err,
+		"a registry URL carrying U+2028 must fail decode at the trust boundary")
+	assert.Contains(t, err.Error(), "control characters")
+}
+
+// TestValidateVersion_Accepts pins the shapes ValidateVersion must
+// admit before they're substituted into the attestation URL path.
+// Same trust-boundary discipline as ValidatePackageName: the regex
+// `^[A-Za-z0-9][A-Za-z0-9.+-]*$` accepts semver including pre-release
+// and build metadata, and the length cap is 256.
+func TestValidateVersion_Accepts(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{
+		"1.0.0",
+		"0.0.1",
+		"10.20.30",
+		"1.2.3-rc.1",
+		"1.2.3-rc.1+build.5",
+		"1.2.3+sha.abc123",
+		"1.0.0-alpha",
+		"1.0.0-alpha.beta.1",
+		"v2-leading-alpha-ok",
+	} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			assert.NoError(t, ValidateVersion(version))
+		})
+	}
+}
+
+// TestValidateVersion_Rejects pins the shapes ValidateVersion must
+// refuse — the version segment of the attestation URL is a path
+// component, so any byte that could escape it (slash, query,
+// fragment, whitespace, null, newline, @) is a hard reject regardless
+// of whether the npm spec would accept it. Flag-shaped values (leading
+// dash) are rejected so a future caller that passes the value
+// somewhere shell-shaped can't be flag-injected. Length cap is 256.
+func TestValidateVersion_Rejects(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version string
+	}{
+		{"empty", ""},
+		{"starts with dot", ".1.0.0"},
+		{"starts with hyphen", "-rf"},
+		{"starts with plus", "+build.1"},
+		{"contains slash", "1.0.0/etc"},
+		{"contains path traversal", "../1.0.0"},
+		{"contains query", "1.0.0?x=1"},
+		{"contains fragment", "1.0.0#frag"},
+		{"contains space", "1.0.0 beta"},
+		{"contains at sign", "1.0.0@something"},
+		{"contains null", "1.0.0\x00rc"},
+		{"contains newline", "1.0.0\nv2"},
+		{"contains underscore", "1.0.0_beta"},
+		{"too long", strings.Repeat("a", 257)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateVersion(tc.version)
+			require.Errorf(t, err, "must reject %q", tc.version)
+		})
+	}
+}
+
+// TestClient_GetAttestation_MalformedName_NoHTTPCall: ValidatePackageName
+// must reject a bad name BEFORE any HTTP activity on the attestation
+// path, same discipline as TestClient_GetPackage_MalformedName_NoHTTPCall
+// for the packument path. Without this pin a future caller that lets
+// attacker-influenced bytes reach GetAttestation could escape the
+// URL path component.
+func TestClient_GetAttestation_MalformedName_NoHTTPCall(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		calls++
+	}))
+	defer srv.Close()
+
+	c := newClientWithBaseURL(srv.URL)
+	_, err := c.GetAttestation(context.Background(), "../etc/passwd", "1.0.0")
+	require.Error(t, err)
+	assert.Equal(t, 0, calls,
+		"malformed package name must be rejected pre-HTTP on the attestation endpoint")
+}
+
+// TestClient_GetAttestation_MalformedVersion_NoHTTPCall: ValidateVersion
+// must reject a bad version BEFORE any HTTP activity. The version
+// flows into the URL path segment after the @-separator; a value
+// containing `/` would split the segment, and a value containing `@`
+// would confuse the registry's name@version parsing.
+func TestClient_GetAttestation_MalformedVersion_NoHTTPCall(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		calls++
+	}))
+	defer srv.Close()
+
+	c := newClientWithBaseURL(srv.URL)
+	_, err := c.GetAttestation(context.Background(), "express", "1.0.0/../../etc")
+	require.Error(t, err)
+	assert.Equal(t, 0, calls,
+		"malformed version must be rejected pre-HTTP on the attestation endpoint")
+}
+
 // TestClient_GetPackage_MalformedName_NoHTTPCall confirms that a
 // malformed package name is rejected BEFORE any HTTP activity. The
 // counter below stays at zero on a bad input — otherwise the
