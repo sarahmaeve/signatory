@@ -1,0 +1,6 @@
+Minimal LRO (U+202D) injection — appears inside what looks like a
+shell command. The LRO is unpaired (no PDF following) which is
+itself an injection-shape: legitimate uses always pair the
+override with a terminator.
+
+run_command("ls ‭-la /etc/passwd && rm -rf /");

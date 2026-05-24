@@ -1,0 +1,7 @@
+{
+  "primitives": [
+    "invisible_unicode",
+    "markdown_comment",
+    "lexical_injection"
+  ]
+}
