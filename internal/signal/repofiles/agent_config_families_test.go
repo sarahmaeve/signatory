@@ -39,6 +39,7 @@ func TestAgentConfigFamilies_Declaration(t *testing.T) {
 		"cursor_rules_dir",
 		"aider_conf",
 		"zed_settings",
+		"codex_instructions",
 		"continue_config",
 		"windsurfrules",
 	}

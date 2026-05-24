@@ -1,6 +1,10 @@
 package astfeature
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sarahmaeve/signatory/internal/agentconfig"
+)
 
 // This file holds the language-neutral catalogs the per-language
 // source-AST analyzers consult. The catalogs describe **what the
@@ -84,27 +88,33 @@ func IsSensitivePath(p string) bool {
 // bufferzonecorp, and the AI-agent-config injection class Trapdoor
 // pioneered. Substring-matched against the backslash-normalized
 // resolved path.
-var PersistencePathPatterns = []string{
-	"/.ssh/authorized_keys", "/.ssh/config", "/.bashrc", "/.bash_profile",
-	"/.zshrc", "/.profile", "/.bash_aliases",
-	"/etc/cron", "/var/spool/cron", "/.config/systemd/", "/etc/systemd/",
-	"/Library/LaunchAgents/", "/Library/LaunchDaemons/",
-	"/.config/autostart/",
-	// Agent / IDE config dirs an implant writes to survive uninstall.
-	"/.claude/", "/.vscode/", "/.cursor/", "/.idea/",
-	// AI-agent instruction-file loci added 2026-05 per the Trapdoor
-	// campaign (zero-width-Unicode prompt-injection carriers). The
-	// file-level entries match anywhere in the path so writes to the
-	// consumer's repo root, home dir, or a vendored subdir all fire.
-	// See design/anti-subversion.md for the broader threat model.
-	"/.cursorrules", "/CLAUDE.md", "/AGENTS.md", "/.windsurfrules",
-	// Sibling agent/IDE config dirs in the Trapdoor target surface.
-	"/.aider/", "/.zed/", "/.codex/", "/.continue/", "/.windsurf/",
-	// Git hook dirs (post-commit/pre-push implants).
-	"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push",
-	// Credential-store tampering (writing, not reading).
-	"/.npmrc", "/.netrc", "/.git-credentials",
-}
+//
+// The AI-agent instruction-file loci are derived at init from
+// internal/agentconfig.RuntimePersistencePrefixes(), so the source
+// of truth for "what is an agent-locus" lives in one place. Adding
+// a new Locus there automatically expands this catalog; the
+// previously-duplicated maintenance (Trapdoor 2026-05 added
+// /.codex/ here but forgot the corresponding repofiles Family) is
+// no longer possible.
+var PersistencePathPatterns = func() []string {
+	out := []string{
+		"/.ssh/authorized_keys", "/.ssh/config", "/.bashrc", "/.bash_profile",
+		"/.zshrc", "/.profile", "/.bash_aliases",
+		"/etc/cron", "/var/spool/cron", "/.config/systemd/", "/etc/systemd/",
+		"/Library/LaunchAgents/", "/Library/LaunchDaemons/",
+		"/.config/autostart/",
+		// Non-AI editor config dirs an implant writes to survive uninstall.
+		// AI-coding-agent loci (.claude, .cursor, .aider, .zed, .codex,
+		// .continue, .windsurf and the agent-instruction files at root)
+		// are appended from agentconfig.RuntimePersistencePrefixes() below.
+		"/.vscode/", "/.idea/",
+		// Git hook dirs (post-commit/pre-push implants).
+		"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push",
+		// Credential-store tampering (writing, not reading).
+		"/.npmrc", "/.netrc", "/.git-credentials",
+	}
+	return append(out, agentconfig.RuntimePersistencePrefixes()...)
+}()
 
 // IsPersistencePath reports whether a statically-resolved write
 // destination targets a persistence / credential-tamper location.
