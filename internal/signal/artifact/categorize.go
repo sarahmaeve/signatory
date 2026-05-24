@@ -4,6 +4,8 @@ import (
 	"path"
 	"slices"
 	"strings"
+
+	"github.com/sarahmaeve/signatory/internal/signal/repofiles"
 )
 
 // Category constants. The set is intentionally small and descriptive
@@ -20,6 +22,7 @@ const (
 	CategoryVendored       = "vendored"
 	CategoryBinaryInTests  = "binary_in_tests"
 	CategorySuspiciousPath = "suspicious_path"
+	CategoryAgentConfig    = "agent_config"
 	CategoryOther          = "other"
 )
 
@@ -33,16 +36,27 @@ const (
 //
 //  1. suspicious_path  — wins over everything; a bad path is the
 //     headline regardless of what filename comes after it.
-//  2. generated        — autoconf/automake outputs by exact name.
-//  3. vendored         — under vendor/ third_party/ deps/.
-//  4. build_glue       — m4 / autotools sources / lifecycle scripts.
-//  5. binary_in_tests  — under tests/testdata/fixtures with a
+//  2. agent_config     — AI-instruction files (.cursorrules,
+//     CLAUDE.md, .claude/, …) per repofiles.IsAgentConfigPath. A
+//     file shipping in the tarball but absent from git at the
+//     paired commit is the xz-precedent applied to AI-config
+//     injection. Fires before build_glue / generated / other so a
+//     future agent-config family that collides with a build-glue
+//     basename still classifies as agent_config (no presently-
+//     overlapping families, but ordering future-proofs).
+//  3. generated        — autoconf/automake outputs by exact name.
+//  4. vendored         — under vendor/ third_party/ deps/.
+//  5. build_glue       — m4 / autotools sources / lifecycle scripts.
+//  6. binary_in_tests  — under tests/testdata/fixtures with a
 //     binary-shaped extension. Header-only means we can't verify
 //     the bytes; the path shape is the heuristic.
-//  6. other            — fallback.
+//  7. other            — fallback.
 func classify(p string) string {
 	if isSuspiciousPath(p) {
 		return CategorySuspiciousPath
+	}
+	if repofiles.IsAgentConfigPath(p) {
+		return CategoryAgentConfig
 	}
 	if isGenerated(p) {
 		return CategoryGenerated

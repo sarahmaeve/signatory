@@ -1,6 +1,42 @@
 package repofiles
 
-import "regexp"
+import (
+	"path"
+	"regexp"
+	"slices"
+)
+
+// IsAgentConfigPath reports whether a posix-style path identifies a
+// file that any AgentConfigFamilies entry would detect. Operates on
+// a single path string — no filesystem access — so it composes
+// cleanly with collectors that work on virtual paths (artifact
+// tarball entries, PR diff entries) rather than on a cloned working
+// tree.
+//
+// Equivalent to a hypothetical Scan() walking a virtual tree
+// containing exactly p: the function tests the path's directory and
+// basename against each family's Dirs + Detector, returning true on
+// the first match.
+//
+// Path conventions: posix separators ("/"), no leading slash. Empty
+// string is never agent-config. Symlinks / case-folding / extension
+// tolerance are governed by the family detectors, not this function.
+func IsAgentConfigPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	dir := path.Dir(p)
+	base := path.Base(p)
+	for _, fam := range agentConfigFamilies {
+		if !slices.Contains(fam.Dirs, dir) {
+			continue
+		}
+		if fam.Detector != nil && fam.Detector.MatchString(base) {
+			return true
+		}
+	}
+	return false
+}
 
 // AgentConfigFamilies returns the AI-agent configuration file family
 // list in a deterministic, declared order. Parallel to Families() but

@@ -629,6 +629,7 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"pair_confidence reports whether the tarball↔commit pairing was an exact gitHead match (npm v≥5) or a tag-name guess (everywhere else); the synthesist must weight tag-match evidence less heavily than exact-match evidence",
 			"healthy autotools projects ship configure / Makefile.in / aclocal.m4 in the tarball but not in git; the categorizer marks these as 'generated' so the signal payload distinguishes legitimate dist-prep noise from suspicious extras",
 			"unresolved pair_confidence is recorded as positive_absence rather than a divergence signal — 'we couldn't even pair this' is a hygiene fact about the project's release process, not a finding about its contents",
+			"the categorizer emits an 'agent_config' bucket for AI-instruction files (.cursorrules, CLAUDE.md, AGENTS.md, .claude/, .cursor/rules/, .aider.conf.yml, .zed/, .continue/, .windsurfrules) per the Trapdoor 2026-05 campaign; a file in this bucket appearing in the tarball but absent from git at the paired commit is the xz-precedent applied to AI-config injection — Trapdoor weaponized exactly this carrier shape",
 		},
 	},
 	"exfil_capture_host": {
