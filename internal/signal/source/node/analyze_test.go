@@ -551,6 +551,63 @@ func TestThreat_PersistenceWrites(t *testing.T) {
 		"writing build output is ordinary I/O — must not flag")
 }
 
+// TestThreat_AIAgentConfigWrites models the Trapdoor 2026-05
+// campaign IOC: a postinstall script that drops .cursorrules /
+// CLAUDE.md / .claude/ config carrying a zero-width-Unicode prompt-
+// injection payload aimed at the consumer's AI coding agent. The
+// SensitivePathWrites count must fire on the resolvable destinations
+// (the catalog entries are the Trapdoor target shape); ordinary
+// build output must not.
+func TestThreat_AIAgentConfigWrites(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const fs = require('fs');\n" +
+		"fs.writeFileSync('/home/dev/.cursorrules', payload);\n" +
+		"fs.writeFileSync('/home/dev/CLAUDE.md', payload);\n" +
+		"fs.writeFileSync('/repo/.claude/settings.json', cfg);\n" +
+		"fs.writeFileSync('/home/dev/.aider/setup.sh', payload);\n" +
+		"fs.writeFileSync('/repo/.windsurfrules', payload);\n"
+	c := counts(t, malicious)
+	assert.Equal(t, 5, c.SensitivePathWrites,
+		"each Trapdoor-shape AI-agent config write must fire — "+
+			".cursorrules, CLAUDE.md, .claude/, .aider/, .windsurfrules")
+
+	benign := "" +
+		"const fs = require('fs');\n" +
+		"fs.writeFileSync('./README.md', readme);\n" +
+		"fs.writeFileSync('./dist/bundle.js', code);\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.SensitivePathWrites,
+		"README and build output must not fire — only the agent-config catalog")
+}
+
+// TestThreat_WalletKeystoreReads models the Trapdoor cargo build.rs
+// payload (translated to the JS-side fs.readFile primitive): reading
+// crypto-wallet keystore files to exfiltrate blockchain credentials.
+// The Move/Sui developer community was the targeting context.
+func TestThreat_WalletKeystoreReads(t *testing.T) {
+	t.Parallel()
+	malicious := "" +
+		"const fs = require('fs');\n" +
+		"fs.readFileSync('/home/dev/.sui/sui_config/keystore.aes');\n" +
+		"fs.readFileSync('/home/dev/.config/solana/id.json');\n" +
+		"fs.readFileSync('/home/dev/.aptos/config.yaml');\n" +
+		"fs.readFileSync('/home/dev/.ethereum/keystore/UTC--2024');\n" +
+		"fs.readFileSync('/home/dev/.bitcoin/wallet.dat');\n"
+	c := counts(t, malicious)
+	assert.Equal(t, 5, c.SensitivePathReads,
+		"each Trapdoor-targeted wallet keystore read must fire — "+
+			"Sui, Solana, Aptos, Ethereum, Bitcoin")
+
+	benign := "" +
+		"const fs = require('fs');\n" +
+		"fs.readFileSync('./package.json');\n" +
+		"fs.readFileSync('./src/index.js');\n"
+	bc := counts(t, benign)
+	assert.Equal(t, 0, bc.SensitivePathReads,
+		"ordinary source-tree reads must not fire — only the wallet catalog")
+}
+
 // TestThreat_CloudMetadataPivot models the SSRF-to-IMDS credential
 // mint (TanStack AWS IMDSv2, litellm). A metadata-host destination is
 // counted distinctly from ordinary egress (near-zero false positive);

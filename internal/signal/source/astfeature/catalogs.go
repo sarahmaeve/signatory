@@ -40,6 +40,12 @@ var SensitivePathPatterns = []string{
 	// Browser / OS credential stores.
 	"Login Data", "Cookies", "key4.db", "logins.json",
 	"cookies.sqlite", "Local State", "Library/Keychains",
+	// Crypto-wallet keystores. Added 2026-05 per the Trapdoor
+	// cross-ecosystem campaign whose cargo build.rs payloads read
+	// these locations to harvest blockchain credentials. Sui /
+	// Solana / Aptos / Ethereum keystore / Bitcoin wallet.dat.
+	"/.sui/", "/.config/solana/", "/.aptos/",
+	"/.ethereum/keystore/", "wallet.dat",
 }
 
 // IsSensitivePath reports whether a statically-resolved path
@@ -74,8 +80,9 @@ func IsSensitivePath(p string) bool {
 // destinations. Distinct from SensitivePathPatterns (read-side
 // credential material): these are the locations a payload WRITES
 // to in order to survive uninstall or hijack future sessions — the
-// recurring post-exploitation step across TanStack, node-ipc, and
-// bufferzonecorp. Substring-matched against the backslash-normalized
+// recurring post-exploitation step across TanStack, node-ipc,
+// bufferzonecorp, and the AI-agent-config injection class Trapdoor
+// pioneered. Substring-matched against the backslash-normalized
 // resolved path.
 var PersistencePathPatterns = []string{
 	"/.ssh/authorized_keys", "/.ssh/config", "/.bashrc", "/.bash_profile",
@@ -85,6 +92,14 @@ var PersistencePathPatterns = []string{
 	"/.config/autostart/",
 	// Agent / IDE config dirs an implant writes to survive uninstall.
 	"/.claude/", "/.vscode/", "/.cursor/", "/.idea/",
+	// AI-agent instruction-file loci added 2026-05 per the Trapdoor
+	// campaign (zero-width-Unicode prompt-injection carriers). The
+	// file-level entries match anywhere in the path so writes to the
+	// consumer's repo root, home dir, or a vendored subdir all fire.
+	// See design/anti-subversion.md for the broader threat model.
+	"/.cursorrules", "/CLAUDE.md", "/AGENTS.md", "/.windsurfrules",
+	// Sibling agent/IDE config dirs in the Trapdoor target surface.
+	"/.aider/", "/.zed/", "/.codex/", "/.continue/", "/.windsurf/",
 	// Git hook dirs (post-commit/pre-push implants).
 	"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push",
 	// Credential-store tampering (writing, not reading).

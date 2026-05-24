@@ -52,6 +52,17 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 		assert.True(t, slices.Contains(SensitivePathPatterns, want),
 			"browser/OS credential store entry %q missing", want)
 	}
+
+	// Crypto-wallet keystores added per the Trapdoor 2026-05 campaign.
+	walletKeystores := []string{
+		"/.sui/", "/.config/solana/", "/.aptos/",
+		"/.ethereum/keystore/", "wallet.dat",
+	}
+	for _, want := range walletKeystores {
+		assert.True(t, slices.Contains(SensitivePathPatterns, want),
+			"crypto-wallet keystore entry %q missing — Trapdoor's "+
+				"cargo build.rs payloads read these locations", want)
+	}
 }
 
 // TestCatalog_PersistencePath_Membership locks in the
@@ -82,6 +93,18 @@ func TestCatalog_PersistencePath_Membership(t *testing.T) {
 	for _, want := range agentIDE {
 		assert.True(t, slices.Contains(PersistencePathPatterns, want),
 			"agent/IDE config dir entry %q missing", want)
+	}
+
+	// AI-agent instruction loci added per the Trapdoor 2026-05
+	// campaign — both file-level entries (.cursorrules, CLAUDE.md,
+	// AGENTS.md, .windsurfrules) and sibling agent/IDE config dirs.
+	aiAgentLoci := []string{
+		"/.cursorrules", "/CLAUDE.md", "/AGENTS.md", "/.windsurfrules",
+		"/.aider/", "/.zed/", "/.codex/", "/.continue/", "/.windsurf/",
+	}
+	for _, want := range aiAgentLoci {
+		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+			"AI-agent instruction locus %q missing — Trapdoor weaponized this carrier shape", want)
 	}
 
 	gitHooks := []string{"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push"}
@@ -163,6 +186,13 @@ func TestIsSensitivePath_Behavior(t *testing.T) {
 		{"environment_cfg_must_not_fire", "environment.cfg", false},
 		{"empty_string_never_match", "", false},
 		{"ordinary_path", "src/index.js", false},
+
+		// Crypto-wallet keystores (Trapdoor 2026-05).
+		{"sui_wallet", "/home/user/.sui/sui_config/keystore.aes", true},
+		{"solana_id_json", "/home/user/.config/solana/id.json", true},
+		{"aptos_config", "/home/user/.aptos/config.yaml", true},
+		{"ethereum_keystore", "/home/user/.ethereum/keystore/UTC--2024-01-15", true},
+		{"bitcoin_walletdat", "/home/user/.bitcoin/wallet.dat", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,6 +221,17 @@ func TestIsPersistencePath_Behavior(t *testing.T) {
 		{"backslash_normalize", `C:\Users\x\.cursor\setup.mjs`, true},
 		{"empty_string_never_match", "", false},
 		{"build_output", "./dist/bundle.js", false},
+
+		// AI-agent instruction loci (Trapdoor 2026-05).
+		{"cursorrules_at_root", "/repo/.cursorrules", true},
+		{"claude_md_at_root", "/repo/CLAUDE.md", true},
+		{"agents_md_at_root", "/repo/AGENTS.md", true},
+		{"windsurfrules_at_root", "/repo/.windsurfrules", true},
+		{"aider_dir_setup", "/home/x/.aider/setup.sh", true},
+		{"zed_settings", "/repo/.zed/settings.json", true},
+		{"codex_instructions", "/repo/.codex/instructions.md", true},
+		{"continue_config", "/repo/.continue/config.json", true},
+		{"windsurf_dir", "/repo/.windsurf/rules.md", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
