@@ -40,3 +40,23 @@ detector-purposes even when their real-world intent is benign.
 - `system-detected-as-prose.benign.md` — "the system: macOS" inside
   ordinary prose. The role-marker regex is line-anchored, so this
   must not fire.
+
+Unicode obfuscation bypasses (post-normalizer integration coverage).
+A naive `strings.ToLower` + substring matcher misses each of these;
+the lexical normalizer composed in `normalizeForLexicalMatch`
+(strip `unicode.Cf`, map `unicode.IsSpace` runes to ASCII space)
+closes them.
+
+- `ignore-previous-nbsp.malicious.md` — "Ignore" and "previous"
+  separated by U+00A0 NO-BREAK SPACE. Renders visually identical
+  to a regular space; the substring against `"ignore previous"`
+  fails without whitespace normalization.
+- `ignore-previous-zwsp-midword.malicious.md` — "Ignore" split
+  mid-word by U+200B ZERO-WIDTH SPACE. Also fires
+  PrimitiveInvisibleUnicode (defense in depth); the lexical
+  detector must catch it independently because not every ignorable
+  rune is in the invisible-unicode catalog.
+- `ignore-previous-shy-midword.malicious.md` — "Ignore" split
+  mid-word by U+00AD SOFT HYPHEN. SOFT HYPHEN is NOT in
+  PrimitiveInvisibleUnicode's catalog, so the lexical detector
+  is the ONLY primitive that catches this evasion.
