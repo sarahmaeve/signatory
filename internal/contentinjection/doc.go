@@ -19,13 +19,14 @@
 //
 // # The primitives
 //
-// Seven primitives per the design doc, grouped by detection mechanism:
+// Eight primitives per the design doc, grouped by detection mechanism:
 //
 //   - Rune-scan family (single pass, three findings emitted):
 //     PrimitiveInvisibleUnicode, PrimitiveBidiControl, PrimitiveTagBlock.
 //   - Regex family: PrimitiveMarkdownComment, PrimitiveMarkdownImage,
 //     PrimitiveLexicalInjection.
 //   - Length-distribution family: PrimitiveEncodedBlob.
+//   - Script-mix family: PrimitiveConfusableMixedScript (added 2026-05).
 //
 // # The shared-package property
 //

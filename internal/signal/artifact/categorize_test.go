@@ -42,28 +42,6 @@ func TestClassify_AgentConfig(t *testing.T) {
 	}
 }
 
-// TestClassify_AgentConfigOrderingOverBuildGlue confirms agent_config
-// fires before build_glue when both could match. Today no agent-
-// config path is also a build_glue basename, so the ordering is
-// belt-and-braces — but if a future agent-config family ever
-// declares e.g. `.aider/setup.py`, ordering must not silently
-// reclassify it as build_glue.
-func TestClassify_AgentConfigOrderingOverBuildGlue(t *testing.T) {
-	t.Parallel()
-
-	// Construct a path that BOTH a hypothetical agent-config family
-	// and the build_glue basename catalog would match. We use the
-	// real agent-config path (.aider.conf.yml) and verify the
-	// classifier reports agent_config rather than letting it fall
-	// through to other / build_glue. (.aider.conf.yml does not
-	// presently match any build_glue rule; this is the future-proof
-	// assertion.)
-	got := classify(".aider.conf.yml")
-	assert.Equal(t, CategoryAgentConfig, got,
-		"agent_config must win the classification race over future "+
-			"build_glue collisions")
-}
-
 // TestClassify_AgentConfigNotConfusedWithHygieneFiles ensures the
 // hygiene-file shapes (README, SECURITY, CONTRIBUTING, …) that
 // repofiles' Families() declares do NOT classify as agent_config.

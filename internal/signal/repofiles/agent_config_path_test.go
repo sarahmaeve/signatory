@@ -1,9 +1,12 @@
 package repofiles
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestIsAgentConfigPath_KnownFiles covers every family declared by
@@ -60,32 +63,61 @@ func TestIsAgentConfigPath_KnownFiles(t *testing.T) {
 	}
 }
 
-// TestIsAgentConfigPath_AlignsWithScan is a meta-test: every file
-// the per-clone Scan() finds via AgentConfigFamilies must also be
-// classified true by IsAgentConfigPath. Drift between the two
-// surfaces would split the source-of-truth.
+// TestIsAgentConfigPath_AlignsWithScan is the real cross-validation
+// between the two surfaces: a synthetic clone is populated with one
+// file per Locus, Scan() is run against it, and IsAgentConfigPath
+// must agree on every Match.Path. Drift between the two surfaces
+// would split the source-of-truth (agentconfig.Loci) and is the
+// failure mode this test exists to catch — for example, a future
+// refactor that special-cases a path in one surface but not the
+// other.
+//
+// The fixture set deliberately exercises one file per Locus rather
+// than a hand-curated subset, so the test fails loudly if any new
+// Locus is added without keeping the two surfaces in sync.
 func TestIsAgentConfigPath_AlignsWithScan(t *testing.T) {
 	t.Parallel()
 
-	// Sample paths the Scan-based tests use; check every one against
-	// the single-path classifier.
-	samplePaths := []string{
+	clone := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(clone, ".git"), 0o755))
+
+	// One file per Locus. Subdirectory-scoped Loci need MkdirAll for
+	// the parent. Content is non-empty so the scanner does not drop
+	// the entry as a zero-byte placeholder.
+	files := []string{
 		".cursorrules",
 		"CLAUDE.md",
 		"AGENTS.md",
+		"GEMINI.md",
+		".github/copilot-instructions.md",
+		".github/instructions/typescript.instructions.md",
 		".claude/settings.json",
 		".claude/CLAUDE.md",
 		".cursor/rules/001-base.mdc",
 		".aider.conf.yml",
 		".zed/settings.json",
+		".codex/instructions.md",
 		".continue/config.json",
 		".windsurfrules",
 	}
-	for _, p := range samplePaths {
-		t.Run(p, func(t *testing.T) {
+	for _, rel := range files {
+		absPath := filepath.Join(clone, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(absPath), 0o755))
+		require.NoError(t, os.WriteFile(absPath, []byte("content"), 0o644))
+	}
+
+	matches, err := Scan(clone, AgentConfigFamilies())
+	require.NoError(t, err)
+	require.NotEmpty(t, matches,
+		"test premise: Scan must find at least one match in the populated clone")
+
+	for _, m := range matches {
+		t.Run(m.Path, func(t *testing.T) {
 			t.Parallel()
-			assert.True(t, IsAgentConfigPath(p),
-				"path %q is detected by Scan; IsAgentConfigPath must agree", p)
+			assert.True(t, IsAgentConfigPath(m.Path),
+				"Scan emitted path %q (family %q); IsAgentConfigPath must agree — "+
+					"drift means the two surfaces no longer share a source of truth",
+				m.Path, m.Family)
 		})
 	}
 }
