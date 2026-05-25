@@ -2,6 +2,7 @@ package repofiles
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,16 @@ const sourceName = "repofiles"
 // to pick up a newly-added CONTRIBUTING between runs and long enough
 // that the scan doesn't churn the store on routine analyses.
 const defaultTTL = 24 * time.Hour
+
+// maxCargoTomlBytes caps detectProcMacro's read so an attacker-
+// controlled multi-GiB Cargo.toml cannot OOM the collector. A typical
+// Cargo.toml is well under 64 KiB; 1 MiB accommodates the largest
+// real-world workspace roots while remaining a hard DoS ceiling. The
+// false-negative tradeoff (proc-macro = true beyond the cap is
+// invisible) is acceptable: a malicious crate engineering its Cargo
+// manifest to push the declaration past 1 MiB is itself a strong
+// hostility signal and is bounded by what cargo will actually parse.
+const maxCargoTomlBytes = 1 * 1024 * 1024
 
 // Collector emits a compound "repo_files" signal summarizing the
 // presence of conventional project-hygiene files under a local git
@@ -202,18 +213,26 @@ func (c *Collector) detectAgentConfig(result *signal.CollectionResult, entityID 
 // Emits present=false when Cargo.toml exists but is not a proc macro.
 func (c *Collector) detectProcMacro(result *signal.CollectionResult, entityID string, collectedAt time.Time) {
 	cargoPath := filepath.Join(c.path, "Cargo.toml")
-	data, err := os.ReadFile(cargoPath) //nolint:gosec // G304: c.path is the collector's by-design input (the clone root we were asked to inspect)
+	f, err := os.Open(cargoPath) //nolint:gosec // G304: c.path is the collector's by-design input (the clone root we were asked to inspect)
 	if err != nil {
 		// File doesn't exist or unreadable — not applicable. Don't
 		// emit anything; this is "signal not applicable" not "signal
 		// absent due to failure."
 		return
 	}
+	defer func() { _ = f.Close() }()
+
+	// Bounded read: maxCargoTomlBytes caps memory consumption for an
+	// adversarial-size Cargo.toml. See the constant's doc for the
+	// false-negative tradeoff.
+	data, err := io.ReadAll(io.LimitReader(f, maxCargoTomlBytes))
+	if err != nil {
+		return
+	}
 
 	// Quick scan for proc-macro = true in the [lib] section. A full
 	// TOML parse is overkill — the pattern `proc-macro = true` under
-	// a [lib] header is unambiguous and the file is already capped by
-	// filesystem reads (64 KiB typical Cargo.toml).
+	// a [lib] header is unambiguous.
 	isProcMacro := detectProcMacroInToml(string(data))
 
 	result.RecordSignal(entityID, "proc_macro_crate", sourceName, collectedAt, c.ttl,
