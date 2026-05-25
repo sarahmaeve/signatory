@@ -154,7 +154,23 @@ relay).
     base64 stays under the 1024 threshold. Whitespace-broken runs
     similarly evade.
   - **HTML `<img>` tags** in markdown documents: our regex is
-    markdown-syntax-only.
+    markdown-syntax-only. Honest framing: **no public exploit
+    documented at time of writing** uses HTML `<img>` over
+    markdown `![]()` specifically. The CamoLeak / EchoLeak class
+    of attack is rendering-mediated, and the exploited renderers
+    (Slack, M365 Copilot, GitHub Copilot Chat) all support both
+    syntaxes — adversary-side syntax choice depends on what they
+    expect the model to reliably generate. The evasion logic is
+    sound (an adversary who learns we detect `![]()` would
+    trivially switch to HTML), but the gap is **speculative**
+    rather than documented; deferred pending evidence of in-the-
+    wild use.
+
+    This is distinct from the visual-content-driven attack class
+    (VisCo, FigStep, MM-SafetyBench) where the IMAGE BYTES jailbreak
+    an MLLM. That threat model requires OCR / visual perception of
+    image files and is out of scope for the contentinjection
+    primitive package; it would be a separate collector entirely.
 
 ## The product opportunity
 
