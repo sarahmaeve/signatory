@@ -155,13 +155,31 @@ var CredentialEnvNames = []string{
 	"_ACCESS_KEY", "_PRIVATE_KEY", "_CREDENTIALS",
 }
 
-// IsCredentialEnvName reports whether an env-var name names a
-// credential/secret. Case-insensitive; exact for the named entries,
-// substring for the generic suffixes (so VENDOR_API_KEY is caught).
+// IsCredentialEnvName reports whether an env-var name contains a
+// credential/secret signal. Case-insensitive; matches by substring
+// for every catalog entry — both the named ones (NPM_TOKEN,
+// AWS_SECRET_ACCESS_KEY, …) and the generic suffixes (_TOKEN,
+// _SECRET, …). False positives are accepted; the design policy
+// is that a missed credential read is the more expensive failure
+// mode than an over-flagged variant.
+//
+// Practical implications of the substring rule:
+//
+//   - VENDOR_TOKEN → fires (matches the _TOKEN suffix).
+//   - MY_DATABASE_URL_PROD → fires (substring match on DATABASE_URL).
+//     This is the intent: prefixed namespaced credentials still
+//     classify as credential reads.
+//   - NOT_NPM_TOKEN_REAL → fires (substring match on NPM_TOKEN AND
+//     on _TOKEN — multiple catalog entries can match a single name).
+//     Accepted false positive; the alternative (exact-only on the
+//     named entries) drops legitimate prefixed forms like
+//     STRIPE_DATABASE_URL.
+//   - NODE_ENV / PORT / DEBUG → don't fire (no catalog entry as
+//     substring).
 func IsCredentialEnvName(name string) bool {
 	u := strings.ToUpper(name)
 	for _, c := range CredentialEnvNames {
-		if u == c || strings.Contains(u, c) {
+		if strings.Contains(u, c) {
 			return true
 		}
 	}
