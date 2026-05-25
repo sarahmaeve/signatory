@@ -40,3 +40,31 @@ directives, and editor folds while catching real payloads.
   "the system will execute" — mid-sentence verb, single catalog
   word, does not match starts-with-verb OR verb-density rule.
 - `editor-fold.benign.md` — `<!-- region: ... -->` editor fold.
+
+Fast-path punctuation evasions (post-Unicode-strip integration
+coverage). The original `startsWithCatalogVerb` stripped only
+ASCII `.,;:!`; the following four fixtures each exercise one
+wrapping shape that defeated the ASCII strip, and pin that the
+unicode.IsPunct trim closes the class:
+
+- `comment-verb-trailing-question.malicious.md` — `Ignore?` at
+  first position. Trailing `?` (U+003F) was not in the original
+  ASCII strip set.
+- `comment-verb-paren-wrapped.malicious.md` — `(Ignore)` at first
+  position. Leading `(` and trailing `)` both missed by the
+  original right-only TrimRight.
+- `comment-verb-quote-wrapped.malicious.md` — `"Ignore"` at first
+  position. Surrounding ASCII double quotes (U+0022) missed by
+  the original strip.
+- `comment-verb-fullwidth-period.malicious.md` — `Ignore．` at
+  first position. U+FF0E FULLWIDTH FULL STOP is the East-Asian
+  typographic period; trivially evaded any literal-ASCII strip
+  set.
+
+Residual gaps the unicode.IsPunct trim does NOT close: tokens
+wrapped in angle brackets (`<Ignore>` — U+003C/U+003E are Sm
+Math Symbols, not punctuation) or backticks (`` `Ignore` `` —
+U+0060 is Sk Modifier Symbol). These shapes are unusual for
+imperative directives in practice; when they do appear, the
+verb-density rule catches them when the comment body carries
+other catalog verbs.

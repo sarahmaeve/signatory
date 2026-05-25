@@ -3,6 +3,7 @@ package contentinjection
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // markdownCommentPattern captures the body of every <!-- ... -->
@@ -115,15 +116,35 @@ func isImperativeShape(body string) bool {
 }
 
 // startsWithCatalogVerb reports whether the first whitespace-
-// delimited token of body is a catalog imperative verb. Trailing
-// punctuation (period, comma, colon) is stripped from the token
-// before lookup so "Ignore." and "Execute," still match.
+// delimited token of body is a catalog imperative verb. Punctuation
+// is stripped from BOTH sides of the token before lookup via
+// unicode.IsPunct, so the lookup tolerates the full class of
+// wrapping shapes attackers use to defeat a naive ASCII strip:
+//
+//   - Trailing ASCII period / comma / colon / semicolon / bang
+//     ("Ignore." / "Execute,"). The original strip set.
+//   - Trailing ASCII question mark ("Ignore?").
+//   - Surrounding ASCII parens ("(Ignore)").
+//   - Surrounding ASCII quotes (`"Ignore"` / `'Ignore'`).
+//   - Surrounding brackets / braces ("[Ignore]" / "{Ignore}").
+//   - Trailing Unicode full-width punctuation ("Ignore．" with
+//     U+FF0E FULLWIDTH FULL STOP, "Ignore？" with U+FF1F).
+//   - Surrounding markdown italic underscores ("_Ignore_") —
+//     U+005F is unicode.Pc (Connector Punctuation).
+//
+// Residual evasion shapes not in unicode.P (angle-bracketed
+// "<Ignore>" — U+003C/U+003E are Sm Math Symbols, not punctuation;
+// backtick-wrapped "`Ignore`" — U+0060 is Sk Modifier Symbol) are
+// caught by the verb-density rule when the body carries other
+// catalog verbs, and are unusual shapes for directive imperatives
+// in practice. The trade-off is recorded in the markdown_comment
+// corpus README.
 func startsWithCatalogVerb(body string) bool {
 	fields := strings.Fields(body)
 	if len(fields) == 0 {
 		return false
 	}
-	first := strings.ToLower(strings.TrimRight(fields[0], ".,;:!"))
+	first := strings.ToLower(strings.TrimFunc(fields[0], unicode.IsPunct))
 	_, ok := imperativeVerbSet[first]
 	return ok
 }
