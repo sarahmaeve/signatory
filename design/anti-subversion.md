@@ -132,10 +132,19 @@ relay).
     one catalog verb mid-sentence and no leading-verb structure
     slips past the "first-word OR density" heuristic. Real
     attack vector that the catalog enrichment doesn't address.
-  - **Unicode-confusable evasion**: catalog substring matches are
-    defeated by Cyrillic / fullwidth / Greek substitutions
-    ("Іgnore" with Cyrillic І; `system：` with U+FF1A fullwidth
-    colon). LLM tokenizers still see the original phrase.
+  - **Unicode-confusable evasion** (partially closed 2026-05): new
+    `PrimitiveConfusableMixedScript` flags any whitespace-delimited
+    token containing Latin letters alongside Cyrillic or Cherokee
+    letters within the same token. The structural signal is the
+    mix — no innocent reason to write "Іgnore" with Cyrillic-І in
+    English prose. **Still open:** Latin × Greek mixing (deferred
+    because math/science notation legitimately mixes), fullwidth
+    punctuation substitutions (`system：` with U+FF1A is NFKC-
+    confusable but not script-confusable), and homoglyph-via-
+    same-script substitutions (Latin "a" U+0061 → Latin "ɑ"
+    U+0251 are both Latin but visually distinct). Closing these
+    needs the full UTS #39 CONFUSABLES.TXT mapping or NFKC
+    comparison — a heavier detector with more FP risk.
   - **Non-English lexical phrases**: catalogs are English-only;
     LLMs honor multilingual injection.
   - **Many-short-URL aggregation** ("dictionary of pixels") for

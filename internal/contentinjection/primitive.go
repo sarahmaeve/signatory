@@ -46,6 +46,18 @@ const (
 	// Detection: length-distribution heuristic on base16 / base32 /
 	// base64 runs.
 	PrimitiveEncodedBlob Primitive = "encoded_blob"
+
+	// PrimitiveConfusableMixedScript — a single whitespace-delimited
+	// token containing letters from more than one writing system,
+	// scoped to combinations with essentially no legitimate use:
+	// Latin × Cyrillic and Latin × Cherokee. The forgery-resistance
+	// argument is structural: there is no innocent reason to write
+	// "Іgnore" with a Cyrillic І inside otherwise-English prose.
+	// Detection bytes survive any LLM-side normalization decision —
+	// the bytes-on-disk are the actionable signal regardless of
+	// whether any specific model is fooled. Added 2026-05 to the
+	// design doc primitive table as the eighth primitive.
+	PrimitiveConfusableMixedScript Primitive = "confusable_mixedscript"
 )
 
 // Finding is one positive observation from a primitive scan. Count

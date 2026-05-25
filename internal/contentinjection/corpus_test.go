@@ -37,13 +37,14 @@ func TestCorpus_CognitiveHazards(t *testing.T) {
 	// Map of subdirectory name -> expected primitive when the
 	// fixture's outcome suffix is .malicious.
 	primitiveByDir := map[string]Primitive{
-		"invisible_unicode": PrimitiveInvisibleUnicode,
-		"bidi_control":      PrimitiveBidiControl,
-		"tag_block":         PrimitiveTagBlock,
-		"markdown_comment":  PrimitiveMarkdownComment,
-		"markdown_image":    PrimitiveMarkdownImage,
-		"lexical_injection": PrimitiveLexicalInjection,
-		"encoded_blob":      PrimitiveEncodedBlob,
+		"invisible_unicode":      PrimitiveInvisibleUnicode,
+		"bidi_control":           PrimitiveBidiControl,
+		"tag_block":              PrimitiveTagBlock,
+		"markdown_comment":       PrimitiveMarkdownComment,
+		"markdown_image":         PrimitiveMarkdownImage,
+		"lexical_injection":      PrimitiveLexicalInjection,
+		"encoded_blob":           PrimitiveEncodedBlob,
+		"confusable_mixedscript": PrimitiveConfusableMixedScript,
 	}
 
 	entries, err := os.ReadDir(root)

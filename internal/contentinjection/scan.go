@@ -26,7 +26,7 @@ func Scan(content []byte) ScanResult {
 // Count > 0; primitives with no occurrences, and primitives the
 // caller suppressed, are both omitted from Findings.
 //
-// The seven primitives are evaluated in this order:
+// The eight primitives are evaluated in this order:
 //
 //  1. PrimitiveInvisibleUnicode
 //  2. PrimitiveBidiControl
@@ -35,12 +35,13 @@ func Scan(content []byte) ScanResult {
 //  5. PrimitiveMarkdownImage
 //  6. PrimitiveLexicalInjection
 //  7. PrimitiveEncodedBlob
+//  8. PrimitiveConfusableMixedScript
 //
 // Order is stable across calls; consumers may rely on it for
 // deterministic signal-value emission. The order reflects the
 // design doc's grouping (rune-scan family first, regex family next,
-// length-distribution family last) but carries no semantic weight
-// beyond presentation.
+// length-distribution family next, script-mix detection last) but
+// carries no semantic weight beyond presentation.
 func ScanWithOptions(content []byte, opts ScanOptions) ScanResult {
 	suppressed := make(map[Primitive]struct{}, len(opts.SuppressPrimitives))
 	for _, p := range opts.SuppressPrimitives {
@@ -88,6 +89,11 @@ func ScanWithOptions(content []byte, opts ScanOptions) ScanResult {
 	}
 	if !suppress(PrimitiveEncodedBlob) {
 		if f := scanEncodedBlob(content); f.Count > 0 {
+			result.Findings = append(result.Findings, f)
+		}
+	}
+	if !suppress(PrimitiveConfusableMixedScript) {
+		if f := scanConfusableMixedScript(content); f.Count > 0 {
 			result.Findings = append(result.Findings, f)
 		}
 	}
