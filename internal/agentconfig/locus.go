@@ -49,14 +49,24 @@ type Locus struct {
 
 // Loci returns the AI-agent locus declarations in deterministic
 // order. Returns a fresh slice on each call so callers cannot
-// mutate the package-level declaration.
+// mutate the package-level declaration — the inner Dirs, Preferred,
+// and RuntimePathPrefixes slices are deep-copied because a plain
+// copy() would leave their backing arrays aliased to the singleton.
 //
 // Order matters: it drives the iteration order of derived outputs
 // (repofiles.AgentConfigFamilies, astfeature's appended runtime
 // prefixes) and the test assertions that lock in coverage.
 func Loci() []Locus {
 	out := make([]Locus, len(loci))
-	copy(out, loci)
+	for i, l := range loci {
+		out[i] = Locus{
+			Name:                l.Name,
+			Dirs:                slices.Clone(l.Dirs),
+			Detector:            l.Detector,
+			Preferred:           slices.Clone(l.Preferred),
+			RuntimePathPrefixes: slices.Clone(l.RuntimePathPrefixes),
+		}
+	}
 	return out
 }
 

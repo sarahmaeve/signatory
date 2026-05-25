@@ -93,6 +93,40 @@ func TestLoci_Immutable(t *testing.T) {
 	assert.Equal(t, "cursorrules", second[0].Name)
 }
 
+// TestLoci_Immutable_SliceFields covers what TestLoci_Immutable does
+// not: Name is a string (value-typed), so a shallow copy is safe for
+// it; Dirs / Preferred / RuntimePathPrefixes are slice headers whose
+// backing arrays the original implementation aliased to the package-
+// level singletons. A caller mutating loci[0].Dirs[0] silently
+// polluted every future caller. The doc on Loci() claims the
+// declaration cannot be mutated by callers — this test pins that
+// claim against the slice fields specifically.
+func TestLoci_Immutable_SliceFields(t *testing.T) {
+	t.Parallel()
+
+	first := Loci()
+	require.NotEmpty(t, first[0].Dirs)
+	require.NotEmpty(t, first[0].RuntimePathPrefixes)
+	require.NotEmpty(t, first[0].Preferred,
+		"test premise: cursorrules locus declares Preferred")
+
+	originalDir := first[0].Dirs[0]
+	originalPrefix := first[0].RuntimePathPrefixes[0]
+	originalPreferred := first[0].Preferred[0]
+
+	first[0].Dirs[0] = "MUTATED_DIR"
+	first[0].RuntimePathPrefixes[0] = "MUTATED_PREFIX"
+	first[0].Preferred[0] = "MUTATED_PREFERRED"
+
+	second := Loci()
+	assert.Equal(t, originalDir, second[0].Dirs[0],
+		"Dirs slice header aliased the package singleton; mutation leaked across Loci() calls")
+	assert.Equal(t, originalPrefix, second[0].RuntimePathPrefixes[0],
+		"RuntimePathPrefixes slice header aliased the package singleton; mutation leaked")
+	assert.Equal(t, originalPreferred, second[0].Preferred[0],
+		"Preferred slice header aliased the package singleton; mutation leaked")
+}
+
 // TestIsConfigPath_KnownFiles covers every Locus's detector. A
 // regression on any single entry would silently drop that file
 // class from cross-package classifiers.

@@ -82,6 +82,36 @@ func TestAgentConfigFamilies_Immutable(t *testing.T) {
 		"AgentConfigFamilies() must return a fresh slice on each call")
 }
 
+// TestAgentConfigFamilies_Immutable_SliceFields covers what
+// TestAgentConfigFamilies_Immutable does not: Name is a string
+// (value-typed) and is safe for any copy depth; Dirs and Preferred
+// are slice headers. The load-bearing guarantee is in
+// agentconfig.Loci(), which deep-copies on each call; this test
+// pins that AgentConfigFamilies() inherits that property at its own
+// public boundary, so a future regression that stashes a singleton
+// inside this function (rather than calling Loci() each time) is
+// caught here too.
+func TestAgentConfigFamilies_Immutable_SliceFields(t *testing.T) {
+	t.Parallel()
+
+	first := AgentConfigFamilies()
+	require.NotEmpty(t, first[0].Dirs)
+	require.NotEmpty(t, first[0].Preferred,
+		"test premise: cursorrules family declares Preferred")
+
+	originalDir := first[0].Dirs[0]
+	originalPreferred := first[0].Preferred[0]
+
+	first[0].Dirs[0] = "MUTATED_DIR"
+	first[0].Preferred[0] = "MUTATED_PREFERRED"
+
+	second := AgentConfigFamilies()
+	assert.Equal(t, originalDir, second[0].Dirs[0],
+		"Dirs slice header leaked across AgentConfigFamilies() calls")
+	assert.Equal(t, originalPreferred, second[0].Preferred[0],
+		"Preferred slice header leaked across AgentConfigFamilies() calls")
+}
+
 // TestAgentConfigFamilies_Disjoint guards against accidental overlap
 // with the hygiene Families() list. The two surfaces emit distinct
 // signal types and should never share a family name; a collision
