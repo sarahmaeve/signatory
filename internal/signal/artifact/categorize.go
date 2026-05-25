@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/sarahmaeve/signatory/internal/signal/repofiles"
+	"github.com/sarahmaeve/signatory/internal/agentconfig"
 )
 
 // Category constants. The set is intentionally small and descriptive
@@ -37,7 +37,7 @@ const (
 //  1. suspicious_path  — wins over everything; a bad path is the
 //     headline regardless of what filename comes after it.
 //  2. agent_config     — AI-instruction files (.cursorrules,
-//     CLAUDE.md, .claude/, …) per repofiles.IsAgentConfigPath. A
+//     CLAUDE.md, .claude/, …) per agentconfig.IsConfigPath. A
 //     file shipping in the tarball but absent from git at the
 //     paired commit is the xz-precedent applied to AI-config
 //     injection. Fires before build_glue / generated / other so a
@@ -55,7 +55,7 @@ func classify(p string) string {
 	if isSuspiciousPath(p) {
 		return CategorySuspiciousPath
 	}
-	if repofiles.IsAgentConfigPath(p) {
+	if agentconfig.IsConfigPath(p) {
 		return CategoryAgentConfig
 	}
 	if isGenerated(p) {

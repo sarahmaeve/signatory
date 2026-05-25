@@ -32,16 +32,3 @@ func AgentConfigFamilies() []Family {
 	}
 	return out
 }
-
-// IsAgentConfigPath reports whether a posix-style path identifies a
-// file that any AgentConfigFamilies entry would detect. Delegates
-// to agentconfig.IsConfigPath — the cross-package classifier surface
-// (artifact-vs-repo categorizer, future README/PR scanner) reads
-// from a single source of truth.
-//
-// Kept as a re-export rather than removed because callers
-// (internal/signal/artifact/categorize.go) reference the repofiles
-// symbol.
-func IsAgentConfigPath(p string) bool {
-	return agentconfig.IsConfigPath(p)
-}
