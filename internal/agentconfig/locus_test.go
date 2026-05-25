@@ -230,7 +230,7 @@ func TestIsConfigPath_KnownFiles(t *testing.T) {
 
 // TestRuntimePersistencePrefixes_Membership locks in the union
 // the AST persistence-write catalog appends. Drift between this
-// list and astfeature.PersistencePathPatterns is caught by a
+// list and astfeature's persistence-path catalog is caught by a
 // companion test in astfeature; this test is the within-package
 // pin.
 func TestRuntimePersistencePrefixes_Membership(t *testing.T) {

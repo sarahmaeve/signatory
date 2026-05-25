@@ -250,7 +250,7 @@ var loci = []Locus{
 	{
 		// .codex/instructions.md — OpenAI Codex CLI's per-repo
 		// instruction file. The runtime prefix /.codex/ was already
-		// in astfeature.PersistencePathPatterns; this Locus closes
+		// in astfeature's persistence-path catalog; this Locus closes
 		// the divergence by giving it a Family for inventory and
 		// content-injection scanning too.
 		//

@@ -28,20 +28,20 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 		"/.kube/config", "/.config/gcloud", "/.azure/",
 	}
 	for _, want := range authKeystores {
-		assert.True(t, slices.Contains(SensitivePathPatterns, want),
-			"auth keystore entry %q missing from SensitivePathPatterns", want)
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
+			"auth keystore entry %q missing from sensitivePathPatterns", want)
 	}
 
 	systemCreds := []string{"/etc/shadow", "/etc/passwd"}
 	for _, want := range systemCreds {
-		assert.True(t, slices.Contains(SensitivePathPatterns, want),
-			"system credential entry %q missing from SensitivePathPatterns", want)
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
+			"system credential entry %q missing from sensitivePathPatterns", want)
 	}
 
 	shellHistory := []string{".bash_history", ".zsh_history"}
 	for _, want := range shellHistory {
-		assert.True(t, slices.Contains(SensitivePathPatterns, want),
-			"shell history entry %q missing from SensitivePathPatterns", want)
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
+			"shell history entry %q missing from sensitivePathPatterns", want)
 	}
 
 	browserStores := []string{
@@ -49,7 +49,7 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 		"cookies.sqlite", "Local State", "Library/Keychains",
 	}
 	for _, want := range browserStores {
-		assert.True(t, slices.Contains(SensitivePathPatterns, want),
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
 			"browser/OS credential store entry %q missing", want)
 	}
 
@@ -59,7 +59,7 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 		"/.ethereum/keystore/", "wallet.dat",
 	}
 	for _, want := range walletKeystores {
-		assert.True(t, slices.Contains(SensitivePathPatterns, want),
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
 			"crypto-wallet keystore entry %q missing — Trapdoor's "+
 				"cargo build.rs payloads read these locations", want)
 	}
@@ -76,8 +76,8 @@ func TestCatalog_PersistencePath_Membership(t *testing.T) {
 		"/.bashrc", "/.bash_profile", "/.zshrc", "/.profile", "/.bash_aliases",
 	}
 	for _, want := range shellRc {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
-			"shell rc entry %q missing from PersistencePathPatterns", want)
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
+			"shell rc entry %q missing from persistencePathPatterns", want)
 	}
 
 	scheduled := []string{
@@ -85,13 +85,13 @@ func TestCatalog_PersistencePath_Membership(t *testing.T) {
 		"/Library/LaunchAgents/", "/Library/LaunchDaemons/", "/.config/autostart/",
 	}
 	for _, want := range scheduled {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
 			"scheduled-task entry %q missing", want)
 	}
 
 	agentIDE := []string{"/.claude/", "/.vscode/", "/.cursor/", "/.idea/"}
 	for _, want := range agentIDE {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
 			"agent/IDE config dir entry %q missing", want)
 	}
 
@@ -103,19 +103,19 @@ func TestCatalog_PersistencePath_Membership(t *testing.T) {
 		"/.aider/", "/.zed/", "/.codex/", "/.continue/", "/.windsurf/",
 	}
 	for _, want := range aiAgentLoci {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
 			"AI-agent instruction locus %q missing — Trapdoor weaponized this carrier shape", want)
 	}
 
 	gitHooks := []string{"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push"}
 	for _, want := range gitHooks {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
 			"git hook entry %q missing", want)
 	}
 
 	credTamper := []string{"/.npmrc", "/.netrc", "/.git-credentials"}
 	for _, want := range credTamper {
-		assert.True(t, slices.Contains(PersistencePathPatterns, want),
+		assert.True(t, slices.Contains(persistencePathPatterns, want),
 			"credential-store tamper entry %q missing", want)
 	}
 }
@@ -133,7 +133,7 @@ func TestCatalog_CredentialEnv_Membership(t *testing.T) {
 		"GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY",
 	}
 	for _, want := range canonical {
-		assert.True(t, slices.Contains(CredentialEnvNames, want),
+		assert.True(t, slices.Contains(credentialEnvNames, want),
 			"canonical credential env name %q missing", want)
 	}
 
@@ -142,7 +142,7 @@ func TestCatalog_CredentialEnv_Membership(t *testing.T) {
 		"_ACCESS_KEY", "_PRIVATE_KEY", "_CREDENTIALS",
 	}
 	for _, want := range genericSuffixes {
-		assert.True(t, slices.Contains(CredentialEnvNames, want),
+		assert.True(t, slices.Contains(credentialEnvNames, want),
 			"generic suffix %q missing — vendor-prefixed credentials would not match", want)
 	}
 }
@@ -161,7 +161,7 @@ func TestCatalog_CloudMetadata_Membership(t *testing.T) {
 		".internal.cloudapp.net",
 	}
 	for _, w := range want {
-		assert.True(t, slices.Contains(CloudMetadataHosts, w),
+		assert.True(t, slices.Contains(cloudMetadataHosts, w),
 			"cloud metadata host %q missing", w)
 	}
 }

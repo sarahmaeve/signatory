@@ -28,14 +28,14 @@ import (
 // / CloudMetadataCalls consumes the same lists, and any
 // threat-landscape addition lands in one place.
 
-// SensitivePathPatterns are credential / secret-material fragments
+// sensitivePathPatterns are credential / secret-material fragments
 // matched as substrings against the backslash-normalized resolved
 // file path. Tight on purpose: this must not fire on ordinary file
 // I/O.
 //
 // The bare ".env" basename is detected separately by IsSensitivePath
 // to avoid matching ".envrc" or "environment.cfg".
-var SensitivePathPatterns = []string{
+var sensitivePathPatterns = []string{
 	"/.ssh/", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 	".aws/credentials", ".aws/config", "/.netrc", ".pypirc", ".npmrc",
 	".git-credentials", "/.gnupg/", ".docker/config.json",
@@ -64,7 +64,7 @@ func IsSensitivePath(p string) bool {
 		return false
 	}
 	norm := strings.ReplaceAll(p, "\\", "/")
-	for _, pat := range SensitivePathPatterns {
+	for _, pat := range sensitivePathPatterns {
 		if strings.Contains(norm, pat) {
 			return true
 		}
@@ -80,8 +80,8 @@ func IsSensitivePath(p string) bool {
 	return base == ".env"
 }
 
-// PersistencePathPatterns are persistence / credential-tamper write
-// destinations. Distinct from SensitivePathPatterns (read-side
+// persistencePathPatterns are persistence / credential-tamper write
+// destinations. Distinct from sensitivePathPatterns (read-side
 // credential material): these are the locations a payload WRITES
 // to in order to survive uninstall or hijack future sessions — the
 // recurring post-exploitation step across TanStack, node-ipc,
@@ -96,7 +96,7 @@ func IsSensitivePath(p string) bool {
 // previously-duplicated maintenance (Trapdoor 2026-05 added
 // /.codex/ here but forgot the corresponding repofiles Family) is
 // no longer possible.
-var PersistencePathPatterns = func() []string {
+var persistencePathPatterns = func() []string {
 	out := []string{
 		"/.ssh/authorized_keys", "/.ssh/config", "/.bashrc", "/.bash_profile",
 		"/.zshrc", "/.profile", "/.bash_aliases",
@@ -125,7 +125,7 @@ func IsPersistencePath(p string) bool {
 		return false
 	}
 	norm := strings.ReplaceAll(p, "\\", "/")
-	for _, pat := range PersistencePathPatterns {
+	for _, pat := range persistencePathPatterns {
 		if strings.Contains(norm, pat) {
 			return true
 		}
@@ -133,13 +133,13 @@ func IsPersistencePath(p string) bool {
 	return false
 }
 
-// CredentialEnvNames is the catalog of process-environment entry
+// credentialEnvNames is the catalog of process-environment entry
 // names whose read is a credential / cloud-token / CI-secret
 // harvest. Exact-or-substring matched (case-insensitive on the
 // input) so AWS_SECRET_ACCESS_KEY and a vendor-prefixed *_API_KEY
 // both hit, while NODE_ENV / PORT / DEBUG do not. Tight on purpose
 // — this must not fire on ordinary config reads.
-var CredentialEnvNames = []string{
+var credentialEnvNames = []string{
 	"NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "VAULT_TOKEN",
 	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
 	"AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
@@ -178,7 +178,7 @@ var CredentialEnvNames = []string{
 //     substring).
 func IsCredentialEnvName(name string) bool {
 	u := strings.ToUpper(name)
-	for _, c := range CredentialEnvNames {
+	for _, c := range credentialEnvNames {
 		if strings.Contains(u, c) {
 			return true
 		}
@@ -186,12 +186,12 @@ func IsCredentialEnvName(name string) bool {
 	return false
 }
 
-// CloudMetadataHosts are instance-metadata / SSRF-pivot endpoints.
+// cloudMetadataHosts are instance-metadata / SSRF-pivot endpoints.
 // A network call whose resolved URL contains one is credential-mint
 // behavior — legitimate package code effectively never contacts
 // these at import time, so this is a near-zero-false-positive
 // signal.
-var CloudMetadataHosts = []string{
+var cloudMetadataHosts = []string{
 	"169.254.169.254",          // AWS/Azure/GCP/OpenStack IMDS
 	"169.254.170.2",            // ECS task-role credential endpoint
 	"metadata.google.internal", // GCP/GKE metadata
@@ -208,7 +208,7 @@ func IsCloudMetadataURL(u string) bool {
 	if u == "" {
 		return false
 	}
-	for _, h := range CloudMetadataHosts {
+	for _, h := range cloudMetadataHosts {
 		if strings.Contains(u, h) {
 			return true
 		}
