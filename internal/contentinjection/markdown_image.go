@@ -79,10 +79,10 @@ func isExfilShapedURL(url string) bool {
 }
 
 // truncateURLForDetail caps a URL at urlExfilSampleLen with an
-// ellipsis suffix so the signal payload stays bounded.
+// ellipsis suffix so the signal payload stays bounded. Delegates
+// to truncateAtRuneBoundary for UTF-8 safety so a percent-decoded
+// or IDN-encoded multi-byte rune at the truncation point is not
+// split.
 func truncateURLForDetail(url string) string {
-	if len(url) <= urlExfilSampleLen {
-		return url
-	}
-	return url[:urlExfilSampleLen] + "..."
+	return truncateAtRuneBoundary(url, urlExfilSampleLen)
 }

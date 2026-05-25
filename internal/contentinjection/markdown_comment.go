@@ -128,14 +128,12 @@ func startsWithCatalogVerb(body string) bool {
 	return ok
 }
 
-// truncateForDetail trims a comment body to the first 80 characters,
+// truncateForDetail trims a comment body to the first 80 bytes,
 // collapsing internal whitespace runs to single spaces so the sample
-// is one line in signal payload output.
+// is one line in signal payload output. Delegates to
+// truncateAtRuneBoundary for UTF-8 safety so a CJK / emoji rune at
+// the truncation point is not split.
 func truncateForDetail(body string) string {
 	collapsed := strings.Join(strings.Fields(body), " ")
-	const limit = 80
-	if len(collapsed) <= limit {
-		return collapsed
-	}
-	return collapsed[:limit] + "..."
+	return truncateAtRuneBoundary(collapsed, 80)
 }

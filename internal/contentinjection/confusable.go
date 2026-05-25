@@ -84,14 +84,13 @@ func isMixedScriptConfusable(word string) bool {
 	return sawCyrillic || sawCherokee
 }
 
-// truncateWordForDetail caps a single token at 40 characters with
-// an ellipsis suffix. Distinct from truncateForDetail (which
-// collapses whitespace runs for multi-word comment samples); a
-// confusable token has no internal whitespace by construction.
+// truncateWordForDetail caps a single token at 40 bytes with an
+// ellipsis suffix. Distinct from truncateForDetail (which collapses
+// whitespace runs for multi-word comment samples); a confusable
+// token has no internal whitespace by construction. Delegates to
+// truncateAtRuneBoundary for UTF-8 safety — non-Latin homoglyphs
+// must not be split mid-rune, or the analyst-surface sample is
+// garbled exactly when it would matter most.
 func truncateWordForDetail(word string) string {
-	const limit = 40
-	if len(word) <= limit {
-		return word
-	}
-	return word[:limit] + "..."
+	return truncateAtRuneBoundary(word, 40)
 }
