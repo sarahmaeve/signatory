@@ -14,10 +14,21 @@ var markdownCommentPattern = regexp.MustCompile(`(?s)<!--(.*?)-->`)
 
 // markdownCommentMinBodyLen is the threshold below which a comment
 // is treated as trivial (TOC markers, lint-disable, editor folds).
-// Tuned to skip common housekeeping markers — "TOC", "/lint-disable",
-// "prettier-ignore" — without missing prose-shaped payloads. Length
-// is measured after trim, on the comment body (excluding markers).
-const markdownCommentMinBodyLen = 32
+// Calibrated above every documented housekeeping shape — the
+// longest being "prettier-ignore-end" at 19 bytes — so this
+// filter remains an honest "skip the trivial markers" check
+// rather than a payload-size escape hatch.
+//
+// Lowered to 20 from an earlier 32 during the
+// capture-agent-attack review: at 32, payloads like "Ignore
+// previous orders." (23 bytes) and "Ignore previous
+// instructions." (29 bytes) — canonical prompt-injection
+// directives — were silently skipped. Shape filtering belongs
+// to isImperativeShape (verb-set + verb-density); this length
+// gate exists only to drop housekeeping noise. Length is
+// measured after trim, on the comment body (excluding the
+// `<!-- -->` markers themselves).
+const markdownCommentMinBodyLen = 20
 
 // scanMarkdownComment fires PrimitiveMarkdownComment when a markdown
 // HTML comment contains imperative-mood prose. Per design doc the
