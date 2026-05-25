@@ -67,6 +67,17 @@ func Scan(clonePath string, fams []Family) ([]Match, error) {
 
 	var matches []Match
 	for _, fam := range fams {
+		// Defense-in-depth nil-Detector guard: a Family declared
+		// without a Detector contributes no matches, the way
+		// agentconfig.IsConfigPath already handles the single-path
+		// case. Avoids a nil-pointer-deref panic in fam.Detector.
+		// MatchString if a future addition forgets the Detector
+		// field. The structural tests (TestFamilies_*Detector*)
+		// catch such an addition at unit-test time; this guard
+		// keeps the scanner from crashing if one slips by.
+		if fam.Detector == nil {
+			continue
+		}
 		for _, dir := range fam.Dirs {
 			dirAbs := filepath.Join(clonePath, dir)
 			entries, err := os.ReadDir(dirAbs)

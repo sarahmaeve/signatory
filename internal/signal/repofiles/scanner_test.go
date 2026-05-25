@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/agentconfig"
 )
 
 // makeClone creates a throwaway directory with a minimal .git marker
@@ -282,6 +284,42 @@ func TestScan_SortedOutput(t *testing.T) {
 	// Sorted lex by path: README.md < README.rst.
 	assert.Equal(t, "README.md", matches[0].Path)
 	assert.Equal(t, "README.rst", matches[1].Path)
+}
+
+// TestScan_NilDetectorFamilyIsSkippedNotPanic locks in the
+// defensive nil-Detector behavior. A Family declared without a
+// Detector (programming error in a future addition) must not
+// crash the scanner — it must be silently skipped so other
+// families in the same call continue to produce matches. This
+// matches agentconfig.IsConfigPath's existing nil-Detector guard;
+// the two surfaces should agree on the failure shape.
+//
+// Without the guard, scanner.go's `fam.Detector.MatchString(name)`
+// panics with a nil pointer dereference on the first directory
+// entry it encounters.
+func TestScan_NilDetectorFamilyIsSkippedNotPanic(t *testing.T) {
+	t.Parallel()
+
+	root := makeClone(t, map[string]string{
+		"README.md": "readme body",
+	})
+
+	fams := []Family{
+		{Name: "buggy_nil_detector", Dirs: []string{"."}, Detector: nil, Preferred: nil},
+		{Name: "readme", Dirs: []string{"."}, Detector: agentconfig.StemWithExt("README"), Preferred: []string{"README.md"}},
+	}
+
+	matches, err := Scan(root, fams)
+	require.NoError(t, err, "Scan must not return an error for nil-Detector families")
+
+	for _, m := range matches {
+		assert.NotEqual(t, "buggy_nil_detector", m.Family,
+			"nil-Detector family must produce no matches (silently skipped)")
+	}
+	// The valid family must still produce its match — the nil-Detector
+	// sibling must not derail the whole scan.
+	require.Len(t, matches, 1, "the non-nil-detector family must still match")
+	assert.Equal(t, "readme", matches[0].Family)
 }
 
 // familyNames extracts family names from a match slice, for coverage
