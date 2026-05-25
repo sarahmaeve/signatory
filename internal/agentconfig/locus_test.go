@@ -41,6 +41,49 @@ func TestLoci_Declaration(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestLoci_CodexInstructions_PreferredCoversAllDetectorForms pins
+// the symmetry between Detector and Preferred for the
+// codex_instructions Locus. The Detector accepts five filename
+// forms (instructions.md plus config.{json,yaml,yml,toml}); every
+// one must appear in Preferred so canonical-form ranking is
+// deterministic regardless of which file a repo actually ships.
+//
+// Without this coverage, a repo with two non-instructions.md
+// forms (e.g. config.toml plus config.json) falls through to
+// repofiles.rank's Phase-3 alphabetical fallback — an
+// implementation detail, not a declared preference. The fix
+// widens Preferred to list every Detector-accepted form in
+// canonical-precedence order.
+func TestLoci_CodexInstructions_PreferredCoversAllDetectorForms(t *testing.T) {
+	t.Parallel()
+
+	var codex *Locus
+	for _, l := range Loci() {
+		if l.Name == "codex_instructions" {
+			c := l
+			codex = &c
+			break
+		}
+	}
+	require.NotNil(t, codex, "codex_instructions Locus must exist")
+
+	// Every form the Detector accepts.
+	detectorAcceptedForms := []string{
+		"instructions.md",
+		"config.json",
+		"config.yaml",
+		"config.yml",
+		"config.toml",
+	}
+	for _, form := range detectorAcceptedForms {
+		require.True(t, codex.Detector.MatchString(form),
+			"test premise: Detector must accept %q", form)
+		assert.True(t, slices.Contains(codex.Preferred, form),
+			"Preferred must include Detector-accepted form %q for "+
+				"deterministic canonical ranking", form)
+	}
+}
+
 // TestLoci_AllFieldsDeclared catches a regression where a Locus
 // landed with a nil Detector, empty Dirs, or empty
 // RuntimePathPrefixes — any of which would silently disable that

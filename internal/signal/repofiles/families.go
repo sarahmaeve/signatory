@@ -26,7 +26,11 @@
 
 package repofiles
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/sarahmaeve/signatory/internal/agentconfig"
+)
 
 // Family declares one hygiene-file family — its stable key, the
 // candidate directories to scan, the filename detector, and the
@@ -76,7 +80,7 @@ var families = []Family{
 		// repo view. Nearly universal; absence is a meaningful cue.
 		Name:      "readme",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("README"),
+		Detector:  agentconfig.StemWithExt("README"),
 		Preferred: []string{"README.md", "README.rst", "README.txt", "README"},
 	},
 	{
@@ -85,7 +89,7 @@ var families = []Family{
 		// present at a canonical path.
 		Name:      "security",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("SECURITY"),
+		Detector:  agentconfig.StemWithExt("SECURITY"),
 		Preferred: []string{"SECURITY.md", "SECURITY.rst", "SECURITY.txt"},
 	},
 	{
@@ -95,7 +99,7 @@ var families = []Family{
 		// drift (e.g., lowercased "codeowners" that won't gate).
 		Name:      "codeowners",
 		Dirs:      []string{".", ".github", "docs"},
-		Detector:  stemWithExt("CODEOWNERS"),
+		Detector:  agentconfig.StemWithExt("CODEOWNERS"),
 		Preferred: []string{"CODEOWNERS"},
 	},
 	{
@@ -104,7 +108,7 @@ var families = []Family{
 		// accordingly.
 		Name:      "mailmap",
 		Dirs:      []string{"."},
-		Detector:  exact(".mailmap"),
+		Detector:  agentconfig.Exact(".mailmap"),
 		Preferred: []string{".mailmap"},
 	},
 	{
@@ -120,7 +124,7 @@ var families = []Family{
 		// CONTRIBUTING documents how to contribute to the project.
 		Name:      "contributing",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("CONTRIBUTING"),
+		Detector:  agentconfig.StemWithExt("CONTRIBUTING"),
 		Preferred: []string{"CONTRIBUTING.md", "CONTRIBUTING.rst"},
 	},
 	{
@@ -129,7 +133,7 @@ var families = []Family{
 		// (commit-derived); represents maintainer-authored attribution.
 		Name:      "authors",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("AUTHORS"),
+		Detector:  agentconfig.StemWithExt("AUTHORS"),
 		Preferred: []string{"AUTHORS.md", "AUTHORS.txt", "AUTHORS"},
 	},
 	{
@@ -139,7 +143,7 @@ var families = []Family{
 		// an explicit ongoing-responsibility statement.
 		Name:      "maintainers",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("MAINTAINERS"),
+		Detector:  agentconfig.StemWithExt("MAINTAINERS"),
 		Preferred: []string{"MAINTAINERS.md", "MAINTAINERS.txt", "MAINTAINERS"},
 	},
 	{
@@ -147,25 +151,9 @@ var families = []Family{
 		// a strong hygiene cue when a project publishes one.
 		Name:      "governance",
 		Dirs:      []string{"."},
-		Detector:  stemWithExt("GOVERNANCE"),
+		Detector:  agentconfig.StemWithExt("GOVERNANCE"),
 		Preferred: []string{"GOVERNANCE.md", "GOVERNANCE.rst"},
 	},
-}
-
-// stemWithExt builds the detector for families whose filenames share
-// a stem and tolerate a single extension (README, SECURITY, CHANGELOG,
-// CONTRIBUTING, AUTHORS, MAINTAINERS, GOVERNANCE, CODEOWNERS). The
-// extension is [^.]+ rather than .+ so multi-dot filenames (backup
-// copies like README.md.bak, editor swaps like .README.md.swp) don't
-// match — those aren't the hygiene file, they're artifacts.
-func stemWithExt(stem string) *regexp.Regexp {
-	return regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(stem) + `(\.[^.]+)?$`)
-}
-
-// exact builds the detector for families whose filename is fixed with
-// no extension tolerance (.mailmap — git's parser is strict).
-func exact(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(name) + `$`)
 }
 
 // changelogDetector handles the one family with two distinct stems:

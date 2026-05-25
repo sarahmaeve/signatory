@@ -129,7 +129,7 @@ var loci = []Locus{
 		// the model as a system-prompt prefix. Trapdoor 2026-05 IOC.
 		Name:                "cursorrules",
 		Dirs:                []string{"."},
-		Detector:            exact(".cursorrules"),
+		Detector:            Exact(".cursorrules"),
 		Preferred:           []string{".cursorrules"},
 		RuntimePathPrefixes: []string{"/.cursorrules"},
 	},
@@ -139,7 +139,7 @@ var loci = []Locus{
 		// claude.md / Claude.md too; canonical form is uppercase.
 		Name:                "claude_md",
 		Dirs:                []string{"."},
-		Detector:            stemWithExt("CLAUDE"),
+		Detector:            StemWithExt("CLAUDE"),
 		Preferred:           []string{"CLAUDE.md"},
 		RuntimePathPrefixes: []string{"/CLAUDE.md"},
 	},
@@ -149,7 +149,7 @@ var loci = []Locus{
 		// agent instructions. Same carrier shape as CLAUDE.md.
 		Name:                "agents_md",
 		Dirs:                []string{"."},
-		Detector:            stemWithExt("AGENTS"),
+		Detector:            StemWithExt("AGENTS"),
 		Preferred:           []string{"AGENTS.md"},
 		RuntimePathPrefixes: []string{"/AGENTS.md"},
 	},
@@ -159,7 +159,7 @@ var loci = []Locus{
 		// per the Copilot docs). Same carrier shape as CLAUDE.md.
 		Name:                "gemini_md",
 		Dirs:                []string{"."},
-		Detector:            stemWithExt("GEMINI"),
+		Detector:            StemWithExt("GEMINI"),
 		Preferred:           []string{"GEMINI.md"},
 		RuntimePathPrefixes: []string{"/GEMINI.md"},
 	},
@@ -171,7 +171,7 @@ var loci = []Locus{
 		// https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/add-custom-instructions/add-repository-instructions
 		Name:                "copilot_repo_instructions",
 		Dirs:                []string{".github"},
-		Detector:            exact("copilot-instructions.md"),
+		Detector:            Exact("copilot-instructions.md"),
 		Preferred:           []string{"copilot-instructions.md"},
 		RuntimePathPrefixes: []string{"/.github/copilot-instructions.md"},
 	},
@@ -199,7 +199,7 @@ var loci = []Locus{
 		// otherwise prompt.
 		Name:                "claude_dir_settings",
 		Dirs:                []string{".claude"},
-		Detector:            exact("settings.json"),
+		Detector:            Exact("settings.json"),
 		Preferred:           []string{"settings.json"},
 		RuntimePathPrefixes: []string{"/.claude/"},
 	},
@@ -211,7 +211,7 @@ var loci = []Locus{
 		// the overlap.
 		Name:                "claude_dir_claude_md",
 		Dirs:                []string{".claude"},
-		Detector:            stemWithExt("CLAUDE"),
+		Detector:            StemWithExt("CLAUDE"),
 		Preferred:           []string{"CLAUDE.md"},
 		RuntimePathPrefixes: []string{"/.claude/"},
 	},
@@ -243,7 +243,7 @@ var loci = []Locus{
 		// override LSP commands and AI-feature defaults.
 		Name:                "zed_settings",
 		Dirs:                []string{".zed"},
-		Detector:            exact("settings.json"),
+		Detector:            Exact("settings.json"),
 		Preferred:           []string{"settings.json"},
 		RuntimePathPrefixes: []string{"/.zed/"},
 	},
@@ -253,10 +253,18 @@ var loci = []Locus{
 		// in astfeature.PersistencePathPatterns; this Locus closes
 		// the divergence by giving it a Family for inventory and
 		// content-injection scanning too.
+		//
+		// Preferred lists every Detector-accepted form in canonical
+		// precedence order: instructions.md is preferred (the named
+		// instruction file), then the four config-file variants in
+		// json → yaml → yml → toml order. Listing all five keeps
+		// canonical-form ranking deterministic regardless of which
+		// file a repo ships, and avoids falling through to
+		// repofiles.rank's Phase-3 alphabetical fallback.
 		Name:                "codex_instructions",
 		Dirs:                []string{".codex"},
 		Detector:            regexp.MustCompile(`(?i)^(instructions\.md|config\.(json|yaml|yml|toml))$`),
-		Preferred:           []string{"instructions.md"},
+		Preferred:           []string{"instructions.md", "config.json", "config.yaml", "config.yml", "config.toml"},
 		RuntimePathPrefixes: []string{"/.codex/"},
 	},
 	{
@@ -266,7 +274,7 @@ var loci = []Locus{
 		// systemMessage field.
 		Name:                "continue_config",
 		Dirs:                []string{".continue"},
-		Detector:            exact("config.json"),
+		Detector:            Exact("config.json"),
 		Preferred:           []string{"config.json"},
 		RuntimePathPrefixes: []string{"/.continue/"},
 	},
@@ -276,23 +284,32 @@ var loci = []Locus{
 		// (formerly Codeium) coding-agent toolchain.
 		Name:                "windsurfrules",
 		Dirs:                []string{"."},
-		Detector:            exact(".windsurfrules"),
+		Detector:            Exact(".windsurfrules"),
 		Preferred:           []string{".windsurfrules"},
 		RuntimePathPrefixes: []string{"/.windsurfrules", "/.windsurf/"},
 	},
 }
 
-// stemWithExt builds a detector for filenames matching <stem>.<ext>
+// StemWithExt builds a detector for filenames matching <stem>.<ext>
 // with single-extension tolerance. The extension is [^.]+ rather
 // than .+ so multi-dot artifacts (README.md.bak, .CLAUDE.md.swp)
-// don't match — those aren't the agent-config file, they're
-// editor backups.
-func stemWithExt(stem string) *regexp.Regexp {
+// don't match — those aren't the canonical file, they're editor
+// backups.
+//
+// Exported as the single source of truth for the stem-tolerant
+// filename pattern. The hygiene-file scanner in repofiles consumes
+// it for README / SECURITY / CODEOWNERS / etc.; the AI-agent locus
+// declarations consume it for CLAUDE / AGENTS / GEMINI / etc.
+// Keeping one implementation prevents the two surfaces from
+// drifting apart.
+func StemWithExt(stem string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(stem) + `(\.[^.]+)?$`)
 }
 
-// exact builds a detector for filenames matching exactly the given
-// name (case-insensitive, no extension tolerance).
-func exact(name string) *regexp.Regexp {
+// Exact builds a detector for filenames matching exactly the given
+// name (case-insensitive, no extension tolerance). Companion to
+// StemWithExt; shared with the hygiene-file scanner for the same
+// drift-prevention reason.
+func Exact(name string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(name) + `$`)
 }
