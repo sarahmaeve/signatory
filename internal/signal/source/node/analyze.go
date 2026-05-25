@@ -64,7 +64,7 @@ func accumulate(c *astfeature.Counts, mod *Module) {
 	c.XORAssignments += mod.XorAssigns
 
 	for _, name := range mod.EnvReads {
-		if isCredentialEnvName(name) {
+		if astfeature.IsCredentialEnvName(name) {
 			c.EnvCredentialReads++
 		}
 	}
@@ -78,7 +78,7 @@ func accumulate(c *astfeature.Counts, mod *Module) {
 			c.DynamicEvalCalls++
 		case matchesCatalog(call.Callee, processExecCallees):
 			c.ExecCalls++
-		case matchesCatalog(call.Callee, networkCallees) && isCloudMetadataURL(call.FirstArg):
+		case matchesCatalog(call.Callee, networkCallees) && astfeature.IsCloudMetadataURL(call.FirstArg):
 			// A metadata/SSRF-pivot destination is counted distinctly
 			// from generic egress — the destination class IS the
 			// signal (near-zero false positive). Ordered before the
@@ -86,7 +86,7 @@ func accumulate(c *astfeature.Counts, mod *Module) {
 			c.CloudMetadataCalls++
 		case matchesCatalog(call.Callee, networkCallees):
 			c.NetworkCallSites++
-		case matchesCatalog(call.Callee, writeSinkCallees) && isPersistencePath(call.FirstArg):
+		case matchesCatalog(call.Callee, writeSinkCallees) && astfeature.IsPersistencePath(call.FirstArg):
 			c.SensitivePathWrites++
 		case matchesCatalog(call.Callee, base64DecodeCallees):
 			c.Base64DecodeCalls++
@@ -98,7 +98,7 @@ func accumulate(c *astfeature.Counts, mod *Module) {
 			// ordinary buffer construction and must NOT count, so the
 			// no-false-positive property holds.
 			c.Base64DecodeCalls++
-		case matchesCatalog(call.Callee, pathReadCallees) && isSensitivePath(call.FirstArg):
+		case matchesCatalog(call.Callee, pathReadCallees) && astfeature.IsSensitivePath(call.FirstArg):
 			c.SensitivePathReads++
 		}
 	}
@@ -130,69 +130,6 @@ func isDynamicEval(callee string) bool {
 	return false
 }
 
-// credentialEnvNames is the catalog of process-environment entry
-// names whose read is a credential / cloud-token / CI-secret harvest.
-// Exact-or-substring matched (case-insensitive) so AWS_SECRET_ACCESS_KEY
-// and a vendor-prefixed *_API_KEY both hit, while NODE_ENV / PORT /
-// DEBUG do not. Tight on purpose — this must not fire on ordinary
-// config reads.
-var credentialEnvNames = []string{
-	"NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "VAULT_TOKEN",
-	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
-	"AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
-	"ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
-	"ACTIONS_RUNTIME_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
-	"AZURE_CLIENT_SECRET", "AZURE_TENANT_ID", "CLOUDFLARE_API_TOKEN",
-	"DIGITALOCEAN_ACCESS_TOKEN", "DOCKER_PASSWORD", "DOCKER_AUTH_CONFIG",
-	"SLACK_TOKEN", "STRIPE_SECRET_KEY", "SENTRY_AUTH_TOKEN",
-	"DATABASE_URL", "REDIS_URL", "MONGODB_URI", "SSH_PRIVATE_KEY",
-	"PRIVATE_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-	// Generic credential-bearing suffixes (substring-matched).
-	"_TOKEN", "_SECRET", "_API_KEY", "_APIKEY", "_PASSWORD",
-	"_ACCESS_KEY", "_PRIVATE_KEY", "_CREDENTIALS",
-}
-
-// isCredentialEnvName reports whether an env-var name names a
-// credential/secret. Case-insensitive; exact for the named entries,
-// substring for the generic suffixes (so VENDOR_API_KEY is caught).
-func isCredentialEnvName(name string) bool {
-	u := strings.ToUpper(name)
-	for _, c := range credentialEnvNames {
-		if u == c || strings.Contains(u, c) {
-			return true
-		}
-	}
-	return false
-}
-
-// cloudMetadataHosts are instance-metadata / SSRF-pivot endpoints. A
-// network call whose resolved URL contains one is credential-mint
-// behavior — legitimate package code effectively never contacts these
-// at import time, so this is a near-zero-false-positive signal.
-var cloudMetadataHosts = []string{
-	"169.254.169.254",          // AWS/Azure/GCP/OpenStack IMDS
-	"169.254.170.2",            // ECS task-role credential endpoint
-	"metadata.google.internal", // GCP/GKE metadata
-	"metadata.goog",            // GCP short alias
-	"100.100.200.200",          // Alibaba Cloud metadata
-	".internal.cloudapp.net",   // Azure internal
-}
-
-// isCloudMetadataURL reports whether a statically-resolved URL string
-// targets a cloud metadata / SSRF-pivot host. Empty (unresolved) is
-// never a match — a runtime-built URL is a conservative miss.
-func isCloudMetadataURL(u string) bool {
-	if u == "" {
-		return false
-	}
-	for _, h := range cloudMetadataHosts {
-		if strings.Contains(u, h) {
-			return true
-		}
-	}
-	return false
-}
-
 // writeSinkCallees are the file-write entry points whose first
 // argument is a destination path. Mirrors pathReadCallees for the
 // write side (SensitivePathWrites). fs.promises / aliased fs resolve
@@ -202,44 +139,6 @@ var writeSinkCallees = []string{
 	"fs.appendFileSync", "fs.createWriteStream",
 	"fs.promises.writeFile", "fs.promises.appendFile",
 	"fs.cpSync", "fs.copyFileSync", "fs.copyFile",
-}
-
-// persistencePathPatterns are persistence / credential-tamper write
-// destinations. Distinct from sensitivePathPatterns (which is
-// read-side credential material): these are the locations a payload
-// WRITES to in order to survive uninstall or hijack future sessions —
-// the recurring post-exploitation step across TanStack, node-ipc, and
-// bufferzonecorp. Substring-matched against the backslash-normalized
-// resolved path.
-var persistencePathPatterns = []string{
-	"/.ssh/authorized_keys", "/.ssh/config", "/.bashrc", "/.bash_profile",
-	"/.zshrc", "/.profile", "/.bash_aliases",
-	"/etc/cron", "/var/spool/cron", "/.config/systemd/", "/etc/systemd/",
-	"/Library/LaunchAgents/", "/Library/LaunchDaemons/",
-	"/.config/autostart/",
-	// Agent / IDE config dirs an implant writes to survive uninstall.
-	"/.claude/", "/.vscode/", "/.cursor/", "/.idea/",
-	// Git hook dirs (post-commit/pre-push implants).
-	"/.git/hooks/", "/hooks/post-commit", "/hooks/pre-push",
-	// Credential-store tampering (writing, not reading).
-	"/.npmrc", "/.netrc", "/.git-credentials",
-}
-
-// isPersistencePath reports whether a statically-resolved write
-// destination targets a persistence / credential-tamper location. The
-// empty string (unresolved) is never a match — a runtime-built path
-// is a conservative miss, never a false guess.
-func isPersistencePath(p string) bool {
-	if p == "" {
-		return false
-	}
-	norm := strings.ReplaceAll(p, "\\", "/")
-	for _, pat := range persistencePathPatterns {
-		if strings.Contains(norm, pat) {
-			return true
-		}
-	}
-	return false
 }
 
 // bufferDecodeEncodings are the Buffer.from second-arg values that
@@ -328,44 +227,4 @@ func matchesCatalog(callee string, catalog []string) bool {
 		}
 	}
 	return false
-}
-
-// sensitivePathPatterns are credential / secret-material fragments —
-// the same language-neutral catalog the python analyzer uses (the
-// material is OS/credential-store shaped, not language-shaped).
-// Matched as substrings against the backslash-normalized resolved
-// path, so "~/.ssh/id_rsa" and "/home/u/.ssh/id_rsa" both hit
-// "/.ssh/".
-var sensitivePathPatterns = []string{
-	"/.ssh/", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-	".aws/credentials", ".aws/config", "/.netrc", ".pypirc", ".npmrc",
-	".git-credentials", "/.gnupg/", ".docker/config.json",
-	"/.kube/config", "/.config/gcloud", "/.azure/", "/etc/shadow",
-	"/etc/passwd", ".bash_history", ".zsh_history",
-	// Browser / OS credential stores.
-	"Login Data", "Cookies", "key4.db", "logins.json",
-	"cookies.sqlite", "Local State", "Library/Keychains",
-}
-
-// isSensitivePath reports whether a statically-resolved path targets
-// credential or secret material. The empty string (unresolved arg) is
-// never sensitive — a runtime-built path is a conservative miss, not
-// a guess.
-func isSensitivePath(p string) bool {
-	if p == "" {
-		return false
-	}
-	norm := strings.ReplaceAll(p, "\\", "/")
-	for _, pat := range sensitivePathPatterns {
-		if strings.Contains(norm, pat) {
-			return true
-		}
-	}
-	// Bare dotenv file: basename exactly ".env" (avoid matching
-	// "environment.cfg" or ".envrc").
-	base := norm
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	return base == ".env"
 }

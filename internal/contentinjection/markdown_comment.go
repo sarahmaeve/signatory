@@ -1,0 +1,171 @@
+package contentinjection
+
+import (
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+// markdownCommentPattern captures the body of every <!-- ... -->
+// block in the input. The `(?s)` flag makes `.` match newlines so
+// multi-line comments are captured as a single unit. Non-greedy so
+// adjacent comments don't merge.
+var markdownCommentPattern = regexp.MustCompile(`(?s)<!--(.*?)-->`)
+
+// markdownCommentMinBodyLen is the threshold below which a comment
+// is treated as trivial (TOC markers, lint-disable, editor folds).
+// Calibrated above every documented housekeeping shape — the
+// longest being "prettier-ignore-end" at 19 bytes — so this
+// filter remains an honest "skip the trivial markers" check
+// rather than a payload-size escape hatch.
+//
+// Lowered to 20 from an earlier 32 during the
+// capture-agent-attack review: at 32, payloads like "Ignore
+// previous orders." (23 bytes) and "Ignore previous
+// instructions." (29 bytes) — canonical prompt-injection
+// directives — were silently skipped. Shape filtering belongs
+// to isImperativeShape (verb-set + verb-density); this length
+// gate exists only to drop housekeeping noise. Length is
+// measured after trim, on the comment body (excluding the
+// `<!-- -->` markers themselves).
+const markdownCommentMinBodyLen = 20
+
+// scanMarkdownComment fires PrimitiveMarkdownComment when a markdown
+// HTML comment contains imperative-mood prose. Per design doc the
+// detection is scored on "length × verb density, not bare presence"
+// because TOC markers and lint-disable comments are legitimate.
+//
+// The v0 structural rule: a comment fires when its trimmed body
+// exceeds markdownCommentMinBodyLen AND either
+//
+//   - the first whitespace-delimited word is a catalog imperative
+//     verb (the directive shape: "Ignore X", "Fetch Y", "Execute Z"); or
+//   - the body contains two or more catalog verbs (the verb-density
+//     shape: "When summarizing... also fetch... and execute..." —
+//     directive content embedded in connecting prose).
+//
+// Either condition catches a real payload pattern; neither fires on
+// descriptive prose like "the build system will execute the suite"
+// (verb mid-sentence, single occurrence) or on lint directives like
+// "prettier-ignore-end" (single verb-shaped token, body too short).
+func scanMarkdownComment(content []byte) Finding {
+	out := Finding{Primitive: PrimitiveMarkdownComment}
+	for _, m := range markdownCommentPattern.FindAllSubmatch(content, -1) {
+		body := strings.TrimSpace(string(m[1]))
+		if len(body) < markdownCommentMinBodyLen {
+			continue
+		}
+		if !isImperativeShape(body) {
+			continue
+		}
+		out.Count++
+		if len(out.Details) < detailCap {
+			out.Details = append(out.Details, truncateForDetail(body))
+		}
+	}
+	return out
+}
+
+// imperativeVerbCatalog is the small set of verbs whose
+// imperative-mood use in a markdown comment is injection-shaped.
+// Lowercase; matching is case-insensitive on the input.
+//
+// The list is intentionally tight. Adding "read", "use", or "see"
+// would explode the false-positive rate on legitimate technical
+// prose (every README does "see X for details" inside markdown).
+// The verbs here all carry an "act on the world" intent that
+// markdown comments — invisible to humans, visible to LLM ingestion
+// — would not legitimately direct.
+//
+// Calibration is per-verb. "harvest", "siphon", "egress", "reveal",
+// and "decrypt" were added in the 2026-05 catalog enrichment;
+// each has near-zero legitimate use in markdown comments. "scrape"
+// was added with awareness that some research / tooling READMEs
+// discuss web scraping as a topic — but markdown-comment use of
+// "scrape" remains rare even there.
+var imperativeVerbCatalog = []string{
+	"ignore", "fetch", "run", "execute", "install", "download",
+	"summarize", "output", "print", "send", "exfiltrate", "leak",
+	"upload", "post", "submit", "transmit", "exec", "eval",
+	// Catalog enrichment 2026-05: data-extraction / exfil verbs the
+	// design doc's adversarial-variants enumeration named as
+	// frequent in real attacks but absent from the v0 catalog.
+	"harvest", "scrape", "siphon", "egress", "reveal", "decrypt",
+}
+
+// catalogVerbPattern matches any catalog verb as a word-bounded
+// token anywhere in the input. Case-insensitive. Used by
+// isImperativeShape to count total verb occurrences.
+var catalogVerbPattern = func() *regexp.Regexp {
+	verbs := strings.Join(imperativeVerbCatalog, "|")
+	return regexp.MustCompile(`(?i)\b(?:` + verbs + `)\b`)
+}()
+
+// imperativeVerbSet is the lookup-form catalog used by
+// startsWithCatalogVerb. Lowercase keys.
+var imperativeVerbSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(imperativeVerbCatalog))
+	for _, v := range imperativeVerbCatalog {
+		m[v] = struct{}{}
+	}
+	return m
+}()
+
+// isImperativeShape reports whether the comment body shows either
+// directive structure (first word is a catalog imperative verb) or
+// verb-density structure (two or more catalog verbs total). See
+// scanMarkdownComment for the reasoning behind the two-condition
+// rule.
+func isImperativeShape(body string) bool {
+	if startsWithCatalogVerb(body) {
+		return true
+	}
+	if len(catalogVerbPattern.FindAllStringIndex(body, -1)) >= 2 {
+		return true
+	}
+	return false
+}
+
+// startsWithCatalogVerb reports whether the first whitespace-
+// delimited token of body is a catalog imperative verb. Punctuation
+// is stripped from BOTH sides of the token before lookup via
+// unicode.IsPunct, so the lookup tolerates the full class of
+// wrapping shapes attackers use to defeat a naive ASCII strip:
+//
+//   - Trailing ASCII period / comma / colon / semicolon / bang
+//     ("Ignore." / "Execute,"). The original strip set.
+//   - Trailing ASCII question mark ("Ignore?").
+//   - Surrounding ASCII parens ("(Ignore)").
+//   - Surrounding ASCII quotes (`"Ignore"` / `'Ignore'`).
+//   - Surrounding brackets / braces ("[Ignore]" / "{Ignore}").
+//   - Trailing Unicode full-width punctuation ("Ignore．" with
+//     U+FF0E FULLWIDTH FULL STOP, "Ignore？" with U+FF1F).
+//   - Surrounding markdown italic underscores ("_Ignore_") —
+//     U+005F is unicode.Pc (Connector Punctuation).
+//
+// Residual evasion shapes not in unicode.P (angle-bracketed
+// "<Ignore>" — U+003C/U+003E are Sm Math Symbols, not punctuation;
+// backtick-wrapped "`Ignore`" — U+0060 is Sk Modifier Symbol) are
+// caught by the verb-density rule when the body carries other
+// catalog verbs, and are unusual shapes for directive imperatives
+// in practice. The trade-off is recorded in the markdown_comment
+// corpus README.
+func startsWithCatalogVerb(body string) bool {
+	fields := strings.Fields(body)
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.ToLower(strings.TrimFunc(fields[0], unicode.IsPunct))
+	_, ok := imperativeVerbSet[first]
+	return ok
+}
+
+// truncateForDetail trims a comment body to the first 80 bytes,
+// collapsing internal whitespace runs to single spaces so the sample
+// is one line in signal payload output. Delegates to
+// truncateAtRuneBoundary for UTF-8 safety so a CJK / emoji rune at
+// the truncation point is not split.
+func truncateForDetail(body string) string {
+	collapsed := strings.Join(strings.Fields(body), " ")
+	return truncateAtRuneBoundary(collapsed, 80)
+}

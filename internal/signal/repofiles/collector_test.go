@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,14 +44,17 @@ func TestCollector_Name(t *testing.T) {
 	assert.Equal(t, "repofiles", c.Name())
 }
 
-// TestCollector_EmitsOneCompoundSignal verifies the end-to-end shape:
-// one repo_files signal emitted, grouped under hygiene, value
-// structured as a map from family-name to Result.
-func TestCollector_EmitsOneCompoundSignal(t *testing.T) {
+// TestCollector_EmitsRepoFilesCompoundSignal verifies the end-to-end
+// shape for the repo_files signal specifically. The collector emits
+// multiple signals (repo_files + agent_config_files +
+// agent_config_content_injection always; proc_macro_crate when
+// Cargo.toml is present); this test locks in the repo_files entry's
+// shape independent of the others.
+func TestCollector_EmitsRepoFilesCompoundSignal(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"),
 		[]byte("readme body"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "SECURITY.md"),
@@ -61,16 +65,8 @@ func TestCollector_EmitsOneCompoundSignal(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Exactly one signal emitted — it's a compound signal, not
-	// one-signal-per-family.
-	require.Len(t, result.Collected, 1,
-		"collector must emit exactly one compound signal")
-
-	soa := result.Collected[0]
-	require.False(t, soa.IsAbsence(), "compound signal must not be an absence")
-
-	sig := soa.ToSignal()
-	assert.Equal(t, "repo_files", sig.Type)
+	sig := findSignal(t, result, "repo_files")
+	require.NotNil(t, sig, "repo_files signal must be emitted")
 	assert.Equal(t, "repofiles", sig.Source)
 	assert.Equal(t, profile.SignalGroupHygiene, sig.Group)
 	assert.Equal(t, profile.ForgeryLowDeclining, sig.ForgeryResistance)
@@ -95,23 +91,45 @@ func TestCollector_EmitsOneCompoundSignal(t *testing.T) {
 	assert.False(t, value["codeowners"].Present)
 }
 
+// findSignal returns the first emitted signal with the given type,
+// or nil if not present. Walks the collected slice rather than
+// asserting position because the collector emits multiple signals
+// and the relative order is not part of the contract.
+func findSignal(t *testing.T, result *signal.CollectionResult, sigType string) *profile.Signal {
+	t.Helper()
+	if result == nil {
+		return nil
+	}
+	for i := range result.Collected {
+		s := result.Collected[i]
+		if s.IsAbsence() {
+			continue
+		}
+		sig := s.ToSignal()
+		if sig.Type == sigType {
+			return &sig
+		}
+	}
+	return nil
+}
+
 // TestCollector_EmptyClone_AllFamiliesAbsent verifies the empty-repo
-// shape: one signal still emitted, but every family reports absent.
-// This is distinct from "no signal at all" and is important for the
-// handoff — the agent sees "we checked and nothing was there" rather
-// than "signatory didn't look."
+// shape: the repo_files signal still emits, every hygiene family
+// reports absent. Distinct from "no signal at all" — the handoff
+// reads "we checked and nothing was there" rather than "signatory
+// didn't look."
 func TestCollector_EmptyClone_AllFamiliesAbsent(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o750))
 
 	c := NewCollector(root)
 	result, err := c.Collect(context.Background(), &profile.Entity{ID: "e1"})
 	require.NoError(t, err)
-	require.Len(t, result.Collected, 1)
 
-	sig := result.Collected[0].ToSignal()
+	sig := findSignal(t, result, "repo_files")
+	require.NotNil(t, sig)
 	var value map[string]Result
 	require.NoError(t, json.Unmarshal(sig.Value, &value))
 
@@ -139,7 +157,8 @@ func TestCollector_SignalValueOmitsFamilyField(t *testing.T) {
 	result, err := c.Collect(context.Background(), &profile.Entity{ID: "e1"})
 	require.NoError(t, err)
 
-	sig := result.Collected[0].ToSignal()
+	sig := findSignal(t, result, "repo_files")
+	require.NotNil(t, sig)
 
 	// Parse generically and inspect the readme entry's keys.
 	var generic map[string]map[string]any
@@ -204,7 +223,8 @@ func TestCollector_DefaultTTL(t *testing.T) {
 	result, err := c.Collect(context.Background(), &profile.Entity{ID: "e1"})
 	require.NoError(t, err)
 
-	sig := result.Collected[0].ToSignal()
+	sig := findSignal(t, result, "repo_files")
+	require.NotNil(t, sig)
 	ttl := sig.ExpiresAt.Sub(sig.CollectedAt)
 	assert.Equal(t, defaultTTL, ttl)
 }
@@ -294,6 +314,51 @@ serde_derive = "1.0"
 	require.NoError(t, json.Unmarshal(signalMap["proc_macro_crate"], &val))
 	assert.Equal(t, false, val["present"],
 		"non-proc-macro crate should emit present=false")
+}
+
+// TestCollector_ProcMacroCrate_OversizedFileIsBounded is the
+// regression test for the DoS path that existed before
+// maxCargoTomlBytes was introduced. The previous detectProcMacro
+// implementation called os.ReadFile with no cap, so an attacker
+// committing a multi-GB Cargo.toml could OOM the collector.
+//
+// The fix bounds the read and accepts the false-negative tradeoff:
+// a proc-macro = true declaration placed AFTER the cap is invisible
+// to the detector. This test pins both behaviors at once — the cap
+// is enforced AND the file beyond it is not silently scanned.
+func TestCollector_ProcMacroCrate_OversizedFileIsBounded(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+
+	// Build a Cargo.toml with benign content up to and past the cap,
+	// then place [lib] proc-macro = true at the end. The unbounded
+	// implementation reads the whole file and sees the line; the
+	// bounded implementation stops short of it.
+	filler := strings.Repeat("# padding to push proc-macro past the cap\n", 30000)
+	body := "[package]\nname = \"crate\"\n\n" + filler + "\n[lib]\nproc-macro = true\n"
+	require.Greater(t, len(body), maxCargoTomlBytes,
+		"test premise: file must exceed the cap to exercise the bound")
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.toml"),
+		[]byte(body), 0o644))
+
+	c := NewCollector(root)
+	result, err := c.Collect(context.Background(), &profile.Entity{
+		ID:           "test-oversized-cargo",
+		CanonicalURI: "pkg:cargo/big",
+		Ecosystem:    "cargo",
+	})
+	require.NoError(t, err)
+
+	sig := findSignal(t, result, "proc_macro_crate")
+	require.NotNil(t, sig)
+	var val map[string]any
+	require.NoError(t, json.Unmarshal(sig.Value, &val))
+	assert.Equal(t, false, val["present"],
+		"a proc-macro declaration placed beyond the read cap must not be detected — "+
+			"the bounded read is the DoS defense for adversarial-size Cargo.toml")
 }
 
 // TestCollector_ProcMacroCrate_NoCargo verifies that repos without

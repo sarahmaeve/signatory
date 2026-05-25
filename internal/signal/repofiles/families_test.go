@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sarahmaeve/signatory/internal/agentconfig"
 )
 
 // TestDetector_StemWithExt covers the shared detector for families
@@ -15,7 +17,7 @@ import (
 func TestDetector_StemWithExt(t *testing.T) {
 	t.Parallel()
 
-	det := stemWithExt("README")
+	det := agentconfig.StemWithExt("README")
 	cases := []struct {
 		in   string
 		want bool
@@ -60,7 +62,7 @@ func TestDetector_StemWithExt(t *testing.T) {
 func TestDetector_Exact(t *testing.T) {
 	t.Parallel()
 
-	det := exact(".mailmap")
+	det := agentconfig.Exact(".mailmap")
 	cases := []struct {
 		in   string
 		want bool
