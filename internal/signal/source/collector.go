@@ -11,6 +11,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal/source/golang"
 	"github.com/sarahmaeve/signatory/internal/signal/source/node"
 	"github.com/sarahmaeve/signatory/internal/signal/source/python"
+	"github.com/sarahmaeve/signatory/internal/signal/source/rust"
 )
 
 // collectorSource is the value that lands in profile.Signal.Source
@@ -80,6 +81,8 @@ func languageProfile(ecosystem string) (filter func(path string) bool, analyzer 
 		return isPythonSourceFile, python.NewAnalyzer(), true
 	case "npm":
 		return isNodeSourceFile, node.NewAnalyzer(), true
+	case "cargo", "crates":
+		return isRustSourceFile, rust.NewAnalyzer(), true
 	default:
 		return nil, nil, false
 	}

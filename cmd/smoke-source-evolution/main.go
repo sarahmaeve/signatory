@@ -176,9 +176,29 @@ func profileForTarget(target string) (string, ecosystemProfile, error) {
 			capApplies:      false,
 			bucketsExhaust:  false,
 		}, nil
+	case strings.HasPrefix(target, "pkg:cargo/"):
+		return strings.TrimPrefix(target, "pkg:cargo/"), ecosystemProfile{
+			matrixEcosystem: "cargo", matrixLanguage: "rust",
+			// The cargo pin-table emitter shares the cargo-registry
+			// source string with the basic registry collector (same
+			// analyst-facing source domain — see pintable.go's
+			// Name() doc), so smoke validation looks for the same
+			// signal-level Source as everything else cargo.
+			pinSignalSource: "cargo-registry",
+			pinValueSources: map[string]bool{"cargo-tag-match": true},
+			// crates.io has no publisher-asserted commit SHA, so the
+			// only currently-emitted pin SHAs come from local
+			// rev-parse — SHA-1 only. A future .cargo_vcs_info.json
+			// upgrade pass would still write SHA-1 (cargo publish
+			// writes git's native form), so SHA-256 is not yet on
+			// the accepted set.
+			shaHexLens:     map[int]bool{shaHexLen: true},
+			capApplies:     false,
+			bucketsExhaust: false,
+		}, nil
 	}
 	return "", ecosystemProfile{}, fmt.Errorf(
-		"unsupported target %q: expected pkg:golang/, pkg:go/, pkg:npm/, or pkg:pypi/ prefix", target)
+		"unsupported target %q: expected pkg:golang/, pkg:go/, pkg:npm/, pkg:pypi/, or pkg:cargo/ prefix", target)
 }
 
 // analyzeTimeout bounds how long the analyze command can run.
@@ -199,7 +219,7 @@ const (
 func main() {
 	var target string
 	flag.StringVar(&target, "target", defaultTarget,
-		"package canonical URI to analyze (pkg:golang/… , pkg:npm/… , or pkg:pypi/…)")
+		"package canonical URI to analyze (pkg:golang/…, pkg:npm/…, pkg:pypi/…, or pkg:cargo/…)")
 	flag.Parse()
 
 	if err := run(target); err != nil {

