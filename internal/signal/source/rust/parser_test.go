@@ -349,6 +349,81 @@ func TestParse_XorAssign_InString_NotCounted(t *testing.T) {
 		"^= inside a string is a literal byte sequence, not an assignment")
 }
 
+// TestParse_XorAssign_InMacroRulesBody_NotCounted is the false-
+// positive guard surfaced by the anyhow dogfood: anyhow's src/ensure.rs
+// contains a `macro_rules!` arm whose pattern includes the literal
+// `^=` token tree:
+//
+//	($bitxoreq:tt $($dup:tt)*) ^= $($rest:tt)*
+//
+// This is a token-tree pattern, NOT a real assignment expression —
+// it lexes as `^=` but it lives inside a macro_rules! body that
+// describes syntax to match, not code to execute. AST.md §4 opaque-
+// token discipline: parser must skip macro_rules! bodies entirely so
+// pattern syntax inside them never inflates XorAssigns.
+//
+// The fix is parallel to node's "code inside template-literal ${} is
+// not tokenized" gap — a body whose contents are pattern syntax must
+// not feed the call/assignment trackers.
+func TestParse_XorAssign_InMacroRulesBody_NotCounted(t *testing.T) {
+	t.Parallel()
+	const src = `
+macro_rules! ensure_bitxoreq {
+    (atom ($($stack:tt)+) $bail:tt (~$($fuel:tt)*) {($($buf:tt)*) $($parse:tt)*} ($bitxoreq:tt $($dup:tt)*) ^= $($rest:tt)*) => {
+        $crate::__private::stringify!()
+    };
+}
+fn helper() {
+    // Real assignment outside the macro — should still count.
+    let mut a = 0;
+    a ^= 1;
+}
+`
+	m := parse(t, src)
+	assert.Equal(t, 1, m.XorAssigns,
+		"only the real `a ^= 1` outside the macro_rules! body counts; "+
+			"the pattern `^=` inside macro_rules! is matcher syntax, not an assignment")
+}
+
+// TestParse_MacroRules_CallsInsideSkipped confirms call sites inside
+// macro_rules! bodies aren't recorded as Calls either. The body is a
+// pattern/template description — `$crate::process::Command::new` in
+// a macro_rules! arm is syntax substitution, not an executable call.
+func TestParse_MacroRules_CallsInsideSkipped(t *testing.T) {
+	t.Parallel()
+	const src = `
+macro_rules! make_cmd {
+    ($name:expr) => {
+        std::process::Command::new($name)
+    };
+}
+fn helper() {
+    let real = std::env::var("AWS_SECRET_ACCESS_KEY");
+}
+`
+	m := parse(t, src)
+	require.Len(t, m.Calls, 1,
+		"only the real std::env::var call should be recorded; "+
+			"Command::new inside macro_rules! is syntax substitution")
+	assert.Equal(t, "std::env::var", m.Calls[0].Callee)
+}
+
+// TestParse_MacroRulesEmptyBody confirms an empty macro_rules! body
+// doesn't trip the parser's brace-skip logic.
+func TestParse_MacroRulesEmptyBody(t *testing.T) {
+	t.Parallel()
+	const src = `
+macro_rules! nothing {}
+fn main() { foo(); }
+`
+	m := parse(t, src)
+	require.Len(t, m.Calls, 1)
+	assert.Equal(t, "foo", m.Calls[0].Callee)
+	assert.Equal(t, "main", m.Calls[0].InFn,
+		"the empty macro_rules! body must not leave the brace stack "+
+			"in a state that mislabels subsequent fn frames")
+}
+
 // ============================================================
 // Adversarial / leniency
 // ============================================================

@@ -105,7 +105,18 @@ func accumulate(c *astfeature.Counts, mod *Module, path string) {
 		}
 
 		switch {
-		case matchesCatalog(call.Callee, processExecCallees):
+		case matchesCatalog(call.Callee, processExecCallees) && call.FirstArg != "":
+			// ExecCalls fires only when the first arg statically
+			// resolves to a string literal — the legitimate
+			// build.rs idiom Command::new(rustc_var) passes a name
+			// reference (unresolvable, FirstArg=="") and must not
+			// spike. The Trapdoor synthetic uses Command::new("sh"),
+			// a literal that resolves. Mirrors how
+			// SensitivePathReads / EnvCredentialReads already
+			// require the arg to match a static catalog. Conservative
+			// gap: variable-bound shell names
+			// (`let sh="sh"; Command::new(&sh)`) — same shape as the
+			// python receiver-flow miss.
 			c.ExecCalls++
 		case matchesCatalog(call.Callee, networkCallees) &&
 			astfeature.IsCloudMetadataURL(call.FirstArg):

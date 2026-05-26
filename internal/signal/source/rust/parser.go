@@ -210,6 +210,22 @@ func (p *parser) run() {
 				p.i = next
 				continue
 			}
+		case "macro_rules":
+			// macro_rules! bodies describe SYNTAX patterns, not
+			// executable code — pattern tokens like `^=` inside
+			// the body must not feed XorAssigns / Calls. Skip the
+			// entire body and any inner braces.
+			//
+			// Surfaced by the anyhow dogfood: src/ensure.rs has a
+			// macro_rules! arm whose pattern includes the literal
+			// `^=` token tree, which previously inflated
+			// XorAssigns to 1 on a legit error-handling crate.
+			// Parallel to node's "code inside template-literal
+			// ${} is not tokenized" gap (AST.md §4).
+			if next, ok := p.skipMacroRulesBody(p.i); ok {
+				p.i = next
+				continue
+			}
 		}
 
 		// Try call parsing for any non-keyword name token.
@@ -418,6 +434,38 @@ func lastSegment(path []string) string {
 		return ""
 	}
 	return path[len(path)-1]
+}
+
+// skipMacroRulesBody recognizes the shape `macro_rules ! NAME {` and
+// returns the index just past the matching `}`. Tokens inside the
+// body are NOT processed by the main walk — they're macro pattern /
+// template syntax, not executable code.
+//
+// Returns ok=false when the expected `! NAME {` continuation isn't
+// present; the caller falls through to ordinary name handling. This
+// keeps the recognizer specific to the literal `macro_rules!` shape
+// and avoids swallowing real source if a user has a local variable
+// happens to be named `macro_rules` (rare but legal — Rust permits
+// `macro_rules` as an ordinary identifier outside the
+// `macro_rules!` construct).
+func (p *parser) skipMacroRulesBody(i int) (int, bool) {
+	if i+3 >= len(p.toks) {
+		return i, false
+	}
+	if p.toks[i].Value != "macro_rules" {
+		return i, false
+	}
+	if p.toks[i+1].Value != "!" {
+		return i, false
+	}
+	if p.toks[i+2].Kind != TokenName {
+		return i, false
+	}
+	if p.toks[i+3].Value != "{" {
+		return i, false
+	}
+	// matchBracket consumes the `{` and returns the index just past `}`.
+	return matchBracket(p.toks, i+3), true
 }
 
 // parseFnHeader recognizes `fn name(...)` or

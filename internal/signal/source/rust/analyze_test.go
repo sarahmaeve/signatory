@@ -398,6 +398,54 @@ fn helper() {
 			"std::process::Command::new and spike ExecCalls")
 }
 
+// TestAnalyze_ExecCalls_UnresolvableArg_NoSpike is the false-
+// positive guard surfaced by the anyhow dogfood. anyhow's build.rs
+// invokes rustc to probe what features are available:
+//
+//	let mut cmd = Command::new(rustc.next().unwrap());
+//	let output = Command::new(rustc).arg("--version")...
+//
+// Both pass a name / expression as the executable — unresolvable
+// to a static literal. These are LEGITIMATE build-time probes (env
+// detection is a common cargo build.rs idiom), not payload
+// execution. Counting them would false-positive on roughly any
+// crate with a build.rs that probes rustc.
+//
+// The fix mirrors how SensitivePathReads / EnvCredentialReads
+// already require the first arg to match a static catalog — exec
+// counts only when the first arg statically resolves to a string
+// literal. The conservative gap is variable-bound shell names
+// (`let sh = "sh"; Command::new(&sh)`), parallel to python's
+// receiver-flow gap.
+func TestAnalyze_ExecCalls_UnresolvableArg_NoSpike(t *testing.T) {
+	t.Parallel()
+	const src = `
+fn helper() {
+    let rustc = "rustc";
+    let _ = std::process::Command::new(rustc).arg("--version").output();
+    let _ = std::process::Command::new(some_var).output();
+}
+`
+	c := counts(t, src)
+	assert.Equal(t, 0, c.ExecCalls,
+		"Command::new with an unresolvable (name / expression) first arg "+
+			"must NOT spike — it's the legitimate build.rs env-probe shape")
+}
+
+// TestAnalyze_ExecCalls_LiteralArg_StillSpikes confirms the gate
+// only excludes UNRESOLVABLE args; any resolved string literal —
+// whether a known shell name or some other binary the attacker
+// wants to run — keeps spiking ExecCalls.
+func TestAnalyze_ExecCalls_LiteralArg_StillSpikes(t *testing.T) {
+	t.Parallel()
+	for _, arg := range []string{"sh", "bash", "/bin/sh", "curl", "wget", "nc"} {
+		src := `fn helper() { let _ = std::process::Command::new("` + arg + `").output(); }`
+		c := counts(t, src)
+		assert.Equalf(t, 1, c.ExecCalls,
+			"Command::new(%q) (string literal) must spike ExecCalls", arg)
+	}
+}
+
 // ============================================================
 // ImportTimeCallSites: build.rs vs other files
 // ============================================================
