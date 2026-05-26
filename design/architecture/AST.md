@@ -481,6 +481,40 @@ Pick a dogfood target whose registry JSON is < 10 MiB
   naturally non-zero** for any real package (`logging.getLogger`
   at module top, etc.). Their value is the **spike**, never the
   absolute. Don't design thresholds on absolute values.
+- **Differential detectors need an in-situ companion.** The
+  `source_evolution_anomaly` signal compares ADJACENT versions for
+  zero→non-zero crossings — it catches hijacks (clean→weaponized
+  transitions) but is structurally blind to born-malicious packages
+  whose first published version is already weaponized (the dominant
+  cargo/npm typo-squat shape, including the 2026-05-24 Trapdoor
+  cargo crates). No clean baseline → no crossing → quiet, even
+  though every catalog field is populated. The fix is an in-situ
+  companion (`source_evolution_concern`, `concern.go`): same matrix
+  rows, same Counts catalogs, evaluated **row-wise** instead of
+  pair-wise. Both signals are derived from the same matrix in the
+  same Collect call; they're independent (hijack fires both;
+  born-malicious fires only concern). Don't ship a differential
+  detector without a row-wise companion.
+- **The "rare on benign" field subset is the load-bearing decision
+  for absolute-value thresholding.** Not all Counts fields are
+  equal for in-situ detection. Three are *universally excluded*
+  because legitimate code routinely populates them — putting any
+  of them in an absolute-threshold signal would false-positive
+  across most of the ecosystem:
+    - `ImportTimeCallSites` (naturally non-zero per the lesson
+      above)
+    - `NetworkCallSites` (any HTTP-client crate / web framework)
+    - `Base64DecodeCalls` (crypto crates — sigstore has 18 on
+      live dogfood; per-package-purpose understanding would be
+      needed to disambiguate)
+  The remaining 9 fields constitute the rare-on-benign subset;
+  any non-zero value on those is signal-bearing without
+  cross-version context. Validated zero across
+  `pkg:cargo/{anyhow, serde}`, `pkg:golang/kong`, `pkg:npm/ms`,
+  `pkg:pypi/sigstore` on every selected row. **Future fields must
+  be dogfood-validated zero on legitimate packages before joining
+  the rare-on-benign subset; the exclusion list grows when
+  legitimate code is shown to populate a field.**
 
 ### Parsers
 

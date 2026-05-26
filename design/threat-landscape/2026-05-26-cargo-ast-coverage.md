@@ -37,7 +37,16 @@ integrated `clean → clean → weaponized` end-to-end fixture under
 | XOR-with-literal-key obfuscation | `XORAssignments` | `^=` token in any non-`macro_rules!` scope. Trapdoor's `XOR_KEY = "cargo-build-helper-2026"` primitive spikes this from zero between two versions |
 | Process exec of a named binary | `ExecCalls` | `std::process::Command::new` / `Command::new` / `tokio::process::Command::new` with a **resolvable** first arg. Unresolvable args (`Command::new(rustc_var)` — anyhow's build.rs idiom) deliberately don't spike; see §3 |
 | Calls at cargo build time | `ImportTimeCallSites` | Any call inside `fn main()` when the file's basename is `build.rs`. Naturally non-zero on benign crates (cargo's `println!("cargo:rerun-if-changed=…")` idiom) — load-bearing only as a SPIKE metric, never as an absolute threshold |
-| Cross-version anomaly | `source_evolution_anomaly` | The existing differential detector — fires when ≥ `MinSpikedFeatures` (=2) fields cross 0 → non-zero between adjacent rows. Trapdoor-shape `build.rs` weaponization crosses all 8 AST fields above in a single version |
+| Cross-version anomaly (hijack: clean → weaponized) | `source_evolution_anomaly` | Differential detector — fires when ≥ `MinSpikedFeatures` (=2) fields cross 0 → non-zero between adjacent rows. Catches the "established crate that suddenly turned" shape. |
+| In-situ concern (born-malicious: weaponized from v0.1.0) | `source_evolution_concern` | Row-wise companion — fires when ≥ `MinConcernFeatures` (=2) rare-on-benign fields are non-zero on any single row, no cross-version context required. Catches the typo-squat shape Trapdoor exemplifies, where every published version is already weaponized and the differential detector has no clean baseline to cross from. Excluded from the "rare-on-benign" subset: `ImportTimeCallSites`, `NetworkCallSites`, `Base64DecodeCalls` (all naturally non-zero on legitimate code). |
+
+The two summary signals are **independent**, not mutually exclusive:
+
+| Scenario | source_evolution_anomaly | source_evolution_concern |
+|---|---|---|
+| Clean → weaponized (hijack) | fires | fires |
+| Born-malicious v0.1.0 (Trapdoor shape) | quiet (no crossing) | fires |
+| Legitimate package, any history | quiet | quiet |
 
 ### Fixture-driven validation
 
@@ -52,11 +61,19 @@ above end-to-end through the live `signatory` analyze pipeline:
   version, anomaly fires naming each one, the `(clean, clean) → 0`
   middle pair stays anomaly-free (regression guard against
   false-positives on benign evolution)
+- `TestCollector_CargoBornMalicious_FiresConcern` — single
+  weaponized v0.1.0 with no clean prior; anomaly stays quiet (no
+  crossing to detect) while concern fires with the expected
+  rare-on-benign features. The Trapdoor-specific regression.
+- `TestCollector_CargoBenignBaseline_ConcernQuiet` — three benign
+  versions; concern stays quiet despite `ImportTimeCallSites` being
+  non-zero on every row (it's deliberately excluded from the
+  rare-on-benign subset).
 
 Plus dogfood validation on `pkg:cargo/anyhow` (~100 versions,
 v-prefix tags, build.rs probes rustc) and `pkg:cargo/serde` (~315
 versions): all catalog fields zero across every selected row,
-anomaly false. Regression-clean on
+anomaly AND concern false. Regression-clean on
 `pkg:golang/alecthomas/kong` / `pkg:npm/ms` / `pkg:pypi/sigstore`.
 
 ---
@@ -74,14 +91,17 @@ composing with the AST layer:
 | Burst of recent publishes (mass-publish campaign) | `version_publish_burst` | (same) |
 | Yanked release count | `yanked_release_count` | (same) |
 | Crate→repo divergence (tarball ≠ git tree at tag) | `artifact_repo_divergence` | `internal/signal/artifact/` — recovers `git.sha1` from `.cargo_vcs_info.json` inside the published `.crate` tarball |
-| Per-version SHA anchor for source-evolution | `version_pin_table` | `internal/signal/registry/cargo/pintable.go` — tag-match against the local clone with `cargo-tag-match` provenance label |
+| Per-version SHA anchor for source-evolution | `version_pin_table` | `internal/signal/registry/cargo/pintable.go` — two-tier pin source: `cargo-tag-match` (rev-parse against local clone tags) for the long tail, upgraded to `cargo-vcs-info` (publisher-stamped SHA from `.cargo_vcs_info.json` inside the `.crate` tarball) for the recent `crossVersionWindow=10` window. Both tiers gated through `fulcio.IsGitObjectID`. Parallel to npm's gitHead → attestation upgrade. |
 
-A future `.cargo_vcs_info.json`-upgrade pass on the pin-table
-collector can land alongside this as a higher-confidence
-provenance tier (publisher-stamped, gated through
-`fulcio.IsGitObjectID`), parallel to npm's gitHead → attestation
-upgrade. The two-tier pattern is already in place; only the second
-tier is deferred.
+The vcs_info upgrade pass landed in commit `c5d29bc`. Live-dogfood
+across `pkg:cargo/anyhow` (10 vcs-info + 91 tag-match) and
+`pkg:cargo/serde` (10 vcs-info + 300 tag-match) showed **zero SHA
+divergence between the two tiers** on either crate — the upgrade is
+a provenance-strength upgrade, not a SHA replacement, for healthy
+crates. Option A (silent override on disagreement) confirmed
+appropriate; Option B (emit a `version_pin_source_divergence`
+signal on disagreement) stays deferred until a real-world incident
+motivates it.
 
 ---
 
