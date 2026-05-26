@@ -492,6 +492,19 @@ incident-shaped corpus (the 6 Trapdoor crates and their
 `build.rs` files, while still observable on the wayback /
 mirror surface) that should drive TDD when the work lands.
 
+**Update 2026-05-26**: the cargo source-AST analyzer landed across
+branch `cargo-rust-ast` (commits `ad580f2` … `3ebfa57`). The
+per-attack-shape bucketing map and the explicit "structurally
+cannot see" list live at
+[`2026-05-26-cargo-ast-coverage.md`](2026-05-26-cargo-ast-coverage.md).
+The synthetic clean → clean → weaponized integration fixture
+under `internal/signal/source/collector_test.go` covers the
+Trapdoor primitive set (named env-credential reads, sensitive-path
+reads, persistence writes, IMDS contact, base64 decode, XOR
+obfuscation, attacker exfil, shell exec). The
+`XOR_KEY = "cargo-build-helper-2026"` primitive in particular
+spikes `XORAssignments` as predicted.
+
 ## Open questions
 
 - **(Resolved 2026-05-24.)** Should the Layer 3 catalog-sharing
