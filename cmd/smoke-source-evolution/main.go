@@ -185,13 +185,26 @@ func profileForTarget(target string) (string, ecosystemProfile, error) {
 			// Name() doc), so smoke validation looks for the same
 			// signal-level Source as everything else cargo.
 			pinSignalSource: "cargo-registry",
-			pinValueSources: map[string]bool{"cargo-tag-match": true},
-			// crates.io has no publisher-asserted commit SHA, so the
-			// only currently-emitted pin SHAs come from local
-			// rev-parse — SHA-1 only. A future .cargo_vcs_info.json
-			// upgrade pass would still write SHA-1 (cargo publish
-			// writes git's native form), so SHA-256 is not yet on
-			// the accepted set.
+			// Two per-pin source tiers, parallel to npm's
+			// gitHead → attestation upgrade:
+			//   - cargo-tag-match: tag-resolved against the local
+			//     clone (publisher-asserted via tag metadata)
+			//   - cargo-vcs-info: recovered from
+			//     .cargo_vcs_info.json inside the .crate tarball
+			//     (publisher-stamped at `cargo publish` time)
+			// The upgrade pass restamps recent-window pins from the
+			// weaker to the stronger source when the tarball
+			// recovery succeeds; pins outside the window stay on
+			// cargo-tag-match.
+			pinValueSources: map[string]bool{
+				"cargo-tag-match": true,
+				"cargo-vcs-info":  true,
+			},
+			// crates.io has no publisher-asserted commit SHA in
+			// registry JSON, and both pin source tiers above write
+			// SHA-1 — `cargo publish` records git's native form, and
+			// `git rev-parse --verify` returns SHA-1. SHA-256 is not
+			// yet on the accepted set.
 			shaHexLens:     map[int]bool{shaHexLen: true},
 			capApplies:     false,
 			bucketsExhaust: false,
