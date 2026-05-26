@@ -340,7 +340,7 @@ func Hello() string { return "hi" }
 	entity := goEntity("example.com/synth")
 	result, err := c.Collect(t.Context(), entity)
 	require.NoError(t, err)
-	require.Equal(t, 2, result.SignalCount(), "matrix + anomaly expected")
+	require.Equal(t, 3, result.SignalCount(), "matrix + anomaly + concern expected")
 	require.Equal(t, 0, result.AbsenceCount(), "happy path produces no absences")
 
 	// ---- matrix ----
@@ -479,7 +479,7 @@ func Hello() {}
 	result, err := c.Collect(t.Context(), goEntity("example.com/single"))
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, result.SignalCount())
+	assert.Equal(t, 3, result.SignalCount(), "matrix + anomaly + concern expected")
 	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
 	var matrix MatrixValue
 	require.NoError(t, json.Unmarshal(matrixSig.Value, &matrix))
@@ -532,8 +532,8 @@ func TestCollector_PyPIEntity_EmitsBothSignals(t *testing.T) {
 	result, err := c.Collect(t.Context(), pypiEntity("demo"))
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, result.SignalCount(),
-		"pypi entity must emit matrix + anomaly, not skip at the gate")
+	assert.Equal(t, 3, result.SignalCount(),
+		"pypi entity must emit matrix + anomaly + concern, not skip at the gate")
 
 	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
 	var matrix MatrixValue
@@ -798,8 +798,8 @@ func TestCollector_NpmEntity_BenignBaseline(t *testing.T) {
 	result, err := c.Collect(t.Context(), npmEntity("demo"))
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, result.SignalCount(),
-		"npm entity must emit matrix + anomaly, not skip at the gate")
+	assert.Equal(t, 3, result.SignalCount(),
+		"npm entity must emit matrix + anomaly + concern, not skip at the gate")
 
 	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
 	var matrix MatrixValue
@@ -1074,8 +1074,8 @@ func TestCollector_CargoEntity_BenignBaseline(t *testing.T) {
 	result, err := c.Collect(t.Context(), cargoEntity("synthetic"))
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, result.SignalCount(),
-		"cargo entity must emit matrix + anomaly, not skip at the gate")
+	assert.Equal(t, 3, result.SignalCount(),
+		"cargo entity must emit matrix + anomaly + concern, not skip at the gate")
 
 	matrixSig := findEmittedSignal(t, result, "source_evolution_matrix")
 	var matrix MatrixValue
@@ -1258,4 +1258,146 @@ func TestCollector_CargoWeaponizedProgression_FiresAnomaly(t *testing.T) {
 			"cloud_metadata_calls",
 		},
 		"the crossed features must be named for the analyst")
+}
+
+// TestCollector_CargoBornMalicious_FiresConcern is the load-bearing
+// integration test for the in-situ concern signal class. Models the
+// dominant cargo supply-chain typo-squat shape from the 2026-05-24
+// Trapdoor incident: a brand-new crate is published with a single
+// version (0.1.0) whose build.rs already carries the credential-
+// stealer payload — no clean prior version exists.
+//
+// The differential anomaly cannot fire on this shape (no zero→non-zero
+// crossing because no clean baseline). The concern signal MUST fire
+// independently on the single concerning row.
+//
+// Together with TestCollector_CargoWeaponizedProgression_FiresAnomaly
+// (clean → clean → weaponized) this pins both halves of the
+// differential vs in-situ dichotomy.
+func TestCollector_CargoBornMalicious_FiresConcern(t *testing.T) {
+	t.Parallel()
+
+	// Single tagged version, born malicious. No clean prior.
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "0.1.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoWeaponizedBuildV030,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "born-malicious",
+			Pins: []VersionPin{
+				{Version: "0.1.0", SHA: shaByTag["0.1.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), cargoEntity("born-malicious"))
+	require.NoError(t, err)
+
+	// Differential anomaly must NOT fire — no clean prior to cross from.
+	anomalySig := findEmittedSignal(t, result, "source_evolution_anomaly")
+	var anomaly AnomalyValue
+	require.NoError(t, json.Unmarshal(anomalySig.Value, &anomaly))
+	assert.False(t, anomaly.AnomalyPresent,
+		"a single weaponized version cannot trip the differential anomaly — "+
+			"no clean baseline to cross from. This is exactly the gap "+
+			"source_evolution_concern exists to close.")
+
+	// In-situ concern MUST fire — every rare-on-benign field is non-zero
+	// on the single row.
+	concernSig := findEmittedSignal(t, result, "source_evolution_concern")
+	assert.Equal(t, profile.SignalGroupPublication, concernSig.Group)
+	assert.Equal(t, profile.ForgeryVeryHigh, concernSig.ForgeryResistance)
+
+	var concern ConcernValue
+	require.NoError(t, json.Unmarshal(concernSig.Value, &concern))
+	assert.True(t, concern.ConcernPresent,
+		"a single Trapdoor-shape row must independently fire concern")
+	assert.Equal(t, "0.1.0", concern.FirstConcernVersion,
+		"the first (only) row is the concern entry point")
+
+	// Every rare-on-benign field the Trapdoor fixture spikes must be named.
+	// (Network and Base64 are populated by the fixture but excluded from
+	// the concern set; ImportTime is similarly excluded — none should
+	// appear in concerning_features.)
+	wantFired := []string{
+		"sensitive_path_reads",
+		"exec_calls",
+		"xor_assignments",
+		"env_credential_reads",
+		"sensitive_path_writes",
+		"cloud_metadata_calls",
+	}
+	for _, want := range wantFired {
+		assert.Containsf(t, concern.ConcerningFeatures, want,
+			"the Trapdoor build.rs fires %q (rare-on-benign); "+
+				"concerning_features must name it", want)
+	}
+	for _, excluded := range []string{
+		"network_call_sites", "base64_decode_calls", "import_time_call_sites",
+	} {
+		assert.NotContainsf(t, concern.ConcerningFeatures, excluded,
+			"%q is in the deliberately-excluded subset (naturally non-zero on "+
+				"benign code) and must NEVER appear in concerning_features", excluded)
+	}
+}
+
+// TestCollector_CargoBenignBaseline_ConcernQuiet is the
+// no-false-positive guard at the integration level. The same
+// three-version clean→clean→clean fixture exercised by
+// TestCollector_CargoEntity_BenignBaseline must NOT trip the concern
+// signal on any of its rows.
+func TestCollector_CargoBenignBaseline_ConcernQuiet(t *testing.T) {
+	t.Parallel()
+
+	clonePath, shaByTag := initRepoWithVersionedProgression(t, []versionFixture{
+		{Tag: "0.1.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV010,
+		}},
+		{Tag: "0.2.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib,
+			"build.rs":   cargoCleanBuildV020,
+		}},
+		{Tag: "0.3.0", Files: map[string]string{
+			"Cargo.toml": cargoStubCargoToml,
+			"src/lib.rs": cargoCleanLib + "\npub fn goodbye() -> &'static str { \"bye\" }\n",
+			"build.rs":   cargoCleanBuildV020,
+		}},
+	})
+
+	pinSource := &fakePinSource{
+		table: PinTable{
+			ModulePath: "synthetic",
+			Pins: []VersionPin{
+				{Version: "0.1.0", SHA: shaByTag["0.1.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.2.0", SHA: shaByTag["0.2.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+				{Version: "0.3.0", SHA: shaByTag["0.3.0"], Source: "cargo-tag-match",
+					PublishedAt: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+
+	c := NewCollector(clonePath, pinSource, false)
+	result, err := c.Collect(t.Context(), cargoEntity("synthetic"))
+	require.NoError(t, err)
+
+	concernSig := findEmittedSignal(t, result, "source_evolution_concern")
+	var concern ConcernValue
+	require.NoError(t, json.Unmarshal(concernSig.Value, &concern))
+	assert.False(t, concern.ConcernPresent,
+		"three benign cargo versions must NOT fire concern — only the deliberately "+
+			"excluded fields (ImportTimeCallSites from cargo's println!) populate, "+
+			"and the rare-on-benign subset stays zero across every row")
+	assert.Empty(t, concern.ConcerningFeatures)
 }

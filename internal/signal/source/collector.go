@@ -31,11 +31,16 @@ const collectorTTL = 24 * time.Hour
 //   - LanguageAnalyzer     — extracts AST features per version
 //     (golang.Analyzer for Go; python.Analyzer for pypi)
 //   - Assembler            — builds MatrixValue
-//   - DetectAnomaly        — derives the anomaly summary
+//   - DetectAnomaly        — derives the differential anomaly summary
+//   - DetectConcern        — derives the in-situ concern summary
 //
-// Emits two signals per supported-ecosystem entity:
+// Emits three signals per supported-ecosystem entity:
 //   - source_evolution_matrix  (compound per-version table)
-//   - source_evolution_anomaly (boolean + pointer summary)
+//   - source_evolution_anomaly (boolean + pointer summary — differential)
+//   - source_evolution_concern (boolean + pointer summary — in-situ;
+//     catches born-malicious packages whose first version is already
+//     weaponized, which the differential anomaly cannot see because
+//     no clean baseline exists to cross from)
 //
 // The file filter and analyzer are selected per entity by
 // languageProfile. Unsupported ecosystems skip silently (empty
@@ -172,9 +177,9 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		return result, nil
 	}
 
-	// Emit the matrix first, then the derived anomaly. Order
+	// Emit the matrix first, then the two derived signals. Order
 	// doesn't affect store correctness but matches the analyst
-	// reading order: data → summary.
+	// reading order: data → summaries.
 	result.RecordSignal(entity.ID, "source_evolution_matrix",
 		collectorSource, collectedAt, collectorTTL, matrix)
 
@@ -182,17 +187,31 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	result.RecordSignal(entity.ID, "source_evolution_anomaly",
 		collectorSource, collectedAt, collectorTTL, anomaly)
 
+	// Concern is the in-situ (single-row, absolute-value) companion
+	// to the differential anomaly. Fires on born-malicious packages
+	// where every published version is already weaponized — no
+	// cross-version transition to catch, but the row itself crosses
+	// the rare-on-benign threshold. See concern.go.
+	concern := DetectConcern(matrix.Rows)
+	result.RecordSignal(entity.ID, "source_evolution_concern",
+		collectorSource, collectedAt, collectorTTL, concern)
+
 	return result, nil
 }
 
-// recordAbsenceBoth emits absence records for both signals at
-// once. Used when the collector can't make any progress — both
-// signals are equally affected, so both should appear as absences
-// rather than one missing and one absent.
+// recordAbsenceBoth emits absence records for all three derived
+// signals at once. Used when the collector can't make any progress —
+// matrix, anomaly, and concern are equally affected, so all should
+// appear as absences rather than a partial set.
+//
+// The name is historical (it was "both" when there were two signals).
+// Kept rather than renamed because the call sites read fine and a
+// rename would churn the diff for no behaviour change.
 func (c *Collector) recordAbsenceBoth(r *signal.CollectionResult, entity *profile.Entity,
 	reason string, retryable bool, t time.Time) {
 	r.RecordAbsence(entity.ID, "source_evolution_matrix", collectorSource, reason, retryable, t)
 	r.RecordAbsence(entity.ID, "source_evolution_anomaly", collectorSource, reason, retryable, t)
+	r.RecordAbsence(entity.ID, "source_evolution_concern", collectorSource, reason, retryable, t)
 }
 
 // recordFailureBoth is the same pattern for transient failures.
@@ -202,4 +221,5 @@ func (c *Collector) recordFailureBoth(r *signal.CollectionResult, entity *profil
 	reason string, retryable bool, t time.Time) {
 	r.RecordFailure(entity.ID, "source_evolution_matrix", collectorSource, reason, retryable, t)
 	r.RecordFailure(entity.ID, "source_evolution_anomaly", collectorSource, reason, retryable, t)
+	r.RecordFailure(entity.ID, "source_evolution_concern", collectorSource, reason, retryable, t)
 }
