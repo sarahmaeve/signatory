@@ -117,9 +117,9 @@ func TestParseVCSInfoSHA_Strict(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotSHA, gotOK := parseVCSInfoSHA([]byte(tc.payload))
+			gotSHA, gotOK := ParseVCSInfoSHA([]byte(tc.payload))
 			assert.Equal(t, tc.wantOK, gotOK,
-				"parseVCSInfoSHA returned ok=%v for %q (payload=%q)",
+				"ParseVCSInfoSHA returned ok=%v for %q (payload=%q)",
 				gotOK, tc.name, tc.payload)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantSHA, gotSHA)
@@ -205,7 +205,7 @@ func TestCargoVCSInfoIntent_DepthBoundedMatch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := cargoVCSInfoIntent.Match(stream.Entry{
+			got := CargoVCSInfoIntent.Match(stream.Entry{
 				Path: tc.path,
 				Type: tc.entryType,
 			})
