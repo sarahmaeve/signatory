@@ -1,13 +1,16 @@
 # Source-Evolution AST Analysis — Orientation & Lessons Learned
 
 Status: written after pypi→Go parity (PR #143); updated after **npm**
-parity + the threat-landscape signal expansion (branch `npm-ast`).
-Audience: whoever adds the next ecosystem (cargo / gem / maven / …).
+parity + the threat-landscape signal expansion (branch `npm-ast`);
+updated again after **cargo/Rust** parity + the Trapdoor incident
+follow-up (branch `cargo-rust-ast`, 2026-05-26).
+Audience: whoever adds the next ecosystem (gem / maven / …).
 
-Done so far: **Go**, **pypi**, **npm/TypeScript**. The smoke driver
-is now ecosystem-agnostic. If you are adding cargo/gem, the pattern
-below is fully worn in — read §4's npm lessons first, they are the
-freshest and the most transferable.
+Done so far: **Go**, **pypi**, **npm/TypeScript**, **cargo/Rust**.
+The smoke driver is now ecosystem-agnostic. If you are adding
+gem/maven, the pattern below is fully worn in — read §4's
+cargo/Rust lessons first, they are the freshest and the most
+transferable.
 
 The single most important thing to internalize first:
 
@@ -248,7 +251,153 @@ Pick a dogfood target whose registry JSON is < 10 MiB
 
 ## 4. Lessons learned & caveats
 
-### npm / TypeScript (newest — most transferable to cargo/gem)
+### cargo / Rust (newest — most transferable to gem/maven)
+
+- **The map held again.** The §1 claim ("resolution, acquisition,
+  provenance are generic; the new work is a bounded leaf") held a
+  third time. The hand-written lexer+parser+analyzer was ~95% of
+  the effort; the wiring (`languageProfile`,
+  `ecosystemForLanguage`, file filter, dispatch gate, smoke
+  `profileForTarget`) was the predicted ~5 lines each. The genuinely
+  new pieces unique to cargo were the **pin-table emitter** (cargo
+  has no publisher-asserted SHA) and the **build.rs scope
+  discriminator** (cargo's analog of Python's module-scope-calls
+  counter), both small and self-contained.
+- **Rust lexical hazards, decided once.** Block comments **nest** in
+  Rust (unlike C); the scan must be depth-bounded (`maxBlockCommentDepth`)
+  or a crafted file with 300k `/*` levels stack-overflows the lexer.
+  Raw strings (`r#"…"#`) match `#` counts up to `maxRawStringHashes`,
+  with overflow falling through to ordinary identifier scanning
+  (conservative miss, never a hang). Char vs lifetime
+  (`'a'` vs `'static`) disambiguates by looking at the byte AFTER
+  the candidate: closed apostrophe within 1–2 bytes → char; alpha
+  continue → lifetime. **`>>` is NOT lexed as a single op** —
+  nested generics (`Vec<HashMap<K, V>>`) close with `>>` source
+  bytes, and the parser-stage angle-bracket counter naturally pops
+  two levels per token; emitting a single `>>` op would be the
+  same `<T>`-vs-JSX tar pit TypeScript has. **`0..1` range vs
+  `0.5` decimal**: `scanNumber` looks ahead at the byte AFTER `.`
+  and stops the number if it's another `.`, so range ops never
+  get swallowed.
+- **`macro_rules!` bodies are SYNTAX, not code.** Surfaced by the
+  anyhow live-dogfood: anyhow's `src/ensure.rs` has a `macro_rules!`
+  arm whose pattern includes the literal `^=` token tree, which
+  before the fix inflated `XorAssigns` to 1 on a legit error-handling
+  crate. The parser-stage skip
+  (`skipMacroRulesBody`) — detect `macro_rules ! NAME {`, jump to
+  the matching `}` — is the Rust analog of node's "code inside
+  template-literal `${…}` is not tokenized". Generalized: **any
+  language with a hygienic-macro / quasiquote construct whose body
+  is pattern/template syntax must have a parser-side skip**, or
+  catalog tokens and assignment operators inside the body inflate
+  the differential signal.
+- **Catalog match arg-resolution consistency.** The anyhow dogfood
+  exposed a second false positive: anyhow's `build.rs` invokes
+  rustc to probe Rust capabilities (`Command::new(rustc.next().unwrap())`,
+  `Command::new(rustc)`), a benign cargo idiom that ran `ExecCalls`
+  up to 2 on a clean error-handling crate. The fix: gate the
+  `ExecCalls` case on `call.FirstArg != ""`, mirroring how
+  `SensitivePathReads` / `EnvCredentialReads` / `CloudMetadataCalls`
+  already require the first arg to match a catalog. **The lesson
+  generalizes: every "this construct is suspicious" Counts field
+  should require an arg that statically resolves**; an unresolvable
+  arg defaults to "legitimate dynamic dispatch", documented as a
+  conservative gap. This is the `re.compile`→`dynamic_eval`
+  precedent extended to a per-language idiom.
+- **Three-version clean→clean→weaponized > two-version synthetic
+  progression.** Per user direction during the design phase, the
+  cargo synthetic fixture uses three versions instead of the
+  two-version pattern Go/pypi/npm use. The middle (clean→clean) pair
+  is a regression guard against the anomaly firing on benign
+  evolution — it catches a class of false positives the two-version
+  fixture is blind to (any zero→non-zero transition between v1 and
+  v2 fires, even on benign growth, because the detector only sees
+  one pair). The third version makes the differential detector
+  prove it can stay quiet across one benign pair and fire across
+  the next. Strictly stronger; use three-version progressions for
+  future ecosystems.
+- **Pin source: tag-match is the cheapest viable form** when an
+  ecosystem has no publisher-asserted commit SHA in registry JSON.
+  cargo's `.cargo_vcs_info.json` IS available but only by fetching
+  each version's tarball, ~10× the HTTP cost. The tag-match emitter
+  (`internal/signal/registry/cargo/pintable.go`) gets ~100% pin
+  coverage on conventional crates (101/101 on anyhow, 310/312 on
+  serde) via two `git rev-parse --verify <tag>^{commit}` attempts
+  per version (`v<version>` then bare `<version>`). The per-pin
+  source label is `cargo-tag-match`; a future `.cargo_vcs_info.json`
+  upgrade pass slots in as a second tier (publisher-stamped, gated
+  through `fulcio.IsGitObjectID`), parallel to npm's
+  gitHead → attestation upgrade. **Don't pay tarball costs until
+  tag-match misses justify it.**
+- **Two-collector dispatch when the pin-table needs the clone but
+  the registry signals don't.** cargo's basic registry collector
+  (`last_publish`, `recent_downloads`, `owner_count`, …) runs in
+  the registry layer BEFORE `resolveClonePath`. The pin-table
+  emitter needs the clone, so it's a SEPARATE collector
+  (`cargo.PinTableCollector`) appended in the clone-required
+  layer with `cargo.NewClient()` re-instantiated — one extra
+  GetCrate call per analyze, acceptable. Both collectors share the
+  `Name()` string `cargo-registry` so the analyst-facing source
+  attribution is uniform. Parallel to how gopublish is its own
+  collector separate from the (nonexistent) Go registry
+  collector — the structural pattern is "split the pin-table
+  emitter when the dispatch layer dictates it" rather than restructure
+  registry-layer collector ordering.
+- **`build.rs`'s `fn main()` is cargo's import-time scope.** Rust
+  has no Python-style module-scope statements; the closest analog
+  is `build.rs` (which cargo invokes at `cargo build`). The
+  analyzer scopes `ImportTimeCallSites` to
+  `filepath.Base(path) == "build.rs" && call.InFn == "main"` —
+  every call (macro or fn) inside that body counts. A `src/main.rs`
+  `fn main()` is binary-startup execution, NOT import-time, and
+  does not contribute. This is the load-bearing decision for the
+  Trapdoor mapping: their entire payload lives in build.rs's
+  main(), and the differential detector spikes precisely there.
+- **Synthetic fixture safety hygiene.** Cargo fixtures that
+  exercise weaponized primitives must be (a) **non-compilable**
+  (the test `Cargo.toml` is a stub with no `[package]` block so a
+  curious dev can't accidentally `cargo build` the testdata), (b)
+  **obviously test-shaped**: the XOR key is
+  `"synthetic-test-fixture-not-real"` (not the real Trapdoor
+  literal), the attacker host uses the `.invalid` TLD reserved
+  for testing, credential strings are placeholder values, and (c)
+  **commented as fixture material** at every file so SOC scans
+  over the repo recognize them as test bytes. Adopt the same
+  discipline for any future ecosystem whose threat fixtures touch
+  real attack primitives.
+- **Live-dogfood findings become the regression suite.** Both
+  anyhow false positives (the `macro_rules!` `^=` and the
+  `Command::new(rustc_var)` build.rs idiom) became permanent
+  parser/analyzer unit tests *before* the analyzer fix landed,
+  not after. This is faithful TDD on a real-world finding — the
+  dogfood is not a one-time validation, it's a corpus generator
+  for the test suite. Document the finding in the test name
+  (`TestParse_XorAssign_InMacroRulesBody_NotCounted`,
+  `TestAnalyze_ExecCalls_UnresolvableArg_NoSpike`) so future
+  readers see the lineage from incident → test → fix.
+- **Deferred — `fetchVCSInfoSHA` silent fallback masks tampering
+  evidence (open signal-shape decision).** Every failure mode in
+  the vcs_info upgrade pass (`pintable.go:fetchVCSInfoSHA`)
+  currently collapses to `("", false)` and the pin retains its
+  tag-match SHA. Network / 404 / missing-entry reads as "publisher
+  hasn't adopted vcs_info or transient glitch"; depth-squatted
+  `src/.cargo_vcs_info.json`, malformed vcs_info JSON, and non-40-
+  hex SHA values are EVIDENCE OF TAMPERING and currently
+  indistinguishable from the benign cases — an analyst seeing a
+  `cargo-tag-match` row can't tell which class fired. Surfaced by
+  the 2026-05-27 adversarial review. Open design choice on how to
+  surface the tampering class: (a) new boolean field on the pin
+  (`vcs_info_tampered`) — wire-format change to consumers; (b)
+  sibling signal (`version_pin_table_tampering`) — new signal type
+  in the dispatch table; (c) record a non-retryable failure on the
+  pin table itself — loses per-version granularity. Defer until a
+  real-world tampering case is observed OR the same shape is needed
+  in another ecosystem (PyPI's `PKG-INFO` is the closest analog —
+  similar publisher-stamped metadata, same potential tamper surface).
+  No action in this branch beyond pinning the failure-mode
+  enumeration in `TestPinTableCollector_VCSInfoUpgrade_SilentFallback`.
+
+### npm / TypeScript (previous-newest — still highly transferable)
 
 - **The map held.** The §1 claim ("resolution, acquisition, provenance
   are generic; the new work is a bounded leaf") was true again. The
@@ -353,6 +502,40 @@ Pick a dogfood target whose registry JSON is < 10 MiB
   naturally non-zero** for any real package (`logging.getLogger`
   at module top, etc.). Their value is the **spike**, never the
   absolute. Don't design thresholds on absolute values.
+- **Differential detectors need an in-situ companion.** The
+  `source_evolution_anomaly` signal compares ADJACENT versions for
+  zero→non-zero crossings — it catches hijacks (clean→weaponized
+  transitions) but is structurally blind to born-malicious packages
+  whose first published version is already weaponized (the dominant
+  cargo/npm typo-squat shape, including the 2026-05-24 Trapdoor
+  cargo crates). No clean baseline → no crossing → quiet, even
+  though every catalog field is populated. The fix is an in-situ
+  companion (`source_evolution_concern`, `concern.go`): same matrix
+  rows, same Counts catalogs, evaluated **row-wise** instead of
+  pair-wise. Both signals are derived from the same matrix in the
+  same Collect call; they're independent (hijack fires both;
+  born-malicious fires only concern). Don't ship a differential
+  detector without a row-wise companion.
+- **The "rare on benign" field subset is the load-bearing decision
+  for absolute-value thresholding.** Not all Counts fields are
+  equal for in-situ detection. Three are *universally excluded*
+  because legitimate code routinely populates them — putting any
+  of them in an absolute-threshold signal would false-positive
+  across most of the ecosystem:
+    - `ImportTimeCallSites` (naturally non-zero per the lesson
+      above)
+    - `NetworkCallSites` (any HTTP-client crate / web framework)
+    - `Base64DecodeCalls` (crypto crates — sigstore has 18 on
+      live dogfood; per-package-purpose understanding would be
+      needed to disambiguate)
+  The remaining 9 fields constitute the rare-on-benign subset;
+  any non-zero value on those is signal-bearing without
+  cross-version context. Validated zero across
+  `pkg:cargo/{anyhow, serde}`, `pkg:golang/kong`, `pkg:npm/ms`,
+  `pkg:pypi/sigstore` on every selected row. **Future fields must
+  be dogfood-validated zero on legitimate packages before joining
+  the rare-on-benign subset; the exclusion list grows when
+  legitimate code is shown to populate a field.**
 
 ### Parsers
 

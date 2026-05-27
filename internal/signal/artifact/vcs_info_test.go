@@ -117,9 +117,9 @@ func TestParseVCSInfoSHA_Strict(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotSHA, gotOK := parseVCSInfoSHA([]byte(tc.payload))
+			gotSHA, gotOK := ParseVCSInfoSHA([]byte(tc.payload))
 			assert.Equal(t, tc.wantOK, gotOK,
-				"parseVCSInfoSHA returned ok=%v for %q (payload=%q)",
+				"ParseVCSInfoSHA returned ok=%v for %q (payload=%q)",
 				gotOK, tc.name, tc.payload)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantSHA, gotSHA)
@@ -205,7 +205,7 @@ func TestCargoVCSInfoIntent_DepthBoundedMatch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := cargoVCSInfoIntent.Match(stream.Entry{
+			got := CargoVCSInfoIntent.Match(stream.Entry{
 				Path: tc.path,
 				Type: tc.entryType,
 			})
@@ -216,27 +216,34 @@ func TestCargoVCSInfoIntent_DepthBoundedMatch(t *testing.T) {
 }
 
 // TestPublisherMetadataPaths verifies the per-ecosystem expected-
-// tarball-only filename list. Pinning these explicitly catches a
-// future "I added a metadata path to vcs_info.go but forgot to
-// document the rationale" regression — every entry here should
-// have a comment in vcs_info.go explaining why.
+// tarball-only filename list. Exact equality (not Contains) because
+// adding a path to this list is a security-sensitive decision: every
+// entry SUPPRESSES that filename from divergence reporting, so an
+// accidental addition of e.g. ".env" or "secret.key" would silently
+// hide tampered files from the publisher-metadata-aware diff. The
+// test fails on any extra entry, forcing a deliberate update with a
+// matching rationale comment in vcs_info.go.
 func TestPublisherMetadataPaths(t *testing.T) {
 	t.Parallel()
 
-	cargo := publisherMetadataPaths("cargo")
-	assert.Contains(t, cargo, ".cargo_vcs_info.json",
-		"cargo metadata list must include the vcs_info file — without "+
-			"it, every cargo crate's divergence falsely flags vcs_info as extra")
-	assert.Contains(t, cargo, "Cargo.toml.orig",
-		"cargo metadata list must include Cargo.toml.orig — `cargo "+
-			"package` writes both alongside the normalized Cargo.toml")
-	assert.Contains(t, cargo, "Cargo.lock",
-		"cargo metadata list must include Cargo.lock — `cargo publish` "+
-			"injects the lockfile into the .crate tarball regardless of "+
-			"whether the source repo commits one. Library crates (per Rust "+
-			"convention) gitignore Cargo.lock, so without this filter every "+
-			"library crate's divergence falsely flags Cargo.lock as extra. "+
-			"Surfaced by the blake3 dogfood run on this branch.")
+	// Cargo's documented metadata set — the rationale for each entry
+	// lives next to publisherMetadataPaths in vcs_info.go.
+	assert.Equal(t, []string{
+		".cargo_vcs_info.json",
+		"Cargo.toml.orig",
+		"Cargo.lock",
+	}, publisherMetadataPaths("cargo"),
+		"any addition to cargo metadata silently suppresses that "+
+			"filename from divergence — must be a deliberate change with "+
+			"matching rationale in vcs_info.go")
+
+	// PyPI's PEP 241 / core-metadata file. Every modern Python build
+	// backend (setuptools, hatch, flit, pdm, poetry) emits PKG-INFO
+	// at the sdist root; never committed to git.
+	assert.Equal(t, []string{"PKG-INFO"}, publisherMetadataPaths("pypi"),
+		"pypi metadata list must contain exactly PKG-INFO — "+
+			".egg-info/* paths are derived per-package in eggInfoPaths, "+
+			"not enumerated here")
 
 	assert.Empty(t, publisherMetadataPaths("npm"),
 		"npm has no equivalent fixed metadata; tarball contents are "+

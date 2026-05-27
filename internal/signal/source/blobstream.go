@@ -812,6 +812,35 @@ func isNodeSourceFile(path string) bool {
 	return true
 }
 
+// isRustSourceFile reports whether the given posix-style path is a
+// Rust source file the source-evolution analyzer wants to consume.
+// The Rust analog of isGoSourceFile / isPythonSourceFile /
+// isNodeSourceFile — same intent: the package's own authored runtime
+// source plus build.rs (the cargo build-time entry point, dominant
+// supply-chain vector for the 2026-05-24 Trapdoor campaign), but
+// not tests, benches, examples, or build output.
+//
+//   - non-.rs files
+//   - tests/, benches/, examples/ directories at any depth — not
+//     code that runs at consumer build/run time
+//   - target/ build output (cargo's default output dir)
+//   - vendor/ vendored deps
+//
+// build.rs at any depth IS admitted: it's the supply-chain-relevant
+// build-time entry point.
+func isRustSourceFile(path string) bool {
+	if !strings.HasSuffix(path, ".rs") {
+		return false
+	}
+	for seg := range strings.SplitSeq(path, "/") {
+		switch seg {
+		case "tests", "benches", "examples", "target", "vendor":
+			return false
+		}
+	}
+	return true
+}
+
 // isMissingObjectMessage reports whether the stderr text from a
 // failing git command contains a phrasing that indicates the
 // requested SHA is unknown or unresolvable. Conservative: matches

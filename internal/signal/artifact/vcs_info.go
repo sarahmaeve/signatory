@@ -11,11 +11,11 @@ import (
 	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 )
 
-// vcsInfoIntentName is the CaptureIntent.Name the cargo-side capture
+// VCSInfoIntentName is the CaptureIntent.Name the cargo-side capture
 // intent registers. Used as the lookup key in Manifest.Captured by
 // extractCargoVCSInfoSHA. Stable string — changing it would silently
 // break the post-fetch SHA recovery.
-const vcsInfoIntentName = "cargo-vcs-info"
+const VCSInfoIntentName = "cargo-vcs-info"
 
 // vcsInfoMaxBytes caps how many bytes the walker is willing to copy
 // for the vcs_info entry. Real .cargo_vcs_info.json files are well
@@ -27,7 +27,7 @@ const vcsInfoMaxBytes int64 = 64 * 1024
 // into the .crate tarball at the wrapping-directory root.
 const vcsInfoFileName = ".cargo_vcs_info.json"
 
-// cargoVCSInfoIntent is the CaptureIntent the artifact collector
+// CargoVCSInfoIntent is the CaptureIntent the artifact collector
 // registers when the entity ecosystem is cargo. The matcher accepts
 // the file at depth 0 (no wrapper) OR depth 1 under any wrapping
 // directory (the typical .crate layout: "<name>-<version>/...").
@@ -42,8 +42,8 @@ const vcsInfoFileName = ".cargo_vcs_info.json"
 // First-match-wins is enforced by stream.Walk; subsequent matches
 // land in Manifest.SkippedIntents with reason "duplicate match",
 // surfacing the squatting attempt as evidence.
-var cargoVCSInfoIntent = stream.CaptureIntent{
-	Name: vcsInfoIntentName,
+var CargoVCSInfoIntent = stream.CaptureIntent{
+	Name: VCSInfoIntentName,
 	Match: func(e stream.Entry) bool {
 		if e.Type != stream.EntryFile {
 			return false
@@ -76,7 +76,7 @@ type vcsInfoPayload struct {
 	} `json:"git"`
 }
 
-// parseVCSInfoSHA extracts the publisher-stamped commit SHA from a
+// ParseVCSInfoSHA extracts the publisher-stamped commit SHA from a
 // .cargo_vcs_info.json byte payload. Returns ("", false) on:
 //
 //   - Malformed JSON (parse error, truncated, garbage bytes).
@@ -90,7 +90,7 @@ type vcsInfoPayload struct {
 // All failure modes return cleanly rather than erroring — the
 // caller falls back to tag-match resolution, which is the
 // well-defined "no exact pair available" path.
-func parseVCSInfoSHA(payload []byte) (string, bool) {
+func ParseVCSInfoSHA(payload []byte) (string, bool) {
 	var p vcsInfoPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return "", false
@@ -130,11 +130,11 @@ func extractCargoVCSInfoSHA(manifest *stream.Manifest) (string, bool) {
 	if manifest == nil {
 		return "", false
 	}
-	bytes_, ok := manifest.Captured[vcsInfoIntentName]
+	bytes_, ok := manifest.Captured[VCSInfoIntentName]
 	if !ok {
 		return "", false
 	}
-	return parseVCSInfoSHA(bytes_)
+	return ParseVCSInfoSHA(bytes_)
 }
 
 // captureIntentsForEcosystem returns the per-ecosystem named-file
@@ -149,7 +149,7 @@ func extractCargoVCSInfoSHA(manifest *stream.Manifest) (string, bool) {
 func captureIntentsForEcosystem(ecosystem string) []stream.CaptureIntent {
 	switch ecosystem {
 	case "cargo":
-		return []stream.CaptureIntent{cargoVCSInfoIntent}
+		return []stream.CaptureIntent{CargoVCSInfoIntent}
 	default:
 		return nil
 	}
@@ -260,7 +260,7 @@ func walkGemArchive(ctx context.Context, src io.Reader,
 // cargo (`cargo publish` writes all three):
 //
 //   - .cargo_vcs_info.json — git provenance JSON (the same file
-//     parseVCSInfoSHA reads).
+//     ParseVCSInfoSHA reads).
 //   - Cargo.toml.orig — verbatim copy of the source Cargo.toml,
 //     written alongside the normalized Cargo.toml.
 //   - Cargo.lock — the lockfile. Always injected by `cargo publish`

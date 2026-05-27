@@ -492,6 +492,45 @@ incident-shaped corpus (the 6 Trapdoor crates and their
 `build.rs` files, while still observable on the wayback /
 mirror surface) that should drive TDD when the work lands.
 
+**Update 2026-05-26**: the cargo source-AST analyzer landed across
+branch `cargo-rust-ast` (commits `ad580f2` … `e3a65fc`). The
+per-attack-shape bucketing map and the explicit "structurally
+cannot see" list live at
+[`2026-05-26-cargo-ast-coverage.md`](2026-05-26-cargo-ast-coverage.md).
+The synthetic clean → clean → weaponized integration fixture under
+`internal/signal/source/collector_test.go` covers the Trapdoor
+primitive set (named env-credential reads, sensitive-path reads,
+persistence writes, IMDS contact, base64 decode, XOR obfuscation,
+attacker exfil, shell exec). The
+`XOR_KEY = "cargo-build-helper-2026"` primitive in particular
+spikes `XORAssignments` as predicted.
+
+The follow-on work also closed two gaps this incident exposed
+that weren't named explicitly in the original write-up:
+
+  - **Pin-source second tier (commit `c5d29bc`)**: the cargo
+    pin-table emitter now upgrades the recent-window pins from
+    `cargo-tag-match` to `cargo-vcs-info` by recovering the
+    publisher-stamped SHA from `.cargo_vcs_info.json` inside the
+    `.crate` tarball, parallel to npm's gitHead → attestation
+    upgrade. Live-dogfood on anyhow + serde: zero SHA divergence
+    between the two tiers.
+  - **Born-malicious detection signal class (commit `e3a65fc`)**:
+    the original differential `source_evolution_anomaly` was
+    structurally blind to the dominant Trapdoor shape (every
+    published version weaponized from v0.1.0 — no clean baseline
+    to cross from). A new in-situ companion
+    `source_evolution_concern` evaluates each row independently
+    against the rare-on-benign Counts subset (the 9 fields where
+    any non-zero value is signal-bearing without cross-version
+    context). The Trapdoor six crates' v0.1.0 would now fire
+    concern with `env_credential_reads`, `sensitive_path_reads`,
+    `sensitive_path_writes`, `exec_calls`, `xor_assignments`,
+    `cloud_metadata_calls` named — exactly the primitive set this
+    incident catalogued. Dogfood-validated zero on every
+    legitimate target (cargo/anyhow, cargo/serde, npm/ms,
+    golang/kong, pypi/sigstore).
+
 ## Open questions
 
 - **(Resolved 2026-05-24.)** Should the Layer 3 catalog-sharing

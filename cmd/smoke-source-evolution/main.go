@@ -176,9 +176,42 @@ func profileForTarget(target string) (string, ecosystemProfile, error) {
 			capApplies:      false,
 			bucketsExhaust:  false,
 		}, nil
+	case strings.HasPrefix(target, "pkg:cargo/"):
+		return strings.TrimPrefix(target, "pkg:cargo/"), ecosystemProfile{
+			matrixEcosystem: "cargo", matrixLanguage: "rust",
+			// The cargo pin-table emitter shares the cargo-registry
+			// source string with the basic registry collector (same
+			// analyst-facing source domain — see pintable.go's
+			// Name() doc), so smoke validation looks for the same
+			// signal-level Source as everything else cargo.
+			pinSignalSource: "cargo-registry",
+			// Two per-pin source tiers, parallel to npm's
+			// gitHead → attestation upgrade:
+			//   - cargo-tag-match: tag-resolved against the local
+			//     clone (publisher-asserted via tag metadata)
+			//   - cargo-vcs-info: recovered from
+			//     .cargo_vcs_info.json inside the .crate tarball
+			//     (publisher-stamped at `cargo publish` time)
+			// The upgrade pass restamps recent-window pins from the
+			// weaker to the stronger source when the tarball
+			// recovery succeeds; pins outside the window stay on
+			// cargo-tag-match.
+			pinValueSources: map[string]bool{
+				"cargo-tag-match": true,
+				"cargo-vcs-info":  true,
+			},
+			// crates.io has no publisher-asserted commit SHA in
+			// registry JSON, and both pin source tiers above write
+			// SHA-1 — `cargo publish` records git's native form, and
+			// `git rev-parse --verify` returns SHA-1. SHA-256 is not
+			// yet on the accepted set.
+			shaHexLens:     map[int]bool{shaHexLen: true},
+			capApplies:     false,
+			bucketsExhaust: false,
+		}, nil
 	}
 	return "", ecosystemProfile{}, fmt.Errorf(
-		"unsupported target %q: expected pkg:golang/, pkg:go/, pkg:npm/, or pkg:pypi/ prefix", target)
+		"unsupported target %q: expected pkg:golang/, pkg:go/, pkg:npm/, pkg:pypi/, or pkg:cargo/ prefix", target)
 }
 
 // analyzeTimeout bounds how long the analyze command can run.
@@ -199,7 +232,7 @@ const (
 func main() {
 	var target string
 	flag.StringVar(&target, "target", defaultTarget,
-		"package canonical URI to analyze (pkg:golang/… , pkg:npm/… , or pkg:pypi/…)")
+		"package canonical URI to analyze (pkg:golang/…, pkg:npm/…, pkg:pypi/…, or pkg:cargo/…)")
 	flag.Parse()
 
 	if err := run(target); err != nil {
@@ -275,7 +308,12 @@ func run(target string) error {
 		return err
 	}
 
-	printSmokeSummary(target, pinTable, matrix, anomaly, presentCount)
+	concern, err := validateSourceConcern(result, rep)
+	if err != nil {
+		return err
+	}
+
+	printSmokeSummary(target, pinTable, matrix, anomaly, concern, presentCount)
 	return nil
 }
 
@@ -631,6 +669,49 @@ func validateSourceAnomaly(result analyzeJSON, rep *reporter) (anomalyValue, err
 	return a, nil
 }
 
+// validateSourceConcern finds the source_evolution_concern signal,
+// validates its metadata, parses its value, and asserts the
+// load-bearing healthy-library invariant: a well-maintained library
+// must NOT fire the in-situ concern. Firing on a clean target
+// indicates the rare-on-benign field set or the MinConcernFeatures
+// threshold is too aggressive — same load-bearing role as the
+// anomaly false-positive guard above.
+func validateSourceConcern(result analyzeJSON, rep *reporter) (concernValue, error) {
+	rep.step("find source_evolution_concern signal")
+	sig, ok := result.findSignal("source_evolution_concern")
+	if !ok {
+		return concernValue{}, enumerateMissingSignal(result, "source_evolution_concern")
+	}
+	rep.pass("source_evolution_concern present")
+
+	rep.step("validate source_evolution_concern metadata")
+	if err := validateMetadata(sig, "publication", "very-high", "source-evolution"); err != nil {
+		return concernValue{}, err
+	}
+	rep.pass("metadata: group=publication forgery=very-high source=source-evolution")
+
+	rep.step("validate concern value shape — healthy library should not fire concern")
+	var c concernValue
+	if err := json.Unmarshal(sig.Value, &c); err != nil {
+		return concernValue{}, fmt.Errorf("unmarshal source_evolution_concern value: %w", err)
+	}
+	if c.ConcernPresent {
+		return concernValue{}, fmt.Errorf(
+			"concern fired on healthy library — false positive!\n"+
+				"  first_concern_version: %s\n"+
+				"  concerning_features:   %v\n"+
+				"  This indicates the in-situ threshold (MinConcernFeatures=2) is\n"+
+				"  too sensitive for legitimate code, OR the rare-on-benign field\n"+
+				"  set is too inclusive. Either the target's source legitimately\n"+
+				"  populates 2+ of the catalog fields (e.g. an ssh-keychain manager\n"+
+				"  that legitimately reads ~/.ssh AND execs a shell), or the\n"+
+				"  threshold/field-set needs tightening.",
+			c.FirstConcernVersion, c.ConcerningFeatures)
+	}
+	rep.pass("concern_present=false (no false positive on healthy library)")
+	return c, nil
+}
+
 // printSmokeSummary writes the final all-checks-passed banner plus
 // a one-line view of each signal's headline numbers — pins+missing
 // counts for the pin table, total+present row counts for the
@@ -642,6 +723,7 @@ func printSmokeSummary(
 	pinTable pinTableValue,
 	matrix matrixValue,
 	anomaly anomalyValue,
+	concern concernValue,
 	presentCount int,
 ) {
 	fmt.Println()
@@ -651,6 +733,7 @@ func printSmokeSummary(
 		len(pinTable.Pins), len(pinTable.MissingOriginVersions), len(pinTable.FetchFailedVersions))
 	fmt.Printf("matrix:                %d rows (%d present)\n", len(matrix.Rows), presentCount)
 	fmt.Printf("anomaly_present:       %v (expected: false on healthy library)\n", anomaly.AnomalyPresent)
+	fmt.Printf("concern_present:       %v (expected: false on healthy library)\n", concern.ConcernPresent)
 	if len(matrix.Rows) > 0 && matrix.Rows[0].TagSHALocalStatus == "present" {
 		newest := matrix.Rows[0]
 		fmt.Printf("Newest row:            %s @ %s\n",
@@ -826,6 +909,14 @@ type anomalyValue struct {
 	FirstAnomalousVersion string   `json:"first_anomalous_version,omitempty"`
 	PreviousVersion       string   `json:"previous_version,omitempty"`
 	SpikedFeatures        []string `json:"spiked_features,omitempty"`
+}
+
+// concernValue mirrors source.ConcernValue. Local definition so the
+// smoke's contract stays independent of the producer's struct shape.
+type concernValue struct {
+	ConcernPresent      bool     `json:"concern_present"`
+	FirstConcernVersion string   `json:"first_concern_version,omitempty"`
+	ConcerningFeatures  []string `json:"concerning_features,omitempty"`
 }
 
 // =====================================================

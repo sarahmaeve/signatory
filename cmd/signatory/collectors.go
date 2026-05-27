@@ -387,8 +387,24 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 		// Appended LAST in the dispatch order so by the time it
 		// runs, the orchestrator's in-run accumulator already holds
 		// the version_pin_table emitted earlier in the same run.
+		// Cargo pin-table emitter. crates.io exposes no publisher-
+		// asserted commit SHA in registry JSON, so the cargo pin
+		// table is synthesized post-clone by tag-matching each
+		// non-yanked, time-orderable version against the local
+		// clone's refs. Runs BEFORE source-evolution so the
+		// in-run accumulator already holds version_pin_table by the
+		// time the source-evolution collector reads it. (For npm /
+		// pypi / golang the equivalent step runs in the registry
+		// layer because their pin sources don't need a clone.)
+		if entity.Ecosystem == "cargo" || entity.Ecosystem == "crates" {
+			collectors = append(collectors,
+				cargocollector.NewPinTableCollector(cargocollector.NewClient(), clonePath),
+			)
+		}
+
 		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" ||
-			entity.Ecosystem == "pypi" || entity.Ecosystem == "npm" {
+			entity.Ecosystem == "pypi" || entity.Ecosystem == "npm" ||
+			entity.Ecosystem == "cargo" || entity.Ecosystem == "crates" {
 			pinSource := sourcecollector.NewPinSource(opts.InRunResult, opts.Store)
 			collectors = append(collectors,
 				sourcecollector.NewCollector(clonePath, pinSource, opts.AllowFetch),

@@ -603,6 +603,19 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"refactors and legitimate feature additions can also produce multi-feature spikes — the signal is an anomaly flag, not a verdict; the analyst reads the matrix row at the spike SHA to classify",
 			"threshold is conservative (multi-feature joint, false-negative-heavy by design); false negatives are recoverable because the matrix itself is in the handoff and the analyst can still notice",
 			"absence does not mean clean — a sleeper that has not yet been weaponized produces a flat matrix, no anomaly fires, and the operator's metadata signals (account age, tag signing) carry the load until source diverges",
+			"differential by construction: does NOT fire on born-malicious packages whose first published version is already weaponized (no clean baseline to cross from). The companion signal source_evolution_concern covers that class.",
+		},
+	},
+	"source_evolution_concern": {
+		Type:              "source_evolution_concern",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Boolean+pointer summary derived from source_evolution_matrix: a single version's AST counts independently fire two or more rare-on-benign catalog features (env-credential reads, sensitive-path reads/writes, exec, XOR-assign, cloud-metadata calls, dynamic-eval, install-hook overrides, init), without requiring a cross-version transition. Names the first chronological concerning version and which features fired. Companion to source_evolution_anomaly: where anomaly catches clean→weaponized transitions, concern catches born-malicious packages whose first published version already carries the payload (the dominant typo-squat shape, exemplified by the 2026-05-24 Trapdoor cargo crates).",
+		Caveats: []string{
+			"threshold is conservative (2+ rare-on-benign features required); a single field firing alone — even one ordinarily near-zero on benign code — does not trip the boolean",
+			"three Counts fields are deliberately excluded from the rare-on-benign subset because they are naturally non-zero on legitimate code: import_time_call_sites (cargo build.rs idiom + python module-scope getLogger), network_call_sites (any HTTP client crate), base64_decode_calls (crypto crates). Concerning_features will never name them.",
+			"a benign-but-high-risk package (e.g. an ssh keychain manager that legitimately reads ~/.ssh AND execs a shell) can fire the signal; the analyst reads the matrix row at the first concerning version to classify intent",
+			"absence does not mean clean — a sleeper that does no catalog-matched I/O until exploited would produce zero rare-on-benign counts and stay quiet here; the metadata signals carry the load until source diverges",
 		},
 	},
 	"artifact_url": {
