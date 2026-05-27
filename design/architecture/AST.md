@@ -375,6 +375,27 @@ Pick a dogfood target whose registry JSON is < 10 MiB
   (`TestParse_XorAssign_InMacroRulesBody_NotCounted`,
   `TestAnalyze_ExecCalls_UnresolvableArg_NoSpike`) so future
   readers see the lineage from incident → test → fix.
+- **Deferred — `fetchVCSInfoSHA` silent fallback masks tampering
+  evidence (open signal-shape decision).** Every failure mode in
+  the vcs_info upgrade pass (`pintable.go:fetchVCSInfoSHA`)
+  currently collapses to `("", false)` and the pin retains its
+  tag-match SHA. Network / 404 / missing-entry reads as "publisher
+  hasn't adopted vcs_info or transient glitch"; depth-squatted
+  `src/.cargo_vcs_info.json`, malformed vcs_info JSON, and non-40-
+  hex SHA values are EVIDENCE OF TAMPERING and currently
+  indistinguishable from the benign cases — an analyst seeing a
+  `cargo-tag-match` row can't tell which class fired. Surfaced by
+  the 2026-05-27 adversarial review. Open design choice on how to
+  surface the tampering class: (a) new boolean field on the pin
+  (`vcs_info_tampered`) — wire-format change to consumers; (b)
+  sibling signal (`version_pin_table_tampering`) — new signal type
+  in the dispatch table; (c) record a non-retryable failure on the
+  pin table itself — loses per-version granularity. Defer until a
+  real-world tampering case is observed OR the same shape is needed
+  in another ecosystem (PyPI's `PKG-INFO` is the closest analog —
+  similar publisher-stamped metadata, same potential tamper surface).
+  No action in this branch beyond pinning the failure-mode
+  enumeration in `TestPinTableCollector_VCSInfoUpgrade_SilentFallback`.
 
 ### npm / TypeScript (previous-newest — still highly transferable)
 

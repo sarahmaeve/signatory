@@ -29,10 +29,26 @@ var ErrNotFound = fmt.Errorf("cargo: %w", httpx.ErrNotFound)
 // maxCrateNameLength is crates.io's published cap.
 const maxCrateNameLength = 64
 
+// maxCrateVersionLength is the upper bound enforced on registry-
+// supplied version strings before they flow into git argv (resolveTagSHA)
+// or HTTP URL paths (fetchVCSInfoSHA). Semver itself doesn't cap
+// length, but anything past 256 bytes is well outside legitimate use
+// and within the "obviously crafted" range for publisher-controlled
+// JSON.
+const maxCrateVersionLength = 256
+
 // crateNamePattern matches the crates.io name grammar: starts with a
 // letter, then letters, digits, hyphens, or underscores. Max 64 chars
 // is enforced separately by length check.
 var crateNamePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// crateVersionPattern matches the cargo / semver version grammar:
+// starts with an alphanumeric, then any of `0-9 A-Z a-z . _ + -`.
+// The leading-alphanumeric rule is the load-bearing safety property
+// — a leading `-` would let a publisher-controlled v.Num be parsed
+// as a git flag when concatenated into `rev-parse --verify <ver>^{commit}`.
+// Length is enforced separately by maxCrateVersionLength.
+var crateVersionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]*$`)
 
 // crateUserAgent is the User-Agent the cargo client sends. crates.io
 // REQUIRES a User-Agent; requests without one get 403. Per crates.io's
@@ -55,6 +71,36 @@ func ValidateCrateName(name string) error {
 	if !crateNamePattern.MatchString(name) {
 		return fmt.Errorf("crate name %q does not match crates.io grammar "+
 			"(allowed: a-z A-Z 0-9 _ -, must start with a letter)", name)
+	}
+	return nil
+}
+
+// ValidateCrateVersion enforces the cargo / semver version grammar at
+// the trust boundary, before publisher-controlled v.Num flows into
+// `git rev-parse --verify <version>^{commit}` (resolveTagSHA) or
+// URL paths (fetchVCSInfoSHA).
+//
+// The load-bearing rejection is leading `-`: gitenv.NewCmd's contract
+// says argv-validation is the caller's responsibility, and a v.Num
+// like `--upload-pack=foo` would be interpreted by git's argument
+// parser as a flag rather than a ref. safeOverrides neutralizes the
+// known-bad git config keys (gpg.program, core.hooksPath, etc.), so
+// this isn't an RCE path today — but the discipline is the right
+// trust boundary regardless of which downstream defenses exist.
+//
+// Behaviour pinned by TestValidateCrateVersion.
+func ValidateCrateVersion(version string) error {
+	if version == "" {
+		return fmt.Errorf("crate version is empty")
+	}
+	if len(version) > maxCrateVersionLength {
+		return fmt.Errorf("crate version exceeds %d-byte maximum (got %d)",
+			maxCrateVersionLength, len(version))
+	}
+	if !crateVersionPattern.MatchString(version) {
+		return fmt.Errorf("crate version %q does not match the cargo version "+
+			"grammar (allowed: 0-9 A-Z a-z . _ + -, must start with an "+
+			"alphanumeric)", version)
 	}
 	return nil
 }

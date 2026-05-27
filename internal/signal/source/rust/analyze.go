@@ -260,37 +260,26 @@ var networkCallees = []string{
 }
 
 // matchesCatalog reports whether callee equals a catalog entry, or
-// — for `::`-DOTTED catalog entries only — ends with a `::`
-// boundary + the entry. The boundary split is the specificity
-// contract AST.md §4 requires: a method merely named `.var` on
-// something else (callee like "config.var") is not `env::var` and
-// must not spike the catalog.
+// has a `::` module-boundary immediately preceding it. The boundary
+// rule is the AST.md §4 specificity contract: a method merely named
+// `.var` on a local (callee shape "config.var") is not `env::var`
+// and must not spike the catalog. Equally, `foo_env::var` must not
+// match `env::var` — the boundary character must be a literal `::`,
+// not just trailing letters that happen to line up.
 //
-// Method-chain entries (e.g. `STANDARD.decode`) match exactly OR
-// when callee has a `::` separator before the entry: parser
-// alias-expansion turns `STANDARD.decode` into something like
-// `base64::engine::general_purpose::STANDARD.decode`, and the
-// `::STANDARD.decode` boundary fires the suffix match. A method
-// chain on an unaliased name remains an exact-only match.
+// One `HasSuffix(callee, "::"+entry)` handles both ::-dotted entries
+// (e.g. `env::var`) and method-chain entries (e.g. `STANDARD.decode`):
+// for the latter, parser alias-expansion produces fully-qualified
+// callees like `base64::engine::general_purpose::STANDARD.decode`,
+// and the `::STANDARD.decode` boundary fires the same suffix match.
 //
-// Substrings without a `::` boundary still don't match
-// (foo_env::var won't match env::var). Mirrors the python and node
-// analyzers' matcher with the same specificity discipline.
+// Behaviour is pinned by TestMatchesCatalog_SpecificityContract; the
+// matcher mirrors the python and node analyzers' identical rule.
 func matchesCatalog(callee string, catalog []string) bool {
 	for _, entry := range catalog {
 		if callee == entry {
 			return true
 		}
-		if strings.Contains(entry, "::") && strings.HasSuffix(callee, "::"+entry) {
-			return true
-		}
-		// Method-chain catalog entry without `::` (e.g.
-		// "STANDARD.decode"): still admit a `::` boundary match so
-		// alias-expanded paths land. Without this admission, an
-		// expanded callee like
-		// "base64::engine::general_purpose::STANDARD.decode" would
-		// not match the entry "STANDARD.decode" by exact, and the
-		// `strings.Contains(entry, "::")` gate would reject it.
 		if strings.HasSuffix(callee, "::"+entry) {
 			return true
 		}

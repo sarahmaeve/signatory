@@ -1,9 +1,12 @@
 package source
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/signal/source/astfeature"
 )
@@ -238,4 +241,64 @@ func TestDetectConcern_FieldOrderingStable(t *testing.T) {
 	require.Equal(want, got.ConcerningFeatures,
 		"output must be in canonical Counts field-declaration order, "+
 			"NOT alphabetical or input-order")
+}
+
+// TestConcerningFeatures_FieldExhaustiveness reflects over every
+// astfeature.Counts field and asserts each one is either:
+//   - in the documented exclusion set (and so must NOT fire concern), OR
+//   - wired into concerningFeatures() with its json-tag name (and so
+//     MUST fire concern when populated in isolation).
+//
+// Adding a new Counts field without either listing it in
+// rareOnBenignExclusions below OR wiring it into concerningFeatures
+// will fail this test. That's the load-bearing invariant — the prior
+// suite hand-listed the 9 included fields, so a 13th-field oversight
+// in concern.go would have slipped through silently.
+func TestConcerningFeatures_FieldExhaustiveness(t *testing.T) {
+	t.Parallel()
+
+	// The documented exclusions (see concerningFeatures's doc
+	// comment in concern.go). Keys are the json-tag names; values
+	// are short rationales mirrored from the production-file comment
+	// so a drift in either side fails review.
+	rareOnBenignExclusions := map[string]string{
+		"network_call_sites":     "any HTTP-client / web framework legitimately populates",
+		"base64_decode_calls":    "crypto crates routinely decode base64 (purpose-blind)",
+		"import_time_call_sites": "naturally non-zero on every real package",
+	}
+
+	countsType := reflect.TypeFor[astfeature.Counts]()
+	for i := range countsType.NumField() {
+		field := countsType.Field(i)
+		tag := field.Tag.Get("json")
+		if comma := strings.IndexByte(tag, ','); comma >= 0 {
+			tag = tag[:comma]
+		}
+		require.NotEmptyf(t, tag,
+			"astfeature.Counts.%s must carry a json tag — concerningFeatures "+
+				"identifies fields by tag name", field.Name)
+
+		t.Run(field.Name, func(t *testing.T) {
+			t.Parallel()
+			var c astfeature.Counts
+			reflect.ValueOf(&c).Elem().Field(i).SetInt(1)
+
+			fired := concerningFeatures(c)
+
+			if rationale, excluded := rareOnBenignExclusions[tag]; excluded {
+				assert.Emptyf(t, fired,
+					"%s is in the documented exclusion set (%s) — populating "+
+						"it must NOT fire concern. If you intentionally moved this "+
+						"field INTO the rare-on-benign subset, also remove it from "+
+						"rareOnBenignExclusions in the test.",
+					field.Name, rationale)
+				return
+			}
+			assert.Equalf(t, []string{tag}, fired,
+				"%s (json:%q) must fire concern when populated in isolation. "+
+					"Either wire it into concerningFeatures() or add it to "+
+					"rareOnBenignExclusions with a rationale comment.",
+				field.Name, tag)
+		})
+	}
 }

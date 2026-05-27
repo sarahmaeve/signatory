@@ -247,6 +247,17 @@ func (c *PinTableCollector) recordVersionPinTable(ctx context.Context,
 		}
 		processed++
 
+		// Trust boundary: publisher controls v.Num via the crates.io
+		// JSON. Refuse to flow malformed version strings into either
+		// `git rev-parse --verify <ver>^{commit}` argv or the tarball
+		// URL — leading `-` would be parsed as a flag by git, and
+		// control bytes / shell metachars are out-of-grammar regardless.
+		// Behaviour pinned by TestValidateCrateVersion.
+		if err := ValidateCrateVersion(v.Num); err != nil {
+			missingOrigin = append(missingOrigin, v.Num)
+			continue
+		}
+
 		sha, ok := c.resolveTagSHA(ctx, v.Num)
 		if !ok || !fulcio.IsGitObjectID(sha) {
 			missingOrigin = append(missingOrigin, v.Num)
@@ -333,7 +344,15 @@ func (c *PinTableCollector) upgradePinsFromTarballs(ctx context.Context,
 	packageName string, pins []versionPin) {
 
 	upgradeCount := min(crossVersionWindow, len(pins))
-	for i := 0; i < upgradeCount; i++ {
+	for i := range upgradeCount {
+		// Explicit cancellation check matches the peer
+		// rust.Analyzer.Analyze pattern (analyze.go:42). The http
+		// client also honors ctx, so a cancelled ctx would already
+		// fail each fetch fast — this just makes the loop's
+		// cancellation contract visible rather than implicit.
+		if ctx.Err() != nil {
+			return
+		}
 		sha, ok := c.fetchVCSInfoSHA(ctx, packageName, pins[i].Version)
 		if !ok {
 			continue

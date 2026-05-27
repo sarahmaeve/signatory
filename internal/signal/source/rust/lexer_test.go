@@ -273,10 +273,24 @@ func TestLex_BlockComment_NestedSkipped(t *testing.T) {
 func TestLex_BlockComment_UnterminatedAtEOF(t *testing.T) {
 	t.Parallel()
 	toks := tokenize(t, "let x = 1; /* unterminated")
-	// Lenient: lexer must reach EOF without erroring.
-	// Tokens before the comment must still emit.
-	assert.NotEmpty(t, toks)
+	// Lenient: lexer must reach EOF without erroring, and an
+	// unterminated `/* ... ` must consume to EOF rather than leak
+	// "unterminated" as a TokenName the parser would treat as a real
+	// identifier. Pin the exact 5-token output so a regression that
+	// breaks the comment scan and emits `unterminated`, `comment` as
+	// names fails here.
+	require.Len(t, toks, 5,
+		"exactly 5 tokens before the unterminated `/*` (let, x, =, 1, ;)")
 	assert.Equal(t, "let", toks[0].Value)
+	assert.Equal(t, "x", toks[1].Value)
+	assert.Equal(t, "=", toks[2].Value)
+	assert.Equal(t, "1", toks[3].Value)
+	assert.Equal(t, ";", toks[4].Value)
+	for _, tk := range toks {
+		assert.NotEqualf(t, "unterminated", tk.Value,
+			"`unterminated` must never leak as a token — the unterminated "+
+				"`/* ` consumes to EOF")
+	}
 }
 
 func TestLex_DocComment_Skipped(t *testing.T) {

@@ -574,14 +574,169 @@ fn main() {
 }
 `
 	c := countsAtPath(t, "build.rs", src)
-	assert.Positive(t, c.XORAssignments, "XOR loop")
-	assert.Positive(t, c.EnvCredentialReads, "env::var with credential names")
-	assert.Positive(t, c.SensitivePathReads, "fs::read_to_string on credential paths")
-	assert.Positive(t, c.Base64DecodeCalls, "base64::decode")
-	assert.Positive(t, c.NetworkCallSites, "reqwest::blocking::get to attacker host")
-	assert.Positive(t, c.CloudMetadataCalls, "reqwest::blocking::get to IMDS")
-	assert.Positive(t, c.SensitivePathWrites, "fs::write to authorized_keys")
-	assert.Positive(t, c.ExecCalls, "Command::new(sh)")
-	assert.Positive(t, c.ImportTimeCallSites,
-		"every call inside main() in build.rs counts as import-time")
+	// Each catalog-field count maps to a specific fixture feature;
+	// pinning exact integers catches both regressions (parser drops a
+	// catalog match) AND over-counts (a parser bug double-records).
+	// `Positive` alone would tolerate a 10x over-count from e.g.
+	// accumulate() running twice per file.
+	assert.Equal(t, 1, c.XORAssignments,
+		"exactly one `^=` in the for-loop body")
+	assert.Equal(t, 2, c.EnvCredentialReads,
+		"AWS_SECRET_ACCESS_KEY + GITHUB_TOKEN")
+	assert.Equal(t, 2, c.SensitivePathReads,
+		"id_rsa + .aws/credentials")
+	assert.Equal(t, 1, c.Base64DecodeCalls,
+		"single base64::decode site")
+	assert.Equal(t, 1, c.NetworkCallSites,
+		"only the attacker.test.invalid GET — the IMDS GET goes to "+
+			"CloudMetadataCalls instead")
+	assert.Equal(t, 1, c.CloudMetadataCalls,
+		"169.254.169.254 IMDS GET")
+	assert.Equal(t, 1, c.SensitivePathWrites,
+		"authorized_keys write")
+	assert.Equal(t, 1, c.ExecCalls,
+		"Command::new(\"sh\") — chained .arg/.output don't double-fire")
+	// ImportTimeCallSites counts every call inside build.rs's main(),
+	// including chained methods (`.unwrap_or_default()`, `.arg()`).
+	// Lower-bound to the 9 catalog-matched calls — the load-bearing
+	// property is "at least every catalog match registered as
+	// import-time," not the exact method-chain accounting.
+	assert.GreaterOrEqual(t, c.ImportTimeCallSites, 9,
+		"every named-catalog call inside build.rs main() registers as "+
+			"import-time (chained .unwrap_or_default()/.arg() etc. drive "+
+			"the actual count higher)")
+}
+
+// ============================================================
+// matchesCatalog: AST.md §4 specificity contract
+// ============================================================
+
+// TestMatchesCatalog_SpecificityContract pins the boundary-discipline
+// behaviour matchesCatalog must satisfy per AST.md §4: a callee whose
+// terminal characters spell the same letters as a catalog entry but
+// aren't separated by a `::` module boundary (and aren't an exact
+// match) must NOT match. Past silent regressions of this contract
+// would spike e.g. `config.var` into EnvCredentialReads.
+//
+// Mirrors the python and node analyzers' identical matcher rule.
+func TestMatchesCatalog_SpecificityContract(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		callee  string
+		catalog []string
+		want    bool
+	}{
+		// -- Positive: exact match against ::-dotted entry --
+		{
+			name:    "exact match on ::-dotted entry",
+			callee:  "env::var",
+			catalog: []string{"env::var"},
+			want:    true,
+		},
+		// -- Positive: ::-boundary suffix match against ::-dotted entry --
+		// std::env::var ends with ::env::var, so the boundary is a
+		// real module boundary; this is the most common shape after
+		// alias-expansion turns `var(...)` into `std::env::var`.
+		{
+			name:    "::-boundary suffix match on ::-dotted entry",
+			callee:  "std::env::var",
+			catalog: []string{"env::var"},
+			want:    true,
+		},
+		// -- Positive: exact match on method-chain entry --
+		{
+			name:    "exact match on method-chain entry",
+			callee:  "STANDARD.decode",
+			catalog: []string{"STANDARD.decode"},
+			want:    true,
+		},
+		// -- Positive: ::-boundary match on method-chain entry --
+		// Parser alias-expansion: `use base64::engine::general_purpose::STANDARD;`
+		// turns `STANDARD.decode()` into this fully-qualified shape;
+		// the catalog entry stays `STANDARD.decode` and must still
+		// match.
+		{
+			name:    "::-boundary suffix match on method-chain entry",
+			callee:  "base64::engine::general_purpose::STANDARD.decode",
+			catalog: []string{"STANDARD.decode"},
+			want:    true,
+		},
+		// -- Negative: same letters, no `::` boundary --
+		// The whole reason matchesCatalog exists. A method literally
+		// named `.var` on some local — callee shape "config.var" — is
+		// semantically unrelated to env::var. Past silent regression
+		// of this discipline would spike legitimate config-handling
+		// crates into EnvCredentialReads.
+		{
+			name:    "config.var must NOT match env::var",
+			callee:  "config.var",
+			catalog: []string{"env::var"},
+			want:    false,
+		},
+		// -- Negative: prefix-letter mash, no `::` boundary --
+		// The `::` before the catalog entry must be a literal `::`,
+		// not just the trailing characters happening to align — a
+		// crate that names its own module `foo_env` with a `var` fn
+		// must not collide with std::env::var.
+		{
+			name:    "foo_env::var must NOT match env::var",
+			callee:  "foo_env::var",
+			catalog: []string{"env::var"},
+			want:    false,
+		},
+		{
+			name:    "my_fs::write must NOT match fs::write",
+			callee:  "my_fs::write",
+			catalog: []string{"fs::write"},
+			want:    false,
+		},
+		// -- Negative: completely unrelated --
+		{
+			name:    "unrelated callee against ::-entry",
+			callee:  "hello",
+			catalog: []string{"env::var"},
+			want:    false,
+		},
+		// -- Negative: method-chain dot is not a `::` boundary --
+		// `config.STANDARD.decode` has the entry as a STRING suffix
+		// but the boundary char is `.`, not `::`. Must not match.
+		{
+			name:    "config.STANDARD.decode must NOT match STANDARD.decode",
+			callee:  "config.STANDARD.decode",
+			catalog: []string{"STANDARD.decode"},
+			want:    false,
+		},
+		// -- Edge: empty catalog --
+		{
+			name:    "empty catalog never matches",
+			callee:  "env::var",
+			catalog: []string{},
+			want:    false,
+		},
+		// -- Edge: empty callee --
+		{
+			name:    "empty callee never matches",
+			callee:  "",
+			catalog: []string{"env::var"},
+			want:    false,
+		},
+		// -- Positive: multiple entries, non-first matches --
+		// Guards against a regression that breaks early on the first
+		// non-match instead of iterating.
+		{
+			name:    "second-position entry matches",
+			callee:  "fs::write",
+			catalog: []string{"fs::read", "fs::write", "fs::read_to_string"},
+			want:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := matchesCatalog(tc.callee, tc.catalog)
+			assert.Equal(t, tc.want, got,
+				"matchesCatalog(%q, %v) = %v, want %v",
+				tc.callee, tc.catalog, got, tc.want)
+		})
+	}
 }

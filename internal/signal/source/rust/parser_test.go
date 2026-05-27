@@ -1,6 +1,7 @@
 package rust
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -430,17 +431,81 @@ fn main() { foo(); }
 
 func TestParse_LenientOnGarbage(t *testing.T) {
 	t.Parallel()
-	for _, src := range []string{
-		`fn`,
-		`fn (`,
-		`use ::`,
-		`use std::{{`,
-		`}`,
-		`{{{{`,
-		`)))))`,
-		`fn f<<>>(x) { y(); }`, // double `<` is `<<` lexed as op
-	} {
-		_, err := Parse([]byte(src))
-		assert.NoError(t, err, "Parse must never error on garbage (src=%q)", src)
+	cases := []struct {
+		name string
+		src  string
+		// wantCalls is the exact expected len(m.Calls). The strict
+		// count guards against a parser regression that spuriously
+		// records calls on garbage shapes — e.g. counting the `fn`
+		// keyword as a callee.
+		wantCalls int
+		// wantUses is the exact expected len(m.Uses).
+		wantUses int
+		// wantCallees is the subset of Call.Callee values that MUST
+		// appear (order-independent). Non-exhaustive — extra calls
+		// are allowed beyond the listed ones, but every listed entry
+		// must be present. Empty means no positive Callee assertion.
+		wantCallees []string
+	}{
+		{
+			name: "bare fn keyword",
+			src:  `fn`,
+		},
+		{
+			name: "fn with paren only",
+			src:  `fn (`,
+		},
+		{
+			name: "use with empty path",
+			src:  `use ::`,
+		},
+		{
+			name: "use with double open brace",
+			src:  `use std::{{`,
+		},
+		{
+			name: "stray close brace",
+			src:  `}`,
+		},
+		{
+			name: "runs of opens",
+			src:  `{{{{`,
+		},
+		{
+			name: "runs of closes",
+			src:  `)))))`,
+		},
+		{
+			// `<<` is one shift-left token (not two `<` tokens), so
+			// parseFnHeader doesn't recognize the generics and gives
+			// up — but the main run() loop still walks the trailing
+			// `{ y(); }` and records the call. The leniency contract:
+			// a malformed prelude must not blind the rest of the file.
+			name:        "malformed generics, body still recovers",
+			src:         `fn f<<>>(x) { y(); }`,
+			wantCalls:   1,
+			wantCallees: []string{"y"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := Parse([]byte(tc.src))
+			require.NoError(t, err,
+				"Parse must never error on garbage (src=%q)", tc.src)
+			require.NotNil(t, m,
+				"Parse must always return a non-nil Module")
+			assert.Len(t, m.Calls, tc.wantCalls,
+				"drift in Calls count (m.Calls=%v)", m.Calls)
+			assert.Len(t, m.Uses, tc.wantUses,
+				"drift in Uses count (m.Uses=%v)", m.Uses)
+			for _, want := range tc.wantCallees {
+				found := slices.ContainsFunc(m.Calls, func(c Call) bool {
+					return c.Callee == want
+				})
+				assert.True(t, found,
+					"expected callee %q in m.Calls=%v after leniency recovery",
+					want, m.Calls)
+			}
+		})
 	}
 }

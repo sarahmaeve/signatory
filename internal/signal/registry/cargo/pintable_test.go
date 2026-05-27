@@ -793,3 +793,78 @@ func TestPinTableCollector_VCSInfoUpgrade_BoundedByWindow(t *testing.T) {
 			i, pt.Pins[i].Version)
 	}
 }
+
+// TestPinTableCollector_MalformedVersionNum_LandsInMissingOrigin
+// covers the publisher-controlled-v.Num trust-boundary gate. A
+// crates.io publisher who returns a v.Num like `--upload-pack=foo`
+// must NOT see that string flow into `git rev-parse --verify
+// <ver>^{commit}` argv. ValidateCrateVersion in recordVersionPinTable
+// short-circuits this path: malformed versions are recorded in
+// MissingOriginVersions and the SHA-resolution loop is never entered
+// for them. Behaviour pinned at the trust boundary
+// (TestValidateCrateVersion).
+//
+// The well-formed sibling version still pins normally — proving the
+// gate is per-version and doesn't poison the whole table.
+func TestPinTableCollector_MalformedVersionNum_LandsInMissingOrigin(t *testing.T) {
+	t.Parallel()
+
+	clonePath, _ := initRepoWithTags(t, []string{"v0.1.0"})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/crates/synth" {
+			cr := CrateResponse{
+				Crate: Crate{Name: "synth"},
+				Versions: []Version{
+					// Well-formed: must pin via tag-match.
+					{Num: "0.1.0", CreatedAt: "2026-01-01T10:00:00Z"},
+					// Adversarial v.Num shapes a hostile publisher
+					// might return. Each must land in MissingOrigin
+					// rather than reach git argv.
+					{Num: "--upload-pack=foo", CreatedAt: "2026-01-02T10:00:00Z"},
+					{Num: "-rf", CreatedAt: "2026-01-03T10:00:00Z"},
+					{Num: "1.0.0\n--malicious", CreatedAt: "2026-01-04T10:00:00Z"},
+					{Num: "1.0.0;ls", CreatedAt: "2026-01-05T10:00:00Z"},
+				},
+			}
+			json.NewEncoder(w).Encode(cr) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := NewPinTableCollector(NewClientWithBaseURL(srv.URL), clonePath)
+	entity := &profile.Entity{
+		ID: "ent-synth", CanonicalURI: "pkg:cargo/synth", Ecosystem: "cargo",
+	}
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	assert.Empty(t, result.Failures,
+		"malformed-version handling must not surface as a failure — "+
+			"the table is still emitted, just with the bad versions in "+
+			"MissingOriginVersions")
+
+	pt, _ := findEmittedPinTable(t, result)
+
+	// All five versions counted as Total and Processed (we considered
+	// each — four were refused at the trust-boundary gate, one pinned).
+	assert.Equal(t, 5, pt.VersionCountTotal)
+	assert.Equal(t, 5, pt.VersionCountProcessed)
+
+	// The well-formed version pins via tag-match.
+	require.Len(t, pt.Pins, 1)
+	assert.Equal(t, "0.1.0", pt.Pins[0].Version)
+	assert.Equal(t, "cargo-tag-match", pt.Pins[0].Source)
+
+	// Every malformed Num lands in MissingOriginVersions verbatim
+	// (JSON-encoded escaping handles the control bytes downstream).
+	assert.ElementsMatch(t, []string{
+		"--upload-pack=foo",
+		"-rf",
+		"1.0.0\n--malicious",
+		"1.0.0;ls",
+	}, pt.MissingOriginVersions,
+		"every malformed v.Num must land in MissingOriginVersions")
+}

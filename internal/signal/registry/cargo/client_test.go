@@ -5,11 +5,96 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestValidateCrateVersion pins the version-string grammar gate.
+// crates.io versions flow into two trust-boundary-sensitive sinks:
+//
+//   - git argv via resolveTagSHA's `rev-parse --verify <version>^{commit}`
+//     — a `--`-prefixed Num would be parsed as a flag, violating the
+//     gitenv.NewCmd "argv-validation is the call site's responsibility"
+//     contract.
+//   - HTTP URL path via fetchVCSInfoSHA. url.PathEscape is defense in
+//     depth, but the grammar gate is the load-bearing trust boundary.
+//
+// Publisher controls v.Num in the crates.io JSON. The validator
+// enforces the cargo / semver grammar (`[0-9A-Za-z][0-9A-Za-z._+-]*`)
+// and a length cap, rejecting leading-dash and embedded control
+// bytes before either sink sees the string.
+func TestValidateCrateVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		// -- valid semver shapes --
+		{"valid semver basic", "1.2.3", false},
+		{"valid single digit", "1", false},
+		{"valid double-digit components", "10.20.30", false},
+		{"valid pre-release", "1.2.3-alpha.1", false},
+		{"valid build metadata", "1.2.3+build.42", false},
+		{"valid pre-release + build", "1.0.0-rc.1+sha.abcdef", false},
+		{"valid underscore in tag", "1.0.0-a_b", false},
+		{"valid alpha-only", "alpha", false}, // non-conventional but in-grammar
+
+		// -- empty / length --
+		{"empty", "", true},
+		{"too long", strings.Repeat("1", 257), true},
+
+		// -- leading-dash (git-flag injection) --
+		{"leading dash", "-rf", true},
+		{"git long flag form", "--upload-pack=foo", true},
+		{"bare dash", "-", true},
+		{"double dash", "--", true},
+
+		// -- non-alphanumeric leading char --
+		{"leading dot", ".1.0", true},
+		{"leading plus", "+1.0", true},
+		{"leading underscore", "_1.0", true},
+
+		// -- control bytes (newline / CR / null) --
+		{"embedded newline", "1.0.0\n--malicious", true},
+		{"embedded CR", "1.0.0\r--malicious", true},
+		{"trailing newline", "1.0.0\n", true},
+		{"null byte", "1.0.0\x00", true},
+		{"tab", "1.0.0\t", true},
+
+		// -- shell / URL metachars (defense in depth; not directly
+		// exploitable today but out-of-grammar regardless) --
+		{"embedded space", "1.0.0 1.0.1", true},
+		{"leading space", " 1.0.0", true},
+		{"slash", "1.0.0/x", true},
+		{"backslash", "1.0.0\\x", true},
+		{"semicolon", "1.0.0;ls", true},
+		{"backtick", "1.0.0`ls`", true},
+		{"dollar", "1.0.0$x", true},
+		{"pipe", "1.0.0|x", true},
+		{"ampersand", "1.0.0&x", true},
+		{"redirect", "1.0.0>x", true},
+		{"colon", "1.0.0:x", true},
+		{"comma", "1.0.0,x", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateCrateVersion(tc.input)
+			if tc.wantErr {
+				assert.Error(t, err,
+					"ValidateCrateVersion(%q) should reject", tc.input)
+			} else {
+				assert.NoError(t, err,
+					"ValidateCrateVersion(%q) should accept", tc.input)
+			}
+		})
+	}
+}
 
 func TestValidateCrateName(t *testing.T) {
 	t.Parallel()

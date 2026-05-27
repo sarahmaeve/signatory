@@ -1,6 +1,9 @@
 package rust
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Module is the parsed view of one Rust source file, reduced to the
 // constructs the trust extractor cares about. NOT a full AST: use
@@ -138,8 +141,9 @@ func Parse(src []byte) (*Module, error) {
 		return nil, err
 	}
 	p := &parser{
-		toks: toks,
-		mod:  &Module{},
+		toks:     toks,
+		mod:      &Module{},
+		useIndex: make(map[string][]string),
 	}
 	p.run()
 	return p.mod, nil
@@ -149,6 +153,18 @@ type parser struct {
 	toks []Token
 	i    int
 	mod  *Module
+
+	// useIndex is the alias→path lookup table populated as
+	// recordUse runs. assembleCallee consults this in O(1) per call
+	// site; the alternative — scanning p.mod.Uses linearly per call
+	// — is O(N*M) in N use-statements + M call sites and falls over
+	// on alias-bomb adversarial input
+	// (robustness_test.go: TestParse_AdversarialInput "alias bomb").
+	//
+	// First-wins semantics: a later `use` that shadows the same alias
+	// does not overwrite the index entry, matching the original
+	// linear scan's `break`-on-first-match behaviour.
+	useIndex map[string][]string
 
 	// fnStack tracks the names of enclosing `fn` definitions.
 	// Pushed when a `fn name(...) {` is recognized; popped when the
@@ -397,8 +413,7 @@ func (p *parser) parseUseGroup(i int, prefix []string) int {
 				j++
 				continue
 			}
-			full := append([]string{}, prefix...)
-			full = append(full, segs...)
+			full := slices.Concat(prefix, segs)
 			alias := lastSegment(full)
 			j = after
 			if j+1 < n && p.toks[j].Value == "as" && p.toks[j+1].Kind == TokenName {
@@ -417,14 +432,24 @@ func (p *parser) parseUseGroup(i int, prefix []string) int {
 // — those correspond to malformed input the lenient walk silently
 // dropped. Glob imports (`use a::b::*;`) emit an entry with Alias =
 // "" so the analyzer can choose to ignore them as a single check.
+//
+// Also populates p.useIndex with the alias→path mapping so
+// assembleCallee can resolve the leading segment in O(1). First-wins:
+// if alias is already indexed, the existing entry is preserved.
 func (p *parser) recordUse(path []string, alias string) {
 	if len(path) == 0 {
 		return
 	}
+	copied := slices.Clone(path)
 	p.mod.Uses = append(p.mod.Uses, Use{
-		Path:  append([]string{}, path...),
+		Path:  copied,
 		Alias: alias,
 	})
+	if alias != "" {
+		if _, present := p.useIndex[alias]; !present {
+			p.useIndex[alias] = copied
+		}
+	}
 }
 
 // lastSegment returns the final element of a path, or "" for empty
@@ -677,27 +702,21 @@ func (p *parser) scanPath(i int) (segments []string, end int, ok bool) {
 
 // assembleCallee builds the user-facing callee string from a
 // segments slice. The first segment is alias-resolved against
-// p.mod.Uses; the rest are joined with `::` (or with `.` if the
+// p.useIndex; the rest are joined with `::` (or with `.` if the
 // segment already starts with `.`, indicating a method-chain step).
 //
-// Alias resolution: an exact match on Use.Alias replaces the first
-// segment with the full Use.Path joined by `::`. Example: with
-// `use std::env::var as v;` recorded, a Call to `v("X")` resolves
-// the leading "v" segment into "std::env::var".
+// Alias resolution: an exact match on a recorded Use.Alias replaces
+// the first segment with the full Use.Path joined by `::`. Example:
+// with `use std::env::var as v;` recorded, a Call to `v("X")`
+// resolves the leading "v" segment into "std::env::var". The lookup
+// is O(1) — recordUse maintains useIndex incrementally.
 func (p *parser) assembleCallee(segments []string) string {
 	if len(segments) == 0 {
 		return ""
 	}
-	// Alias resolution at the head.
 	head := segments[0]
-	resolved := []string(nil)
-	for _, u := range p.mod.Uses {
-		if u.Alias == head && len(u.Path) > 0 {
-			resolved = append(resolved, u.Path...)
-			break
-		}
-	}
-	if resolved == nil {
+	resolved, ok := p.useIndex[head]
+	if !ok {
 		resolved = []string{head}
 	}
 	// Append the rest, preserving `.method` vs `::name` form.
@@ -843,8 +862,7 @@ func resolveArg(arg []Token) string {
 	}
 	// Check for `"a" + "b" + ...` form.
 	var parts []string
-	for k := 0; k < len(arg); k++ {
-		t := arg[k]
+	for _, t := range arg {
 		if t.Kind == TokenString {
 			u := unquote(t.Value)
 			if u == "" && t.Value != `""` {
@@ -937,7 +955,8 @@ func processStringEscapes(s string) string {
 	}
 	var sb strings.Builder
 	sb.Grow(len(s))
-	for i := 0; i < len(s); i++ {
+	i := 0
+	for i < len(s) {
 		c := s[i]
 		if c == '\\' && i+1 < len(s) {
 			switch s[i+1] {
@@ -960,10 +979,11 @@ func processStringEscapes(s string) string {
 				sb.WriteByte('\\')
 				sb.WriteByte(s[i+1])
 			}
-			i++
+			i += 2
 			continue
 		}
 		sb.WriteByte(c)
+		i++
 	}
 	return sb.String()
 }
