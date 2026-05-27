@@ -159,12 +159,14 @@ func hasConclusion(ao *exchange.AnalystOutput, localID string) bool {
 }
 
 // conclusionPageSlug builds the relative path for a conclusion page.
-// Format: conclusions/<output-id-short>-<local-id>.html. The
+// Format: conclusions/<output-id-short>-<local-id-slug>.html. The
 // output-id-short prefix prevents collisions when two analysts emit
 // the same local id (security and provenance both happily produce
-// F001).
+// F001). The local-id is slugified so analyst-chosen ids that contain
+// "/" (e.g. "rvl-cli/no-artifact-signing") don't introduce
+// unexpected path components — the tree stays flat at depth 1.
 func conclusionPageSlug(outputID, localID string) string {
-	return fmt.Sprintf("conclusions/%s-%s.html", shortOutputID(outputID), localID)
+	return fmt.Sprintf("conclusions/%s-%s.html", shortOutputID(outputID), slugify(localID))
 }
 
 // analystPageSlug builds the relative path for an analyst page.

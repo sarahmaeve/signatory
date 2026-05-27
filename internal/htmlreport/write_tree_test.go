@@ -93,6 +93,54 @@ func fixtureWriteTreeInput(parentDir string) WriteReportTreeInput {
 	}
 }
 
+// TestWriteReportTree_SlashedLocalID guards against analyst-chosen
+// local IDs that contain "/" (e.g. "rvl-cli/no-artifact-signing").
+// The slug contract is a flat tree at depth 1 under conclusions/;
+// without sanitizing the local-id portion, the slash becomes an
+// unexpected path separator and the write fails because the writer
+// only mkdirs conclusions/, analysts/, assets/.
+func TestWriteReportTree_SlashedLocalID(t *testing.T) {
+	parent := t.TempDir()
+	synth, loaded := writeTreeFixture()
+
+	// Replace the F003 ref + matching conclusion with a slashed id
+	// that mirrors the real-world rvl-cli case.
+	synth.SynthesisSupplement.KeyConclusionRefs[0] = exchange.ConclusionRef{
+		OutputID:          "out-sec-0001abcdef",
+		ConclusionLocalID: "rvl-cli/no-artifact-signing",
+		Weight:            1,
+	}
+	loaded["out-sec-0001abcdef"].Conclusions[0].ID = "rvl-cli/no-artifact-signing"
+
+	in := WriteReportTreeInput{
+		ParentDir:         parent,
+		Synth:             synth,
+		SynthesisOutputID: "synth-uuid-aaaaaaaa-bbbb-cccc-dddd",
+		ShortName:         "rvl-cli",
+		Loaded:            loaded,
+		GeneratedAt:       "2026-05-06T13:00:00Z",
+		Version:           "v0.1.0-test",
+	}
+
+	indexPath, err := WriteReportTree(in)
+	require.NoError(t, err, "slashed local id should not break the writer")
+
+	subdir := filepath.Dir(indexPath)
+
+	// Assets must be copied — the conclusion-page loop bailing on a
+	// slashed id was leaving reports unstyled in production.
+	_, err = os.Stat(filepath.Join(subdir, "assets", "style.css"))
+	assert.NoError(t, err, "assets must be copied even when local ids contain '/'")
+
+	// The slugified conclusion page must exist at flat depth 1.
+	entries, err := os.ReadDir(filepath.Join(subdir, "conclusions"))
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, e.IsDir(),
+			"conclusions/ must remain flat; slashed local id should not create %q", e.Name())
+	}
+}
+
 func TestWriteReportTree_RefuseOnMissingParent(t *testing.T) {
 	in := fixtureWriteTreeInput(filepath.Join(t.TempDir(), "does-not-exist"))
 	_, err := WriteReportTree(in)
