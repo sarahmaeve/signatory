@@ -28,6 +28,13 @@ import (
 // gate. main skips the stderr echo for it — the report is on stdout.
 var ErrPRDefenseBlocked = errors.New("pr-scan: pull request blocked by defense scan")
 
+// ErrPRAuthorBurned is returned by the author-burn gate when the PR's
+// author identity is burned (directly or via cascade). The PR is
+// refused BEFORE any clone/scan — the patch→identity counterpart of
+// analyze's pre-collection burn gate. Unlike ErrPRDefenseBlocked, the
+// message IS echoed to stderr (there's no stdout report to duplicate).
+var ErrPRAuthorBurned = errors.New("pr-scan: pull request author is burned")
+
 const (
 	// prScanSource is the Source stamped on every pr-scan signal.
 	prScanSource = "pr-scan"
@@ -74,7 +81,7 @@ type PRScanCheckCmd struct {
 	Target  string `arg:"" help:"Pull request: owner/repo#N, https://github.com/owner/repo/pull/N, or patch:github/owner/repo/N."`
 	Path    string `help:"Directory to hold the PR clone. Defaults to filestore/clones/pr-<repo>-<N>." type:"path"`
 	JSON    bool   `help:"Output the report as JSON." default:"false"`
-	Refresh bool   `help:"Force a fresh scan and re-store even if an unchanged capture exists." default:"false"`
+	Refresh bool   `help:"Force a fresh scan and re-store even if an unchanged capture exists. Also proceeds past the author-burn gate (with a loud warning) — pr-scan sets no posture and accepts no PRs, so a forced re-scan of a burned author is a low-risk forensic action." default:"false"`
 
 	// Test seams (not flags).
 	Client      *ghclient.Client                                                                                      `kong:"-"`
@@ -128,6 +135,33 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 		return err
 	}
 	defer s.Close() //nolint:errcheck // store close on command exit; error not actionable
+
+	// Author-burn gate: resolve the author's burn status once. The
+	// default `pr-scan` REFUSES a burned author before any clone/scan —
+	// the patch→identity counterpart of analyze's pre-collection gate.
+	// --refresh proceeds anyway (pr-scan sets no posture and accepts no
+	// PRs, so a forced forensic re-scan is low-risk) but flags the burn
+	// loudly so the scan output is read with suspicion. Bots have no
+	// identity entity (linkAuthorIdentity skips them), so the gate skips
+	// them too. EffectiveBurnByURI catches a direct identity burn or a
+	// cascade.
+	if pr.Author != "" && !isBotAuthor(pr.Author, pr.AuthorType) {
+		authorURI := profile.CanonicalIdentityURI("github", pr.Author)
+		burn, ebCtx, gerr := s.EffectiveBurnByURI(ctx, authorURI)
+		switch {
+		case gerr == nil && !cmd.Refresh:
+			return errors.Join(ErrPRAuthorBurned,
+				formatBurnGateError("pr-scan refusing to analyze", authorURI, burn, ebCtx))
+		case gerr == nil: // burned, but --refresh forces a forensic re-scan
+			_, _ = fmt.Fprintf(stderr,
+				"⚠  DANGER: PR AUTHOR IS BURNED — %s\n"+
+					"  Reason: %s (burned by %s at %s)\n"+
+					"  Proceeding because --refresh was given; treat this scan's output with suspicion.\n",
+				authorURI, burn.Reason, burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339))
+		case !errors.Is(gerr, store.ErrNotFound):
+			return fmt.Errorf("author burn gate: %w", gerr)
+		}
+	}
 
 	// Cache: a prior capture at the same head SHA is reported without a
 	// re-scan, unless --refresh forces one.
@@ -306,7 +340,11 @@ func (cmd *PRScanSummaryCmd) Run(globals *Globals) error {
 	return cmd.listAll(ctx, s, stdout)
 }
 
-// capture is one row in the summary listing.
+// capture is one row in the summary listing. Burned / BurnVia / BurnReason
+// are computed LIVE at summary time via EffectiveBurn — they reflect the
+// author's CURRENT burn status, not whatever was true when the PR was
+// scanned. pr-scan sets no posture and records no conclusions, so an
+// active burn is the headline trust signal a reviewer needs to see.
 type capture struct {
 	Ref               string            `json:"ref"`
 	Verdict           prdefense.Verdict `json:"verdict"`
@@ -314,6 +352,9 @@ type capture struct {
 	AuthorAssociation string            `json:"author_association,omitempty"`
 	HeadSHA           string            `json:"head_sha"`
 	ScannedAt         time.Time         `json:"scanned_at"`
+	Burned            bool              `json:"burned,omitempty"`
+	BurnVia           string            `json:"burn_via,omitempty"` // "direct" or "<role> <owner-uri>"
+	BurnReason        string            `json:"burn_reason,omitempty"`
 }
 
 func (cmd *PRScanSummaryCmd) listAll(ctx context.Context, s store.Store, w io.Writer) error {
@@ -335,18 +376,32 @@ func (cmd *PRScanSummaryCmd) listAll(ctx context.Context, s store.Store, w io.Wr
 			if err := json.Unmarshal(sg.Value, &rec); err != nil {
 				return fmt.Errorf("decode verdict for %s: %w", e.CanonicalURI, err)
 			}
-			caps = append(caps, capture{
+			c := capture{
 				Ref:               refFromPatchURI(e.CanonicalURI),
 				Verdict:           rec.Verdict,
 				Author:            rec.Author,
 				AuthorAssociation: rec.AuthorAssociation,
 				HeadSHA:           rec.HeadSHA,
 				ScannedAt:         sg.CollectedAt.UTC(),
-			})
+			}
+			// Live burn status: a burn applied (or withdrawn) AFTER the
+			// scan changes this, independent of the stored verdict.
+			if burn, ebCtx, berr := s.EffectiveBurn(ctx, e.ID); berr == nil {
+				c.Burned = true
+				c.BurnReason = burn.Reason
+				c.BurnVia = burnViaLabel(ebCtx)
+			} else if !errors.Is(berr, store.ErrNotFound) {
+				return fmt.Errorf("effective burn for %s: %w", e.CanonicalURI, berr)
+			}
+			caps = append(caps, c)
 		}
 	}
-	// Surface blocks first, then warns, then clears; newest first within.
+	// Burned authors float to the very top (the headline trust signal),
+	// then blocks, warns, clears; newest first within a tier.
 	sort.SliceStable(caps, func(i, j int) bool {
+		if caps[i].Burned != caps[j].Burned {
+			return caps[i].Burned
+		}
 		if ri, rj := verdictRank(caps[i].Verdict), verdictRank(caps[j].Verdict); ri != rj {
 			return ri < rj
 		}
@@ -367,13 +422,28 @@ func (cmd *PRScanSummaryCmd) listAll(ctx context.Context, s store.Store, w io.Wr
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "VERDICT\tPR\tAUTHOR\tHEAD\tSCANNED")
+	_, _ = fmt.Fprintln(tw, "BURN\tVERDICT\tPR\tAUTHOR\tHEAD\tSCANNED")
 	for _, c := range caps {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			strings.ToUpper(string(c.Verdict)), c.Ref, authorLabel(c.Author, c.AuthorAssociation),
+		burn := ""
+		if c.Burned {
+			burn = "BURNED"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			burn, strings.ToUpper(string(c.Verdict)), c.Ref, authorLabel(c.Author, c.AuthorAssociation),
 			shortSHA(c.HeadSHA), c.ScannedAt.Format(time.RFC3339))
 	}
 	return tw.Flush()
+}
+
+// burnViaLabel renders an EffectiveBurnContext as a compact "via" label
+// for summary output: "direct" for a burn on the patch itself, or
+// "<role> <owner-uri>" (e.g. "author identity:github/mallory") for a
+// cascade. A patch's burn normally cascades from its author identity.
+func burnViaLabel(ctx *store.EffectiveBurnContext) string {
+	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
+		return ctx.ViaRole + " " + ctx.ViaOwner.CanonicalURI
+	}
+	return "direct"
 }
 
 func (cmd *PRScanSummaryCmd) showOne(ctx context.Context, s store.Store, w io.Writer) error {
@@ -404,6 +474,13 @@ func (cmd *PRScanSummaryCmd) showOne(ctx context.Context, s store.Store, w io.Wr
 	_, _ = fmt.Fprintf(w, "PR:      %s\n", refFromPatchURI(resolved.CanonicalURI))
 	_, _ = fmt.Fprintf(w, "Verdict: %s\n", strings.ToUpper(string(rec.Verdict)))
 	_, _ = fmt.Fprintf(w, "Author:  %s\n", authorLabel(rec.Author, rec.AuthorAssociation))
+	// Live burn status (computed now, not at scan time): the headline
+	// trust signal for a patch, since pr-scan sets no posture.
+	if ent, ferr := s.FindEntityByURI(ctx, resolved.CanonicalURI); ferr == nil {
+		if burn, ebCtx, berr := s.EffectiveBurn(ctx, ent.ID); berr == nil {
+			_, _ = fmt.Fprintf(w, "Burn:    BURNED (via %s) — %s\n", burnViaLabel(ebCtx), burn.Reason)
+		}
+	}
 	_, _ = fmt.Fprintf(w, "Head:    %s\n", rec.HeadSHA)
 	_, _ = fmt.Fprintf(w, "Scanned: %s\n", at.UTC().Format(time.RFC3339))
 	for _, reason := range rec.Reasons {

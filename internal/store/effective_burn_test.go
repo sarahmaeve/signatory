@@ -350,6 +350,58 @@ func TestEffectiveBurn_CascadeViaGPGSigner_MultipleBurnedFinds(t *testing.T) {
 	assert.Contains(t, burn.Reason, "middle key compromised")
 }
 
+// TestEffectiveBurn_CascadeViaPRAuthor: a patch (pull request) whose
+// pr_author signal names a burned author identity reports the cascade
+// with ViaRole=author. This is the contributor-burn primitive — once a
+// user is burned for submitting a malicious PR, every patch they
+// authored reads as effectively burned.
+func TestEffectiveBurn_CascadeViaPRAuthor(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	patchID := seedRepoEntity(t, s, "patch:github/octo/hello/3", "hello#3")
+	authorID := seedOwnerEntity(t, s, "identity:github/mallory", "mallory")
+	seedSignal(t, s, patchID, "pr_author", "pr-scan", map[string]any{
+		"login":              "mallory",
+		"author_association": "FIRST_TIME_CONTRIBUTOR",
+		"identity":           "identity:github/mallory",
+	})
+	seedBurn(t, s, authorID, "malicious PR: webhook.site exfil in init()")
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), patchID)
+	require.NoError(t, err)
+	require.NotNil(t, burn)
+	require.NotNil(t, ctx)
+	assert.False(t, ctx.Direct, "cascade case must report Direct=false")
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "identity:github/mallory", ctx.ViaOwner.CanonicalURI)
+	assert.Equal(t, "author", ctx.ViaRole,
+		"PR authorship cascades with role=author (per EffectiveBurnContext.ViaRole docstring)")
+	assert.Contains(t, burn.Reason, "malicious PR")
+}
+
+// TestEffectiveBurn_CascadeViaPRAuthor_LoginFallback pins the fallback:
+// a pr_author value missing the explicit identity URI still cascades by
+// deriving identity:github/<login> from the login field.
+func TestEffectiveBurn_CascadeViaPRAuthor_LoginFallback(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	patchID := seedRepoEntity(t, s, "patch:github/octo/hello/4", "hello#4")
+	authorID := seedOwnerEntity(t, s, "identity:github/mallory", "mallory")
+	seedSignal(t, s, patchID, "pr_author", "pr-scan", map[string]any{
+		"login": "mallory", // no "identity" field — derive from login
+	})
+	seedBurn(t, s, authorID, "repeat malicious submitter")
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), patchID)
+	require.NoError(t, err)
+	require.NotNil(t, burn)
+	require.NotNil(t, ctx)
+	assert.Equal(t, "identity:github/mallory", ctx.ViaOwner.CanonicalURI)
+	assert.Equal(t, "author", ctx.ViaRole)
+}
+
 // TestEffectiveBurn_CascadeUnknownSource_NoCascade pins the
 // dispatch contract's fail-shut posture: a maintainer_count signal
 // with an unrecognized Source produces NO cascade candidates, rather

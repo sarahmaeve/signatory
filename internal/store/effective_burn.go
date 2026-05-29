@@ -44,6 +44,9 @@ type EffectiveBurnContext struct {
 	//   - "maintainer" — npm/pypi Maintainers list (maintainer_count)
 	//   - "signer"     — git per-developer GPG key
 	//                    (commit_signing_keys)
+	//   - "author"     — pull-request author (pr_author signal):
+	//                    a burned user cascades to every patch they
+	//                    submitted (contributor burn)
 	//
 	// Future producer collectors extend this set ("committer" for
 	// git author entities, etc.). The string is stable; downstream
@@ -476,6 +479,32 @@ func (s *SQLite) cascadeCandidates(ctx context.Context, entityID string) ([]casc
 					Role: "signer",
 				})
 			}
+
+		case "pr_author":
+			// {"login":"...", "author_association":"...",
+			//  "identity":"identity:github/<login>"} → the PR author's
+			// identity. A burned author cascades to every patch they
+			// submitted. Role: author. The stored identity URI is
+			// authoritative (pr-scan writes the canonical form); fall
+			// back to deriving it from login for older/partial values.
+			// github-only today — pr-scan is GitHub-only in v0.1, so no
+			// source dispatch is needed (a future GitLab/Forgejo PR
+			// collector would add one, as maintainer_count did).
+			var v struct {
+				Login    string `json:"login"`
+				Identity string `json:"identity"`
+			}
+			if err := json.Unmarshal(sig.Value, &v); err != nil {
+				continue
+			}
+			uri := v.Identity
+			if uri == "" && v.Login != "" {
+				uri = profile.CanonicalIdentityURI("github", v.Login)
+			}
+			if uri == "" {
+				continue
+			}
+			out = append(out, cascadeCandidate{URI: uri, Role: "author"})
 		}
 	}
 	return out, nil
