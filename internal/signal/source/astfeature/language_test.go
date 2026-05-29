@@ -62,3 +62,49 @@ func TestLanguageForPath(t *testing.T) {
 		})
 	}
 }
+
+// TestLanguageForChangedFile pins the PR-defense routing: same as
+// LanguageForPath but test files ARE included — an attacker hides
+// payloads in test code (the prt-scan conftest.py vector), and a PR's
+// changed test file is authored code worth scanning. Vendored /
+// build-output / declaration / minified files stay excluded (third-party
+// or generated, AST-noisy).
+func TestLanguageForChangedFile(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path     string
+		wantLang string
+		wantOK   bool
+	}{
+		// Test files — EXCLUDED by LanguageForPath, INCLUDED here.
+		{"conftest.py", LangPython, true},
+		{"tests/unit.py", LangPython, true},
+		{"app_test.py", LangPython, true},
+		{"pkg/widget_test.go", LangGo, true},
+		{"src/x.test.tsx", LangJavaScript, true},
+		{"__tests__/a.js", LangJavaScript, true},
+		{"benches/b.rs", LangRust, true},
+		{"examples/e.rs", LangRust, true},
+		// Normal source still included.
+		{"main.go", LangGo, true},
+		{"build.rs", LangRust, true},
+		// Vendored / build-output / declaration / minified — STILL excluded.
+		{"vendor/x/y.go", "", false},
+		{"node_modules/dep/index.js", "", false},
+		{".venv/lib/x.py", "", false},
+		{"target/debug/x.rs", "", false},
+		{"types.d.ts", "", false},
+		{"bundle.min.js", "", false},
+		{"README.md", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			lang, ok := LanguageForChangedFile(tc.path)
+			assert.Equal(t, tc.wantOK, ok, "included?")
+			assert.Equal(t, tc.wantLang, lang, "language")
+		})
+	}
+}

@@ -148,8 +148,12 @@ func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []Ch
 		// Exfil-host references.
 		rep.ExfilHits = append(rep.ExfilHits, exfilwatch.ScanBytes(cf.Path, content)...)
 
-		// Bucket source files for per-language AST analysis.
-		if lang, ok := astfeature.LanguageForPath(cf.Path); ok {
+		// Bucket source files for per-language AST analysis. PR-defense
+		// uses LanguageForChangedFile (not LanguageForPath): a changed
+		// test file is authored code an attacker abuses (prt-scan's
+		// conftest.py), so test files are scanned here even though the
+		// source-evolution baseline excludes them.
+		if lang, ok := astfeature.LanguageForChangedFile(cf.Path); ok {
 			langFiles[lang] = append(langFiles[lang], astfeature.SourceFile{Path: cf.Path, Content: content})
 		}
 	}
