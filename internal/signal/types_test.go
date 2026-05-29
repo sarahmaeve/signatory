@@ -223,6 +223,8 @@ func TestRegistry_PRScanTypesHaveExpectedShape(t *testing.T) {
 		{"pr_exfil_host_reference", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
 		{"pr_agent_config_touched", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
 		{"pr_ast_concern", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
+		{"pr_risky_path_touched", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
+		{"pr_anomalous_language", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
 		{"pr_defense_verdict", profile.SignalGroupHygiene, profile.ForgeryHigh},
 		{"pr_author", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
 		{"author_profile", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},

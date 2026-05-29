@@ -1271,6 +1271,28 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"scoped to the changed source files; covers Go / Python / JS-TS / Rust — other languages are not AST-scanned",
 		},
 	},
+	"pr_risky_path_touched": {
+		Type:              "pr_risky_path_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request modifies one or more paths an organization declared sensitive (risky_paths in a shared pr-analyzer.yaml) — surfaced so a PR touching a dangerous code area is noticed even when its content is benign.",
+		Caveats: []string{
+			"org policy, opt-in: only emitted when pr-scan is run with --config naming a YAML that declares risky_paths; absent config means no opinion, not 'safe'",
+			"path-prefix match only (P == F or P + \"/\" prefixes F, no wildcards), via pr-analyzer's shared codeshape.MatchesRiskyPath — touching the area is the signal, not the content",
+			"scoped to the PR's changed files at the head commit; added / modified / removed all count as a touch",
+		},
+	},
+	"pr_anomalous_language": {
+		Type:              "pr_anomalous_language",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request introduces one or more programming languages outside the organization's preferred/allowed set (the languages weighting in a shared pr-analyzer.yaml) — surfaced so a PR that brings in a non-acceptable language is noticed.",
+		Caveats: []string{
+			"org policy, opt-in: only emitted when pr-scan is run with --config naming a YAML that declares languages.preferred or languages.allowed",
+			"programming languages only — markup (Markdown, YAML, JSON, …) is excluded via pr-analyzer's shared codeshape classification, so docs/config-only PRs never trip it",
+			"language detection is path/extension based (pr-analyzer's DetectLanguages); renaming a source file's extension evades it by design",
+		},
+	},
 	"pr_defense_verdict": {
 		Type:              "pr_defense_verdict",
 		Group:             profile.SignalGroupHygiene,

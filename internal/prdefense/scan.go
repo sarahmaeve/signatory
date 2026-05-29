@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sarahmaeve/pr-analyzer/codeshape"
+
 	"github.com/sarahmaeve/signatory/internal/agentconfig"
 	"github.com/sarahmaeve/signatory/internal/contentinjection"
 	"github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
@@ -83,15 +85,47 @@ type SkippedFile struct {
 
 // Report is the outcome of scanning a PR's changelist.
 type Report struct {
-	HeadSHA          string            `json:"head_sha"`
-	Verdict          Verdict           `json:"verdict"`
-	Reasons          []string          `json:"reasons,omitempty"`
-	ContentInjection []FileInjection   `json:"content_injection,omitempty"`
-	ExfilHits        []exfilwatch.Hit  `json:"exfil_hits,omitempty"`
-	AgentConfigPaths []string          `json:"agent_config_paths,omitempty"`
-	ASTConcerns      []LanguageConcern `json:"ast_concerns,omitempty"`
-	Scanned          int               `json:"scanned"`
-	Skipped          []SkippedFile     `json:"skipped,omitempty"`
+	HeadSHA            string            `json:"head_sha"`
+	Verdict            Verdict           `json:"verdict"`
+	Reasons            []string          `json:"reasons,omitempty"`
+	ContentInjection   []FileInjection   `json:"content_injection,omitempty"`
+	ExfilHits          []exfilwatch.Hit  `json:"exfil_hits,omitempty"`
+	AgentConfigPaths   []string          `json:"agent_config_paths,omitempty"`
+	ASTConcerns        []LanguageConcern `json:"ast_concerns,omitempty"`
+	RiskyPathHits      []string          `json:"risky_path_hits,omitempty"`     // changed paths matching an org-configured risky prefix
+	AnomalousLanguages []string          `json:"anomalous_languages,omitempty"` // programming languages in the PR outside the org's preferred/allowed set
+	Scanned            int               `json:"scanned"`
+	Skipped            []SkippedFile     `json:"skipped,omitempty"`
+}
+
+// Option configures a Scan. Options carry org policy (from a shared
+// pr-analyzer.yaml) into the otherwise self-contained scan.
+type Option func(*scanConfig)
+
+type scanConfig struct {
+	riskyPaths []string
+	langPolicy codeshape.LanguageConfig
+}
+
+// WithRiskyPaths supplies the org-configured risky-path prefixes (from a
+// shared pr-analyzer.yaml's codeshape.risky_paths). A changed file under
+// one of them is flagged in Report.RiskyPathHits and warned, so an org is
+// told when a PR touches a sensitive area — independent of file content.
+// Matching uses pr-analyzer's codeshape.MatchesRiskyPath so the rule
+// stays identical across the two tools.
+func WithRiskyPaths(prefixes []string) Option {
+	return func(c *scanConfig) { c.riskyPaths = prefixes }
+}
+
+// WithLanguagePolicy supplies the org's acceptable/not-acceptable language
+// weighting (a shared pr-analyzer.yaml's codeshape.languages). A
+// programming language present in the PR but in neither the preferred nor
+// the allowed list is "anomalous" — flagged in Report.AnomalousLanguages
+// and warned. Detection + bucketing use pr-analyzer's DetectLanguages /
+// BucketLanguages, so the rule (including the markup exclusion) is
+// identical across the two tools. Zero-value policy = no opinion.
+func WithLanguagePolicy(cfg codeshape.LanguageConfig) Option {
+	return func(c *scanConfig) { c.langPolicy = cfg }
 }
 
 // binarySniffWindow bounds the prefix inspected for a NUL byte.
@@ -102,9 +136,37 @@ const binarySniffWindow = 8192
 // oversized files are recorded as skipped, not scanned. A per-file or
 // per-language analyzer error is non-fatal — it never aborts the scan,
 // since a partial result is still a useful gate.
-func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []ChangedFile) (Report, error) {
+func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []ChangedFile, opts ...Option) (Report, error) {
+	var cfg scanConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	rep := Report{HeadSHA: headSHA}
 	langFiles := map[string][]astfeature.SourceFile{}
+
+	// Org-policy risky-path touch — independent of content and of whether
+	// the file is read below. Touching a sensitive area (added / modified /
+	// removed) is the signal, so this pass runs over the full changelist.
+	for _, cf := range changed {
+		if codeshape.MatchesRiskyPath(cf.Path, cfg.riskyPaths) {
+			rep.RiskyPathHits = append(rep.RiskyPathHits, cf.Path)
+		}
+	}
+
+	// Org-policy language weighting — path-based, over the full changelist.
+	// A programming language in the PR but outside preferred/allowed is
+	// anomalous (markup is excluded by BucketLanguages). Reuses
+	// pr-analyzer's detection + bucketing so the verdict matches the
+	// overview's posture for the same shared config.
+	if len(cfg.langPolicy.Preferred) > 0 || len(cfg.langPolicy.Allowed) > 0 {
+		files := make([]codeshape.File, len(changed))
+		for i, cf := range changed {
+			files[i] = codeshape.File{Path: cf.Path}
+		}
+		posture := codeshape.BucketLanguages(codeshape.DetectLanguages(files), cfg.langPolicy)
+		rep.AnomalousLanguages = posture.Anomalous
+	}
 
 	for _, cf := range changed {
 		if isRemovedStatus(cf.Status) {
@@ -235,6 +297,12 @@ func deriveVerdict(rep Report) (Verdict, []string) {
 	}
 	if len(rep.AgentConfigPaths) > 0 {
 		warnReasons = append(warnReasons, fmt.Sprintf("%d agent-config file(s) touched", len(rep.AgentConfigPaths)))
+	}
+	if len(rep.RiskyPathHits) > 0 {
+		warnReasons = append(warnReasons, fmt.Sprintf("%d org-defined sensitive path(s) modified", len(rep.RiskyPathHits)))
+	}
+	if len(rep.AnomalousLanguages) > 0 {
+		warnReasons = append(warnReasons, fmt.Sprintf("non-acceptable language(s): %s", strings.Join(rep.AnomalousLanguages, ", ")))
 	}
 	if len(warnReasons) > 0 {
 		return VerdictWarn, warnReasons

@@ -14,7 +14,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/sarahmaeve/pr-analyzer/configfile"
 	"github.com/sarahmaeve/pr-analyzer/engineerprofile"
+
 	"github.com/sarahmaeve/signatory/internal/prdefense"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
@@ -83,6 +85,7 @@ type PRScanCheckCmd struct {
 	Path    string `help:"Directory to hold the PR clone. Defaults to filestore/clones/pr-<repo>-<N>." type:"path"`
 	JSON    bool   `help:"Output the report as JSON." default:"false"`
 	Refresh bool   `help:"Force a fresh scan and re-store even if an unchanged capture exists. Also proceeds past the author-burn gate (with a loud warning) — pr-scan sets no posture and accepts no PRs, so a forced re-scan of a burned author is a low-risk forensic action." default:"false"`
+	Config  string `help:"Path to a shared pr-analyzer.yaml carrying the org's per-repo policy. Today pr-scan honors its codeshape.risky_paths — a PR touching a declared sensitive area is flagged and warned. The same file the org points pr-analyzer at." type:"path"`
 
 	// Test seams (not flags).
 	Client      *ghclient.Client                                                                                      `kong:"-"`
@@ -181,11 +184,16 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 		}
 	}
 
+	policy, err := cmd.loadPolicy(stderr)
+	if err != nil {
+		return err
+	}
+
 	absPath, err := cmd.clonePath(resolved, n)
 	if err != nil {
 		return err
 	}
-	rep, err := cmd.scan(ctx, stderr, resolved, absPath, pr, n)
+	rep, err := cmd.scan(ctx, stderr, resolved, absPath, pr, n, policy...)
 	if err != nil {
 		return err
 	}
@@ -244,7 +252,7 @@ func (cmd *PRScanCheckCmd) clonePath(resolved *profile.ResolvedTarget, n int) (s
 
 // scan clones the repo, fetches the PR head (objects only), and runs the
 // content scanners over the changed-file blobs.
-func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved *profile.ResolvedTarget, absPath string, pr ghclient.PullRequest, n int) (prdefense.Report, error) {
+func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved *profile.ResolvedTarget, absPath string, pr ghclient.PullRequest, n int, policy ...prdefense.Option) (prdefense.Report, error) {
 	newProvider := cmd.NewProvider
 	if newProvider == nil {
 		cloneURL := resolved.CloneURL
@@ -270,7 +278,31 @@ func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved 
 	for i, f := range pr.Files {
 		changed[i] = prdefense.ChangedFile{Path: f.Path, Status: f.Status}
 	}
-	return prdefense.Scan(ctx, provider, pr.HeadSHA, changed)
+	return prdefense.Scan(ctx, provider, pr.HeadSHA, changed, policy...)
+}
+
+// loadPolicy reads the org's per-repo policy from --config, if set, and
+// returns it as prdefense.Scan options. The config is a shared
+// pr-analyzer.yaml (same file/schema the org points pr-analyzer at),
+// loaded through pr-analyzer's own loader so the parse can't drift. Today
+// it carries risky paths and the language weighting. Returns nil when
+// --config is unset (org policy is opt-in). Non-fatal parse warnings are
+// echoed to stderr.
+func (cmd *PRScanCheckCmd) loadPolicy(stderr io.Writer) ([]prdefense.Option, error) {
+	if cmd.Config == "" {
+		return nil, nil
+	}
+	cfg, warnings, err := configfile.Load(cmd.Config)
+	if err != nil {
+		return nil, NewUsageError(fmt.Errorf("load --config %q: %w", cmd.Config, err))
+	}
+	for _, w := range warnings {
+		_, _ = fmt.Fprintf(stderr, "config warning: %s\n", w.Message)
+	}
+	return []prdefense.Option{
+		prdefense.WithRiskyPaths(cfg.CodeShape.RiskyPaths),
+		prdefense.WithLanguagePolicy(cfg.CodeShape.Languages),
+	}, nil
 }
 
 // cachedReport is the --json shape for a cache hit: a prdefense.Report
@@ -686,6 +718,14 @@ func prScanSignals(entityID string, rep prdefense.Report, author, authorAssociat
 	if len(rep.ASTConcerns) > 0 {
 		r.RecordSignal(entityID, "pr_ast_concern", prScanSource, now, prSignalTTL,
 			map[string]any{"languages": rep.ASTConcerns})
+	}
+	if len(rep.RiskyPathHits) > 0 {
+		r.RecordSignal(entityID, "pr_risky_path_touched", prScanSource, now, prSignalTTL,
+			map[string]any{"paths": rep.RiskyPathHits})
+	}
+	if len(rep.AnomalousLanguages) > 0 {
+		r.RecordSignal(entityID, "pr_anomalous_language", prScanSource, now, prSignalTTL,
+			map[string]any{"languages": rep.AnomalousLanguages})
 	}
 	r.RecordSignal(entityID, verdictSignalType, prScanSource, now, prSignalTTL, verdictRecord{
 		Verdict:           rep.Verdict,

@@ -126,6 +126,8 @@ type deepScan struct {
 	InjectionFiles   []string
 	AgentConfigPaths []string
 	ASTConcernLangs  []string
+	RiskyPaths       []string
+	AnomalousLangs   []string
 	Burned           bool
 	BurnVia          string
 	BurnReason       string
@@ -180,6 +182,20 @@ func loadDeepScan(ctx context.Context, s store.Store, entityID string) (deepScan
 			if json.Unmarshal(sg.Value, &v) == nil {
 				ds.AgentConfigPaths = v.Paths
 			}
+		case "pr_risky_path_touched":
+			var v struct {
+				Paths []string `json:"paths"`
+			}
+			if json.Unmarshal(sg.Value, &v) == nil {
+				ds.RiskyPaths = v.Paths
+			}
+		case "pr_anomalous_language":
+			var v struct {
+				Languages []string `json:"languages"`
+			}
+			if json.Unmarshal(sg.Value, &v) == nil {
+				ds.AnomalousLangs = v.Languages
+			}
 		case "pr_ast_concern":
 			var v struct {
 				Languages []struct {
@@ -224,6 +240,12 @@ func (d deepScan) sections() []rhtml.Section {
 	if d.Burned {
 		pills = append(pills, rhtml.Pill{Text: "AUTHOR BURNED", Tier: "danger"})
 	}
+	if len(d.RiskyPaths) > 0 {
+		pills = append(pills, rhtml.Pill{Text: "SENSITIVE PATH", Tier: "warning"})
+	}
+	if len(d.AnomalousLangs) > 0 {
+		pills = append(pills, rhtml.Pill{Text: "ANOMALOUS LANG", Tier: "warning"})
+	}
 
 	var rows []rhtml.Row
 	if d.Burned {
@@ -247,6 +269,12 @@ func (d deepScan) sections() []rhtml.Section {
 	}
 	if len(d.ASTConcernLangs) > 0 {
 		rows = append(rows, rhtml.Row{Term: "AST concern", Detail: strings.Join(d.ASTConcernLangs, ", ")})
+	}
+	if len(d.RiskyPaths) > 0 {
+		rows = append(rows, rhtml.Row{Term: "Sensitive paths", Detail: strings.Join(d.RiskyPaths, ", ")})
+	}
+	if len(d.AnomalousLangs) > 0 {
+		rows = append(rows, rhtml.Row{Term: "Anomalous languages", Detail: strings.Join(d.AnomalousLangs, ", ")})
 	}
 
 	return []rhtml.Section{{Title: "pr-scan deep findings", Pills: pills, Rows: rows}}

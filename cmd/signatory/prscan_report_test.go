@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	rhtml "github.com/sarahmaeve/pr-analyzer/render/html"
 
 	"github.com/sarahmaeve/signatory/internal/profile"
+	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
 
@@ -48,6 +50,26 @@ func TestDeepScan_sections(t *testing.T) {
 func TestDeepScan_sections_empty(t *testing.T) {
 	t.Parallel()
 	assert.Nil(t, deepScan{}.sections())
+}
+
+// TestDeepScan_sections_riskyPath: an org-defined sensitive-path touch
+// surfaces a SENSITIVE PATH pill + the paths row.
+func TestDeepScan_sections_riskyPath(t *testing.T) {
+	t.Parallel()
+	secs := deepScan{Verdict: "warn", RiskyPaths: []string{"internal/secret/keys.go"}}.sections()
+	require.Len(t, secs, 1)
+	assert.Contains(t, secs[0].Pills, rhtml.Pill{Text: "SENSITIVE PATH", Tier: "warning"})
+	assert.Contains(t, secs[0].Rows, rhtml.Row{Term: "Sensitive paths", Detail: "internal/secret/keys.go"})
+}
+
+// TestDeepScan_sections_anomalousLang: a non-acceptable language surfaces
+// an ANOMALOUS LANG pill + the languages row.
+func TestDeepScan_sections_anomalousLang(t *testing.T) {
+	t.Parallel()
+	secs := deepScan{Verdict: "warn", AnomalousLangs: []string{"Rust"}}.sections()
+	require.Len(t, secs, 1)
+	assert.Contains(t, secs[0].Pills, rhtml.Pill{Text: "ANOMALOUS LANG", Tier: "warning"})
+	assert.Contains(t, secs[0].Rows, rhtml.Row{Term: "Anomalous languages", Detail: "Rust"})
 }
 
 // TestDeepScan_sections_verdictTiers maps each verdict to its pill tier.
@@ -107,6 +129,104 @@ func TestFunctional_PRScanReport_EmitsSidecar(t *testing.T) {
 	_, has2 := enrich["2"]
 	assert.False(t, has2, "unscanned PR #2 must not appear in the sidecar")
 	assert.Contains(t, msg.String(), "pr-scan.js")
+}
+
+// TestFunctional_PRScanCheck_RiskyPathFromConfig drives the org-policy
+// path end to end: --config names a pr-analyzer.yaml declaring
+// internal/secret risky; a PR touching internal/secret/keys.go (benign
+// content) must warn and store a pr_risky_path_touched finding.
+func TestFunctional_PRScanCheck_RiskyPathFromConfig(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+
+	cfgPath := filepath.Join(t.TempDir(), "pr-analyzer.yaml")
+	require.NoError(t, os.WriteFile(cfgPath,
+		[]byte("codeshape:\n  risky_paths:\n    - internal/secret\n"), 0o600))
+
+	src := fakeContentProvider{content: map[string][]byte{
+		"internal/secret/keys.go": []byte("package secret\n\nvar Rotation = 1\n"),
+	}}
+	srv := prScanGitHubServerAs(t, "headRP", "octocat", "User", prFilesJSON("internal/secret/keys.go"))
+	cmd := &PRScanCheckCmd{
+		Target:      "octo/hello#1",
+		JSON:        true,
+		Config:      cfgPath,
+		Client:      ghclient.NewClientWithBaseURL(srv.URL),
+		NewProvider: countingProvider(src, new(int)),
+		Stdout:      &bytes.Buffer{},
+		Stderr:      io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals), "a risky-path touch warns (exit 0), not blocks")
+
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	patch, err := s.FindEntityByURI(ctx, "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, patch.ID)
+	require.NoError(t, err)
+	var risky, verdict string
+	for _, sg := range sigs {
+		switch sg.Type {
+		case "pr_risky_path_touched":
+			risky = string(sg.Value)
+		case "pr_defense_verdict":
+			verdict = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, risky, "a PR touching a configured risky path must store pr_risky_path_touched")
+	assert.Contains(t, risky, "internal/secret/keys.go")
+	assert.Contains(t, verdict, `"verdict":"warn"`)
+}
+
+// TestFunctional_PRScanCheck_AnomalousLanguageFromConfig: --config names a
+// pr-analyzer.yaml that prefers Go; a PR adding a Rust file (benign) is
+// warned and stores pr_anomalous_language, while a markup-only change would
+// not trip it.
+func TestFunctional_PRScanCheck_AnomalousLanguageFromConfig(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+
+	cfgPath := filepath.Join(t.TempDir(), "pr-analyzer.yaml")
+	require.NoError(t, os.WriteFile(cfgPath,
+		[]byte("codeshape:\n  languages:\n    preferred:\n      - Go\n"), 0o600))
+
+	src := fakeContentProvider{content: map[string][]byte{
+		"x/lib.rs": []byte("pub fn f() {}\n"),
+	}}
+	srv := prScanGitHubServerAs(t, "headAL", "octocat", "User", prFilesJSON("x/lib.rs"))
+	cmd := &PRScanCheckCmd{
+		Target:      "octo/hello#1",
+		JSON:        true,
+		Config:      cfgPath,
+		Client:      ghclient.NewClientWithBaseURL(srv.URL),
+		NewProvider: countingProvider(src, new(int)),
+		Stdout:      &bytes.Buffer{},
+		Stderr:      io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals), "an anomalous language warns (exit 0), not blocks")
+
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	patch, err := s.FindEntityByURI(ctx, "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, patch.ID)
+	require.NoError(t, err)
+	var lang, verdict string
+	for _, sg := range sigs {
+		switch sg.Type {
+		case "pr_anomalous_language":
+			lang = string(sg.Value)
+		case "pr_defense_verdict":
+			verdict = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, lang, "a PR introducing a non-preferred language must store pr_anomalous_language")
+	assert.Contains(t, lang, "Rust")
+	assert.Contains(t, verdict, `"verdict":"warn"`)
 }
 
 // seedScannedPR mints a patch entity and stores a block verdict + one
