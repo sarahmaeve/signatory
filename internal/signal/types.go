@@ -1293,6 +1293,17 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"language detection is path/extension based (pr-analyzer's DetectLanguages); renaming a source file's extension evades it by design",
 		},
 	},
+	"pr_dependency_manifest_touched": {
+		Type:              "pr_dependency_manifest_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request changes one or more dependency manifests or lockfiles (go.mod, package.json, Cargo.toml/lock, requirements.txt, Gemfile/lock, …) — a supply-chain touchpoint surfaced for review. Informational: it does not by itself raise the scan verdict.",
+		Caveats: []string{
+			"built-in catalog (shared with pr-analyzer's codeshape.TouchedManifests); not org-customizable and always evaluated",
+			"informational by design — manifest changes are high-frequency (every dependency bump), so the signal flags the touchpoint without gating; what changed inside the manifest is a separate, deeper analysis",
+			"basename match on the PR's changed files; a manifest under an unrecognized filename is not detected",
+		},
+	},
 	"pr_defense_verdict": {
 		Type:              "pr_defense_verdict",
 		Group:             profile.SignalGroupHygiene,

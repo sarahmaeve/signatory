@@ -72,6 +72,16 @@ func TestDeepScan_sections_anomalousLang(t *testing.T) {
 	assert.Contains(t, secs[0].Rows, rhtml.Row{Term: "Anomalous languages", Detail: "Rust"})
 }
 
+// TestDeepScan_sections_manifest: a dependency-manifest touch surfaces an
+// info-tier pill + row, even on an otherwise-clear PR (informational).
+func TestDeepScan_sections_manifest(t *testing.T) {
+	t.Parallel()
+	secs := deepScan{Verdict: "clear", Manifests: []string{"go.mod"}}.sections()
+	require.Len(t, secs, 1)
+	assert.Contains(t, secs[0].Pills, rhtml.Pill{Text: "DEPENDENCY MANIFEST", Tier: "info"})
+	assert.Contains(t, secs[0].Rows, rhtml.Row{Term: "Dependency manifests", Detail: "go.mod"})
+}
+
 // TestDeepScan_sections_verdictTiers maps each verdict to its pill tier.
 func TestDeepScan_sections_verdictTiers(t *testing.T) {
 	t.Parallel()
@@ -227,6 +237,49 @@ func TestFunctional_PRScanCheck_AnomalousLanguageFromConfig(t *testing.T) {
 	require.NotEmpty(t, lang, "a PR introducing a non-preferred language must store pr_anomalous_language")
 	assert.Contains(t, lang, "Rust")
 	assert.Contains(t, verdict, `"verdict":"warn"`)
+}
+
+// TestFunctional_PRScanCheck_FlagsDependencyManifest: a PR changing go.mod
+// is flagged with pr_dependency_manifest_touched WITHOUT --config (built-in)
+// and stays CLEAR (informational — a benign manifest touch doesn't warn).
+func TestFunctional_PRScanCheck_FlagsDependencyManifest(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+
+	src := fakeContentProvider{content: map[string][]byte{
+		"go.mod": []byte("module example.com/x\n\ngo 1.26\n"),
+	}}
+	srv := prScanGitHubServerAs(t, "headDM", "octocat", "User", prFilesJSON("go.mod"))
+	cmd := &PRScanCheckCmd{
+		Target:      "octo/hello#1",
+		JSON:        true,
+		Client:      ghclient.NewClientWithBaseURL(srv.URL),
+		NewProvider: countingProvider(src, new(int)),
+		Stdout:      &bytes.Buffer{},
+		Stderr:      io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	patch, err := s.FindEntityByURI(ctx, "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, patch.ID)
+	require.NoError(t, err)
+	var manifest, verdict string
+	for _, sg := range sigs {
+		switch sg.Type {
+		case "pr_dependency_manifest_touched":
+			manifest = string(sg.Value)
+		case "pr_defense_verdict":
+			verdict = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, manifest, "a PR changing go.mod must store pr_dependency_manifest_touched (no --config needed)")
+	assert.Contains(t, manifest, "go.mod")
+	assert.Contains(t, verdict, `"verdict":"clear"`, "manifest touch is informational — verdict stays clear")
 }
 
 // seedScannedPR mints a patch entity and stores a block verdict + one

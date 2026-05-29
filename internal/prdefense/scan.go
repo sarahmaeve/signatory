@@ -94,6 +94,7 @@ type Report struct {
 	ASTConcerns        []LanguageConcern `json:"ast_concerns,omitempty"`
 	RiskyPathHits      []string          `json:"risky_path_hits,omitempty"`     // changed paths matching an org-configured risky prefix
 	AnomalousLanguages []string          `json:"anomalous_languages,omitempty"` // programming languages in the PR outside the org's preferred/allowed set
+	ManifestsTouched   []string          `json:"manifests_touched,omitempty"`   // changed dependency manifests/lockfiles (informational, built-in)
 	Scanned            int               `json:"scanned"`
 	Skipped            []SkippedFile     `json:"skipped,omitempty"`
 }
@@ -145,25 +146,32 @@ func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []Ch
 	rep := Report{HeadSHA: headSHA}
 	langFiles := map[string][]astfeature.SourceFile{}
 
-	// Org-policy risky-path touch — independent of content and of whether
-	// the file is read below. Touching a sensitive area (added / modified /
-	// removed) is the signal, so this pass runs over the full changelist.
+	// Path-based, over the full changelist (added / modified / removed all
+	// count as a touch), via pr-analyzer's shared catalogs so the rules
+	// match the overview for the same input/config.
+	files := make([]codeshape.File, len(changed))
+	for i, cf := range changed {
+		files[i] = codeshape.File{Path: cf.Path}
+	}
+
+	// Dependency-manifest touch — built-in (no config), INFORMATIONAL: it
+	// does not feed the verdict. A manifest change is a supply-chain
+	// touchpoint worth surfacing, but it's high-frequency (every dep bump),
+	// so gating on it would drown the warn tier.
+	rep.ManifestsTouched = codeshape.TouchedManifests(files)
+
+	// Org-policy risky-path touch — touching a declared sensitive area is
+	// the signal, independent of content.
 	for _, cf := range changed {
 		if codeshape.MatchesRiskyPath(cf.Path, cfg.riskyPaths) {
 			rep.RiskyPathHits = append(rep.RiskyPathHits, cf.Path)
 		}
 	}
 
-	// Org-policy language weighting — path-based, over the full changelist.
-	// A programming language in the PR but outside preferred/allowed is
-	// anomalous (markup is excluded by BucketLanguages). Reuses
-	// pr-analyzer's detection + bucketing so the verdict matches the
-	// overview's posture for the same shared config.
+	// Org-policy language weighting — a programming language in the PR but
+	// outside preferred/allowed is anomalous (markup excluded by
+	// BucketLanguages). Opt-in: only when a posture is configured.
 	if len(cfg.langPolicy.Preferred) > 0 || len(cfg.langPolicy.Allowed) > 0 {
-		files := make([]codeshape.File, len(changed))
-		for i, cf := range changed {
-			files[i] = codeshape.File{Path: cf.Path}
-		}
 		posture := codeshape.BucketLanguages(codeshape.DetectLanguages(files), cfg.langPolicy)
 		rep.AnomalousLanguages = posture.Anomalous
 	}

@@ -207,6 +207,28 @@ func TestScan_WarnOnAnomalousLanguage(t *testing.T) {
 	assert.Equal(t, prdefense.VerdictWarn, rep.Verdict)
 }
 
+// TestScan_FlagsDependencyManifests: a PR touching a dependency manifest
+// is surfaced (built-in, no config) but informational — a benign manifest
+// change does NOT escalate the verdict, since dependency bumps are
+// high-frequency and warning on every one would drown the WARN tier.
+func TestScan_FlagsDependencyManifests(t *testing.T) {
+	t.Parallel()
+
+	src := fakeProvider{content: map[string][]byte{
+		"go.mod":      []byte("module x\n\ngo 1.26\n"),
+		"src/main.go": []byte("package main\n\nfunc main() {}\n"),
+	}}
+	changed := []prdefense.ChangedFile{
+		{Path: "go.mod", Status: "modified"},
+		{Path: "src/main.go", Status: "modified"},
+	}
+
+	rep, err := prdefense.Scan(context.Background(), src, "sha", changed)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"go.mod"}, rep.ManifestsTouched)
+	assert.Equal(t, prdefense.VerdictClear, rep.Verdict, "a benign manifest touch is informational, not a warn")
+}
+
 // TestScan_NoLanguagePolicy: without the option, an unlisted language is
 // not flagged — opt-in.
 func TestScan_NoLanguagePolicy(t *testing.T) {

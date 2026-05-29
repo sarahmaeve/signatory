@@ -727,6 +727,10 @@ func prScanSignals(entityID string, rep prdefense.Report, author, authorAssociat
 		r.RecordSignal(entityID, "pr_anomalous_language", prScanSource, now, prSignalTTL,
 			map[string]any{"languages": rep.AnomalousLanguages})
 	}
+	if len(rep.ManifestsTouched) > 0 {
+		r.RecordSignal(entityID, "pr_dependency_manifest_touched", prScanSource, now, prSignalTTL,
+			map[string]any{"paths": rep.ManifestsTouched})
+	}
 	r.RecordSignal(entityID, verdictSignalType, prScanSource, now, prSignalTTL, verdictRecord{
 		Verdict:           rep.Verdict,
 		Reasons:           rep.Reasons,
