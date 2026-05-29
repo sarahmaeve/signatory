@@ -39,22 +39,37 @@ import (
 // Returns the repo dir and the full head commit SHA.
 func initPRFixtureRepo(t *testing.T, prFiles map[string]string) (repoDir, headSHA string) {
 	t.Helper()
+	dir, _, head := initPRFixtureRepoWithBase(t, nil, prFiles)
+	return dir, head
+}
+
+// initPRFixtureRepoWithBase is initPRFixtureRepo with baseFiles committed
+// onto main BEFORE the PR commit, so the base tree (read at pr.BaseSHA)
+// can carry e.g. a CODEOWNERS that the PR head does not. Returns the repo
+// dir, the base commit SHA, and the head commit SHA.
+func initPRFixtureRepoWithBase(t *testing.T, baseFiles, prFiles map[string]string) (repoDir, baseSHA, headSHA string) {
+	t.Helper()
 	dir := t.TempDir()
 	git := func(args ...string) { runGitInFunctional(t, dir, args...) }
+	writeAll := func(files map[string]string) {
+		for path, content := range files {
+			full := filepath.Join(dir, filepath.FromSlash(path))
+			require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+			require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
+			git("add", path)
+		}
+	}
 
 	git("init", "-b", "main", "-q")
 	git("config", "user.email", "test@example.invalid")
 	git("config", "user.name", "Test")
 	git("config", "commit.gpgsign", "false")
+	writeAll(baseFiles)
 	git("commit", "--allow-empty", "-m", "base")
+	baseSHA = gitOutputInFunctional(t, dir, "rev-parse", "HEAD")
 
 	git("checkout", "-q", "-b", "pr-branch")
-	for path, content := range prFiles {
-		full := filepath.Join(dir, filepath.FromSlash(path))
-		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
-		require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
-		git("add", path)
-	}
+	writeAll(prFiles)
 	git("commit", "-q", "-m", "proposed changes")
 	headSHA = gitOutputInFunctional(t, dir, "rev-parse", "HEAD")
 	git("update-ref", "refs/pull/1/head", headSHA)
@@ -63,7 +78,7 @@ func initPRFixtureRepo(t *testing.T, prFiles map[string]string) (repoDir, headSH
 	// refs/pull/1/head reaches it. A clone of main can no longer see it.
 	git("checkout", "-q", "main")
 	git("branch", "-q", "-D", "pr-branch")
-	return dir, headSHA
+	return dir, baseSHA, headSHA
 }
 
 // gitOutputInFunctional runs git and returns trimmed stdout, via the same
@@ -343,4 +358,108 @@ func TestFunctional_PRScan_Maven_SpeculatedBuildExfil_Blocks(t *testing.T) {
 	assert.Equal(t, "webhook.site", rep.ExfilHits[0].Host)
 	assert.Empty(t, rep.ASTConcerns,
 		"no Java/Maven AST analyzer yet — caught via exfil literal only; this pins that boundary")
+}
+
+// TestFunctional_PRScan_CodeownerAtBase pins the CODEOWNERS-at-base read:
+// the base tree carries a CODEOWNERS making octocat own internal/, and the
+// PR (by octocat) touches internal/widget/widget.go. The emitted
+// pr_author_codeowner signal must reflect base-tree ownership — and be
+// read at base, not head, so a PR can't grant its own author ownership.
+func TestFunctional_PRScan_CodeownerAtBase(t *testing.T) {
+	t.Parallel()
+
+	baseFiles := map[string]string{
+		".github/CODEOWNERS": "internal/ @octocat\ndocs/ @someone-else\n",
+	}
+	prFiles := map[string]string{
+		"internal/widget/widget.go": "package widget\n\ntype Widget struct{}\n",
+	}
+	repoDir, baseSHA, headSHA := initPRFixtureRepoWithBase(t, baseFiles, prFiles)
+
+	srv := prScanGitHubServerWithBase(t, baseSHA, headSHA, "octocat",
+		prFilesJSON("internal/widget/widget.go"))
+
+	globals := testGlobals(t)
+	cmd := &PRScanCheckCmd{
+		Target: "octo/hello#1",
+		JSON:   true,
+		Path:   filepath.Join(t.TempDir(), "clone"),
+		Client: ghclient.NewClientWithBaseURL(srv.URL),
+		RunGit: redirectCloneTo(repoDir),
+		Stdout: &bytes.Buffer{},
+		Stderr: io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals), "a benign PR by a code owner clears")
+
+	s, err := store.OpenSQLite(context.Background(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	patch, err := s.FindEntityByURI(context.Background(), "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(context.Background(), patch.ID)
+	require.NoError(t, err)
+	var co string
+	for _, sg := range sigs {
+		if sg.Type == "pr_author_codeowner" {
+			co = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, co, "the patch must carry a pr_author_codeowner signal")
+	assert.Contains(t, co, `"present":true`)
+	assert.Contains(t, co, `"is_codeowner":true`)
+	assert.Contains(t, co, `"owns_changed_paths":true`)
+	assert.Contains(t, co, `"source_path":".github/CODEOWNERS"`)
+	assert.Contains(t, co, `"read_at":"base"`)
+}
+
+// TestFunctional_PRScan_CodeownerSpoofReadAtBase is the anti-spoof pin: the
+// PR head rewrites CODEOWNERS to grant its own author (mallory) ownership,
+// but the BASE tree lists only someone-else. Because membership is read at
+// base, mallory must read as NOT a code owner — the head edit can't grant
+// it.
+func TestFunctional_PRScan_CodeownerSpoofReadAtBase(t *testing.T) {
+	t.Parallel()
+
+	baseFiles := map[string]string{
+		".github/CODEOWNERS": "internal/ @someone-else\n",
+	}
+	prFiles := map[string]string{
+		// The spoof: head CODEOWNERS adds mallory as a catch-all owner.
+		".github/CODEOWNERS":        "internal/ @someone-else\n* @mallory\n",
+		"internal/widget/widget.go": "package widget\n\ntype Widget struct{}\n",
+	}
+	repoDir, baseSHA, headSHA := initPRFixtureRepoWithBase(t, baseFiles, prFiles)
+
+	srv := prScanGitHubServerWithBase(t, baseSHA, headSHA, "mallory",
+		prFilesJSON(".github/CODEOWNERS", "internal/widget/widget.go"))
+
+	globals := testGlobals(t)
+	cmd := &PRScanCheckCmd{
+		Target: "octo/hello#1",
+		JSON:   true,
+		Path:   filepath.Join(t.TempDir(), "clone"),
+		Client: ghclient.NewClientWithBaseURL(srv.URL),
+		RunGit: redirectCloneTo(repoDir),
+		Stdout: &bytes.Buffer{},
+		Stderr: io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals))
+
+	s, err := store.OpenSQLite(context.Background(), globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	patch, err := s.FindEntityByURI(context.Background(), "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(context.Background(), patch.ID)
+	require.NoError(t, err)
+	var co string
+	for _, sg := range sigs {
+		if sg.Type == "pr_author_codeowner" {
+			co = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, co)
+	assert.Contains(t, co, `"present":true`, "the base CODEOWNERS exists")
+	assert.Contains(t, co, `"is_codeowner":false`, "the head-side self-grant must not count")
+	assert.Contains(t, co, `"owns_changed_paths":false`)
 }

@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/sarahmaeve/pr-analyzer/engineerprofile"
 	"github.com/sarahmaeve/signatory/internal/prdefense"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
@@ -145,7 +146,11 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 		}
 	}
 
-	rep, err := cmd.scan(ctx, stderr, resolved, pr, n)
+	absPath, err := cmd.clonePath(resolved, n)
+	if err != nil {
+		return err
+	}
+	rep, err := cmd.scan(ctx, stderr, resolved, absPath, pr, n)
 	if err != nil {
 		return err
 	}
@@ -160,8 +165,15 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 	if err := s.AppendSignals(ctx, prScanSignals(entity.ID, rep, pr.Author, pr.AuthorAssociation, now)); err != nil {
 		return fmt.Errorf("persist pr-scan signals: %w", err)
 	}
-	if err := linkAuthorIdentity(ctx, s, entity.ID, pr, now); err != nil {
+	if err := linkAuthorIdentity(ctx, s, client, stderr, entity.ID, pr, now); err != nil {
 		return err
+	}
+	// CODEOWNERS-at-base membership. Only over a real clone (an injected
+	// provider means no clone on disk to read the base tree from).
+	if cmd.NewProvider == nil {
+		if err := recordAuthorCodeowner(ctx, s, absPath, entity.ID, pr, now); err != nil {
+			return fmt.Errorf("record author codeowner: %w", err)
+		}
 	}
 
 	if cmd.JSON {
@@ -180,18 +192,24 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 	return nil
 }
 
+// clonePath returns the absolute directory holding this PR's clone,
+// defaulting to filestore/clones/pr-<repo>-<N> when --path is unset. Both
+// the head-tree scan and the base-tree CODEOWNERS read resolve against it.
+func (cmd *PRScanCheckCmd) clonePath(resolved *profile.ResolvedTarget, n int) (string, error) {
+	p := cmd.Path
+	if p == "" {
+		p = filepath.Join("filestore", "clones", fmt.Sprintf("pr-%s-%d", shortName(resolved), n))
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("resolve clone path %q: %w", p, err)
+	}
+	return abs, nil
+}
+
 // scan clones the repo, fetches the PR head (objects only), and runs the
 // content scanners over the changed-file blobs.
-func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved *profile.ResolvedTarget, pr ghclient.PullRequest, n int) (prdefense.Report, error) {
-	clonePath := cmd.Path
-	if clonePath == "" {
-		clonePath = filepath.Join("filestore", "clones", fmt.Sprintf("pr-%s-%d", shortName(resolved), n))
-	}
-	absPath, err := filepath.Abs(clonePath)
-	if err != nil {
-		return prdefense.Report{}, fmt.Errorf("resolve clone path %q: %w", clonePath, err)
-	}
-
+func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved *profile.ResolvedTarget, absPath string, pr ghclient.PullRequest, n int) (prdefense.Report, error) {
 	newProvider := cmd.NewProvider
 	if newProvider == nil {
 		cloneURL := resolved.CloneURL
@@ -453,12 +471,19 @@ func loadVerdict(ctx context.Context, s store.Store, patchURI string) (verdictRe
 // so an author who also owns repos resolves to the same identity entity.
 // Bot / GitHub-App authors (which don't resolve to a real user account)
 // are skipped entirely — no identity minted, no link emitted.
-func linkAuthorIdentity(ctx context.Context, s store.Store, patchEntityID string, pr ghclient.PullRequest, now time.Time) error {
+//
+// Beyond the patch→identity link, the author's GitHub account profile
+// (age, repos, followers, type) lands as an author_profile signal on the
+// identity itself — the highest-value, lowest-cost tell for a throwaway
+// account submitting a hostile PR. That fetch is non-fatal: a profile
+// hiccup must not fail the scan (mirrors the owner-profile path).
+func linkAuthorIdentity(ctx context.Context, s store.Store, client *ghclient.Client, stderr io.Writer, patchEntityID string, pr ghclient.PullRequest, now time.Time) error {
 	if pr.Author == "" || isBotAuthor(pr.Author, pr.AuthorType) {
 		return nil
 	}
 	identURI := profile.CanonicalIdentityURI("github", pr.Author)
-	if _, _, err := s.EnsureEntityByCanonicalURI(ctx, identURI, pr.Author); err != nil {
+	ident, _, err := s.EnsureEntityByCanonicalURI(ctx, identURI, pr.Author)
+	if err != nil {
 		return fmt.Errorf("mint author identity %s: %w", identURI, err)
 	}
 	var r signal.CollectionResult
@@ -467,7 +492,91 @@ func linkAuthorIdentity(ctx context.Context, s store.Store, patchEntityID string
 		"author_association": pr.AuthorAssociation,
 		"identity":           identURI,
 	})
+	if prof, perr := client.FetchUserProfile(ctx, pr.Author); perr == nil {
+		r.RecordSignal(ident.ID, "author_profile", prScanSource, now, prSignalTTL, map[string]any{
+			"login":            prof.Login,
+			"name":             prof.Name,
+			"company":          prof.Company,
+			"created":          prof.CreatedAt.Format(time.RFC3339),
+			"account_age_days": int(now.Sub(prof.CreatedAt).Hours() / 24),
+			"public_repos":     prof.PublicRepos,
+			"followers":        prof.Followers,
+			"type":             prof.Type,
+		})
+	} else if stderr != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: fetch author profile %s: %v\n", pr.Author, perr)
+	}
 	return s.AppendSignals(ctx, r.Signals())
+}
+
+// codeownersLocations are the CODEOWNERS file paths GitHub recognizes, in
+// precedence order — the first present file wins. Mirrors the "codeowners"
+// family in internal/signal/repofiles/families.go.
+var codeownersLocations = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
+
+// recordAuthorCodeowner records whether the PR author owns the changed
+// paths, as a pr_author_codeowner signal on the patch entity. The
+// CODEOWNERS file is read from the PR BASE tree, never head: reading at
+// head would let a hostile PR add its own author to CODEOWNERS and read as
+// an owner. Best-effort — an unreadable base tree (base SHA not in the
+// clone) records nothing rather than failing the scan.
+func recordAuthorCodeowner(ctx context.Context, s store.Store, clonePath, patchEntityID string, pr ghclient.PullRequest, now time.Time) error {
+	if pr.BaseSHA == "" {
+		return nil
+	}
+	content, sourcePath, treeReadable := readBaseCodeowners(ctx, clonePath, pr.BaseSHA)
+	if !treeReadable {
+		return nil
+	}
+	changed := make([]string, len(pr.Files))
+	for i, f := range pr.Files {
+		changed[i] = f.Path
+	}
+	co := engineerprofile.ParseCodeowners(content, pr.Author, changed)
+
+	var r signal.CollectionResult
+	r.RecordSignal(patchEntityID, "pr_author_codeowner", prScanSource, now, prSignalTTL, map[string]any{
+		"present":            co.Present,
+		"is_codeowner":       co.IsCodeowner,
+		"owns_changed_paths": co.OwnsChangedPaths,
+		"owned_paths":        co.OwnedPaths,
+		"source_path":        sourcePath,
+		"read_at":            "base",
+	})
+	return s.AppendSignals(ctx, r.Signals())
+}
+
+// readBaseCodeowners reads the first present CODEOWNERS file from the
+// clone's object database at the base tree. treeReadable reports whether
+// the base tree itself could be listed: false means the base SHA isn't in
+// the clone (caller skips the signal); true with nil content means the
+// tree was read but carries no CODEOWNERS (a meaningful present:false).
+func readBaseCodeowners(ctx context.Context, clonePath, baseSHA string) (content []byte, sourcePath string, treeReadable bool) {
+	bs, err := source.NewBlobStreamer(ctx, clonePath, source.WithMaxBlobSize(prBlobCap))
+	if err != nil {
+		return nil, "", false
+	}
+	defer bs.Close() //nolint:errcheck // best-effort resource release
+	blobs, err := bs.ListTreeBlobs(ctx, baseSHA)
+	if err != nil {
+		return nil, "", false
+	}
+	index := make(map[string]string, len(blobs))
+	for _, b := range blobs {
+		index[b.Path] = b.SHA
+	}
+	for _, loc := range codeownersLocations {
+		sha, ok := index[loc]
+		if !ok {
+			continue
+		}
+		c, err := bs.ReadBlob(ctx, sha)
+		if err != nil {
+			continue
+		}
+		return c, loc, true
+	}
+	return nil, "", true
 }
 
 // isBotAuthor reports whether a PR author is a bot / GitHub-App identity

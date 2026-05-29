@@ -1293,4 +1293,26 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the login is publisher-controlled and can change; the canonical identity URI is the stable join key for linking and for future contributor-burn cascades",
 		},
 	},
+	"author_profile": {
+		Type:              "author_profile",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "GitHub account profile of a PR author, recorded on their identity entity: account age, public-repo count, follower count, and account type. A freshly-created (throwaway) account submitting PRs is a strong supply-chain tell.",
+		Caveats: []string{
+			"recorded on the identity: entity (the per-user home), not the patch — it accumulates across every PR/repo we see from this account",
+			"account metadata is publisher-controlled and mutable (followers, repo count drift); the created-at / account-age field is the load-bearing, hardest-to-fake part",
+			"only fetched for human authors — bot / GitHub-App authors are never minted as identities",
+		},
+	},
+	"pr_author_codeowner": {
+		Type:              "pr_author_codeowner",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Whether a PR's author owns (per CODEOWNERS) the paths the PR changes — a maintainer editing their own area vs. an outsider touching a protected one.",
+		Caveats: []string{
+			"read from CODEOWNERS at the BASE commit, not the PR head — otherwise a PR that adds its own author to CODEOWNERS would read as an owner",
+			"only direct @login ownership is detected; team (@org/team) and email owners are not resolved, so a real owner via team membership reads as a non-owner",
+			"pattern matching covers the common CODEOWNERS forms (catch-all, dir, extension, exact) but not full gitignore glob semantics; absence of a CODEOWNERS file is not evidence either way",
+		},
+	},
 }

@@ -225,6 +225,8 @@ func TestRegistry_PRScanTypesHaveExpectedShape(t *testing.T) {
 		{"pr_ast_concern", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
 		{"pr_defense_verdict", profile.SignalGroupHygiene, profile.ForgeryHigh},
 		{"pr_author", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
+		{"author_profile", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
+		{"pr_author_codeowner", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
 	}
 
 	for _, tc := range cases {

@@ -203,6 +203,36 @@ func TestPRScanCheck_MintsAndLinksAuthorIdentity(t *testing.T) {
 	assert.Contains(t, link, "identity:github/octocat")
 }
 
+// TestPRScanCheck_RecordsAuthorProfile pins the account-profile enrichment:
+// a non-bot author's identity must carry an author_profile signal sourced
+// from the GitHub user endpoint, including the account-age field that flags
+// throwaway accounts.
+func TestPRScanCheck_RecordsAuthorProfile(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	runPRScanCheck(t, globals, "octocat", "User")
+
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+
+	ident, err := s.FindEntityByURI(ctx, "identity:github/octocat")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, ident.ID)
+	require.NoError(t, err)
+	var prof string
+	for _, sg := range sigs {
+		if sg.Type == "author_profile" {
+			prof = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, prof, "a non-bot author's identity must carry an author_profile signal")
+	assert.Contains(t, prof, "account_age_days")
+	assert.Contains(t, prof, `"public_repos":8`)
+	assert.Contains(t, prof, `"type":"User"`)
+}
+
 func TestPRScanCheck_SkipsBotAuthor(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ name, login, authorType string }{
@@ -304,6 +334,33 @@ func prScanGitHubServer(t *testing.T, headSHA string, files string) *httptest.Se
 	return prScanGitHubServerAs(t, headSHA, "mallory", "User", files)
 }
 
+// prScanGitHubServerWithBase serves a PR whose base.sha is a real commit
+// SHA (so the CODEOWNERS-at-base read resolves against the clone), with a
+// configurable author login.
+func prScanGitHubServerWithBase(t *testing.T, baseSHA, headSHA, login, files string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/octo/hello/pulls/1", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"number":1,"title":"x","html_url":"u","state":"open","draft":false,
+			"user":{"login":%q,"type":"User"},
+			"base":{"ref":"main","sha":%q},
+			"head":{"ref":"feature","sha":%q},
+			"additions":1,"deletions":0,"changed_files":1,"labels":[],
+			"author_association":"CONTRIBUTOR",
+			"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`, login, baseSHA, headSHA)
+	})
+	mux.HandleFunc("/repos/octo/hello/pulls/1/files", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, files)
+	})
+	mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+		who := strings.TrimPrefix(r.URL.Path, "/users/")
+		fmt.Fprintf(w, `{"login":%q,"type":"User","created_at":"2011-01-25T18:44:36Z","public_repos":8,"followers":42}`, who)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // prScanGitHubServerAs is prScanGitHubServer with a configurable PR
 // author login + user.type, for exercising the bot gate.
 func prScanGitHubServerAs(t *testing.T, headSHA, login, authorType, files string) *httptest.Server {
@@ -320,6 +377,10 @@ func prScanGitHubServerAs(t *testing.T, headSHA, login, authorType, files string
 	})
 	mux.HandleFunc("/repos/octo/hello/pulls/1/files", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, files)
+	})
+	mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+		who := strings.TrimPrefix(r.URL.Path, "/users/")
+		fmt.Fprintf(w, `{"login":%q,"type":%q,"created_at":"2011-01-25T18:44:36Z","public_repos":8,"followers":42}`, who, authorType)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

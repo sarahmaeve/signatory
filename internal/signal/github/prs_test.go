@@ -107,6 +107,27 @@ func TestFetchPullRequest(t *testing.T) {
 	assert.Equal(t, "widget_test.go", pr.Files[1].Path)
 }
 
+func TestFetchUserProfile(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/octocat", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"login":"octocat","name":"The Octocat","company":"@github","type":"User",
+			"created_at":"2011-01-25T18:44:36Z","public_repos":8,"followers":9999}`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := NewClientWithBaseURLAndToken(server.URL, "test-token")
+
+	p, err := client.FetchUserProfile(context.Background(), "octocat")
+	require.NoError(t, err)
+	assert.Equal(t, "octocat", p.Login)
+	assert.Equal(t, "User", p.Type)
+	assert.Equal(t, 8, p.PublicRepos)
+	assert.Equal(t, 9999, p.Followers)
+	assert.Equal(t, 2011, p.CreatedAt.Year())
+}
+
 func TestListOpenPullRequestNumbers(t *testing.T) {
 	t.Parallel()
 
