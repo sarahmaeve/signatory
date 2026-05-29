@@ -57,7 +57,7 @@ func TestFetchPullRequest(t *testing.T) {
 		fmt.Fprint(w, `{
 			"number": 7,
 			"title": "Add widget",
-			"user": {"login": "alice"},
+			"user": {"login": "alice", "type": "User"},
 			"html_url": "https://github.com/octo/hello/pull/7",
 			"state": "open",
 			"draft": false,
@@ -100,6 +100,7 @@ func TestFetchPullRequest(t *testing.T) {
 	assert.Equal(t, "CONTRIBUTOR", pr.AuthorAssociation)
 	assert.Equal(t, "head1111111111111111111111111111111111111", pr.HeadSHA)
 	assert.Equal(t, "base0000000000000000000000000000000000000", pr.BaseSHA)
+	assert.Equal(t, "User", pr.AuthorType)
 	require.Len(t, pr.Files, 2)
 	assert.Equal(t, "widget.go", pr.Files[0].Path)
 	assert.Equal(t, "modified", pr.Files[0].Status)

@@ -28,7 +28,7 @@ func TestGitHubSource(t *testing.T) {
 	mux.HandleFunc("/repos/octo/hello/pulls/7", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{
 			"number": 7,
-			"user": {"login": "alice"},
+			"user": {"login": "alice", "type": "User"},
 			"html_url": "https://github.com/octo/hello/pull/7",
 			"additions": 10,
 			"deletions": 2,
@@ -62,6 +62,7 @@ func TestGitHubSource(t *testing.T) {
 	assert.Equal(t, "CONTRIBUTOR", pr.AuthorAssociation)
 	assert.Equal(t, "head1111111111111111111111111111111111111", pr.HeadSHA)
 	assert.Equal(t, "base0000000000000000000000000000000000000", pr.BaseSHA)
+	assert.Equal(t, "User", pr.AuthorType)
 	require.Len(t, pr.Files, 1)
 	assert.Equal(t, "a.go", pr.Files[0].Path)
 	assert.Equal(t, "modified", pr.Files[0].Status)

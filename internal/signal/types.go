@@ -1282,4 +1282,15 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"pinned to a head SHA; a force-push after the scan invalidates it",
 		},
 	},
+	"pr_author": {
+		Type:              "pr_author",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "The GitHub author of a scanned pull request — login, author_association, and the canonical identity URI of the author's user entity — recorded on the patch so a scan links to the identity: entity of the human who submitted it.",
+		Caveats: []string{
+			"emitted only for human authors; bot / GitHub-App authors (user.type == Bot, or a [bot] login) are not minted as identities and carry no pr_author signal",
+			"author_association is GitHub's point-in-time classification of the author's relationship to THIS repo, not a global property of the identity",
+			"the login is publisher-controlled and can change; the canonical identity URI is the stable join key for linking and for future contributor-burn cascades",
+		},
+	},
 }

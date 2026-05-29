@@ -32,9 +32,13 @@ type PullRequest struct {
 	ChangedFiles      int
 	Labels            []string
 	AuthorAssociation string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Files             []PullRequestFile
+	// AuthorType is the GitHub user object's type for the PR author:
+	// "User", "Bot", or "Organization". Lets callers distinguish a human
+	// contributor from an App/bot identity (dependabot[bot] etc.).
+	AuthorType string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	Files      []PullRequestFile
 }
 
 // PullRequestFile is one entry from a PR's file list.
@@ -72,6 +76,7 @@ type prDetailPayload struct {
 
 type prUserPayload struct {
 	Login string `json:"login"`
+	Type  string `json:"type"`
 }
 
 type prRefPayload struct {
@@ -151,6 +156,7 @@ func (c *Client) FetchPullRequest(ctx context.Context, owner, repoName string, n
 		ChangedFiles:      p.ChangedFiles,
 		Labels:            labels,
 		AuthorAssociation: p.AuthorAssociation,
+		AuthorType:        p.User.Type,
 		CreatedAt:         p.CreatedAt,
 		UpdatedAt:         p.UpdatedAt,
 		Files:             files,

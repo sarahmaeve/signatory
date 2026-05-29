@@ -152,12 +152,16 @@ func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 
 	// Persist: mint the patch: entity and append findings + verdict
 	// (carrying the author for later attribution).
+	now := time.Now().UTC()
 	entity, _, err := s.EnsureEntityByCanonicalURI(ctx, resolved.CanonicalURI, resolved.ShortName)
 	if err != nil {
 		return fmt.Errorf("mint patch entity %s: %w", resolved.CanonicalURI, err)
 	}
-	if err := s.AppendSignals(ctx, prScanSignals(entity.ID, rep, pr.Author, pr.AuthorAssociation, time.Now().UTC())); err != nil {
+	if err := s.AppendSignals(ctx, prScanSignals(entity.ID, rep, pr.Author, pr.AuthorAssociation, now)); err != nil {
 		return fmt.Errorf("persist pr-scan signals: %w", err)
+	}
+	if err := linkAuthorIdentity(ctx, s, entity.ID, pr, now); err != nil {
+		return err
 	}
 
 	if cmd.JSON {
@@ -440,6 +444,39 @@ func loadVerdict(ctx context.Context, s store.Store, patchURI string) (verdictRe
 		return rec, sg.CollectedAt, true, nil
 	}
 	return verdictRecord{}, time.Time{}, false, nil
+}
+
+// linkAuthorIdentity mints (or reuses) the identity: entity for a PR's
+// human author and links the patch to it via a pr_author signal — the
+// per-user home for Engineer Profile data and the join key for a future
+// contributor-burn cascade. The mint is idempotent on the canonical URI,
+// so an author who also owns repos resolves to the same identity entity.
+// Bot / GitHub-App authors (which don't resolve to a real user account)
+// are skipped entirely — no identity minted, no link emitted.
+func linkAuthorIdentity(ctx context.Context, s store.Store, patchEntityID string, pr ghclient.PullRequest, now time.Time) error {
+	if pr.Author == "" || isBotAuthor(pr.Author, pr.AuthorType) {
+		return nil
+	}
+	identURI := profile.CanonicalIdentityURI("github", pr.Author)
+	if _, _, err := s.EnsureEntityByCanonicalURI(ctx, identURI, pr.Author); err != nil {
+		return fmt.Errorf("mint author identity %s: %w", identURI, err)
+	}
+	var r signal.CollectionResult
+	r.RecordSignal(patchEntityID, "pr_author", prScanSource, now, prSignalTTL, map[string]any{
+		"login":              pr.Author,
+		"author_association": pr.AuthorAssociation,
+		"identity":           identURI,
+	})
+	return s.AppendSignals(ctx, r.Signals())
+}
+
+// isBotAuthor reports whether a PR author is a bot / GitHub-App identity
+// rather than a human user account. Authoritative on user.type == "Bot";
+// the [bot] login suffix is a backstop for connectors that don't surface
+// the type.
+func isBotAuthor(login, authorType string) bool {
+	return strings.EqualFold(authorType, "Bot") ||
+		strings.HasSuffix(strings.ToLower(login), "[bot]")
 }
 
 // prScanSignals builds the store signals for one scan: each finding type

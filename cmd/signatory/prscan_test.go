@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sarahmaeve/signatory/internal/prdefense"
+	"github.com/sarahmaeve/signatory/internal/profile"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
@@ -162,6 +163,109 @@ func TestPRScanSummary_Empty(t *testing.T) {
 	assert.Contains(t, out.String(), "No pr-scan captures")
 }
 
+func runPRScanCheck(t *testing.T, globals *Globals, login, authorType string) {
+	t.Helper()
+	src := fakeContentProvider{content: map[string][]byte{"a.go": []byte("package a\n")}}
+	srv := prScanGitHubServerAs(t, "headAAA", login, authorType, prFilesJSON("a.go"))
+	cmd := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client: ghclient.NewClientWithBaseURL(srv.URL), NewProvider: countingProvider(src, new(int)),
+		Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, cmd.Run(globals))
+}
+
+func TestPRScanCheck_MintsAndLinksAuthorIdentity(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	runPRScanCheck(t, globals, "octocat", "User")
+
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+
+	ident, err := s.FindEntityByURI(ctx, "identity:github/octocat")
+	require.NoError(t, err, "a non-bot author must be minted as an identity entity")
+	assert.Equal(t, profile.EntityIdentity, ident.Type)
+
+	patch, err := s.FindEntityByURI(ctx, "patch:github/octo/hello/1")
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, patch.ID)
+	require.NoError(t, err)
+	var link string
+	for _, sg := range sigs {
+		if sg.Type == "pr_author" {
+			link = string(sg.Value)
+		}
+	}
+	require.NotEmpty(t, link, "the patch must carry a pr_author link signal")
+	assert.Contains(t, link, "identity:github/octocat")
+}
+
+func TestPRScanCheck_SkipsBotAuthor(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, login, authorType string }{
+		{"bot_login_suffix", "dependabot[bot]", "User"},
+		{"bot_user_type", "some-app", "Bot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			globals := testGlobals(t)
+			runPRScanCheck(t, globals, tc.login, tc.authorType)
+
+			ctx := context.Background()
+			s, err := store.OpenSQLite(ctx, globals.DBPath)
+			require.NoError(t, err)
+			defer s.Close() //nolint:errcheck // test cleanup
+
+			_, err = s.FindEntityByURI(ctx, profile.CanonicalIdentityURI("github", tc.login))
+			require.ErrorIs(t, err, store.ErrNotFound, "a bot author must not be minted as an identity")
+
+			// The PR is still scanned and stored — just without an author link.
+			patch, err := s.FindEntityByURI(ctx, "patch:github/octo/hello/1")
+			require.NoError(t, err)
+			sigs, err := s.GetSignals(ctx, patch.ID)
+			require.NoError(t, err)
+			var hasVerdict, hasAuthor bool
+			for _, sg := range sigs {
+				switch sg.Type {
+				case "pr_defense_verdict":
+					hasVerdict = true
+				case "pr_author":
+					hasAuthor = true
+				}
+			}
+			assert.True(t, hasVerdict, "a bot PR is still scanned and stored")
+			assert.False(t, hasAuthor, "a bot author carries no pr_author link")
+		})
+	}
+}
+
+func TestPRScanCheck_ReusesExistingEngineerIdentity(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	ctx := context.Background()
+
+	// Pre-seed octocat as an existing engineer identity (e.g. already a
+	// repo owner). The PR scan must reuse this row, not duplicate it.
+	s0, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	pre, _, err := s0.EnsureEntityByCanonicalURI(ctx, "identity:github/octocat", "octocat")
+	require.NoError(t, err)
+	require.NoError(t, s0.Close())
+
+	runPRScanCheck(t, globals, "octocat", "User")
+
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	ident, err := s.FindEntityByURI(ctx, "identity:github/octocat")
+	require.NoError(t, err)
+	assert.Equal(t, pre.ID, ident.ID, "the existing engineer identity must be reused, not duplicated")
+}
+
 // TestFetchPullRef_IssuesPullRefFetch pins the exact git invocation:
 // `git -C <clone> fetch origin refs/pull/<n>/head`. The PR number is an
 // int formatted into the refspec, so there is no attacker-controlled
@@ -197,16 +301,22 @@ func (f fakeContentProvider) ReadFile(_ context.Context, path string) ([]byte, p
 }
 
 func prScanGitHubServer(t *testing.T, headSHA string, files string) *httptest.Server {
+	return prScanGitHubServerAs(t, headSHA, "mallory", "User", files)
+}
+
+// prScanGitHubServerAs is prScanGitHubServer with a configurable PR
+// author login + user.type, for exercising the bot gate.
+func prScanGitHubServerAs(t *testing.T, headSHA, login, authorType, files string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/octo/hello/pulls/1", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `{"number":1,"title":"x","html_url":"u","state":"open","draft":false,
-			"user":{"login":"mallory"},
+			"user":{"login":%q,"type":%q},
 			"base":{"ref":"main","sha":"base000"},
 			"head":{"ref":"evil","sha":%q},
 			"additions":3,"deletions":0,"changed_files":2,"labels":[],
 			"author_association":"FIRST_TIME_CONTRIBUTOR",
-			"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`, headSHA)
+			"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`, login, authorType, headSHA)
 	})
 	mux.HandleFunc("/repos/octo/hello/pulls/1/files", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, files)

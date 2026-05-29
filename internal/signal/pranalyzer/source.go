@@ -76,6 +76,7 @@ func toAnalyzerPR(ref analyzer.PRRef, pr github.PullRequest) analyzer.PR {
 		ChangedFiles:      pr.ChangedFiles,
 		Labels:            pr.Labels,
 		AuthorAssociation: pr.AuthorAssociation,
+		AuthorType:        pr.AuthorType,
 		CreatedAt:         pr.CreatedAt,
 		UpdatedAt:         pr.UpdatedAt,
 		Files:             files,
