@@ -1108,4 +1108,114 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"this is an artifact-level signal (the .jar was signed for the registry), distinct from git tag signing which the git collector handles separately",
 		},
 	},
+
+	// ================================================================
+	// Pull-request queue (pr-analyzer collector) — shape of inbound,
+	// still-open contributions. Entries span vitality / governance /
+	// hygiene; grouped here by source for maintainability, with the
+	// per-entry Group field carrying the real classification.
+	//
+	// All medium-declining: every value is GitHub-API PR metadata,
+	// mutable post-observation (edits, force-push, relabeling) and a
+	// point-in-time snapshot of the OPEN queue — not merge history.
+	// ================================================================
+
+	"open_pr_count": {
+		Type:              "open_pr_count",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Number of currently-open pull requests on the repository, from full pagination of the listing endpoint.",
+		Caveats: []string{
+			"a snapshot of pending inbound work at observation time, not merge throughput — a high count may mean healthy contribution flow or an unreviewed backlog",
+			"this count is the true total (the listing is fully paginated); the per-PR rate/distribution signals below are computed over a bounded sample of it",
+		},
+	},
+	"pr_author_association_distribution": {
+		Type:              "pr_author_association_distribution",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Distribution of GitHub author_association values (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE, …) across the sampled open PRs.",
+		Caveats: []string{
+			"computed over a bounded sample of the most-recent open PRs (default 30); larger queues are sampled, not fully enumerated, and the truncation is logged",
+			"author_association is GitHub's point-in-time classification of the author's relationship to the repo and is connector-defined vocabulary; it shifts as people gain or lose membership",
+			"describes who is proposing changes, not who is merging them — open PRs include contributions that may never land",
+		},
+	},
+	"pr_first_time_contributor_share": {
+		Type:              "pr_first_time_contributor_share",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs whose author_association marks the author as first-time or unaffiliated (FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, NONE).",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); larger queues are sampled with truncation logged",
+			"a high first-timer share is ambiguous — it can mark a welcoming, popular project or an influx of low-quality or hostile PRs; interpret alongside review-gate signals",
+			"open-queue snapshot, not merge history",
+		},
+	},
+	"pr_test_touch_rate": {
+		Type:              "pr_test_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that touch test files, by pr-analyzer's path and filename heuristics.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"heuristic name/path matching (e.g. *_test.go, tests/, spec/) — convention- and language-dependent, with both false positives and misses",
+			"measures whether tests are touched, not whether coverage is adequate or the tests are meaningful",
+		},
+	},
+	"pr_dependency_manifest_touch_rate": {
+		Type:              "pr_dependency_manifest_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that modify a dependency manifest or lockfile (go.mod, package.json, Cargo.toml, requirements.txt, …).",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"flags inbound dependency changes for review; does not distinguish additions from upgrades or removals",
+			"open-queue snapshot — these changes are proposed, not yet merged",
+		},
+	},
+	"pr_agent_config_touch_rate": {
+		Type:              "pr_agent_config_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that touch AI-agent configuration files (CLAUDE.md, .cursorrules, .claude/, …) — a cross-ecosystem prompt-injection carrier surface.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"the agent-config catalog is pr-analyzer's own and can drift from signatory's internal/agentconfig taxonomy until the two are reconciled",
+			"a touch is not itself malicious — legitimate agent-config maintenance looks identical; pair with content-injection scanning of the changed files",
+		},
+	},
+	"pr_oversized_share": {
+		Type:              "pr_oversized_share",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs whose total changed lines (additions + deletions) exceed the large-PR threshold the collector passes to pr-analyzer.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"the threshold is a heuristic; signatory's collection path has no org config, so a built-in default applies — large PRs are a review-burden signal, not a correctness one",
+			"LOC counts are GitHub-reported and exclude binary / generated-file context",
+		},
+	},
+	"pr_language_distribution": {
+		Type:              "pr_language_distribution",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Distribution of programming languages detected across the files changed in the sampled open PRs.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"languages are inferred from file extensions, not content; vendored or generated files inflate counts",
+			"reflects the languages of proposed changes in the open queue, not the repository's overall composition",
+		},
+	},
+	"pr_queue_samples": {
+		Type:              "pr_queue_samples",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Per-PR drill-down detail behind the open-PR-queue aggregate signals: one record per sampled PR (number, author, association, LOC, tests/manifests/agent-config touches, languages).",
+		Caveats: []string{
+			"the retained detail carrier for the pr_* aggregates above — not a trend signal; field-level deltas on this array are expected to be noisy and should not be alerted on",
+			"bounded sample (default 30 most-recent open PRs); truncation is reflected in the carrier's truncated flag",
+			"open-queue snapshot at observation time, mutable via the GitHub API",
+		},
+	},
 }

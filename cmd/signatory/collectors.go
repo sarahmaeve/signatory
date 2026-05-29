@@ -23,6 +23,7 @@ import (
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	gitlabcollector "github.com/sarahmaeve/signatory/internal/signal/gitlab"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
+	prcollector "github.com/sarahmaeve/signatory/internal/signal/pranalyzer"
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
@@ -306,6 +307,14 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// emits nothing when either side is missing, so repo-only
 			// and registry-only entities skip silently.
 			cadencecollector.NewCollector().WithInRun(opts.InRunResult),
+			// pr-analyzer characterizes the open-PR queue (Code Shape /
+			// Engineer Profile aggregates). GitHub-only and the most
+			// expensive API-only collector — up to ~2 calls per sampled PR.
+			// Dispatched unconditionally like its siblings; it self-gates
+			// at Collect time on github.com host AND on an authenticated
+			// token (an empty GITHUB_TOKEN disables it, since the anonymous
+			// 60-req/hour budget can't service a 30-PR sample).
+			prcollector.NewCollector(os.Getenv("GITHUB_TOKEN")),
 		)
 	}
 

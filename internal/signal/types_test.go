@@ -168,6 +168,44 @@ func TestRegistry_GoPublishCollectorTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_PRAnalyzerTypesHaveExpectedShape locks in the
+// (Group, ForgeryResistance) values for the open-PR-queue signal types
+// the pr-analyzer collector (internal/signal/pranalyzer/) emits. Same
+// coupling contract as the sibling tests: registry drift and emitter
+// intent stay aligned. Registered first so the collector can reference
+// them without panicking on unregistered types.
+func TestRegistry_PRAnalyzerTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"open_pr_count", profile.SignalGroupVitality, profile.ForgeryMediumDeclining},
+		{"pr_author_association_distribution", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
+		{"pr_first_time_contributor_share", profile.SignalGroupGovernance, profile.ForgeryMediumDeclining},
+		{"pr_test_touch_rate", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+		{"pr_dependency_manifest_touch_rate", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+		{"pr_agent_config_touch_rate", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+		{"pr_oversized_share", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+		{"pr_language_distribution", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+		{"pr_queue_samples", profile.SignalGroupHygiene, profile.ForgeryMediumDeclining},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — pr-analyzer collector emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match pr-analyzer collector's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match pr-analyzer collector's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_SourceEvolutionTypesHaveExpectedShape locks in the
 // (Group, ForgeryResistance) values for signal types the source-
 // evolution collector (internal/signal/source/) will emit. Same
