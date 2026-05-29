@@ -71,6 +71,7 @@ type verdictRecord struct {
 type PRScanCmd struct {
 	Check   PRScanCheckCmd   `cmd:"" default:"withargs" help:"Deep-scan a pull request's changed files for injected prompt-injection, exfil hosts, and persistence writes (owner/repo#N)."`
 	Summary PRScanSummaryCmd `cmd:"" help:"List previously-captured PR scans, or show one in detail."`
+	Report  PRScanReportCmd  `cmd:"" help:"Render pr-analyzer's repo PR overview (analyses.json) as HTML, with pr-scan deep findings folded into each PR's drill-down."`
 }
 
 // PRScanCheckCmd scans a single pull request's changed files. It is
