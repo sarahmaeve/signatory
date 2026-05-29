@@ -25,6 +25,8 @@ type PullRequest struct {
 	Draft             bool
 	BaseRef           string
 	HeadRef           string
+	BaseSHA           string
+	HeadSHA           string
 	Additions         int
 	Deletions         int
 	ChangedFiles      int
@@ -74,6 +76,7 @@ type prUserPayload struct {
 
 type prRefPayload struct {
 	Ref string `json:"ref"`
+	SHA string `json:"sha"`
 }
 
 type prLabel struct {
@@ -141,6 +144,8 @@ func (c *Client) FetchPullRequest(ctx context.Context, owner, repoName string, n
 		Draft:             p.Draft,
 		BaseRef:           p.Base.Ref,
 		HeadRef:           p.Head.Ref,
+		BaseSHA:           p.Base.SHA,
+		HeadSHA:           p.Head.SHA,
 		Additions:         p.Additions,
 		Deletions:         p.Deletions,
 		ChangedFiles:      p.ChangedFiles,

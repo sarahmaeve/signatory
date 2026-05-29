@@ -61,8 +61,8 @@ func TestFetchPullRequest(t *testing.T) {
 			"html_url": "https://github.com/octo/hello/pull/7",
 			"state": "open",
 			"draft": false,
-			"base": {"ref": "main"},
-			"head": {"ref": "feature"},
+			"base": {"ref": "main", "sha": "base0000000000000000000000000000000000000"},
+			"head": {"ref": "feature", "sha": "head1111111111111111111111111111111111111"},
 			"additions": 187,
 			"deletions": 7,
 			"changed_files": 2,
@@ -98,6 +98,8 @@ func TestFetchPullRequest(t *testing.T) {
 	assert.Equal(t, 2, pr.ChangedFiles)
 	assert.Equal(t, []string{"bug", "area/core"}, pr.Labels)
 	assert.Equal(t, "CONTRIBUTOR", pr.AuthorAssociation)
+	assert.Equal(t, "head1111111111111111111111111111111111111", pr.HeadSHA)
+	assert.Equal(t, "base0000000000000000000000000000000000000", pr.BaseSHA)
 	require.Len(t, pr.Files, 2)
 	assert.Equal(t, "widget.go", pr.Files[0].Path)
 	assert.Equal(t, "modified", pr.Files[0].Status)

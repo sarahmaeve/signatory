@@ -694,22 +694,8 @@ func (b *BlobStreamer) fetchOrigin(ctx context.Context) error {
 //   - vendored code (vendor/ at root or any nested vendor/ dir) —
 //     not the package's own code
 func isGoSourceFile(path string) bool {
-	if !strings.HasSuffix(path, ".go") {
-		return false
-	}
-	if strings.HasSuffix(path, "_test.go") {
-		return false
-	}
-	if path == "vendor" {
-		return false
-	}
-	if strings.HasPrefix(path, "vendor/") {
-		return false
-	}
-	if strings.Contains(path, "/vendor/") {
-		return false
-	}
-	return true
+	lang, ok := astfeature.LanguageForPath(path)
+	return ok && lang == astfeature.LangGo
 }
 
 // isPythonSourceFile reports whether the given posix-style path is a
@@ -729,25 +715,8 @@ func isGoSourceFile(path string) bool {
 // vendor/ convention, so the exclude set is a best guess refined
 // when the Python analyzer (and real-data comparability) lands.
 func isPythonSourceFile(path string) bool {
-	if !strings.HasSuffix(path, ".py") {
-		return false
-	}
-	base := path
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	if base == "conftest.py" ||
-		strings.HasPrefix(base, "test_") ||
-		strings.HasSuffix(base, "_test.py") {
-		return false
-	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "tests", "test", "vendor", "_vendor", "site-packages", ".venv", "venv":
-			return false
-		}
-	}
-	return true
+	lang, ok := astfeature.LanguageForPath(path)
+	return ok && lang == astfeature.LangPython
 }
 
 // isNodeSourceFile reports whether the given posix-style path is a
@@ -767,49 +736,8 @@ func isPythonSourceFile(path string) bool {
 // convention, so the exclude set is a best effort refined against
 // real-data comparability (mirrors the isPythonSourceFile note).
 func isNodeSourceFile(path string) bool {
-	// .d.ts is a declaration file even though it ends in .ts — check
-	// before the extension allowlist so it isn't admitted as TS.
-	if strings.HasSuffix(path, ".d.ts") {
-		return false
-	}
-	ext := false
-	for _, suf := range []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"} {
-		if strings.HasSuffix(path, suf) {
-			ext = true
-			break
-		}
-	}
-	if !ext {
-		return false
-	}
-
-	base := path
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	// Minified bundle: any `.min.` segment in the BASENAME means the
-	// file is build output, not authored source. The intent of `.min.`
-	// is language-side-agnostic — bundlers emit `.min.mjs` and
-	// `.min.cjs` for ESM/CJS targets and (rarely) `.min.ts` for TS
-	// minifiers — so the suffix-on-the-whole-path `.min.js` check that
-	// shipped previously missed every variant other than plain `.js`.
-	// Basename-scoped to avoid matching `.min.` in directory components
-	// like a hypothetical `vendor/.min.dir/foo.js`.
-	if strings.Contains(base, ".min.") {
-		return false
-	}
-	// test/spec file: a ".test." or ".spec." segment in the basename
-	// (foo.test.js, bar.spec.tsx).
-	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
-		return false
-	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "__tests__", "test", "tests", "node_modules", "dist", "build", "out":
-			return false
-		}
-	}
-	return true
+	lang, ok := astfeature.LanguageForPath(path)
+	return ok && lang == astfeature.LangJavaScript
 }
 
 // isRustSourceFile reports whether the given posix-style path is a
@@ -829,16 +757,8 @@ func isNodeSourceFile(path string) bool {
 // build.rs at any depth IS admitted: it's the supply-chain-relevant
 // build-time entry point.
 func isRustSourceFile(path string) bool {
-	if !strings.HasSuffix(path, ".rs") {
-		return false
-	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "tests", "benches", "examples", "target", "vendor":
-			return false
-		}
-	}
-	return true
+	lang, ok := astfeature.LanguageForPath(path)
+	return ok && lang == astfeature.LangRust
 }
 
 // isMissingObjectMessage reports whether the stderr text from a

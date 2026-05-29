@@ -72,6 +72,11 @@ type ResolvedTarget struct {
 	// distinct canonical URI from `pkg:npm/X`; they index to
 	// different entity rows and can hold different postures/burns.
 	Version string
+
+	// PatchID is the pull/merge-request number for patch: targets
+	// (e.g. "593" for patch:github/owner/repo/593). Empty for other
+	// schemes. The pr-scan command reads it to fetch refs/pull/<id>/head.
+	PatchID string
 }
 
 // ResolveTarget normalizes a user-supplied target argument to its
@@ -117,6 +122,14 @@ func ResolveTarget(raw string) (*ResolvedTarget, error) {
 		if strings.HasPrefix(s, prefix) {
 			return resolveCanonicalURI(s)
 		}
+	}
+
+	// Pull-request targets: owner/repo#N shorthand or a github.com
+	// /pull/N URL → patch: canonical URI (GitHub only in v0.1). Must run
+	// before tryRegistryURLs / forge-shorthand parsing, since '#' is not
+	// in the forge-shorthand charset and would otherwise error.
+	if uri, ok := tryPullRequestTarget(s); ok {
+		return resolveCanonicalURI(uri)
 	}
 
 	// Copy-paste-from-browser registry URLs (npmjs.com, pypi.org,
@@ -226,6 +239,77 @@ func tryRegistryURLs(s string) (canonicalURI string, ok bool) {
 		return appendVersion(canonicalGoModuleURI(importPath), version), true
 	}
 	return "", false
+}
+
+// tryPullRequestTarget recognizes a pull-request target and converts it
+// to a patch: canonical URI. Two forms:
+//
+//   - owner/repo#N                            (GitHub shorthand)
+//   - https://github.com/owner/repo/pull/N    (with/without scheme, www,
+//     trailing slash, #fragment, ?query)
+//
+// GitHub only in v0.1. Returns ("", false) for anything else — callers
+// fall through to the existing repo/pkg resolution, and the pr-scan
+// command rejects any target that does not resolve to a patch: URI.
+func tryPullRequestTarget(s string) (canonicalURI string, ok bool) {
+	if owner, repo, num, urlOK := parseGitHubPullURL(s); urlOK {
+		return CanonicalPatchURI(PlatformGitHub, owner, repo, num), true
+	}
+	// owner/repo#N shorthand: no scheme, exactly one '#', positive-int tail.
+	if strings.Contains(s, "://") || strings.Count(s, "#") != 1 {
+		return "", false
+	}
+	left, num, _ := strings.Cut(s, "#")
+	if !isPositiveIntString(num) {
+		return "", false
+	}
+	_, platform, owner, name, err := NormalizeForgeRepoInput(left)
+	if err != nil || platform != PlatformGitHub {
+		return "", false
+	}
+	return CanonicalPatchURI(PlatformGitHub, owner, name, num), true
+}
+
+// parseGitHubPullURL recognizes a github.com pull-request URL and
+// extracts owner, repo, and the PR number. Host-anchored against
+// lookalikes (mirrors parsePkgGoDevURL). Returns ok=false for any other
+// shape.
+func parseGitHubPullURL(input string) (owner, repo, num string, ok bool) {
+	s := strings.TrimPrefix(input, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "www.")
+	rest, hostOK := strings.CutPrefix(s, "github.com/")
+	if !hostOK {
+		return "", "", "", false
+	}
+	rest, _, _ = strings.Cut(rest, "#")
+	rest, _, _ = strings.Cut(rest, "?")
+	rest = strings.TrimSuffix(rest, "/")
+	segs := strings.Split(rest, "/")
+	if len(segs) != 4 || segs[2] != "pull" {
+		return "", "", "", false
+	}
+	owner, repo, num = segs[0], segs[1], segs[3]
+	if owner == "" || repo == "" || !isPositiveIntString(num) {
+		return "", "", "", false
+	}
+	return owner, repo, num, true
+}
+
+// isPositiveIntString reports whether s is a non-empty run of ASCII
+// digits denoting a value > 0, with no sign, whitespace, or leading
+// zero (a leading zero would make CanonicalPatchURI's verbatim id
+// ambiguous against the real PR number).
+func isPositiveIntString(s string) bool {
+	if s == "" || s[0] == '0' {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectUnrecognizedForgeURL fails inputs that look like URLs or
@@ -1079,6 +1163,8 @@ func parsePatchBody(parts []string, uri string) (*ResolvedTarget, error) {
 		Platform:     platform,
 		Owner:        owner,
 		ShortName:    repo + "#" + id,
+		PatchID:      id,
+		CloneURL:     CloneURLForRepoPlatform(platform, owner, repo),
 	}, nil
 }
 

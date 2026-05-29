@@ -47,6 +47,30 @@ func TestScan_HitOnWebhookSiteInInit(t *testing.T) {
 	}
 }
 
+func TestScanBytes_HitWithRelPathAndLine(t *testing.T) {
+	content := []byte("line one\nfetch(\"https://webhook.site/abc\")\nclean line\n")
+	hits := exfilwatch.ScanBytes("src/x.js", content)
+	if len(hits) != 1 {
+		t.Fatalf("want 1 hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Host != "webhook.site" {
+		t.Errorf("got host %q, want webhook.site", hits[0].Host)
+	}
+	if hits[0].File != "src/x.js" {
+		t.Errorf("got file %q, want src/x.js", hits[0].File)
+	}
+	if hits[0].Line != 2 {
+		t.Errorf("got line %d, want 2", hits[0].Line)
+	}
+}
+
+func TestScanBytes_NoHitOnCleanBytes(t *testing.T) {
+	hits := exfilwatch.ScanBytes("a.go", []byte("package a\nfunc A() {}\n"))
+	if len(hits) != 0 {
+		t.Fatalf("want 0 hits, got %d: %+v", len(hits), hits)
+	}
+}
+
 func TestScan_SubdomainCounts(t *testing.T) {
 	dir := t.TempDir()
 	content := "var u = \"https://abc-def-1234.webhook.site/x\"\n"

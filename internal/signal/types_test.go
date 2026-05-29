@@ -206,6 +206,39 @@ func TestRegistry_PRAnalyzerTypesHaveExpectedShape(t *testing.T) {
 	}
 }
 
+// TestRegistry_PRScanTypesHaveExpectedShape locks in the (Group,
+// ForgeryResistance) values for the per-PR changelist-defense signal
+// types the pr-scan command emits (internal/prdefense). Distinct from
+// the pr-analyzer queue aggregates above: these are content-derived
+// findings pinned to a PR head commit, not open-queue shape.
+func TestRegistry_PRScanTypesHaveExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		signalType string
+		group      profile.SignalGroup
+		forgery    profile.ForgeryResistance
+	}{
+		{"pr_content_injection", profile.SignalGroupHygiene, profile.ForgeryHigh},
+		{"pr_exfil_host_reference", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
+		{"pr_agent_config_touched", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
+		{"pr_ast_concern", profile.SignalGroupHygiene, profile.ForgeryVeryHigh},
+		{"pr_defense_verdict", profile.SignalGroupHygiene, profile.ForgeryHigh},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.signalType, func(t *testing.T) {
+			t.Parallel()
+			info, ok := GetSignalTypeInfo(tc.signalType)
+			require.True(t, ok, "signal type %q must be registered — pr-scan emits it", tc.signalType)
+			assert.Equal(t, tc.group, info.Group,
+				"%q: registry Group must match pr-scan's intent", tc.signalType)
+			assert.Equal(t, tc.forgery, info.ForgeryResistance,
+				"%q: registry ForgeryResistance must match pr-scan's intent", tc.signalType)
+		})
+	}
+}
+
 // TestRegistry_SourceEvolutionTypesHaveExpectedShape locks in the
 // (Group, ForgeryResistance) values for signal types the source-
 // evolution collector (internal/signal/source/) will emit. Same

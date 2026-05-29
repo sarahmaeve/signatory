@@ -1218,4 +1218,68 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"open-queue snapshot at observation time, mutable via the GitHub API",
 		},
 	},
+
+	// ================================================================
+	// Pull-request changelist defense (pr-scan command) — content-
+	// derived findings about the files a SINGLE pull request changes,
+	// pinned to the PR head commit. Distinct from the pr-analyzer queue
+	// aggregates above (which are shape-derived over the open-PR queue).
+	// A pre-merge gate: "is THIS changeset trying to compromise us?"
+	// ================================================================
+
+	"pr_content_injection": {
+		Type:              "pr_content_injection",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Hidden or obfuscated instruction-injection primitives (zero-width unicode, bidi controls, tag blocks, markdown-comment imperatives, exfil-shaped image URLs, lexical injection, encoded blobs, confusable scripts) detected in a file a pull request changes.",
+		Caveats: []string{
+			"scoped to the PR's changed files at the head commit — a clean result does not vouch for the rest of the repo",
+			"detects surface patterns; runtime-concatenated or custom-encoded payloads can evade it",
+			"imperative prose is expected in agent-config files (CLAUDE.md, etc.), so the markdown-comment primitive is suppressed there to avoid false positives",
+		},
+	},
+	"pr_exfil_host_reference": {
+		Type:              "pr_exfil_host_reference",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Literal reference to an HTTP-capture-as-a-service host (webhook.site, requestbin, oast.*, …) in a file a pull request changes — a strong supply-chain exfiltration signal.",
+		Caveats: []string{
+			"literal substring match; obfuscated (XOR / base64 / runtime-concatenated) host strings evade it by design",
+			"scoped to the PR's changed files at the head commit",
+			"a hit is high-signal: published library code has no legitimate reason to POST to a public request collector",
+		},
+	},
+	"pr_agent_config_touched": {
+		Type:              "pr_agent_config_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request modifies one or more AI-agent configuration files (CLAUDE.md, .cursorrules, .claude/, …) — the prompt-injection carrier surface that warrants extra scrutiny of the accompanying content-injection scan.",
+		Caveats: []string{
+			"path classification only (from the agent-config taxonomy); touching such a file is not itself malicious — legitimate maintenance looks identical",
+			"raises severity when paired with a pr_content_injection hit in the same file",
+			"scoped to the PR's changed files",
+		},
+	},
+	"pr_ast_concern": {
+		Type:              "pr_ast_concern",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "AST analysis of the source files a pull request changes spiked two or more rare-on-benign features (exec calls, persistence-path writes, dynamic eval, …) at the head commit — a weaponized-code signal.",
+		Caveats: []string{
+			"in-situ concern only (single checkout); the cross-version anomaly detector is not run here — a PR head has no version history to compare against",
+			"conservative by design (threshold of two features): favors precision over recall, so single-feature payloads are missed",
+			"scoped to the changed source files; covers Go / Python / JS-TS / Rust — other languages are not AST-scanned",
+		},
+	},
+	"pr_defense_verdict": {
+		Type:              "pr_defense_verdict",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "The overall pre-merge verdict for a pull-request scan — block / warn / clear — derived from the changelist findings, with the reasons and the head SHA scanned.",
+		Caveats: []string{
+			"a derived rollup of the other pr_* findings, not an independent observation",
+			"clear means no configured detector fired on the changed files at the head SHA — not a guarantee of safety, since every detector has known evasions",
+			"pinned to a head SHA; a force-push after the scan invalidates it",
+		},
+	},
 }

@@ -69,6 +69,8 @@ func toAnalyzerPR(ref analyzer.PRRef, pr github.PullRequest) analyzer.PR {
 		Draft:             pr.Draft,
 		BaseRef:           pr.BaseRef,
 		HeadRef:           pr.HeadRef,
+		BaseSHA:           pr.BaseSHA,
+		HeadSHA:           pr.HeadSHA,
 		Additions:         pr.Additions,
 		Deletions:         pr.Deletions,
 		ChangedFiles:      pr.ChangedFiles,

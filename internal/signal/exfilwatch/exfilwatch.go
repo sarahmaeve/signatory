@@ -13,6 +13,8 @@ package exfilwatch
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -83,10 +85,23 @@ func scanFile(root, path string) ([]Hit, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return scanReader(rel, f), nil
+}
 
+// ScanBytes scans in-memory content (e.g. a blob read from a git object
+// database for a PR changelist) for literal Hosts matches, attributing
+// hits to rel. Mirrors scanFile without a filesystem read — there is no
+// error path, since a bytes reader cannot fail.
+func ScanBytes(rel string, content []byte) []Hit {
+	return scanReader(rel, bytes.NewReader(content))
+}
+
+// scanReader is the shared line-scan core. It tolerates long lines from
+// minified/vendored sources (1 MiB cap); a partial scan still yields
+// useful hits, so scanner errors are intentionally ignored.
+func scanReader(rel string, r io.Reader) []Hit {
 	var hits []Hit
-	sc := bufio.NewScanner(f)
-	// Tolerate long lines from minified/vendored sources. 1 MiB cap.
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for line := 1; sc.Scan(); line++ {
 		text := sc.Text()
@@ -96,6 +111,5 @@ func scanFile(root, path string) ([]Hit, error) {
 			}
 		}
 	}
-	// sc.Err() ignored: a partial scan still produced useful hits.
-	return hits, nil
+	return hits
 }

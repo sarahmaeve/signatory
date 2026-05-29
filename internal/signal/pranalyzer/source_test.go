@@ -33,7 +33,9 @@ func TestGitHubSource(t *testing.T) {
 			"additions": 10,
 			"deletions": 2,
 			"changed_files": 1,
-			"author_association": "CONTRIBUTOR"
+			"author_association": "CONTRIBUTOR",
+			"base": {"ref": "main", "sha": "base0000000000000000000000000000000000000"},
+			"head": {"ref": "feature", "sha": "head1111111111111111111111111111111111111"}
 		}`)
 	})
 	mux.HandleFunc("/repos/octo/hello/pulls/7/files", func(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +60,8 @@ func TestGitHubSource(t *testing.T) {
 	assert.Equal(t, 10, pr.Additions)
 	assert.Equal(t, 2, pr.Deletions)
 	assert.Equal(t, "CONTRIBUTOR", pr.AuthorAssociation)
+	assert.Equal(t, "head1111111111111111111111111111111111111", pr.HeadSHA)
+	assert.Equal(t, "base0000000000000000000000000000000000000", pr.BaseSHA)
 	require.Len(t, pr.Files, 1)
 	assert.Equal(t, "a.go", pr.Files[0].Path)
 	assert.Equal(t, "modified", pr.Files[0].Status)
