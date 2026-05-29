@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/sarahmaeve/signatory/internal/prdefense"
@@ -17,32 +19,61 @@ import (
 	"github.com/sarahmaeve/signatory/internal/signal"
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/signal/source"
+	"github.com/sarahmaeve/signatory/internal/store"
 )
 
-// ErrPRDefenseBlocked is returned by PRScanCmd.Run when the scan verdict
-// is "block". It drives a non-zero exit (exitCodeFor → 1) so the command
-// works as a CI gate. main skips the stderr echo for it — the human
-// report is already on stdout.
+// ErrPRDefenseBlocked is returned when the scan verdict is "block". It
+// drives a non-zero exit (exitCodeFor → 1) so the command works as a CI
+// gate. main skips the stderr echo for it — the report is on stdout.
 var ErrPRDefenseBlocked = errors.New("pr-scan: pull request blocked by defense scan")
 
-// prSignalTTL bounds the freshness of pr-scan findings. They are pinned
-// to an immutable head commit, so a generous TTL is correct — re-scans
-// of the same head append identical findings under a new timestamp.
-const prSignalTTL = 90 * 24 * time.Hour
+const (
+	// prScanSource is the Source stamped on every pr-scan signal.
+	prScanSource = "pr-scan"
+	// prSignalTTL bounds finding freshness. Findings are pinned to an
+	// immutable head commit, so a generous TTL is correct.
+	prSignalTTL = 90 * 24 * time.Hour
+	// prBlobCap bounds per-blob reads from the object DB (matches the
+	// content-injection scan cap).
+	prBlobCap = 2 * 1024 * 1024
+	// verdictSignalType is the always-emitted rollup signal; its value is
+	// a verdictRecord and it is the cache / summary anchor.
+	verdictSignalType = "pr_defense_verdict"
+)
 
-// prBlobCap bounds per-blob reads from the object DB. Matches the
-// content-injection scan cap — larger files would be truncated by that
-// scanner anyway, and the bound is an abuse defense on a hostile PR.
-const prBlobCap = 2 * 1024 * 1024
+// verdictRecord is the JSON value stored as the pr_defense_verdict signal
+// and parsed back for cache decisions and summaries. It carries the PR
+// AUTHOR so a future workflow can attribute (and burn) the user entity
+// behind a malicious PR.
+type verdictRecord struct {
+	Verdict           prdefense.Verdict       `json:"verdict"`
+	Reasons           []string                `json:"reasons,omitempty"`
+	HeadSHA           string                  `json:"head_sha"`
+	Scanned           int                     `json:"scanned"`
+	Skipped           []prdefense.SkippedFile `json:"skipped,omitempty"`
+	Author            string                  `json:"author,omitempty"`
+	AuthorAssociation string                  `json:"author_association,omitempty"`
+}
 
-// PRScanCmd deep-scans a single pull request's changed files for
-// supply-chain attacks (injected prompt-injection, exfil hosts,
-// persistence-write / weaponized AST) before merge. Standalone — NOT
-// part of general `analyze` collection.
+// PRScanCmd is the `pr-scan` command group. `pr-scan <owner/repo#N>`
+// checks a PR (the default `check` verb); `pr-scan summary` lists prior
+// captures. It is a group rather than a leaf because kong can't give a
+// command both its own Run and sibling subcommands — same shape as
+// burn / posture / serve.
 type PRScanCmd struct {
-	Target string `arg:"" help:"Pull request: owner/repo#N, https://github.com/owner/repo/pull/N, or patch:github/owner/repo/N."`
-	Path   string `help:"Directory to hold the PR clone. Defaults to filestore/clones/pr-<repo>-<N>." type:"path"`
-	JSON   bool   `help:"Output the report as JSON." default:"false"`
+	Check   PRScanCheckCmd   `cmd:"" default:"withargs" help:"Deep-scan a pull request's changed files for injected prompt-injection, exfil hosts, and persistence writes (owner/repo#N)."`
+	Summary PRScanSummaryCmd `cmd:"" help:"List previously-captured PR scans, or show one in detail."`
+}
+
+// PRScanCheckCmd scans a single pull request's changed files. It is
+// cache-aware: a prior capture whose head SHA matches the PR's current
+// head is reported from the store without re-cloning; --refresh forces a
+// fresh scan and re-store.
+type PRScanCheckCmd struct {
+	Target  string `arg:"" help:"Pull request: owner/repo#N, https://github.com/owner/repo/pull/N, or patch:github/owner/repo/N."`
+	Path    string `help:"Directory to hold the PR clone. Defaults to filestore/clones/pr-<repo>-<N>." type:"path"`
+	JSON    bool   `help:"Output the report as JSON." default:"false"`
+	Refresh bool   `help:"Force a fresh scan and re-store even if an unchanged capture exists." default:"false"`
 
 	// Test seams (not flags).
 	Client      *ghclient.Client                                                                                      `kong:"-"`
@@ -52,7 +83,7 @@ type PRScanCmd struct {
 	Stderr      io.Writer                                                                                             `kong:"-"`
 }
 
-func (cmd *PRScanCmd) io(globals *Globals) (context.Context, io.Writer, io.Writer) {
+func (cmd *PRScanCheckCmd) io(globals *Globals) (context.Context, io.Writer, io.Writer) {
 	stdout := cmd.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
@@ -68,29 +99,17 @@ func (cmd *PRScanCmd) io(globals *Globals) (context.Context, io.Writer, io.Write
 	return ctx, stdout, stderr
 }
 
-func (cmd *PRScanCmd) Run(globals *Globals) error {
+func (cmd *PRScanCheckCmd) Run(globals *Globals) error {
 	ctx, stdout, stderr := cmd.io(globals)
 
-	resolved, err := profile.ResolveTarget(cmd.Target)
+	resolved, owner, repo, n, err := resolvePRTarget(cmd.Target)
 	if err != nil {
 		return err
 	}
-	if resolved.Scheme != "patch" {
-		return NewUsageError(fmt.Errorf(
-			"pr-scan target must be a pull request (owner/repo#N or a /pull/N URL); %q resolved to %s",
-			cmd.Target, resolved.CanonicalURI))
-	}
-	if resolved.Platform != profile.PlatformGitHub {
-		return NewUsageError(fmt.Errorf("pr-scan supports GitHub only in v0.1; got platform %q", resolved.Platform))
-	}
-	n, err := strconv.Atoi(resolved.PatchID)
-	if err != nil || n <= 0 {
-		return fmt.Errorf("invalid pull-request number %q", resolved.PatchID)
-	}
-	owner := resolved.Owner
-	repo := strings.TrimSuffix(resolved.ShortName, "#"+resolved.PatchID)
 
-	// 1. PR metadata: changed files + the head commit SHA to pin the scan.
+	// PR metadata: changed files + the CURRENT head SHA. Fetched on every
+	// run (cheap) — the head SHA is how we detect whether the PR changed
+	// since a prior capture.
 	client := cmd.Client
 	if client == nil {
 		client = ghclient.NewClient(os.Getenv("GITHUB_TOKEN"))
@@ -103,17 +122,72 @@ func (cmd *PRScanCmd) Run(globals *Globals) error {
 		return fmt.Errorf("PR %s/%s#%d: GitHub did not report a head commit SHA; cannot pin the scan", owner, repo, n)
 	}
 
-	// 2. Content provider: clone the repo, fetch the PR head ref (objects
-	// only, no checkout), and read changed-file blobs by SHA. Overridable
-	// for tests.
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error not actionable
+
+	// Cache: a prior capture at the same head SHA is reported without a
+	// re-scan, unless --refresh forces one.
+	if !cmd.Refresh {
+		rec, at, ok, err := loadVerdict(ctx, s, resolved.CanonicalURI)
+		if err != nil {
+			return err
+		}
+		if ok && rec.HeadSHA == pr.HeadSHA {
+			return cmd.renderCached(stdout, owner, repo, n, rec, at)
+		}
+		if ok {
+			_, _ = fmt.Fprintf(stderr,
+				"PR changed since last scan (was head %s @ %s); re-scanning.\n",
+				shortSHA(rec.HeadSHA), at.UTC().Format(time.RFC3339))
+		}
+	}
+
+	rep, err := cmd.scan(ctx, stderr, resolved, pr, n)
+	if err != nil {
+		return err
+	}
+
+	// Persist: mint the patch: entity and append findings + verdict
+	// (carrying the author for later attribution).
+	entity, _, err := s.EnsureEntityByCanonicalURI(ctx, resolved.CanonicalURI, resolved.ShortName)
+	if err != nil {
+		return fmt.Errorf("mint patch entity %s: %w", resolved.CanonicalURI, err)
+	}
+	if err := s.AppendSignals(ctx, prScanSignals(entity.ID, rep, pr.Author, pr.AuthorAssociation, time.Now().UTC())); err != nil {
+		return fmt.Errorf("persist pr-scan signals: %w", err)
+	}
+
+	if cmd.JSON {
+		data, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal report: %w", err)
+		}
+		_, _ = fmt.Fprintln(stdout, string(data))
+	} else {
+		renderPRReport(stdout, owner, repo, n, rep)
+	}
+
+	if rep.Verdict == prdefense.VerdictBlock {
+		return ErrPRDefenseBlocked
+	}
+	return nil
+}
+
+// scan clones the repo, fetches the PR head (objects only), and runs the
+// content scanners over the changed-file blobs.
+func (cmd *PRScanCheckCmd) scan(ctx context.Context, stderr io.Writer, resolved *profile.ResolvedTarget, pr ghclient.PullRequest, n int) (prdefense.Report, error) {
 	clonePath := cmd.Path
 	if clonePath == "" {
-		clonePath = filepath.Join("filestore", "clones", fmt.Sprintf("pr-%s-%d", repo, n))
+		clonePath = filepath.Join("filestore", "clones", fmt.Sprintf("pr-%s-%d", shortName(resolved), n))
 	}
 	absPath, err := filepath.Abs(clonePath)
 	if err != nil {
-		return fmt.Errorf("resolve clone path %q: %w", clonePath, err)
+		return prdefense.Report{}, fmt.Errorf("resolve clone path %q: %w", clonePath, err)
 	}
+
 	newProvider := cmd.NewProvider
 	if newProvider == nil {
 		cloneURL := resolved.CloneURL
@@ -129,84 +203,275 @@ func (cmd *PRScanCmd) Run(globals *Globals) error {
 	}
 	provider, cleanup, err := newProvider(ctx, absPath, pr.HeadSHA)
 	if err != nil {
-		return err
+		return prdefense.Report{}, err
 	}
 	if cleanup != nil {
 		defer cleanup() //nolint:errcheck // best-effort resource release
 	}
 
-	// 3. Scan the changelist.
 	changed := make([]prdefense.ChangedFile, len(pr.Files))
 	for i, f := range pr.Files {
 		changed[i] = prdefense.ChangedFile{Path: f.Path, Status: f.Status}
 	}
-	rep, err := prdefense.Scan(ctx, provider, pr.HeadSHA, changed)
-	if err != nil {
-		return err
-	}
+	return prdefense.Scan(ctx, provider, pr.HeadSHA, changed)
+}
 
-	// 4. Persist: mint the patch: entity and append findings + verdict.
-	s, err := globals.OpenStore(ctx)
-	if err != nil {
-		return err
-	}
-	defer s.Close() //nolint:errcheck // store close on command exit; error not actionable
-	entity, _, err := s.EnsureEntityByCanonicalURI(ctx, resolved.CanonicalURI, resolved.ShortName)
-	if err != nil {
-		return fmt.Errorf("mint patch entity %s: %w", resolved.CanonicalURI, err)
-	}
-	if err := s.AppendSignals(ctx, prScanSignals(entity.ID, rep, time.Now().UTC())); err != nil {
-		return fmt.Errorf("persist pr-scan signals: %w", err)
-	}
+// cachedReport is the --json shape for a cache hit: a prdefense.Report
+// (so consumers parse it uniformly) plus a cached marker and the prior
+// scan timestamp.
+type cachedReport struct {
+	prdefense.Report
+	Cached              bool      `json:"cached"`
+	PreviouslyScannedAt time.Time `json:"previously_scanned_at"`
+}
 
-	// 5. Render.
+func (cmd *PRScanCheckCmd) renderCached(w io.Writer, owner, repo string, n int, rec verdictRecord, at time.Time) error {
 	if cmd.JSON {
-		data, err := json.MarshalIndent(rep, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal report: %w", err)
+		out := cachedReport{
+			Report: prdefense.Report{
+				HeadSHA: rec.HeadSHA, Verdict: rec.Verdict, Reasons: rec.Reasons,
+				Scanned: rec.Scanned, Skipped: rec.Skipped,
+			},
+			Cached:              true,
+			PreviouslyScannedAt: at.UTC(),
 		}
-		_, _ = fmt.Fprintln(stdout, string(data))
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal cached report: %w", err)
+		}
+		_, _ = fmt.Fprintln(w, string(data))
 	} else {
-		renderPRReport(stdout, owner, repo, n, rep)
+		_, _ = fmt.Fprintf(w, "PR Defense Scan — %s/%s#%d (head %s)\n", owner, repo, n, shortSHA(rec.HeadSHA))
+		_, _ = fmt.Fprintf(w, "Verdict: %s  (previously scanned %s; head unchanged — pass --refresh to re-scan)\n",
+			strings.ToUpper(string(rec.Verdict)), at.UTC().Format(time.RFC3339))
+		for _, reason := range rec.Reasons {
+			_, _ = fmt.Fprintf(w, "  - %s\n", reason)
+		}
 	}
-
-	// 6. Exit code: block fails the gate.
-	if rep.Verdict == prdefense.VerdictBlock {
+	if rec.Verdict == prdefense.VerdictBlock {
 		return ErrPRDefenseBlocked
 	}
 	return nil
 }
 
+// PRScanSummaryCmd lists previously-captured PR scans, or shows one in
+// detail. It reads only the store — no network, no git.
+type PRScanSummaryCmd struct {
+	Target string    `arg:"" optional:"" help:"owner/repo#N to show one capture in detail; omit to list all captures."`
+	JSON   bool      `help:"Output as JSON." default:"false"`
+	Stdout io.Writer `kong:"-"`
+}
+
+func (cmd *PRScanSummaryCmd) Run(globals *Globals) error {
+	ctx := globals.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stdout := cmd.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	s, err := globals.OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // store close on command exit; error not actionable
+
+	if strings.TrimSpace(cmd.Target) != "" {
+		return cmd.showOne(ctx, s, stdout)
+	}
+	return cmd.listAll(ctx, s, stdout)
+}
+
+// capture is one row in the summary listing.
+type capture struct {
+	Ref               string            `json:"ref"`
+	Verdict           prdefense.Verdict `json:"verdict"`
+	Author            string            `json:"author,omitempty"`
+	AuthorAssociation string            `json:"author_association,omitempty"`
+	HeadSHA           string            `json:"head_sha"`
+	ScannedAt         time.Time         `json:"scanned_at"`
+}
+
+func (cmd *PRScanSummaryCmd) listAll(ctx context.Context, s store.Store, w io.Writer) error {
+	patches, err := s.ListEntitiesByType(ctx, profile.EntityPatch)
+	if err != nil {
+		return err
+	}
+	var caps []capture
+	for _, e := range patches {
+		sigs, err := s.GetLatestSignals(ctx, e.ID)
+		if err != nil {
+			return err
+		}
+		for _, sg := range sigs {
+			if sg.Type != verdictSignalType {
+				continue
+			}
+			var rec verdictRecord
+			if err := json.Unmarshal(sg.Value, &rec); err != nil {
+				return fmt.Errorf("decode verdict for %s: %w", e.CanonicalURI, err)
+			}
+			caps = append(caps, capture{
+				Ref:               refFromPatchURI(e.CanonicalURI),
+				Verdict:           rec.Verdict,
+				Author:            rec.Author,
+				AuthorAssociation: rec.AuthorAssociation,
+				HeadSHA:           rec.HeadSHA,
+				ScannedAt:         sg.CollectedAt.UTC(),
+			})
+		}
+	}
+	// Surface blocks first, then warns, then clears; newest first within.
+	sort.SliceStable(caps, func(i, j int) bool {
+		if ri, rj := verdictRank(caps[i].Verdict), verdictRank(caps[j].Verdict); ri != rj {
+			return ri < rj
+		}
+		return caps[i].ScannedAt.After(caps[j].ScannedAt)
+	})
+
+	if cmd.JSON {
+		data, err := json.MarshalIndent(caps, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(w, string(data))
+		return nil
+	}
+
+	if len(caps) == 0 {
+		_, _ = fmt.Fprintln(w, "No pr-scan captures recorded.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "VERDICT\tPR\tAUTHOR\tHEAD\tSCANNED")
+	for _, c := range caps {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			strings.ToUpper(string(c.Verdict)), c.Ref, authorLabel(c.Author, c.AuthorAssociation),
+			shortSHA(c.HeadSHA), c.ScannedAt.Format(time.RFC3339))
+	}
+	return tw.Flush()
+}
+
+func (cmd *PRScanSummaryCmd) showOne(ctx context.Context, s store.Store, w io.Writer) error {
+	resolved, err := profile.ResolveTarget(cmd.Target)
+	if err != nil {
+		return NewUsageError(fmt.Errorf("resolve target %q: %w", cmd.Target, err))
+	}
+	if resolved.Scheme != "patch" {
+		return NewUsageError(fmt.Errorf("pr-scan summary target must be a pull request (owner/repo#N); %q resolved to %s",
+			cmd.Target, resolved.CanonicalURI))
+	}
+	rec, at, ok, err := loadVerdict(ctx, s, resolved.CanonicalURI)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		_, _ = fmt.Fprintf(w, "No pr-scan record for %s\n", resolved.CanonicalURI)
+		return nil
+	}
+	if cmd.JSON {
+		data, err := json.MarshalIndent(rec, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(w, string(data))
+		return nil
+	}
+	_, _ = fmt.Fprintf(w, "PR:      %s\n", refFromPatchURI(resolved.CanonicalURI))
+	_, _ = fmt.Fprintf(w, "Verdict: %s\n", strings.ToUpper(string(rec.Verdict)))
+	_, _ = fmt.Fprintf(w, "Author:  %s\n", authorLabel(rec.Author, rec.AuthorAssociation))
+	_, _ = fmt.Fprintf(w, "Head:    %s\n", rec.HeadSHA)
+	_, _ = fmt.Fprintf(w, "Scanned: %s\n", at.UTC().Format(time.RFC3339))
+	for _, reason := range rec.Reasons {
+		_, _ = fmt.Fprintf(w, "  - %s\n", reason)
+	}
+	return nil
+}
+
+// --- shared helpers ---
+
+// resolvePRTarget parses a pr-scan target into its patch URI plus
+// owner / repo / PR-number.
+func resolvePRTarget(target string) (resolved *profile.ResolvedTarget, owner, repo string, n int, err error) {
+	resolved, err = profile.ResolveTarget(target)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	if resolved.Scheme != "patch" {
+		return nil, "", "", 0, NewUsageError(fmt.Errorf(
+			"pr-scan target must be a pull request (owner/repo#N or a /pull/N URL); %q resolved to %s",
+			target, resolved.CanonicalURI))
+	}
+	if resolved.Platform != profile.PlatformGitHub {
+		return nil, "", "", 0, NewUsageError(fmt.Errorf("pr-scan supports GitHub only in v0.1; got platform %q", resolved.Platform))
+	}
+	n, err = strconv.Atoi(resolved.PatchID)
+	if err != nil || n <= 0 {
+		return nil, "", "", 0, fmt.Errorf("invalid pull-request number %q", resolved.PatchID)
+	}
+	return resolved, resolved.Owner, strings.TrimSuffix(resolved.ShortName, "#"+resolved.PatchID), n, nil
+}
+
+// loadVerdict returns the latest stored verdict record for a patch URI,
+// its collection timestamp, and whether one exists. A missing entity is
+// (false, nil), not an error.
+func loadVerdict(ctx context.Context, s store.Store, patchURI string) (verdictRecord, time.Time, bool, error) {
+	ent, err := s.FindEntityByURI(ctx, patchURI)
+	if errors.Is(err, store.ErrNotFound) {
+		return verdictRecord{}, time.Time{}, false, nil
+	}
+	if err != nil {
+		return verdictRecord{}, time.Time{}, false, err
+	}
+	sigs, err := s.GetLatestSignals(ctx, ent.ID)
+	if err != nil {
+		return verdictRecord{}, time.Time{}, false, err
+	}
+	for _, sg := range sigs {
+		if sg.Type != verdictSignalType {
+			continue
+		}
+		var rec verdictRecord
+		if err := json.Unmarshal(sg.Value, &rec); err != nil {
+			return verdictRecord{}, time.Time{}, false, fmt.Errorf("decode verdict for %s: %w", patchURI, err)
+		}
+		return rec, sg.CollectedAt, true, nil
+	}
+	return verdictRecord{}, time.Time{}, false, nil
+}
+
 // prScanSignals builds the store signals for one scan: each finding type
-// only when it has content, and the verdict always.
-func prScanSignals(entityID string, rep prdefense.Report, now time.Time) []profile.Signal {
+// only when non-empty, and the verdict (carrying the author) always.
+func prScanSignals(entityID string, rep prdefense.Report, author, authorAssociation string, now time.Time) []profile.Signal {
 	var r signal.CollectionResult
-	const src = "pr-scan"
 
 	if len(rep.ContentInjection) > 0 {
-		r.RecordSignal(entityID, "pr_content_injection", src, now, prSignalTTL,
+		r.RecordSignal(entityID, "pr_content_injection", prScanSource, now, prSignalTTL,
 			map[string]any{"files": rep.ContentInjection})
 	}
 	if len(rep.ExfilHits) > 0 {
-		r.RecordSignal(entityID, "pr_exfil_host_reference", src, now, prSignalTTL,
+		r.RecordSignal(entityID, "pr_exfil_host_reference", prScanSource, now, prSignalTTL,
 			map[string]any{"hits": rep.ExfilHits})
 	}
 	if len(rep.AgentConfigPaths) > 0 {
-		r.RecordSignal(entityID, "pr_agent_config_touched", src, now, prSignalTTL,
+		r.RecordSignal(entityID, "pr_agent_config_touched", prScanSource, now, prSignalTTL,
 			map[string]any{"paths": rep.AgentConfigPaths})
 	}
 	if len(rep.ASTConcerns) > 0 {
-		r.RecordSignal(entityID, "pr_ast_concern", src, now, prSignalTTL,
+		r.RecordSignal(entityID, "pr_ast_concern", prScanSource, now, prSignalTTL,
 			map[string]any{"languages": rep.ASTConcerns})
 	}
-	r.RecordSignal(entityID, "pr_defense_verdict", src, now, prSignalTTL,
-		map[string]any{
-			"verdict":  rep.Verdict,
-			"reasons":  rep.Reasons,
-			"head_sha": rep.HeadSHA,
-			"scanned":  rep.Scanned,
-			"skipped":  rep.Skipped,
-		})
+	r.RecordSignal(entityID, verdictSignalType, prScanSource, now, prSignalTTL, verdictRecord{
+		Verdict:           rep.Verdict,
+		Reasons:           rep.Reasons,
+		HeadSHA:           rep.HeadSHA,
+		Scanned:           rep.Scanned,
+		Skipped:           rep.Skipped,
+		Author:            author,
+		AuthorAssociation: authorAssociation,
+	})
 	return r.Signals()
 }
 
@@ -234,6 +499,52 @@ func renderPRReport(w io.Writer, owner, repo string, n int, rep prdefense.Report
 		_, _ = fmt.Fprintf(w, "  AST concern   %s  %s\n", c.Language, strings.Join(c.Concern.ConcerningFeatures, ", "))
 	}
 	_, _ = fmt.Fprintf(w, "Scanned %d file(s), skipped %d.\n", rep.Scanned, len(rep.Skipped))
+}
+
+func authorLabel(author, association string) string {
+	switch {
+	case author == "" && association == "":
+		return "(unknown)"
+	case association == "":
+		return author
+	case author == "":
+		return "(" + association + ")"
+	default:
+		return author + " (" + association + ")"
+	}
+}
+
+// refFromPatchURI turns patch:github/owner/repo/N into owner/repo#N for
+// display, falling back to the raw URI if it isn't the expected shape.
+func refFromPatchURI(uri string) string {
+	body, ok := strings.CutPrefix(uri, "patch:github/")
+	if !ok {
+		return uri
+	}
+	parts := strings.Split(body, "/")
+	if len(parts) != 3 {
+		return uri
+	}
+	return parts[0] + "/" + parts[1] + "#" + parts[2]
+}
+
+func verdictRank(v prdefense.Verdict) int {
+	switch v {
+	case prdefense.VerdictBlock:
+		return 0
+	case prdefense.VerdictWarn:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func shortName(resolved *profile.ResolvedTarget) string {
+	// ShortName is "repo#N"; the clone dir wants just the repo segment.
+	if i := strings.IndexByte(resolved.ShortName, '#'); i > 0 {
+		return resolved.ShortName[:i]
+	}
+	return resolved.ShortName
 }
 
 func shortSHA(sha string) string {

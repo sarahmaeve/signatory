@@ -221,6 +221,28 @@ func (s *SQLite) FindEntityByVersionedBaseURI(ctx context.Context, baseURI strin
 	return scanEntity(row)
 }
 
+// ListEntitiesByType returns every entity of entityType, ordered by
+// canonical URI. Empty (non-error) result when none match.
+func (s *SQLite) ListEntitiesByType(ctx context.Context, entityType profile.EntityType) ([]*profile.Entity, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+entityColumns+` FROM entities WHERE type = ? ORDER BY canonical_uri`,
+		string(entityType))
+	if err != nil {
+		return nil, fmt.Errorf("list entities by type %q: %w", entityType, err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error not actionable
+
+	var out []*profile.Entity
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // GetOutputEntity returns the entity that an analyst_output was
 // indexed under — the FK-walking shortcut `posture accept` uses so
 // it doesn't have to re-derive the target URI and risk a string-vs-
@@ -1037,7 +1059,13 @@ func (s *SQLite) PutTeamIdentity(ctx context.Context, t *profile.TeamIdentity) e
 
 // scanEntity scans a single entity row and parses timestamps. The
 // column order must match entityColumns.
-func scanEntity(row *sql.Row) (*profile.Entity, error) {
+// rowScanner is satisfied by both *sql.Row (single-row queries) and
+// *sql.Rows (multi-row queries), letting scanEntity serve both.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanEntity(row rowScanner) (*profile.Entity, error) {
 	var e profile.Entity
 	var createdAt, updatedAt string
 	err := row.Scan(&e.ID, &e.CanonicalURI, (*string)(&e.Type), &e.ShortName, &e.Description,

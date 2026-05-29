@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +19,148 @@ import (
 	ghclient "github.com/sarahmaeve/signatory/internal/signal/github"
 	"github.com/sarahmaeve/signatory/internal/store"
 )
+
+// countingProvider wraps a fixed ContentProvider and counts how many
+// times the scan path asked to build one — the signal a (re-)scan ran
+// vs. a cache hit short-circuited it.
+func countingProvider(src prdefense.ContentProvider, calls *int) func(context.Context, string, string) (prdefense.ContentProvider, func() error, error) {
+	return func(context.Context, string, string) (prdefense.ContentProvider, func() error, error) {
+		*calls++
+		return src, nil, nil
+	}
+}
+
+func TestPRScanScan_CacheHit_SkipsRescan(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	src := fakeContentProvider{content: map[string][]byte{"a.go": []byte("package a\n")}}
+	srv := prScanGitHubServer(t, "headAAA", prFilesJSON("a.go"))
+	calls := 0
+
+	run := func() *bytes.Buffer {
+		out := &bytes.Buffer{}
+		c := &PRScanCheckCmd{
+			Target: "octo/hello#1", JSON: true,
+			Client:      ghclient.NewClientWithBaseURL(srv.URL),
+			NewProvider: countingProvider(src, &calls),
+			Stdout:      out, Stderr: io.Discard,
+		}
+		require.NoError(t, c.Run(globals))
+		return out
+	}
+
+	run() // first run scans + stores
+	require.Equal(t, 1, calls)
+
+	out2 := run() // same head SHA, no --refresh → cache hit
+	assert.Equal(t, 1, calls, "second run must hit the cache, not re-scan")
+	assert.Contains(t, out2.String(), `"cached": true`)
+	assert.Contains(t, out2.String(), `"verdict": "clear"`)
+}
+
+func TestPRScanScan_HeadChanged_Rescans(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	src := fakeContentProvider{content: map[string][]byte{"a.go": []byte("package a\n")}}
+	calls := 0
+
+	c1 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client:      ghclient.NewClientWithBaseURL(prScanGitHubServer(t, "headAAA", prFilesJSON("a.go")).URL),
+		NewProvider: countingProvider(src, &calls), Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c1.Run(globals))
+
+	// New server reports a different head SHA → the PR changed.
+	c2 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client:      ghclient.NewClientWithBaseURL(prScanGitHubServer(t, "headBBB", prFilesJSON("a.go")).URL),
+		NewProvider: countingProvider(src, &calls), Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c2.Run(globals))
+	assert.Equal(t, 2, calls, "a changed head SHA must trigger a re-scan")
+}
+
+func TestPRScanScan_Refresh_ForcesRescan(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	src := fakeContentProvider{content: map[string][]byte{"a.go": []byte("package a\n")}}
+	srv := prScanGitHubServer(t, "headAAA", prFilesJSON("a.go"))
+	calls := 0
+
+	c1 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client: ghclient.NewClientWithBaseURL(srv.URL), NewProvider: countingProvider(src, &calls),
+		Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c1.Run(globals))
+
+	c2 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true, Refresh: true, // same head SHA, but forced
+		Client: ghclient.NewClientWithBaseURL(srv.URL), NewProvider: countingProvider(src, &calls),
+		Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c2.Run(globals))
+	assert.Equal(t, 2, calls, "--refresh must re-scan even when the head SHA is unchanged")
+}
+
+// seedCapture writes a pr-scan record straight to the store, so summary
+// tests don't need to run full scans.
+func seedCapture(t *testing.T, globals *Globals, uri, shortName, author, assoc, headSHA string, verdict prdefense.Verdict, reasons []string) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	ent, _, err := s.EnsureEntityByCanonicalURI(ctx, uri, shortName)
+	require.NoError(t, err)
+	rep := prdefense.Report{Verdict: verdict, Reasons: reasons, HeadSHA: headSHA, Scanned: 1}
+	require.NoError(t, s.AppendSignals(ctx, prScanSignals(ent.ID, rep, author, assoc, time.Now().UTC())))
+}
+
+func TestPRScanSummary_ListsCaptures_BlocksFirst(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	seedCapture(t, globals, "patch:github/octo/hello/2", "hello#2", "alice", "MEMBER", "cleansha0000", prdefense.VerdictClear, nil)
+	seedCapture(t, globals, "patch:github/octo/hello/1", "hello#1", "mallory", "FIRST_TIME_CONTRIBUTOR", "evilsha00000", prdefense.VerdictBlock, []string{"1 exfil-host reference(s)"})
+
+	out := &bytes.Buffer{}
+	cmd := &PRScanSummaryCmd{Stdout: out}
+	require.NoError(t, cmd.Run(globals))
+
+	s := out.String()
+	assert.Contains(t, s, "BLOCK")
+	assert.Contains(t, s, "octo/hello#1")
+	assert.Contains(t, s, "mallory (FIRST_TIME_CONTRIBUTOR)")
+	assert.Contains(t, s, "octo/hello#2")
+	// Block must be listed before the clear capture.
+	assert.Less(t, strings.Index(s, "octo/hello#1"), strings.Index(s, "octo/hello#2"),
+		"the BLOCK capture must surface above the CLEAR one")
+}
+
+func TestPRScanSummary_ShowOne(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	seedCapture(t, globals, "patch:github/octo/hello/1", "hello#1", "mallory", "FIRST_TIME_CONTRIBUTOR", "evilsha00000", prdefense.VerdictBlock, []string{"AST concern in go"})
+
+	out := &bytes.Buffer{}
+	cmd := &PRScanSummaryCmd{Target: "octo/hello#1", Stdout: out}
+	require.NoError(t, cmd.Run(globals))
+
+	s := out.String()
+	assert.Contains(t, s, "octo/hello#1")
+	assert.Contains(t, s, "BLOCK")
+	assert.Contains(t, s, "mallory (FIRST_TIME_CONTRIBUTOR)")
+	assert.Contains(t, s, "AST concern in go")
+}
+
+func TestPRScanSummary_Empty(t *testing.T) {
+	t.Parallel()
+	out := &bytes.Buffer{}
+	cmd := &PRScanSummaryCmd{Stdout: out}
+	require.NoError(t, cmd.Run(testGlobals(t)))
+	assert.Contains(t, out.String(), "No pr-scan captures")
+}
 
 // TestFetchPullRef_IssuesPullRefFetch pins the exact git invocation:
 // `git -C <clone> fetch origin refs/pull/<n>/head`. The PR number is an
@@ -87,7 +231,7 @@ func TestPRScan_Run_BlocksAndPersists(t *testing.T) {
 
 	var out bytes.Buffer
 	tmpDB := filepath.Join(t.TempDir(), "s.db")
-	cmd := &PRScanCmd{
+	cmd := &PRScanCheckCmd{
 		Target: "octo/hello#1",
 		JSON:   true,
 		Client: ghclient.NewClientWithBaseURL(srv.URL),
@@ -131,7 +275,7 @@ func TestPRScan_Run_ClearOnBenign(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	cmd := &PRScanCmd{
+	cmd := &PRScanCheckCmd{
 		Target: "octo/hello#1",
 		JSON:   true,
 		Client: ghclient.NewClientWithBaseURL(srv.URL),
@@ -148,7 +292,7 @@ func TestPRScan_Run_ClearOnBenign(t *testing.T) {
 
 func TestPRScan_Run_RejectsNonPRTarget(t *testing.T) {
 	t.Parallel()
-	cmd := &PRScanCmd{Target: "octo/hello", Stdout: io.Discard, Stderr: io.Discard}
+	cmd := &PRScanCheckCmd{Target: "octo/hello", Stdout: io.Discard, Stderr: io.Discard}
 	err := cmd.Run(&Globals{DBPath: filepath.Join(t.TempDir(), "s.db"), Context: context.Background()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pull request")

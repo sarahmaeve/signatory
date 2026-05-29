@@ -130,7 +130,7 @@ func TestFunctional_PRScan_MaliciousPR_Blocks(t *testing.T) {
 
 	var out bytes.Buffer
 	globals := testGlobals(t)
-	cmd := &PRScanCmd{
+	cmd := &PRScanCheckCmd{
 		Target: "octo/hello#1",
 		JSON:   true,
 		Path:   filepath.Join(t.TempDir(), "clone"), // fresh path → real clone
@@ -203,7 +203,7 @@ func TestFunctional_PRScan_BenignPR_Clears(t *testing.T) {
 	srv := prScanGitHubServer(t, headSHA, prFilesJSON("internal/widget/widget.go", "README.md"))
 
 	var out bytes.Buffer
-	cmd := &PRScanCmd{
+	cmd := &PRScanCheckCmd{
 		Target: "octo/hello#1",
 		JSON:   true,
 		Path:   filepath.Join(t.TempDir(), "clone"),
@@ -235,7 +235,7 @@ func runPRScanFixture(t *testing.T, prFiles map[string]string) (prdefense.Report
 	srv := prScanGitHubServer(t, headSHA, prFilesJSON(slices.Sorted(maps.Keys(prFiles))...))
 
 	var out bytes.Buffer
-	cmd := &PRScanCmd{
+	cmd := &PRScanCheckCmd{
 		Target: "octo/hello#1",
 		JSON:   true,
 		Path:   filepath.Join(t.TempDir(), "clone"),
