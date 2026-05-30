@@ -673,6 +673,52 @@ func TestBlobStreamer_ReadBlob_RejectsBlobOverCap(t *testing.T) {
 		"the error must wrap ErrBlobSizeExceedsCap so callers can errors.Is against it; got: %v", err)
 }
 
+// TestBlobStreamer_ReadBlob_OverCap_ClosesStreamer pins the
+// security-relevant side effect that the over-cap-rejection comment in
+// readBlobOnce documents: when a blob's size header exceeds the cap,
+// the method calls closeLocked() because "the cat-file pipe is now in
+// an indeterminate framing state" — the reported (over-cap) size bytes
+// are still queued upstream on the pipe. If the streamer stayed open,
+// the next ReadBlob would consume those stale queued bytes as a header
+// line, corrupting every subsequent response.
+//
+// TestBlobStreamer_ReadBlob_RejectsBlobOverCap above only asserts the
+// returned error wraps ErrBlobSizeExceedsCap; it never observes the
+// close. A regression that deleted the closeLocked() call would keep
+// that test green while reintroducing the framing corruption. This
+// test closes the gap: after the over-cap read, a SECOND ReadBlob must
+// return ErrBlobStreamerClosed, proving the breach tore the streamer
+// down rather than leaving the corrupt pipe live.
+func TestBlobStreamer_ReadBlob_OverCap_ClosesStreamer(t *testing.T) {
+	t.Parallel()
+	clonePath, _ := initRepoForBlobStream(t)
+
+	// Cap below the fixture file size so the over-cap branch fires on
+	// the first read (same seam as the RejectsBlobOverCap test).
+	bs, err := NewBlobStreamer(t.Context(), clonePath, WithMaxBlobSize(10))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.Close() })
+
+	mainSHA := blobSHAFor(t, clonePath, "main.go")
+	libSHA := blobSHAFor(t, clonePath, "lib.go")
+
+	// First read trips the cap and must close the streamer to abandon
+	// the now-untrustworthy pipe framing.
+	_, err = bs.ReadBlob(t.Context(), mainSHA)
+	require.ErrorIs(t, err, ErrBlobSizeExceedsCap,
+		"first read must reject the over-cap blob; got: %v", err)
+
+	// Second read (for any sha) must observe the closed streamer rather
+	// than reading stale queued bytes off the indeterminate pipe. This
+	// is the regression guard: without the closeLocked() call on breach,
+	// the streamer would still be open and this read would not return
+	// ErrBlobStreamerClosed.
+	_, err = bs.ReadBlob(t.Context(), libSHA)
+	assert.ErrorIs(t, err, ErrBlobStreamerClosed,
+		"after an over-cap rejection the streamer must be closed so the "+
+			"next read fails fast instead of consuming stale pipe bytes; got: %v", err)
+}
+
 // TestBlobStreamer_ReadBlob_AllowsBlobUnderCap is the positive sibling:
 // if the configured cap is generous enough for the fixture blob,
 // ReadBlob must succeed. Pins that the cap check is a strict

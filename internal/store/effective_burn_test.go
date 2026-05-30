@@ -402,6 +402,63 @@ func TestEffectiveBurn_CascadeViaPRAuthor_LoginFallback(t *testing.T) {
 	assert.Equal(t, "author", ctx.ViaRole)
 }
 
+// TestEffectiveBurn_CascadeViaPRAuthor_MixedCaseLogin_StillCascades
+// is the evasion-resistance guard for contributor burn. GitHub logins
+// are case-insensitive: "Mallory", "mallory", and "MALLORY" are the
+// same account. The cascade canonicalizes via CanonicalIdentityURI,
+// which lowercases (see profile/uri.go), so a burned author cannot
+// dodge the cascade by re-submitting under a different case-spelling,
+// and two case-spellings of one author cannot fragment into two
+// uncascadable entities.
+//
+// This test exercises the CanonicalIdentityURI FALLBACK path in the
+// pr_author branch specifically: the seeded pr_author value carries a
+// MIXED-CASE login ("Mallory") and NO explicit "identity" field, so
+// the resolver must derive the candidate URI from the login via
+// CanonicalIdentityURI("github", "Mallory") — which lowercases to
+// identity:github/mallory and matches the burn. We deliberately do NOT
+// pre-lowercase the login ourselves: that would bypass the very
+// production canonicalization this test guards.
+//
+// Non-tautology: the burn is on the lowercase identity:github/mallory
+// while the signal names "Mallory". If a future refactor stored or
+// compared the raw, non-canonicalized login (deriving
+// identity:github/Mallory), FindEntityByURI would miss the
+// lowercase-burned owner and EffectiveBurn would return ErrNotFound —
+// this test would fail. That is the regression it catches.
+func TestEffectiveBurn_CascadeViaPRAuthor_MixedCaseLogin_StillCascades(t *testing.T) {
+	t.Parallel()
+	s := newTestDB(t)
+
+	patchID := seedRepoEntity(t, s, "patch:github/octo/hello/5", "hello#5")
+	// Burn the CANONICAL (lowercase) identity — this is what
+	// CanonicalIdentityURI produces and what SetBurn stores.
+	authorID := seedOwnerEntity(t, s, "identity:github/mallory", "mallory")
+	seedBurn(t, s, authorID, "malicious PR resubmitted under cased login")
+
+	// Seed the pr_author signal with a MIXED-CASE login and NO
+	// "identity" field, forcing the CanonicalIdentityURI fallback in
+	// the resolver's pr_author branch. The login is intentionally left
+	// in mixed case to exercise production lowercasing — not
+	// pre-canonicalized here.
+	seedSignal(t, s, patchID, "pr_author", "pr-scan", map[string]any{
+		"login":              "Mallory",
+		"author_association": "FIRST_TIME_CONTRIBUTOR",
+	})
+
+	burn, ctx, err := s.EffectiveBurn(t.Context(), patchID)
+	require.NoError(t, err,
+		"a case-divergent PR author must still cascade — GitHub logins are case-insensitive and the cascade canonicalizes via CanonicalIdentityURI")
+	require.NotNil(t, burn)
+	require.NotNil(t, ctx)
+	assert.False(t, ctx.Direct, "cascade case must report Direct=false")
+	require.NotNil(t, ctx.ViaOwner)
+	assert.Equal(t, "identity:github/mallory", ctx.ViaOwner.CanonicalURI,
+		"the mixed-case login 'Mallory' must canonicalize to identity:github/mallory so the burn still cascades — storing/comparing the raw login would be an evasion bug")
+	assert.Equal(t, "author", ctx.ViaRole)
+	assert.Contains(t, burn.Reason, "malicious PR")
+}
+
 // TestEffectiveBurn_CascadeUnknownSource_NoCascade pins the
 // dispatch contract's fail-shut posture: a maintainer_count signal
 // with an unrecognized Source produces NO cascade candidates, rather

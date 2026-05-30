@@ -248,6 +248,45 @@ func TestCollect_NonGitHubEntityIsGated(t *testing.T) {
 	assert.Empty(t, res.Collected)
 }
 
+// forbiddenSource is an analyzer.PRSource that fails the test if either
+// of its methods is ever called. It proves the unauthenticated self-gate
+// returns before any source access (and thus before any HTTP).
+type forbiddenSource struct{ t *testing.T }
+
+func (f *forbiddenSource) ListOpenPRs(_ context.Context, _, _ string) ([]analyzer.PRRef, error) {
+	f.t.Fatal("ListOpenPRs called while unauthenticated: the rate-budget self-gate did not fire")
+	return nil, nil
+}
+
+func (f *forbiddenSource) FetchPR(_ context.Context, _ analyzer.PRRef) (analyzer.PR, error) {
+	f.t.Fatal("FetchPR called while unauthenticated: the rate-budget self-gate did not fire")
+	return analyzer.PR{}, nil
+}
+
+// TestCollect_UnauthenticatedGate pins the "no network when
+// unauthenticated" contract documented on NewCollector: a 30-PR sample at
+// ~2 calls each would exhaust GitHub's 60-req/hour anonymous budget and
+// poison sibling collectors, so an unauthenticated Collector must return
+// an empty result without touching its PRSource. The forbiddenSource
+// t.Fatal's on any access, so reaching the listing/fetch path fails the
+// test.
+func TestCollect_UnauthenticatedGate(t *testing.T) {
+	t.Parallel()
+
+	c := &Collector{src: &forbiddenSource{t: t}, limit: 30, maxLOC: 1000, authenticated: false}
+
+	res, err := c.Collect(context.Background(), &profile.Entity{ID: "ent-1", URL: "https://github.com/octo/hello"})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// Empty result: no signals, no absences, no failures — and crucially
+	// the source was never invoked (forbiddenSource would have fataled).
+	assert.Empty(t, res.Collected)
+	assert.Equal(t, 0, res.SignalCount())
+	assert.Equal(t, 0, res.AbsenceCount())
+	assert.False(t, res.HasFailures())
+}
+
 func TestName(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "pr-analyzer", (&Collector{}).Name())

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -94,6 +95,94 @@ func TestDeepScan_sections_verdictTiers(t *testing.T) {
 		require.Len(t, secs, 1, "verdict %q", verdict)
 		assert.Contains(t, secs[0].Pills, want, "verdict %q", verdict)
 	}
+}
+
+// TestDeepScan_sections_neutralizesInjection feeds attacker-controlled
+// HTML/JS-breakout payloads through the REAL signatory emit path — a
+// deepScan's sections() wrapped as an rhtml.Enrichment and serialized by
+// rhtml.SidecarJS (the same calls PRScanReportCmd.Run makes). Every
+// attacker-controlled string field of a deepScan (verdict reasons, exfil
+// hosts, injected/agent-config/risky/manifest paths, burn reason) is
+// loaded with breakout payloads; the serialized sidecar must neutralize
+// them: no raw </script (case-insensitively), no literal </ that could
+// terminate an inlining <script> block, and no raw U+2028/U+2029 line
+// separators that break a JS string literal. encoding/json (inside
+// SidecarJS) escapes <, >, & and the line separators, so a signatory-side
+// regression that bypassed SidecarJS — or a dependency change that dropped
+// the escaping — would surface here as a raw payload in the output.
+func TestDeepScan_sections_neutralizesInjection(t *testing.T) {
+	t.Parallel()
+
+	const (
+		scriptBreak = "</script><script>alert(1)</script>"
+		attrBreak   = `"><img src=x onerror=alert(1)>`
+		ampBreak    = "a&b</"
+		lineSep     = " " // raw U+2028 line separator — breaks a JS string literal
+		paraSep     = " " // raw U+2029 paragraph separator — same hazard
+	)
+
+	// A deepScan carrying breakout payloads in every attacker-controlled
+	// string field — these strings originate from PR file content / paths
+	// and an author-supplied burn reason, none of which signatory controls.
+	ds := deepScan{
+		Verdict:          "block",
+		Reasons:          []string{scriptBreak, ampBreak},
+		ExfilHosts:       []string{attrBreak + lineSep},
+		InjectionFiles:   []string{scriptBreak + ".go"},
+		AgentConfigPaths: []string{attrBreak},
+		RiskyPaths:       []string{ampBreak + paraSep},
+		AnomalousLangs:   []string{scriptBreak},
+		Manifests:        []string{attrBreak},
+		Burned:           true,
+		BurnVia:          "author identity:github/mallory",
+		BurnReason:       scriptBreak + lineSep + attrBreak,
+	}
+
+	// Sanity guard against a tautology: the raw payloads we feed in DO
+	// contain the dangerous substrings, so the assertions below only pass
+	// because the emit path neutralized them — not because they were never
+	// present.
+	require.Contains(t, scriptBreak, "</script", "fixture must carry the dangerous substring")
+	require.Contains(t, ampBreak, "</", "fixture must carry a literal </")
+	require.True(t, strings.ContainsRune(lineSep, ' '), "fixture must carry a raw U+2028")
+
+	// The REAL signatory emit path: sections() → Enrichment → SidecarJS.
+	enrich := rhtml.Enrichment{1: ds.sections()}
+	require.NotEmpty(t, enrich[1], "the loaded deepScan must produce a section to serialize")
+	js, err := rhtml.SidecarJS(enrich)
+	require.NoError(t, err)
+	body := string(js)
+
+	// No raw </script survives (case-insensitive — guard the upper-case
+	// variant a naive lower-only check would miss).
+	lower := strings.ToLower(body)
+	assert.NotContains(t, lower, "</script", "serialized sidecar must not contain a raw </script")
+	assert.NotContains(t, body, "</SCRIPT", "serialized sidecar must not contain a raw </SCRIPT")
+	// No literal </ at all — encoding/json escapes < to <, so a
+	// payload can never terminate an inlining <script> element.
+	assert.NotContains(t, body, "</", "serialized sidecar must not contain a literal </")
+	// No raw line/paragraph separators — they must be escaped to   /
+	//   so they can't break a JS string literal.
+	assert.False(t, strings.ContainsRune(body, ' '), "serialized sidecar must not contain a raw U+2028")
+	assert.False(t, strings.ContainsRune(body, ' '), "serialized sidecar must not contain a raw U+2029")
+
+	// Round-trip proof the payloads actually rode through (not silently
+	// dropped): the escaped forms must be present and decode back to the
+	// originals, so this is a real neutralization, not omission. The
+	// expected escapes are COMPUTED (not typed) so the assertion describes
+	// exactly what encoding/json emits for the breakout runes.
+	for _, r := range []rune{'<', '>', '&', ' ', ' '} {
+		assert.Contains(t, body, fmt.Sprintf(`\u%04x`, r),
+			"breakout rune %#U must appear JSON-escaped, not raw", r)
+	}
+	payload := strings.TrimSuffix(strings.TrimSpace(
+		strings.TrimPrefix(body, "window.__praEnrichment = ")), ";")
+	var got map[string][]rhtml.Section
+	require.NoError(t, json.Unmarshal([]byte(payload), &got),
+		"the escaped sidecar must still be valid JSON")
+	require.Len(t, got["1"], 1)
+	assert.Contains(t, got["1"][0].Rows, rhtml.Row{Term: "Verdict reason", Detail: scriptBreak},
+		"the payload must decode back to its original bytes — neutralized, not mangled")
 }
 
 // TestFunctional_PRScanReport_EmitsSidecar drives the command end to end:

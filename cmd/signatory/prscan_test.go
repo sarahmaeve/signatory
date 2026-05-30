@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,6 +81,86 @@ func TestPRScanScan_HeadChanged_Rescans(t *testing.T) {
 	}
 	require.NoError(t, c2.Run(globals))
 	assert.Equal(t, 2, calls, "a changed head SHA must trigger a re-scan")
+}
+
+// TestPRScanScan_HeadChanged_RepersistsNewHead closes the gap left by
+// TestPRScanScan_HeadChanged_Rescans: that test proves a re-scan RAN (the
+// provider was rebuilt) but never confirms the re-scan re-PERSISTED a
+// verdict for the new head. A "re-scanned but didn't re-store" regression
+// — e.g. a persist path that no-ops when a capture already exists, or one
+// that re-stamps the OLD head — would slip past the call-counter. This
+// reads the verdicts back from the REAL store the command wrote to and
+// asserts the re-scan appended a fresh capture keyed on the SECOND head.
+//
+// The assertion is over the persisted HISTORY (GetSignals), not the
+// latest-wins view (GetLatestSignals / loadVerdict): both captures land in
+// the same wall-clock second, and signals are persisted at RFC3339 second
+// granularity, so the two verdict rows share a collected_at and the
+// latest-wins tiebreak is arbitrary in a sub-second test. In production
+// the two scans are minutes-to-days apart so latest-wins is well-defined;
+// here, asserting the new-head row EXISTS in history is the faithful — and
+// strictly stronger — proof that the re-scan re-stored, independent of
+// timestamp resolution.
+func TestPRScanScan_HeadChanged_RepersistsNewHead(t *testing.T) {
+	t.Parallel()
+	globals := testGlobals(t)
+	src := fakeContentProvider{content: map[string][]byte{"a.go": []byte("package a\n")}}
+	calls := 0
+
+	const firstHead, secondHead = "headAAA", "headBBB"
+
+	c1 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client:      ghclient.NewClientWithBaseURL(prScanGitHubServer(t, firstHead, prFilesJSON("a.go")).URL),
+		NewProvider: countingProvider(src, &calls), Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c1.Run(globals))
+
+	// After the first scan: exactly one verdict, keyed on the first head.
+	ctx := context.Background()
+	require.Equal(t, []string{firstHead}, persistedVerdictHeads(t, ctx, globals, "patch:github/octo/hello/1"),
+		"first scan must persist exactly the first head")
+
+	// New server reports a different head SHA → the PR changed; re-scan.
+	c2 := &PRScanCheckCmd{
+		Target: "octo/hello#1", JSON: true,
+		Client:      ghclient.NewClientWithBaseURL(prScanGitHubServer(t, secondHead, prFilesJSON("a.go")).URL),
+		NewProvider: countingProvider(src, &calls), Stdout: &bytes.Buffer{}, Stderr: io.Discard,
+	}
+	require.NoError(t, c2.Run(globals))
+	require.Equal(t, 2, calls, "a changed head SHA must trigger a re-scan")
+
+	// The re-scan must have re-STORED a verdict carrying the SECOND head —
+	// not silently re-run without persisting, and not re-stamped the first
+	// head. The store now holds both captures, in append order.
+	assert.Equal(t, []string{firstHead, secondHead},
+		persistedVerdictHeads(t, ctx, globals, "patch:github/octo/hello/1"),
+		"a changed-head re-scan must append a fresh verdict keyed on the SECOND head")
+}
+
+// persistedVerdictHeads reads the patch entity's full verdict history from
+// the store and returns each capture's persisted head SHA in append order.
+// It opens the REAL store the command wrote to, so it proves what actually
+// landed on disk — not what an in-memory call-counter observed.
+func persistedVerdictHeads(t *testing.T, ctx context.Context, globals *Globals, patchURI string) []string {
+	t.Helper()
+	s, err := store.OpenSQLite(ctx, globals.DBPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck // test cleanup
+	ent, err := s.FindEntityByURI(ctx, patchURI)
+	require.NoError(t, err)
+	sigs, err := s.GetSignals(ctx, ent.ID) // full history, collected_at ASC
+	require.NoError(t, err)
+	var heads []string
+	for _, sg := range sigs {
+		if sg.Type != verdictSignalType {
+			continue
+		}
+		var rec verdictRecord
+		require.NoError(t, json.Unmarshal(sg.Value, &rec))
+		heads = append(heads, rec.HeadSHA)
+	}
+	return heads
 }
 
 func TestPRScanScan_Refresh_ForcesRescan(t *testing.T) {
