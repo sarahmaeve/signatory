@@ -56,9 +56,8 @@ type Hit struct {
 
 // Scan walks root and returns every literal Hosts match.
 //
-// Returns the first non-skip error from filepath.WalkDir; per-file
-// scan errors (e.g. bufio.ErrTooLong on a binary) do not abort the
-// walk — partial reads still produce useful hits.
+// Returns the first non-skip error from filepath.WalkDir; a file that
+// cannot be opened is skipped rather than aborting the walk.
 func Scan(root string) ([]Hit, error) {
 	var hits []Hit
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -96,20 +95,32 @@ func ScanBytes(rel string, content []byte) []Hit {
 	return scanReader(rel, bytes.NewReader(content))
 }
 
-// scanReader is the shared line-scan core. It tolerates long lines from
-// minified/vendored sources (1 MiB cap); a partial scan still yields
-// useful hits, so scanner errors are intentionally ignored.
+// scanReader is the shared line-scan core. It reports every literal Hosts
+// match, case-insensitively (DNS is case-insensitive, so a lowercase-only
+// match would be a free bypass), attributing each to its 1-indexed line.
+//
+// Lines are read whole via bufio.Reader rather than bufio.Scanner: a
+// minified/obfuscated line longer than Scanner's token cap made Scan()
+// return false and silently halt the rest of the file, letting a host
+// literal placed after — or inside — an over-long line slip past this
+// pre-merge gate. We never stop scanning on line length. Callers bound
+// total content (the PR path caps blobs at 2 MiB), so an unbounded line
+// cannot be forced here in practice.
 func scanReader(rel string, r io.Reader) []Hit {
 	var hits []Hit
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for line := 1; sc.Scan(); line++ {
-		text := sc.Text()
-		for _, h := range Hosts {
-			if strings.Contains(text, h) {
-				hits = append(hits, Hit{File: rel, Line: line, Host: h})
+	br := bufio.NewReader(r)
+	for line := 1; ; line++ {
+		text, err := br.ReadString('\n')
+		if len(text) > 0 {
+			lower := strings.ToLower(text)
+			for _, h := range Hosts {
+				if strings.Contains(lower, h) {
+					hits = append(hits, Hit{File: rel, Line: line, Host: h})
+				}
 			}
 		}
+		if err != nil {
+			return hits
+		}
 	}
-	return hits
 }
