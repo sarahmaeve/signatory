@@ -85,18 +85,20 @@ type SkippedFile struct {
 
 // Report is the outcome of scanning a PR's changelist.
 type Report struct {
-	HeadSHA            string            `json:"head_sha"`
-	Verdict            Verdict           `json:"verdict"`
-	Reasons            []string          `json:"reasons,omitempty"`
-	ContentInjection   []FileInjection   `json:"content_injection,omitempty"`
-	ExfilHits          []exfilwatch.Hit  `json:"exfil_hits,omitempty"`
-	AgentConfigPaths   []string          `json:"agent_config_paths,omitempty"`
-	ASTConcerns        []LanguageConcern `json:"ast_concerns,omitempty"`
-	RiskyPathHits      []string          `json:"risky_path_hits,omitempty"`     // changed paths matching an org-configured risky prefix
-	AnomalousLanguages []string          `json:"anomalous_languages,omitempty"` // programming languages in the PR outside the org's preferred/allowed set
-	ManifestsTouched   []string          `json:"manifests_touched,omitempty"`   // changed dependency manifests/lockfiles (informational, built-in)
-	Scanned            int               `json:"scanned"`
-	Skipped            []SkippedFile     `json:"skipped,omitempty"`
+	HeadSHA              string            `json:"head_sha"`
+	Verdict              Verdict           `json:"verdict"`
+	Reasons              []string          `json:"reasons,omitempty"`
+	ContentInjection     []FileInjection   `json:"content_injection,omitempty"`
+	ExfilHits            []exfilwatch.Hit  `json:"exfil_hits,omitempty"`
+	AgentConfigPaths     []string          `json:"agent_config_paths,omitempty"`
+	ASTConcerns          []LanguageConcern `json:"ast_concerns,omitempty"`
+	ExcludedTreeConcerns []LanguageConcern `json:"excluded_tree_concerns,omitempty"` // AST concern in a vendored/build-output/minified changed file — WARN, not BLOCK (can't tell a malicious vendored injection from a benign vendored bump that trips the heuristic)
+	ExcludedTreeSources  []string          `json:"excluded_tree_sources,omitempty"`  // changed source files in vendored/build-output/minified trees, scanned outside the block tier (informational; surfaced so the AST exclusion is never silent)
+	RiskyPathHits        []string          `json:"risky_path_hits,omitempty"`        // changed paths matching an org-configured risky prefix
+	AnomalousLanguages   []string          `json:"anomalous_languages,omitempty"`    // programming languages in the PR outside the org's preferred/allowed set
+	ManifestsTouched     []string          `json:"manifests_touched,omitempty"`      // changed dependency manifests/lockfiles (informational, built-in)
+	Scanned              int               `json:"scanned"`
+	Skipped              []SkippedFile     `json:"skipped,omitempty"`
 }
 
 // Option configures a Scan. Options carry org policy (from a shared
@@ -144,7 +146,8 @@ func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []Ch
 	}
 
 	rep := Report{HeadSHA: headSHA}
-	langFiles := map[string][]astfeature.SourceFile{}
+	langFiles := map[string][]astfeature.SourceFile{}     // normal source → block tier
+	excludedFiles := map[string][]astfeature.SourceFile{} // vendored/build-output source → warn tier
 
 	// Path-based, over the full changelist (added / modified / removed all
 	// count as a touch), via pr-analyzer's shared catalogs so the rules
@@ -222,9 +225,17 @@ func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []Ch
 		// uses LanguageForChangedFile (not LanguageForPath): a changed
 		// test file is authored code an attacker abuses (prt-scan's
 		// conftest.py), so test files are scanned here even though the
-		// source-evolution baseline excludes them.
-		if lang, ok := astfeature.LanguageForChangedFile(cf.Path); ok {
+		// source-evolution baseline excludes them. A changed source file
+		// in a vendored/build-output/minified tree is also attacker-
+		// authored in THIS PR — it is scanned too, but its concern is
+		// routed to the warn tier (see the excluded-tree pass below), not
+		// silently dropped as the baseline filter would.
+		switch lang, incl := astfeature.LanguageForChangedFile(cf.Path); incl {
+		case astfeature.Included:
 			langFiles[lang] = append(langFiles[lang], astfeature.SourceFile{Path: cf.Path, Content: content})
+		case astfeature.ExcludedTree:
+			excludedFiles[lang] = append(excludedFiles[lang], astfeature.SourceFile{Path: cf.Path, Content: content})
+			rep.ExcludedTreeSources = append(rep.ExcludedTreeSources, cf.Path)
 		}
 	}
 
@@ -237,6 +248,23 @@ func Scan(ctx context.Context, src ContentProvider, headSHA string, changed []Ch
 		concern := source.DetectConcern([]source.MatrixRow{{Version: headSHA, AST: &counts}})
 		if concern.ConcernPresent {
 			rep.ASTConcerns = append(rep.ASTConcerns, LanguageConcern{Language: lang, Concern: concern})
+		}
+	}
+
+	// AST concern in vendored/build-output/minified changed files. Same
+	// detector, but routed to the WARN tier: a concern here cannot be
+	// auto-BLOCKed because we can't distinguish a malicious vendored
+	// injection from a benign vendored bump that happens to trip the
+	// heuristic, and a false block would burn an honest author. The named
+	// concern hands a reviewer what they need to make that call.
+	for _, lang := range sortedKeys(excludedFiles) {
+		counts, err := analyzeLanguage(ctx, lang, excludedFiles[lang])
+		if err != nil {
+			continue // analyzer failure on a bucket is non-fatal
+		}
+		concern := source.DetectConcern([]source.MatrixRow{{Version: headSHA, AST: &counts}})
+		if concern.ConcernPresent {
+			rep.ExcludedTreeConcerns = append(rep.ExcludedTreeConcerns, LanguageConcern{Language: lang, Concern: concern})
 		}
 	}
 
@@ -300,6 +328,13 @@ func deriveVerdict(rep Report) (Verdict, []string) {
 		return VerdictBlock, blockReasons
 	}
 
+	if len(rep.ExcludedTreeConcerns) > 0 {
+		langs := make([]string, len(rep.ExcludedTreeConcerns))
+		for i, c := range rep.ExcludedTreeConcerns {
+			langs[i] = c.Language
+		}
+		warnReasons = append(warnReasons, "behavioral concern in vendored/generated "+strings.Join(langs, ", ")+" file(s)")
+	}
 	if otherInjections > 0 {
 		warnReasons = append(warnReasons, fmt.Sprintf("content injection in %d file(s)", otherInjections))
 	}

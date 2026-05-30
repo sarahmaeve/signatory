@@ -1,6 +1,9 @@
 package astfeature
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Language identifiers returned by LanguageForPath / LanguageForChangedFile.
 // They match the per-language analyzers' Language() values so the routing
@@ -13,6 +16,26 @@ const (
 	LangRust       = "rust"
 )
 
+// Inclusion is the PR-defense classification of a changed path, returned by
+// LanguageForChangedFile. It distinguishes two cases that the baseline
+// boolean filter collapses into "false":
+//
+//   - NotSource    — not a source file we analyze (or a type-only .d.ts,
+//     which has no runtime AST).
+//   - Included     — a source file to AST-analyze on the normal block path.
+//   - ExcludedTree — a source file deliberately placed in a vendored /
+//     build-output / minified tree. For the source-evolution baseline that
+//     is third-party-or-generated noise; but in a PR it is THIS changelist's
+//     attacker-authored bytes, so PR-defense still scans it — outside the
+//     block tier (see internal/prdefense.Scan).
+type Inclusion int
+
+const (
+	NotSource Inclusion = iota
+	Included
+	ExcludedTree
+)
+
 // LanguageForPath classifies a posix-style, repo-relative path as one of
 // the source languages the AST analyzers consume, EXCLUDING test files,
 // vendored / build-output trees, TypeScript declaration files, minified
@@ -23,141 +46,124 @@ const (
 //
 // PR-defense uses LanguageForChangedFile instead — see its doc.
 func LanguageForPath(path string) (language string, included bool) {
-	return languageFor(path, false)
+	lang, ok := extLanguage(path)
+	if !ok || inExcludedTree(lang, path) || isTestPath(lang, path) {
+		return "", false
+	}
+	return lang, true
 }
 
-// LanguageForChangedFile is the PR-defense variant of LanguageForPath: it
+// LanguageForChangedFile is the PR-defense variant of LanguageForPath. It
 // INCLUDES test files (conftest.py, *_test.go, tests/, benches/, …),
 // because a changed test file is authored code an attacker abuses — the
 // prt-scan campaign injected payloads into conftest.py, which runs at
-// pytest collection. It still excludes vendored / build-output /
-// declaration / minified files: third-party or generated code that is
-// AST-noisy and would false-positive a legitimate dependency bump.
+// pytest collection.
 //
-// The two functions share the extension and non-test exclusion logic
-// below, so the source-evolution and PR-defense consumers cannot drift on
-// what counts as which language.
-func LanguageForChangedFile(path string) (language string, included bool) {
-	return languageFor(path, true)
+// Unlike the baseline, it does NOT silently drop vendored / build-output /
+// minified source: it returns ExcludedTree for those so PR-defense can scan
+// them outside the block tier rather than ignore them (a changed file under
+// vendor/ or named *.min.js is attacker-authored in this PR — invisible
+// AST exclusion there was a content-block bypass). Only genuinely
+// AST-less inputs (non-source extensions, .d.ts declarations) are NotSource.
+//
+// The extension and exclusion predicates are shared with LanguageForPath,
+// so the source-evolution and PR-defense consumers cannot drift on what
+// counts as which language or which tree.
+func LanguageForChangedFile(path string) (language string, inclusion Inclusion) {
+	lang, ok := extLanguage(path)
+	if !ok {
+		return "", NotSource
+	}
+	if inExcludedTree(lang, path) {
+		return lang, ExcludedTree
+	}
+	return lang, Included
 }
 
-func languageFor(path string, includeTests bool) (language string, included bool) {
-	switch {
-	case includedGo(path, includeTests):
-		return LangGo, true
-	case includedPython(path, includeTests):
-		return LangPython, true
-	case includedNode(path, includeTests):
-		return LangJavaScript, true
-	case includedRust(path, includeTests):
-		return LangRust, true
-	default:
+// extLanguage returns the source language implied by the path's extension —
+// the single source of truth for extension→language. A .d.ts TypeScript
+// declaration is NOT a source file: it is type-only and carries no runtime
+// AST, so it returns ("", false) and is never scanned by either consumer.
+func extLanguage(path string) (string, bool) {
+	if strings.HasSuffix(path, ".d.ts") {
 		return "", false
 	}
-}
-
-// includedGo: a .go file. Test files (_test.go) are excluded unless
-// includeTests; vendored code is always excluded.
-func includedGo(path string, includeTests bool) bool {
-	if !strings.HasSuffix(path, ".go") {
-		return false
+	switch {
+	case strings.HasSuffix(path, ".go"):
+		return LangGo, true
+	case strings.HasSuffix(path, ".py"):
+		return LangPython, true
+	case strings.HasSuffix(path, ".rs"):
+		return LangRust, true
 	}
-	if !includeTests && strings.HasSuffix(path, "_test.go") {
-		return false
-	}
-	if path == "vendor" || strings.HasPrefix(path, "vendor/") || strings.Contains(path, "/vendor/") {
-		return false
-	}
-	return true
-}
-
-// includedPython: a .py file. Test files (conftest.py, test_*, *_test.py,
-// and tests/ test/ dirs) are excluded unless includeTests; vendored and
-// virtual-env trees are always excluded.
-func includedPython(path string, includeTests bool) bool {
-	if !strings.HasSuffix(path, ".py") {
-		return false
-	}
-	base := path
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	if !includeTests && (base == "conftest.py" ||
-		strings.HasPrefix(base, "test_") ||
-		strings.HasSuffix(base, "_test.py")) {
-		return false
-	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "tests", "test":
-			if !includeTests {
-				return false
-			}
-		case "vendor", "_vendor", "site-packages", ".venv", "venv":
-			return false
-		}
-	}
-	return true
-}
-
-// includedNode: a JS/TS authored source file. .d.ts declarations and
-// minified bundles are always excluded (no useful AST); test/spec files
-// and __tests__/test/tests dirs are excluded unless includeTests;
-// node_modules and build-output dirs are always excluded.
-func includedNode(path string, includeTests bool) bool {
-	if strings.HasSuffix(path, ".d.ts") {
-		return false
-	}
-	ext := false
 	for _, suf := range []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"} {
 		if strings.HasSuffix(path, suf) {
-			ext = true
-			break
+			return LangJavaScript, true
 		}
 	}
-	if !ext {
-		return false
-	}
-
-	base := path
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	if strings.Contains(base, ".min.") {
-		return false
-	}
-	if !includeTests && (strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")) {
-		return false
-	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "__tests__", "test", "tests":
-			if !includeTests {
-				return false
-			}
-		case "node_modules", "dist", "build", "out":
-			return false
-		}
-	}
-	return true
+	return "", false
 }
 
-// includedRust: a .rs source file plus build.rs (the cargo build-time
-// entry point). tests/ benches/ examples/ dirs are excluded unless
-// includeTests; target/ build output and vendor/ are always excluded.
-func includedRust(path string, includeTests bool) bool {
-	if !strings.HasSuffix(path, ".rs") {
-		return false
+// inExcludedTree reports whether path sits in a vendored / build-output /
+// minified location for its language — third-party or generated code that
+// is AST-noisy for the source-evolution baseline and would false-positive a
+// legitimate dependency bump.
+func inExcludedTree(lang, path string) bool {
+	switch lang {
+	case LangGo:
+		return hasPathSegment(path, "vendor")
+	case LangPython:
+		return hasPathSegment(path, "vendor", "_vendor", "site-packages", ".venv", "venv")
+	case LangJavaScript:
+		if strings.Contains(lastSegment(path), ".min.") {
+			return true
+		}
+		return hasPathSegment(path, "node_modules", "dist", "build", "out")
+	case LangRust:
+		return hasPathSegment(path, "target", "vendor")
 	}
-	for seg := range strings.SplitSeq(path, "/") {
-		switch seg {
-		case "tests", "benches", "examples":
-			if !includeTests {
-				return false
-			}
-		case "target", "vendor":
-			return false
+	return false
+}
+
+// isTestPath reports whether path is a test/spec file or lives in a test
+// directory for its language. The baseline excludes these (test code
+// pollutes a runtime-AST baseline); PR-defense includes them.
+func isTestPath(lang, path string) bool {
+	base := lastSegment(path)
+	switch lang {
+	case LangGo:
+		return strings.HasSuffix(path, "_test.go")
+	case LangPython:
+		if base == "conftest.py" || strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") {
+			return true
+		}
+		return hasPathSegment(path, "tests", "test")
+	case LangJavaScript:
+		if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
+			return true
+		}
+		return hasPathSegment(path, "__tests__", "test", "tests")
+	case LangRust:
+		return hasPathSegment(path, "tests", "benches", "examples")
+	}
+	return false
+}
+
+// hasPathSegment reports whether any "/"-delimited segment of path equals
+// one of segs (matching "vendor", "a/vendor/b", "vendor/x" but not
+// "myvendor" or "vendorx").
+func hasPathSegment(path string, segs ...string) bool {
+	for s := range strings.SplitSeq(path, "/") {
+		if slices.Contains(segs, s) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+func lastSegment(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
