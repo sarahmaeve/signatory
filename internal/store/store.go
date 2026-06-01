@@ -18,6 +18,11 @@ type Store interface {
 	// matches `baseURI@<something>`. Lookup-side fallback for pre-Plan-A
 	// versioned-entity rows; see SQLite implementation for ordering rules.
 	FindEntityByVersionedBaseURI(ctx context.Context, baseURI string) (*profile.Entity, error)
+	// ListEntitiesByType returns every entity of the given type, ordered
+	// by canonical URI. Powers per-type enumeration (e.g. pr-scan summary
+	// listing all captured patch: entities). Empty result, no error, when
+	// none exist.
+	ListEntitiesByType(ctx context.Context, entityType profile.EntityType) ([]*profile.Entity, error)
 	PutEntity(ctx context.Context, entity *profile.Entity) error
 	// EnsureEntityByCanonicalURI returns the existing entity at uri, or
 	// mints a fresh row keyed by the supplied shortName when none exists.

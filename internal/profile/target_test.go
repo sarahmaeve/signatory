@@ -46,6 +46,50 @@ func TestResolveTarget_GitHubForms(t *testing.T) {
 	}
 }
 
+func TestResolveTarget_PullRequest(t *testing.T) {
+	t.Parallel()
+
+	want := func(t *testing.T, r *ResolvedTarget) {
+		t.Helper()
+		assert.Equal(t, "patch:github/alecthomas/kong/593", r.CanonicalURI)
+		assert.Equal(t, "patch", r.Scheme)
+		assert.Equal(t, "github", r.Platform)
+		assert.Equal(t, "alecthomas", r.Owner)
+		assert.Equal(t, "593", r.PatchID)
+		assert.Equal(t, "kong#593", r.ShortName)
+		assert.Equal(t, "https://github.com/alecthomas/kong", r.CloneURL)
+	}
+
+	for _, in := range []string{
+		"alecthomas/kong#593",
+		"https://github.com/alecthomas/kong/pull/593",
+		"github.com/alecthomas/kong/pull/593",
+		"http://github.com/alecthomas/kong/pull/593/",
+	} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			r, err := ResolveTarget(in)
+			require.NoError(t, err)
+			want(t, r)
+		})
+	}
+}
+
+func TestResolveTarget_PullRequest_Rejects(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		"alecthomas/kong#notanumber",
+		"alecthomas/kong#0",
+		"alecthomas/kong#-3",
+	} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			_, err := ResolveTarget(in)
+			assert.Error(t, err)
+		})
+	}
+}
+
 // TestResolveTarget_NpmjsURLs covers the copy-paste-from-browser
 // convenience: npmjs.com package URLs should resolve to pkg:npm/
 // canonical URIs. Tests the six accepted shapes (with/without www,

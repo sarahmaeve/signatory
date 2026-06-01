@@ -449,7 +449,7 @@ func TestCollectorsFor_CloneHappyPath(t *testing.T) {
 
 	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{Path: dst, Clone: true, Cleanups: testCleanups(t)})
 	require.NoError(t, err)
-	assert.Len(t, collectors, 9, "github + forgejo + gitlab + adoption + openssf-scorecard + cadence + git + repofiles + exfilwatch collectors returned")
+	assert.Len(t, collectors, 10, "github + forgejo + gitlab + adoption + openssf-scorecard + cadence + pr-analyzer + git + repofiles + exfilwatch collectors returned")
 
 	gitDir, err := os.Stat(filepath.Join(dst, ".git"))
 	require.NoError(t, err)

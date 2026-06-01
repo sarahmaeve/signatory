@@ -137,17 +137,19 @@ type AnalyzeCmd struct {
 	Stderr io.Writer `kong:"-"`
 }
 
-// formatBurnGateError renders the "analyze refusing to collect"
-// error returned by the pre-collection burn gate. Multi-line so
-// the user sees the cascade trace AND the override flag in one
-// place; no need to re-run with --verbose to figure out which
-// ledger entry caused the refusal.
+// formatBurnGateError renders the "refusing to proceed" error
+// returned by a pre-collection burn gate. action names the command
+// context ("analyze refusing to collect", "pr-scan refusing to
+// analyze") so the same trace + override-hint format serves every
+// gated command. Multi-line so the user sees the cascade trace AND
+// the override flag in one place; no need to re-run with --verbose to
+// figure out which ledger entry caused the refusal.
 //
 // Direct burns and cascaded burns get distinct phrasing — a
 // direct burn on the queried entity reads "<URI> is burned",
 // whereas a cascaded burn reads "<URI> is burned via <role>
 // <owner-URI>" so the user can trace the cascade source.
-func formatBurnGateError(canonicalURI string, burn *profile.Burn, ctx *store.EffectiveBurnContext) error {
+func formatBurnGateError(action, canonicalURI string, burn *profile.Burn, ctx *store.EffectiveBurnContext) error {
 	var subject string
 	if ctx != nil && !ctx.Direct && ctx.ViaOwner != nil {
 		subject = fmt.Sprintf("%s is burned via %s %s",
@@ -156,11 +158,12 @@ func formatBurnGateError(canonicalURI string, burn *profile.Burn, ctx *store.Eff
 		subject = fmt.Sprintf("%s is burned", canonicalURI)
 	}
 	return fmt.Errorf(
-		"analyze refusing to collect — %s\n"+
+		"%s — %s\n"+
 			"  Reason: %s\n"+
 			"  Burned by: %s at %s\n"+
-			"  Pass --ignore-burn to collect anyway (forensic / verification cases),\n"+
+			"  Pass --ignore-burn to proceed anyway (forensic / verification cases),\n"+
 			"  or `signatory burn remove %s` if the burn was premature",
+		action,
 		subject,
 		burn.Reason,
 		burn.BurnedBy, burn.BurnedAt.Format(time.RFC3339),
@@ -543,7 +546,7 @@ func (cmd *AnalyzeCmd) prepareEntityForRefresh(
 			return nil, false, fmt.Errorf("pre-collection burn gate: %w", gateErr)
 		}
 		if gateErr == nil {
-			return nil, false, formatBurnGateError(resolved.CanonicalURI, gateBurn, gateCtx)
+			return nil, false, formatBurnGateError("analyze refusing to collect", resolved.CanonicalURI, gateBurn, gateCtx)
 		}
 	}
 

@@ -1108,4 +1108,244 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"this is an artifact-level signal (the .jar was signed for the registry), distinct from git tag signing which the git collector handles separately",
 		},
 	},
+
+	// ================================================================
+	// Pull-request queue (pr-analyzer collector) — shape of inbound,
+	// still-open contributions. Entries span vitality / governance /
+	// hygiene; grouped here by source for maintainability, with the
+	// per-entry Group field carrying the real classification.
+	//
+	// All medium-declining: every value is GitHub-API PR metadata,
+	// mutable post-observation (edits, force-push, relabeling) and a
+	// point-in-time snapshot of the OPEN queue — not merge history.
+	// ================================================================
+
+	"open_pr_count": {
+		Type:              "open_pr_count",
+		Group:             profile.SignalGroupVitality,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Number of currently-open pull requests on the repository, from full pagination of the listing endpoint.",
+		Caveats: []string{
+			"a snapshot of pending inbound work at observation time, not merge throughput — a high count may mean healthy contribution flow or an unreviewed backlog",
+			"this count is the true total (the listing is fully paginated); the per-PR rate/distribution signals below are computed over a bounded sample of it",
+		},
+	},
+	"pr_author_association_distribution": {
+		Type:              "pr_author_association_distribution",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Distribution of GitHub author_association values (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE, …) across the sampled open PRs.",
+		Caveats: []string{
+			"computed over a bounded sample of the most-recent open PRs (default 30); larger queues are sampled, not fully enumerated, and the truncation is logged",
+			"author_association is GitHub's point-in-time classification of the author's relationship to the repo and is connector-defined vocabulary; it shifts as people gain or lose membership",
+			"describes who is proposing changes, not who is merging them — open PRs include contributions that may never land",
+		},
+	},
+	"pr_first_time_contributor_share": {
+		Type:              "pr_first_time_contributor_share",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs whose author_association marks the author as first-time or unaffiliated (FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, NONE).",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); larger queues are sampled with truncation logged",
+			"a high first-timer share is ambiguous — it can mark a welcoming, popular project or an influx of low-quality or hostile PRs; interpret alongside review-gate signals",
+			"open-queue snapshot, not merge history",
+		},
+	},
+	"pr_test_touch_rate": {
+		Type:              "pr_test_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that touch test files, by pr-analyzer's path and filename heuristics.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"heuristic name/path matching (e.g. *_test.go, tests/, spec/) — convention- and language-dependent, with both false positives and misses",
+			"measures whether tests are touched, not whether coverage is adequate or the tests are meaningful",
+		},
+	},
+	"pr_dependency_manifest_touch_rate": {
+		Type:              "pr_dependency_manifest_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that modify a dependency manifest or lockfile (go.mod, package.json, Cargo.toml, requirements.txt, …).",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"flags inbound dependency changes for review; does not distinguish additions from upgrades or removals",
+			"open-queue snapshot — these changes are proposed, not yet merged",
+		},
+	},
+	"pr_agent_config_touch_rate": {
+		Type:              "pr_agent_config_touch_rate",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs that touch AI-agent configuration files (CLAUDE.md, .cursorrules, .claude/, …) — a cross-ecosystem prompt-injection carrier surface.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"the agent-config catalog is pr-analyzer's own and can drift from signatory's internal/agentconfig taxonomy until the two are reconciled",
+			"a touch is not itself malicious — legitimate agent-config maintenance looks identical; pair with content-injection scanning of the changed files",
+		},
+	},
+	"pr_oversized_share": {
+		Type:              "pr_oversized_share",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Share of sampled open PRs whose total changed lines (additions + deletions) exceed the large-PR threshold the collector passes to pr-analyzer.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"the threshold is a heuristic; signatory's collection path has no org config, so a built-in default applies — large PRs are a review-burden signal, not a correctness one",
+			"LOC counts are GitHub-reported and exclude binary / generated-file context",
+		},
+	},
+	"pr_language_distribution": {
+		Type:              "pr_language_distribution",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Distribution of programming languages detected across the files changed in the sampled open PRs.",
+		Caveats: []string{
+			"bounded sample (default 30 most-recent open PRs); truncation logged",
+			"languages are inferred from file extensions, not content; vendored or generated files inflate counts",
+			"reflects the languages of proposed changes in the open queue, not the repository's overall composition",
+		},
+	},
+	"pr_queue_samples": {
+		Type:              "pr_queue_samples",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Per-PR drill-down detail behind the open-PR-queue aggregate signals: one record per sampled PR (number, author, association, LOC, tests/manifests/agent-config touches, languages).",
+		Caveats: []string{
+			"the retained detail carrier for the pr_* aggregates above — not a trend signal; field-level deltas on this array are expected to be noisy and should not be alerted on",
+			"bounded sample (default 30 most-recent open PRs); truncation is reflected in the carrier's truncated flag",
+			"open-queue snapshot at observation time, mutable via the GitHub API",
+		},
+	},
+
+	// ================================================================
+	// Pull-request changelist defense (pr-scan command) — content-
+	// derived findings about the files a SINGLE pull request changes,
+	// pinned to the PR head commit. Distinct from the pr-analyzer queue
+	// aggregates above (which are shape-derived over the open-PR queue).
+	// A pre-merge gate: "is THIS changeset trying to compromise us?"
+	// ================================================================
+
+	"pr_content_injection": {
+		Type:              "pr_content_injection",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Hidden or obfuscated instruction-injection primitives (zero-width unicode, bidi controls, tag blocks, markdown-comment imperatives, exfil-shaped image URLs, lexical injection, encoded blobs, confusable scripts) detected in a file a pull request changes.",
+		Caveats: []string{
+			"scoped to the PR's changed files at the head commit — a clean result does not vouch for the rest of the repo",
+			"detects surface patterns; runtime-concatenated or custom-encoded payloads can evade it",
+			"imperative prose is expected in agent-config files (CLAUDE.md, etc.), so the markdown-comment primitive is suppressed there to avoid false positives",
+		},
+	},
+	"pr_exfil_host_reference": {
+		Type:              "pr_exfil_host_reference",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "Literal reference to an HTTP-capture-as-a-service host (webhook.site, requestbin, oast.*, …) in a file a pull request changes — a strong supply-chain exfiltration signal.",
+		Caveats: []string{
+			"literal substring match; obfuscated (XOR / base64 / runtime-concatenated) host strings evade it by design",
+			"scoped to the PR's changed files at the head commit",
+			"a hit is high-signal: published library code has no legitimate reason to POST to a public request collector",
+		},
+	},
+	"pr_agent_config_touched": {
+		Type:              "pr_agent_config_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request modifies one or more AI-agent configuration files (CLAUDE.md, .cursorrules, .claude/, …) — the prompt-injection carrier surface that warrants extra scrutiny of the accompanying content-injection scan.",
+		Caveats: []string{
+			"path classification only (from the agent-config taxonomy); touching such a file is not itself malicious — legitimate maintenance looks identical",
+			"raises severity when paired with a pr_content_injection hit in the same file",
+			"scoped to the PR's changed files",
+		},
+	},
+	"pr_ast_concern": {
+		Type:              "pr_ast_concern",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "AST analysis of the source files a pull request changes spiked two or more rare-on-benign features (exec calls, persistence-path writes, dynamic eval, …) at the head commit — a weaponized-code signal.",
+		Caveats: []string{
+			"in-situ concern only (single checkout); the cross-version anomaly detector is not run here — a PR head has no version history to compare against",
+			"conservative by design (threshold of two features): favors precision over recall, so single-feature payloads are missed",
+			"scoped to the changed source files; covers Go / Python / JS-TS / Rust — other languages are not AST-scanned",
+		},
+	},
+	"pr_risky_path_touched": {
+		Type:              "pr_risky_path_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request modifies one or more paths an organization declared sensitive (risky_paths in a shared pr-analyzer.yaml) — surfaced so a PR touching a dangerous code area is noticed even when its content is benign.",
+		Caveats: []string{
+			"org policy, opt-in: only emitted when pr-scan is run with --config naming a YAML that declares risky_paths; absent config means no opinion, not 'safe'",
+			"path-prefix match only (P == F or P + \"/\" prefixes F, no wildcards), via pr-analyzer's shared codeshape.MatchesRiskyPath — touching the area is the signal, not the content",
+			"scoped to the PR's changed files at the head commit; added / modified / removed all count as a touch",
+		},
+	},
+	"pr_anomalous_language": {
+		Type:              "pr_anomalous_language",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request introduces one or more programming languages outside the organization's preferred/allowed set (the languages weighting in a shared pr-analyzer.yaml) — surfaced so a PR that brings in a non-acceptable language is noticed.",
+		Caveats: []string{
+			"org policy, opt-in: only emitted when pr-scan is run with --config naming a YAML that declares languages.preferred or languages.allowed",
+			"programming languages only — markup (Markdown, YAML, JSON, …) is excluded via pr-analyzer's shared codeshape classification, so docs/config-only PRs never trip it",
+			"language detection is path/extension based (pr-analyzer's DetectLanguages); renaming a source file's extension evades it by design",
+		},
+	},
+	"pr_dependency_manifest_touched": {
+		Type:              "pr_dependency_manifest_touched",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "A pull request changes one or more dependency manifests or lockfiles (go.mod, package.json, Cargo.toml/lock, requirements.txt, Gemfile/lock, …) — a supply-chain touchpoint surfaced for review. Informational: it does not by itself raise the scan verdict.",
+		Caveats: []string{
+			"built-in catalog (shared with pr-analyzer's codeshape.TouchedManifests); not org-customizable and always evaluated",
+			"informational by design — manifest changes are high-frequency (every dependency bump), so the signal flags the touchpoint without gating; what changed inside the manifest is a separate, deeper analysis",
+			"basename match on the PR's changed files; a manifest under an unrecognized filename is not detected",
+		},
+	},
+	"pr_defense_verdict": {
+		Type:              "pr_defense_verdict",
+		Group:             profile.SignalGroupHygiene,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "The overall pre-merge verdict for a pull-request scan — block / warn / clear — derived from the changelist findings, with the reasons and the head SHA scanned.",
+		Caveats: []string{
+			"a derived rollup of the other pr_* findings, not an independent observation",
+			"clear means no configured detector fired on the changed files at the head SHA — not a guarantee of safety, since every detector has known evasions",
+			"pinned to a head SHA; a force-push after the scan invalidates it",
+		},
+	},
+	"pr_author": {
+		Type:              "pr_author",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "The GitHub author of a scanned pull request — login, author_association, and the canonical identity URI of the author's user entity — recorded on the patch so a scan links to the identity: entity of the human who submitted it.",
+		Caveats: []string{
+			"emitted only for human authors; bot / GitHub-App authors (user.type == Bot, or a [bot] login) are not minted as identities and carry no pr_author signal",
+			"author_association is GitHub's point-in-time classification of the author's relationship to THIS repo, not a global property of the identity",
+			"the login is publisher-controlled and can change; the canonical identity URI is the stable join key for linking and for future contributor-burn cascades",
+		},
+	},
+	"author_profile": {
+		Type:              "author_profile",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "GitHub account profile of a PR author, recorded on their identity entity: account age, public-repo count, follower count, and account type. A freshly-created (throwaway) account submitting PRs is a strong supply-chain tell.",
+		Caveats: []string{
+			"recorded on the identity: entity (the per-user home), not the patch — it accumulates across every PR/repo we see from this account",
+			"account metadata is publisher-controlled and mutable (followers, repo count drift); the created-at / account-age field is the load-bearing, hardest-to-fake part",
+			"only fetched for human authors — bot / GitHub-App authors are never minted as identities",
+		},
+	},
+	"pr_author_codeowner": {
+		Type:              "pr_author_codeowner",
+		Group:             profile.SignalGroupGovernance,
+		ForgeryResistance: profile.ForgeryMediumDeclining,
+		Description:       "Whether a PR's author owns (per CODEOWNERS) the paths the PR changes — a maintainer editing their own area vs. an outsider touching a protected one.",
+		Caveats: []string{
+			"read from CODEOWNERS at the BASE commit, not the PR head — otherwise a PR that adds its own author to CODEOWNERS would read as an owner",
+			"only direct @login ownership is detected; team (@org/team) and email owners are not resolved, so a real owner via team membership reads as a non-owner",
+			"pattern matching covers the common CODEOWNERS forms (catch-all, dir, extension, exact) but not full gitignore glob semantics; absence of a CODEOWNERS file is not evidence either way",
+		},
+	},
 }

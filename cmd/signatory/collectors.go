@@ -23,6 +23,7 @@ import (
 	ghcollector "github.com/sarahmaeve/signatory/internal/signal/github"
 	gitlabcollector "github.com/sarahmaeve/signatory/internal/signal/gitlab"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
+	prcollector "github.com/sarahmaeve/signatory/internal/signal/pranalyzer"
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
@@ -306,6 +307,14 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// emits nothing when either side is missing, so repo-only
 			// and registry-only entities skip silently.
 			cadencecollector.NewCollector().WithInRun(opts.InRunResult),
+			// pr-analyzer characterizes the open-PR queue (Code Shape /
+			// Engineer Profile aggregates). GitHub-only and the most
+			// expensive API-only collector — up to ~2 calls per sampled PR.
+			// Dispatched unconditionally like its siblings; it self-gates
+			// at Collect time on github.com host AND on an authenticated
+			// token (an empty GITHUB_TOKEN disables it, since the anonymous
+			// 60-req/hour budget can't service a 30-PR sample).
+			prcollector.NewCollector(os.Getenv("GITHUB_TOKEN")),
 		)
 	}
 
@@ -924,6 +933,38 @@ func ensureCloneAtPath(
 	// Case 2: full clone → refresh refs.
 	progress("Refreshing clone at %s ...\n", absPath)
 	return runner(ctx, absPath, "fetch")
+}
+
+// fetchPullRef fetches refs/pull/<n>/head from origin into the clone at
+// absPath, downloading the PR head commit and its tree/blobs so they are
+// resolvable by SHA in the object DB (the pr-scan path reads changed-file
+// blobs at the head SHA — no working-tree checkout). GitHub's pull refs
+// are not fetched by a default clone, so this explicit fetch is required.
+//
+// n is an int formatted into the refspec, so argv carries no attacker-
+// controlled string — no flag-injection surface (the //nolint note on
+// gitenv applies). The fetch routes through the runner (nil →
+// defaultRunGit → gitenv.NewCloneCmd), inheriting SafeEnv, the
+// .git/config-vector `-c` overrides, and the WaitDelay discipline.
+//
+// Integrity: the caller reads only the API-declared head SHA from the
+// object DB; if the remote served a different commit than the PR detail
+// reported, that SHA will be absent and the blob read fails — so a
+// mismatch surfaces as a hard error rather than a silent wrong-tree scan.
+func fetchPullRef(
+	ctx context.Context,
+	stderr io.Writer,
+	runner func(ctx context.Context, workdir string, args ...string) error,
+	absPath string,
+	n int,
+) error {
+	if runner == nil {
+		runner = defaultRunGit
+	}
+	if stderr != nil {
+		_, _ = fmt.Fprintf(stderr, "Fetching pull/%d/head into %s ...\n", n, absPath)
+	}
+	return runner(ctx, absPath, "fetch", "origin", fmt.Sprintf("refs/pull/%d/head", n))
 }
 
 // defaultRunGit is the production runner that ensureCloneAtPath

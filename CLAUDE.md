@@ -6,8 +6,8 @@ Not using TDD imperils user trust and is an example of misalignment, as is writi
 If you can't do TDD for a ten-line change, you probably can't do it effectively anywhere.
 
 ## Go Version
-Minimum supported version: **Go 1.24**.
+Minimum supported version: **Go 1.26**.
 - Use `errors.Is` / `errors.As` for all sentinel comparisons — never `==`
-- Active development targets Go 1.25+
+- Active development targets Go 1.26+
 - Use //nolint:gosec // GXXX: rationale instead of //nosec for gosec compliance
 

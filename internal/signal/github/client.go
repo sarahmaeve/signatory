@@ -379,6 +379,38 @@ func (c *Client) GetUser(ctx context.Context, username string) (*user, error) {
 	return &u, nil
 }
 
+// UserProfile is the exported subset of a GitHub account profile, for
+// callers outside this package (e.g. cmd/signatory's pr-scan) that build
+// per-user signals and can't name the unexported `user` type.
+type UserProfile struct {
+	Login       string
+	Name        string
+	Company     string
+	CreatedAt   time.Time
+	PublicRepos int
+	Followers   int
+	Type        string // "User", "Bot", or "Organization"
+}
+
+// FetchUserProfile fetches a user/org account profile as an exported
+// UserProfile. Thin wrapper over GetUser so external callers don't depend
+// on the unexported payload type.
+func (c *Client) FetchUserProfile(ctx context.Context, username string) (UserProfile, error) {
+	u, err := c.GetUser(ctx, username)
+	if err != nil {
+		return UserProfile{}, err
+	}
+	return UserProfile{
+		Login:       u.Login,
+		Name:        u.Name,
+		Company:     u.Company,
+		CreatedAt:   u.CreatedAt,
+		PublicRepos: u.PublicRepos,
+		Followers:   u.Followers,
+		Type:        u.Type,
+	}, nil
+}
+
 // repoContent represents a file or directory entry from the contents API.
 type repoContent struct {
 	Name string `json:"name"`

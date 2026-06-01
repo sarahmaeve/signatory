@@ -29,6 +29,7 @@ type CLI struct {
 	Summary SummaryCmd `cmd:"" help:"One-call view: canonical URI, posture, burn status, analyses rollup, related identities. The 'start here' verb for any target." group:"investigate"`
 	Survey  SurveyCmd  `cmd:"" help:"Assess trust posture of a project's dependency tree." group:"investigate"`
 	Analyze AnalyzeCmd `cmd:"" help:"Collect signals (github/git/registry metadata) and display the cached trust profile for a target." group:"investigate"`
+	PRScan  PRScanCmd  `cmd:"pr-scan" help:"Deep-scan a single pull request's changed files for injected prompt-injection, exfil hosts, and persistence writes before merge (owner/repo#N)." group:"investigate"`
 
 	// --- Decide: recording trust decisions ---
 	Posture PostureCmd `cmd:"" help:"Set or view dependency posture tier for an entity." group:"decide"`
@@ -136,7 +137,8 @@ func main() {
 		//   errSilentFailure    — signatory certs doctor (and future
 		//                         diagnostic-style commands)
 		if !errors.Is(err, errStatusNotRunning) &&
-			!errors.Is(err, errSilentFailure) {
+			!errors.Is(err, errSilentFailure) &&
+			!errors.Is(err, ErrPRDefenseBlocked) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		os.Exit(exitCodeFor(err))
