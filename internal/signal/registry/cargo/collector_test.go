@@ -704,6 +704,76 @@ func TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions(t *testing.T) {
 			"rather than emitted with a fabricated URL")
 }
 
+// TestCollector_RecordsArtifactURL_AbsenceWhenVersionMalformed pins the
+// version-half trust boundary: latest.version is registry-supplied
+// (cr.Versions[].num, copied verbatim with no upstream guard) and flows
+// into the static.crates.io download path. The name half is already
+// validated (ValidateCrateName); the version half must be too, mirroring
+// pintable.go's ValidateCrateVersion-then-PathEscape pattern for the same
+// URL. A malformed version (here a path-traversal shape) must record an
+// artifact_url ABSENCE, not emit a signal carrying a fabricated URL —
+// exactly as the no-versions case does.
+func TestCollector_RecordsArtifactURL_AbsenceWhenVersionMalformed(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{Name: "evilcrate", MaxStableVer: "0.1.0"},
+		Versions: []Version{
+			{
+				// Not semver: a path-manipulation payload. crates.io itself
+				// enforces semver, so this models a compromised/alternate
+				// registry — the reason validation is defense-in-depth.
+				Num: "../../../etc/passwd", CreatedAt: "2024-01-01T00:00:00Z", Yanked: false,
+				Checksum: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/evilcrate":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/evilcrate/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL))
+	entity := &profile.Entity{
+		ID:           "test-evilcrate",
+		CanonicalURI: "pkg:cargo/evilcrate",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// No artifact_url SIGNAL with a fabricated URL must be emitted.
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.NotContains(t, signalMap, "artifact_url",
+		"a malformed version must not produce an artifact_url signal with a fabricated URL")
+
+	// It must instead be recorded as an absence.
+	found := false
+	for i := range result.Collected {
+		entry := result.Collected[i]
+		if entry.IsAbsence() && entry.Absence.SignalType == "artifact_url" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found,
+		"a malformed registry-supplied version must record an artifact_url absence "+
+			"rather than emitting a URL with the unvalidated version interpolated")
+}
+
 // TestCollector_CargoDependencies_EmitsUniformShape pins that the
 // cargo collector emits cargo_dependencies with a value shape byte-
 // identical to go_dependencies and npm_dependencies (direct_count,
