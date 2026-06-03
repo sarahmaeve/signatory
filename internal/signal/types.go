@@ -668,6 +668,7 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"literal substring match only; obfuscated literals (XOR, base64, runtime concatenation) defeat the scan and produce no hit — separate obfuscation patterns catch those",
 			"a hit in test fixtures, README files, or webhook-debugging-tool source is data, not a verdict — the analyst weights by file role",
 			"empty hits is a positive observation (we checked, found nothing), not silence; the signal is always emitted when a clone is available",
+			"the payload also carries a skipped list: files not read because they exceed the 2 MiB scan cap (a host literal lives in human-written source, never this large) or are not regular files; a non-empty skipped list means those paths were not examined, so the absence of a hit there is a gap, not a clearance",
 			"the host list is curated in-binary at compile time; updating membership is a code commit, not a remote pull (per ANTIPATTERNS.md no-subscription-list rule)",
 		},
 	},
