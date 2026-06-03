@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"github.com/sarahmaeve/signatory/internal/artifact/stream"
+	"github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 )
 
 // PairConfidence labels how the tarball↔commit pairing was
@@ -51,6 +52,13 @@ type CompareOptions struct {
 	// SampleCap bounds the extras_in_tarball_sample slice length.
 	// Zero or negative means no cap.
 	SampleCap int
+
+	// ExfilHits are the raw exfil-host literals the stream Scanner
+	// found in the published artifact's source (verbatim archive
+	// paths). Compare strips the manifest's top dir and tags each by
+	// repo presence into Comparison.ExfilHostsInArtifact. Nil/empty
+	// leaves the signal's exfil field absent.
+	ExfilHits []exfilwatch.Hit
 }
 
 // Comparison is the structured form of the artifact_repo_divergence
@@ -72,6 +80,12 @@ type Comparison struct {
 	ExtrasInTarballCount  int               `json:"files_extra_in_tarball"`
 	ExtrasInTarballSample []ClassifiedEntry `json:"extras_in_tarball_sample"`
 	Categories            map[string]int    `json:"categories"`
+
+	// ExfilHostsInArtifact lists exfil-host literals found in the
+	// published artifact's source, each tagged by whether its path is
+	// also in the git tree (a path absent from the repo is the xz
+	// shape). Omitted when the scan found nothing.
+	ExfilHostsInArtifact []ArtifactExfilHit `json:"exfil_hosts_in_artifact,omitempty"`
 }
 
 // Compare builds a Comparison from a stream-walked archive manifest
@@ -103,5 +117,6 @@ func Compare(manifest *stream.Manifest, gitPaths []string, opts CompareOptions) 
 		ExtrasInTarballCount:  diff.ExtrasInTarballCount,
 		ExtrasInTarballSample: diff.ExtrasInTarballSample,
 		Categories:            diff.Categories,
+		ExfilHostsInArtifact:  classifyExfilHits(opts.ExfilHits, manifest.StrippedTopDir, gitPaths),
 	}
 }

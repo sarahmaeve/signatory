@@ -10,6 +10,7 @@ import (
 	"github.com/sarahmaeve/signatory/internal/artifact/stream"
 	"github.com/sarahmaeve/signatory/internal/profile"
 	"github.com/sarahmaeve/signatory/internal/signal"
+	"github.com/sarahmaeve/signatory/internal/signal/exfilwatch"
 )
 
 // CollectorName is the source string stamped on every signal /
@@ -24,6 +25,37 @@ const CollectorName = "artifact-vs-repo"
 // daily window so refresh cycles still sweep the signal back through
 // the registry-side check that supplies its inputs.
 const defaultTTL = 24 * time.Hour
+
+// exfilScanMaxFileBytes bounds the bytes the exfil scanner reads from
+// any single artifact entry. Matches the PR-defense blob cap (2 MiB):
+// a host literal in published library source lives in human-written
+// code, which is never this large; a file over the cap is recorded in
+// the manifest's SkippedScans (never silently dropped) rather than
+// buffered.
+const exfilScanMaxFileBytes = 2 << 20
+
+// exfilScanner returns a stream.Scanner that runs the exfilwatch
+// host-literal scan over every file in the published artifact and
+// appends the findings to *hits. Unlike the clone-side exfilwatch
+// Collector (which scans the source repo), this scans WHAT WAS
+// PUBLISHED — so a sink injected into the artifact but absent from the
+// repo (the xz shape) is caught even when the git tree is clean. Bodies
+// are streamed and discarded; only the hits survive.
+func exfilScanner(hits *[]exfilwatch.Hit) stream.Scanner {
+	return stream.Scanner{
+		Name:    "exfilwatch",
+		MaxSize: exfilScanMaxFileBytes,
+		// Only files reach a scanner (the walkers gate on EntryFile
+		// before dispatch); match them all so a renamed payload can't
+		// dodge an extension allowlist, mirroring the clone scan's
+		// scan-everything behavior.
+		Match: func(stream.Entry) bool { return true },
+		Scan: func(path string, body io.Reader) error {
+			*hits = append(*hits, exfilwatch.ScanReader(path, body)...)
+			return nil
+		},
+	}
+}
 
 // CollectorConfig carries the per-construction wiring. Every field
 // is optional; a zero-value Config produces a collector that
@@ -192,14 +224,23 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	//
 	//   - All other ecosystems (npm, cargo, pypi sdist) use a single-
 	//     pass tar.gz walk.
+	// Scan the published artifact's source for exfil-host literals in
+	// the same single pass that builds the divergence manifest — see
+	// exfilScanner. Hits accumulate here and compose into the signal
+	// below, tagged by whether each path is also in the git tree.
+	var exfilHits []exfilwatch.Hit
+	scanners := []stream.Scanner{exfilScanner(&exfilHits)}
+
 	var manifest *stream.Manifest
 	switch entity.Ecosystem {
 	case "gem":
+		// Gem's two-pass outer/inner walk does not yet thread scanners;
+		// the exfil scan is a no-op for gem (documented gap).
 		manifest, err = walkGemArchive(ctx, body, c.cfg.Limits)
 	case "golang", "go":
-		manifest, err = stream.Walk(ctx, body, stream.FormatZip, intents, c.cfg.Limits)
+		manifest, err = stream.WalkWithScanners(ctx, body, stream.FormatZip, intents, scanners, c.cfg.Limits)
 	default:
-		manifest, err = stream.Walk(ctx, body, stream.FormatTarGzip, intents, c.cfg.Limits)
+		manifest, err = stream.WalkWithScanners(ctx, body, stream.FormatTarGzip, intents, scanners, c.cfg.Limits)
 	}
 	if err != nil {
 		recordDivergenceAbsence(result, entity.ID,
@@ -290,6 +331,7 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 		GitCommit:      commit,
 		PairConfidence: res.Confidence,
 		SampleCap:      c.cfg.SampleCap,
+		ExfilHits:      exfilHits,
 	})
 
 	result.RecordSignal(entity.ID, "artifact_repo_divergence", CollectorName,

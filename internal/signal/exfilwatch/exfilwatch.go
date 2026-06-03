@@ -26,6 +26,25 @@ import (
 // published package source is structurally suspicious — there is no
 // scenario in which a library's correct behavior is to POST to a
 // publicly-browseable third-party request collector.
+//
+// The discord.com/api/webhooks entries are a deliberate extension of
+// that rule to a dual-use platform. Discord itself is legitimate, but
+// the webhook delivery path carries an embedded channel id + secret
+// token in the URL; a hardcoded one in published library source is an
+// exfil sink, not configuration (real Discord-notification libraries
+// take the webhook URL as a runtime parameter, and Discord API clients
+// use the /api/v10/ path, not /api/webhooks/). It is the canonical
+// gaming/cookie-stealer channel — e.g. the spadata PyPI stealer
+// (June 2026) POSTed a decrypted .ROBLOSECURITY cookie there. The
+// path-qualified entry keeps the precision: bare discord.com does not
+// match. discordapp.com is Discord's legacy domain and needs its own
+// entry — it does not contain the "discord.com" substring.
+//
+// Telegram (api.telegram.org/bot...) is deliberately NOT listed: every
+// legitimate Telegram bot library hardcodes that exact base URL, so a
+// literal scan would false-positive on benign code and break the
+// "a hit is a strong signal" contract. Telegram exfil is genuinely
+// dual-use and needs a more discriminating mechanism than a host scan.
 var Hosts = []string{
 	"webhook.site",
 	"requestbin.com",
@@ -43,6 +62,8 @@ var Hosts = []string{
 	"ngrok-free.app",
 	"localhost.run",
 	"serveo.net",
+	"discord.com/api/webhooks",
+	"discordapp.com/api/webhooks",
 }
 
 // Hit is one literal occurrence of a Hosts entry on a single line.
@@ -93,6 +114,17 @@ func scanFile(root, path string) ([]Hit, error) {
 // error path, since a bytes reader cannot fail.
 func ScanBytes(rel string, content []byte) []Hit {
 	return scanReader(rel, bytes.NewReader(content))
+}
+
+// ScanReader scans an arbitrary reader for literal Hosts matches,
+// attributing hits to rel. It is the streaming companion to ScanBytes:
+// the artifact walker hands it a bounded archive-entry body so a
+// published tarball can be scanned for exfil sinks without the caller
+// buffering each file into a []byte first. Same line-scan semantics as
+// ScanBytes (case-insensitive, 1-indexed lines, over-long lines never
+// halt the scan); the caller is responsible for bounding the reader.
+func ScanReader(rel string, r io.Reader) []Hit {
+	return scanReader(rel, r)
 }
 
 // scanReader is the shared line-scan core. It reports every literal Hosts

