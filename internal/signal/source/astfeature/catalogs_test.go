@@ -295,6 +295,13 @@ func TestIsCredentialEnvName_Behavior(t *testing.T) {
 
 // TestIsCloudMetadataURL_Behavior covers the metadata-host
 // substring match with the empty-string conservative miss.
+//
+// DNS hostnames are case-insensitive per the DNS spec, so a
+// case-mutated host still resolves and reaches the metadata service.
+// The match must therefore be case-insensitive: otherwise a
+// one-character case change downgrades the near-zero-false-positive
+// CloudMetadataCalls signal to a generic (and concern-excluded)
+// NetworkCallSite. IP-literal hosts have no case and are unaffected.
 func TestIsCloudMetadataURL_Behavior(t *testing.T) {
 	t.Parallel()
 
@@ -309,6 +316,12 @@ func TestIsCloudMetadataURL_Behavior(t *testing.T) {
 		{"azure_internal", "https://test.internal.cloudapp.net/", true},
 		{"empty_string_never_match", "", false},
 		{"ordinary_https", "https://api.example.com/v1/users", false},
+
+		// Case-insensitive DNS evasion: these all resolve to the real
+		// metadata service and must classify as cloud-metadata calls.
+		{"gcp_metadata_mixed_case", "http://Metadata.Google.Internal/computeMetadata/v1/", true},
+		{"gcp_short_alias_upper", "http://METADATA.GOOG/", true},
+		{"azure_internal_mixed_case", "https://Test.Internal.CloudApp.Net/", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
