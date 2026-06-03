@@ -56,13 +56,25 @@ var ErrParserConfusion = errors.New("stream: zip local headers disagree with cen
 func Walk(ctx context.Context, src io.Reader, format Format,
 	intents []CaptureIntent, lim Limits) (*Manifest, error) {
 
+	return WalkWithScanners(ctx, src, format, intents, nil, lim)
+}
+
+// WalkWithScanners is Walk plus a set of Scanners: in addition to
+// emitting the header manifest and capturing CaptureIntent bytes, the
+// walker streams every Scanner-matching entry's body through its Scan
+// function and discards it (see Scanner for the non-retaining
+// contract). Walk is the zero-scanner shorthand; existing callers that
+// don't scan content need no change.
+func WalkWithScanners(ctx context.Context, src io.Reader, format Format,
+	intents []CaptureIntent, scanners []Scanner, lim Limits) (*Manifest, error) {
+
 	switch format {
 	case FormatTarGzip:
-		return walkTarGzip(ctx, src, intents, lim)
+		return walkTarGzip(ctx, src, intents, scanners, lim)
 	case FormatTar:
-		return walkTar(ctx, src, intents, lim)
+		return walkTar(ctx, src, intents, scanners, lim)
 	case FormatZip:
-		return walkZip(ctx, src, intents, lim)
+		return walkZip(ctx, src, intents, scanners, lim)
 	default:
 		return nil, ErrUnknownFormat
 	}

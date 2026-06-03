@@ -587,6 +587,65 @@ func TestCollector_RecordsArtifactURL(t *testing.T) {
 			"recovers the SHA from .cargo_vcs_info.json inside the tarball")
 }
 
+// TestCollector_RecordsArtifactURL_UsesCanonicalCrateName reproduces the
+// once_cell 403: the purl/entity layer normalizes `_`→`-`, so the
+// collector is invoked with packageName "once-cell" while the crate's
+// canonical published name is "once_cell". crates.io's JSON API resolves
+// either separator, but the static.crates.io DOWNLOAD path is
+// separator-sensitive and 403s on the wrong form — so the emitted
+// artifact_url must use the API's canonical crate.name, not the
+// purl-derived name.
+func TestCollector_RecordsArtifactURL_UsesCanonicalCrateName(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{Name: "once_cell", MaxStableVer: "1.21.4"},
+		Versions: []Version{
+			{
+				Num: "1.21.4", CreatedAt: "2024-01-01T00:00:00Z", Yanked: false,
+				Checksum: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/once-cell": // hyphenated lookup — crates.io resolves it
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/once-cell/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{
+				Users: []Owner{{Login: "matklad", Kind: "user"}},
+			}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL))
+	entity := &profile.Entity{
+		ID:           "test-once-cell",
+		CanonicalURI: "pkg:cargo/once-cell", // purl-normalized hyphen form
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.Contains(t, signalMap, "artifact_url")
+
+	var au map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["artifact_url"], &au))
+	assert.Equal(t, "https://static.crates.io/crates/once_cell/1.21.4/download", au["url"],
+		"download URL must use the API's canonical crate.name (once_cell), not the "+
+			"purl-derived hyphenated packageName (once-cell), which 403s on static.crates.io")
+}
+
 // TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions confirms the
 // absence path: a crate response with no orderable non-yanked versions
 // (e.g. all versions yanked) records an artifact_url absence rather
@@ -643,6 +702,76 @@ func TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions(t *testing.T) {
 	assert.True(t, found,
 		"with no orderable non-yanked versions, artifact_url must be recorded as absence "+
 			"rather than emitted with a fabricated URL")
+}
+
+// TestCollector_RecordsArtifactURL_AbsenceWhenVersionMalformed pins the
+// version-half trust boundary: latest.version is registry-supplied
+// (cr.Versions[].num, copied verbatim with no upstream guard) and flows
+// into the static.crates.io download path. The name half is already
+// validated (ValidateCrateName); the version half must be too, mirroring
+// pintable.go's ValidateCrateVersion-then-PathEscape pattern for the same
+// URL. A malformed version (here a path-traversal shape) must record an
+// artifact_url ABSENCE, not emit a signal carrying a fabricated URL —
+// exactly as the no-versions case does.
+func TestCollector_RecordsArtifactURL_AbsenceWhenVersionMalformed(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{Name: "evilcrate", MaxStableVer: "0.1.0"},
+		Versions: []Version{
+			{
+				// Not semver: a path-manipulation payload. crates.io itself
+				// enforces semver, so this models a compromised/alternate
+				// registry — the reason validation is defense-in-depth.
+				Num: "../../../etc/passwd", CreatedAt: "2024-01-01T00:00:00Z", Yanked: false,
+				Checksum: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/evilcrate":
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/evilcrate/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL))
+	entity := &profile.Entity{
+		ID:           "test-evilcrate",
+		CanonicalURI: "pkg:cargo/evilcrate",
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	// No artifact_url SIGNAL with a fabricated URL must be emitted.
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.NotContains(t, signalMap, "artifact_url",
+		"a malformed version must not produce an artifact_url signal with a fabricated URL")
+
+	// It must instead be recorded as an absence.
+	found := false
+	for i := range result.Collected {
+		entry := result.Collected[i]
+		if entry.IsAbsence() && entry.Absence.SignalType == "artifact_url" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found,
+		"a malformed registry-supplied version must record an artifact_url absence "+
+			"rather than emitting a URL with the unvalidated version interpolated")
 }
 
 // TestCollector_CargoDependencies_EmitsUniformShape pins that the

@@ -50,6 +50,10 @@ var sensitivePathPatterns = []string{
 	// Solana / Aptos / Ethereum keystore / Bitcoin wallet.dat.
 	"/.sui/", "/.config/solana/", "/.aptos/",
 	"/.ethereum/keystore/", "wallet.dat",
+	// Game-client credential stores. Added 2026-06 per the spadata
+	// PyPI stealer, which decrypts the Roblox .ROBLOSECURITY session
+	// cookie out of robloxcookies.dat under Roblox/LocalStorage.
+	"robloxcookies.dat", "Roblox/LocalStorage",
 }
 
 // IsSensitivePath reports whether a statically-resolved path
@@ -191,6 +195,10 @@ func IsCredentialEnvName(name string) bool {
 // behavior — legitimate package code effectively never contacts
 // these at import time, so this is a near-zero-false-positive
 // signal.
+//
+// Entries MUST be lowercase: IsCloudMetadataURL lowercases the input
+// URL before substring-matching (DNS hostnames are case-insensitive),
+// so a mixed-case entry here would never match.
 var cloudMetadataHosts = []string{
 	"169.254.169.254",          // AWS/Azure/GCP/OpenStack IMDS
 	"169.254.170.2",            // ECS task-role credential endpoint
@@ -204,12 +212,18 @@ var cloudMetadataHosts = []string{
 // string targets a cloud metadata / SSRF-pivot host. Empty
 // (unresolved) is never a match — a runtime-built URL is a
 // conservative miss.
+//
+// Case-insensitive: the input is lowercased before matching because
+// the DNS-name catalog entries (metadata.google.internal, …) resolve
+// regardless of case, so a case-mutated host must not evade the
+// signal. Mirrors IsCredentialEnvName's case normalization.
 func IsCloudMetadataURL(u string) bool {
 	if u == "" {
 		return false
 	}
+	lower := strings.ToLower(u)
 	for _, h := range cloudMetadataHosts {
-		if strings.Contains(u, h) {
+		if strings.Contains(lower, h) {
 			return true
 		}
 	}

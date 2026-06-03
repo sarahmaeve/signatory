@@ -35,10 +35,12 @@ var ErrNoClone = errors.New("exfilwatch: clone path is empty or not a directory"
 
 // Collector scans a local clone for literal references to
 // HTTP-capture-as-a-service hosts (see Hosts) and emits one
-// exfil_capture_host signal carrying the hit list. A clean tree
-// emits an empty hit list — the signal is always present when a
-// clone is available, so a downstream consumer can distinguish "we
-// checked, nothing found" from "we didn't check."
+// exfil_capture_host signal carrying the hit list plus any files skipped
+// without reading (oversize / irregular). A clean tree emits an empty hit
+// list — the signal is always present when a clone is available, so a
+// downstream consumer can distinguish "we checked, nothing found" from
+// "we didn't check," and the skipped list keeps a file too large to scan
+// from being a silent gap.
 type Collector struct {
 	path string
 	ttl  time.Duration
@@ -56,7 +58,8 @@ func NewCollector(clonePath string) *Collector {
 func (c *Collector) Name() string { return sourceName }
 
 // Collect runs Scan over the clone and emits exactly one
-// exfil_capture_host signal carrying the (possibly empty) hit list.
+// exfil_capture_host signal carrying the (possibly empty) hit list and
+// the list of files skipped without reading.
 //
 // Returns ErrNoClone when path is empty or not a directory; matches
 // repofiles's fail-loudly contract for a missing clone. nil entity
@@ -75,16 +78,19 @@ func (c *Collector) Collect(_ context.Context, entity *profile.Entity) (*signal.
 		return nil, ErrNoClone
 	}
 
-	hits, err := Scan(c.path)
+	hits, skipped, err := Scan(c.path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: scan: %w", sourceName, err)
 	}
+	// JSON-stable: empty slices encode as [] rather than null.
 	if hits == nil {
-		// JSON-stable: empty result encodes as [] rather than null.
 		hits = []Hit{}
+	}
+	if skipped == nil {
+		skipped = []SkippedFile{}
 	}
 
 	result.RecordSignal(entity.ID, signalType, sourceName,
-		time.Now().UTC(), c.ttl, hits)
+		time.Now().UTC(), c.ttl, Result{Hits: hits, Skipped: skipped})
 	return result, nil
 }

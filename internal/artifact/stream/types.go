@@ -1,5 +1,7 @@
 package stream
 
+import "io"
+
 // Format identifies the archive container the walker should dispatch
 // on. Callers declare this explicitly rather than sniff bytes — see
 // the package doc comment for why.
@@ -159,6 +161,48 @@ type CaptureIntent struct {
 	MaxSize int64
 }
 
+// Scanner registers a consumer's interest in inspecting — but not
+// retaining — the bytes of EVERY archive entry it matches. It is the
+// content-scrutiny channel for "examine all source files" consumers
+// (exfil-host literal scanning) that CaptureIntent cannot serve:
+// CaptureIntent buffers the FIRST matching entry into Manifest.Captured
+// for the result's lifetime, whereas a Scanner is invoked once per
+// matching entry and the walker discards each body immediately after
+// Scan returns. Only whatever Scan itself accumulates (typically a
+// small slice of findings, never the file bytes) survives the walk.
+//
+// This is a deliberate, bounded relaxation of the package's "never read
+// entry contents unless a named CaptureIntent asks" rule (see doc.go):
+// scanning reads contents transiently, never into the Manifest, so it
+// does not reintroduce the bulk-extract / expand-to-disk risk the
+// header-only default exists to prevent.
+//
+// MaxSize caps the per-entry bytes the walker will hand to Scan. An
+// entry over the cap is NOT read into memory; its path is recorded in
+// Manifest.SkippedScans so the cap is never silent.
+type Scanner struct {
+	// Name identifies the scanner; used as a prefix in
+	// SkippedScans reasons.
+	Name string
+
+	// Match is called with each Entry post-strip; return true for
+	// every entry whose body Scan should inspect. Match on Path and
+	// Type only — Size is untrusted header data, enforced separately
+	// against MaxSize.
+	Match func(Entry) bool
+
+	// MaxSize bounds the bytes read for any single matching entry.
+	// Entries declared larger are skipped and recorded in
+	// SkippedScans rather than read.
+	MaxSize int64
+
+	// Scan receives the (post-strip) entry path and a reader over its
+	// body, bounded by MaxSize and the walk's caps. It must fully
+	// consume the reader. A non-nil return aborts the whole walk —
+	// reserve it for genuine consumer failures, not "found something."
+	Scan func(path string, body io.Reader) error
+}
+
 // Manifest is the result of walking an archive.
 type Manifest struct {
 	// Entries is the verbatim header listing of every entry observed
@@ -188,6 +232,14 @@ type Manifest struct {
 	// most common reason is oversize; another is "duplicate match"
 	// (intent matched a second entry after the first was captured).
 	SkippedIntents map[string]string
+
+	// SkippedScans maps entry path → human-readable reason for entries
+	// a Scanner matched but did NOT scan (the body exceeded the
+	// scanner's MaxSize). Keyed by path rather than scanner name
+	// because — unlike first-match CaptureIntents — a Scanner matches
+	// every entry, so multiple distinct paths can be skipped; surfacing
+	// each keeps the cap from ever being silent.
+	SkippedScans map[string]string
 
 	// ArchiveSHA256 is the hex-encoded sha256 of the raw archive
 	// bytes as fed to Walk. Computed via tee-reader during the same

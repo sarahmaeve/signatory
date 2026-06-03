@@ -63,6 +63,28 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 			"crypto-wallet keystore entry %q missing — Trapdoor's "+
 				"cargo build.rs payloads read these locations", want)
 	}
+
+	// Game-client credential stores added per the spadata 2026-06 PyPI
+	// Roblox cookie stealer.
+	gameStores := []string{"robloxcookies.dat", "Roblox/LocalStorage"}
+	for _, want := range gameStores {
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
+			"game-client credential store entry %q missing — spadata stole the Roblox .ROBLOSECURITY cookie", want)
+	}
+}
+
+// TestIsSensitivePath_RobloxCookieStore is the behavioral P1 check:
+// the Roblox cookie store resolves as sensitive whether referenced with
+// Windows backslashes or posix slashes, while a path that merely
+// mentions roblox does not.
+func TestIsSensitivePath_RobloxCookieStore(t *testing.T) {
+	t.Parallel()
+	assert.True(t, IsSensitivePath(`C:\Users\me\AppData\Local\Roblox\LocalStorage\robloxcookies.dat`),
+		"Windows-shaped Roblox cookie path must resolve sensitive after backslash normalization")
+	assert.True(t, IsSensitivePath("/home/u/.var/app/Roblox/LocalStorage/robloxcookies.dat"),
+		"posix-shaped Roblox cookie path must resolve sensitive")
+	assert.False(t, IsSensitivePath("/src/roblox_client.py"),
+		"ordinary source merely mentioning roblox must NOT resolve sensitive")
 }
 
 // TestCatalog_PersistencePath_Membership locks in the
@@ -273,6 +295,13 @@ func TestIsCredentialEnvName_Behavior(t *testing.T) {
 
 // TestIsCloudMetadataURL_Behavior covers the metadata-host
 // substring match with the empty-string conservative miss.
+//
+// DNS hostnames are case-insensitive per the DNS spec, so a
+// case-mutated host still resolves and reaches the metadata service.
+// The match must therefore be case-insensitive: otherwise a
+// one-character case change downgrades the near-zero-false-positive
+// CloudMetadataCalls signal to a generic (and concern-excluded)
+// NetworkCallSite. IP-literal hosts have no case and are unaffected.
 func TestIsCloudMetadataURL_Behavior(t *testing.T) {
 	t.Parallel()
 
@@ -287,6 +316,12 @@ func TestIsCloudMetadataURL_Behavior(t *testing.T) {
 		{"azure_internal", "https://test.internal.cloudapp.net/", true},
 		{"empty_string_never_match", "", false},
 		{"ordinary_https", "https://api.example.com/v1/users", false},
+
+		// Case-insensitive DNS evasion: these all resolve to the real
+		// metadata service and must classify as cloud-metadata calls.
+		{"gcp_metadata_mixed_case", "http://Metadata.Google.Internal/computeMetadata/v1/", true},
+		{"gcp_short_alias_upper", "http://METADATA.GOOG/", true},
+		{"azure_internal_mixed_case", "https://Test.Internal.CloudApp.Net/", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

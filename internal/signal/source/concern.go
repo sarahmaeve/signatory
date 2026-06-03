@@ -125,10 +125,13 @@ func DetectConcern(rows []MatrixRow) ConcernValue {
 //     certificates / signatures / payloads. Same purpose-blindness
 //     argument as NetworkCallSites.
 //
-// The remaining 9 fields constitute the rare-on-benign subset.
+// The remaining 10 fields constitute the rare-on-benign subset.
 // Dogfood-validated zero across anyhow / serde / kong / ms /
 // sigstore on every selected row, with the exclusions explicitly
 // allowing the non-zero baseline cases noted above.
+// CredentialDecryptCalls (Windows DPAPI) joined the subset with the
+// spadata 2026-06 follow-up — legitimate code essentially never
+// decrypts an OS-protected secret, so any non-zero count is signal.
 //
 // Output order matches the canonical astfeature.Counts field
 // declaration order so the emitted JSON is stable across runs and
@@ -164,6 +167,9 @@ func concerningFeatures(c astfeature.Counts) []string {
 	}
 	if c.CloudMetadataCalls > 0 {
 		fired = append(fired, "cloud_metadata_calls")
+	}
+	if c.CredentialDecryptCalls > 0 {
+		fired = append(fired, "credential_decrypt_calls")
 	}
 	return fired
 }

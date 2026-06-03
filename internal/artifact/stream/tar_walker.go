@@ -24,7 +24,7 @@ import (
 //  4. Hand off to walkTarHeaders which iterates tar headers,
 //     classifies each entry, and evaluates CaptureIntents.
 func walkTarGzip(ctx context.Context, src io.Reader,
-	intents []CaptureIntent, lim Limits) (*Manifest, error) {
+	intents []CaptureIntent, scanners []Scanner, lim Limits) (*Manifest, error) {
 
 	lim = resolveLimits(lim)
 
@@ -52,7 +52,7 @@ func walkTarGzip(ctx context.Context, src io.Reader,
 		ratioMinCompressed:   ratioMinCompressedBytes,
 		ratioMinDecompressed: ratioMinDecompressedBytes,
 	}
-	return walkTarHeaders(ctx, capped, hasher, intents, lim)
+	return walkTarHeaders(ctx, capped, hasher, intents, scanners, lim)
 }
 
 // walkTar implements Walk for FormatTar — a plain (uncompressed)
@@ -66,7 +66,7 @@ func walkTarGzip(ctx context.Context, src io.Reader,
 // (ratio is 1.0 by construction). MaxTotalBytes still applies as
 // the resource ceiling, on the same terms as the other formats.
 func walkTar(ctx context.Context, src io.Reader,
-	intents []CaptureIntent, lim Limits) (*Manifest, error) {
+	intents []CaptureIntent, scanners []Scanner, lim Limits) (*Manifest, error) {
 
 	lim = resolveLimits(lim)
 
@@ -85,7 +85,7 @@ func walkTar(ctx context.Context, src io.Reader,
 		ratioMinCompressed:   ratioMinCompressedBytes,
 		ratioMinDecompressed: ratioMinDecompressedBytes,
 	}
-	return walkTarHeaders(ctx, capped, hasher, intents, lim)
+	return walkTarHeaders(ctx, capped, hasher, intents, scanners, lim)
 }
 
 // walkTarHeaders is the shared tar-header loop both walkTarGzip and
@@ -103,13 +103,14 @@ func walkTar(ctx context.Context, src io.Reader,
 // ArchiveSHA256 after EOF.
 func walkTarHeaders(ctx context.Context, capped io.Reader,
 	hasher interface{ Sum([]byte) []byte }, intents []CaptureIntent,
-	lim Limits) (*Manifest, error) {
+	scanners []Scanner, lim Limits) (*Manifest, error) {
 
 	tr := tar.NewReader(capped)
 
 	manifest := &Manifest{
 		Captured:       map[string][]byte{},
 		SkippedIntents: map[string]string{},
+		SkippedScans:   map[string]string{},
 	}
 
 	for {
@@ -171,7 +172,7 @@ func walkTarHeaders(ctx context.Context, capped io.Reader,
 			continue
 		}
 
-		captured := false
+		var capturedBody []byte // non-nil iff an intent claimed this body
 		for _, intent := range intents {
 			if !intent.Match(entry) {
 				continue
@@ -213,11 +214,35 @@ func walkTarHeaders(ctx context.Context, capped io.Reader,
 					intent.Name, err)
 			}
 			manifest.Captured[intent.Name] = buf
-			captured = true
+			capturedBody = buf
 			break
 		}
 
-		if !captured {
+		// Scanner dispatch. Every matching scanner inspects this entry's
+		// body and the walker discards it (see Scanner). The body is
+		// read at most once: reused from capturedBody when an intent
+		// already claimed it, else into a transient buffer freed at the
+		// end of this iteration. When nothing needs the body — no
+		// capture and no in-budget scanner — it is advanced past
+		// unread, preserving the header-only default.
+		matched := matchingScanners(scanners, entry)
+		switch {
+		case capturedBody != nil:
+			if err := runScanners(manifest, matched, entry.Path, hdr.Size, capturedBody); err != nil {
+				return nil, err
+			}
+		case len(matched) > 0 && anyScannerAccepts(matched, hdr.Size):
+			buf := make([]byte, hdr.Size)
+			if _, err := io.ReadFull(tr, buf); err != nil {
+				if errors.Is(err, ErrLimitExceeded) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("stream: read body for scan of %q: %w", hdr.Name, err)
+			}
+			if err := runScanners(manifest, matched, entry.Path, hdr.Size, buf); err != nil {
+				return nil, err
+			}
+		default:
 			// Advance past the body without copying. Bounded by
 			// hdr.Size which was already validated against
 			// MaxEntryBytes above, so the read length is statically
@@ -228,6 +253,10 @@ func walkTarHeaders(ctx context.Context, capped io.Reader,
 			// also counts against MaxTotalBytes / MaxCompressionRatio
 			// during the skip; a lying header (smaller than the body)
 			// surfaces as a tar parse error on the next tr.Next().
+			//
+			// Any matching-but-oversize scanners are recorded first so
+			// the cap is never silent.
+			recordScanSkips(manifest, matched, entry.Path, hdr.Size)
 			if _, err := io.CopyN(io.Discard, tr, hdr.Size); err != nil {
 				if errors.Is(err, ErrLimitExceeded) {
 					return nil, err

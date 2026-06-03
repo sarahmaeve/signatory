@@ -57,6 +57,16 @@ type Call struct {
 	// unresolved (same documented static-resolution gap as the Go
 	// analyzer). Feeds SensitivePathReads.
 	FirstArg string
+
+	// SecondArg is the statically-resolved second positional argument,
+	// "" when absent or unresolvable. Resolved the same way as
+	// FirstArg. Today it carries open()'s mode string ('w', 'a',
+	// 'rb', …) so the analyzer can tell a write of a persistence path
+	// (SensitivePathWrites) from a read of a credential path
+	// (SensitivePathReads); a keyword `mode=` form does not resolve
+	// (a documented conservative miss). Mirrors the node analyzer's
+	// SecondArg (Buffer.from's encoding).
+	SecondArg string
 }
 
 // pyKeywords are names that, standing alone before '(', are not a
@@ -169,7 +179,8 @@ func Parse(src []byte) (*Module, error) {
 						Callee:      name,
 						ModuleScope: !inDefClass(),
 						Line:        t.Line,
-						FirstArg:    resolveFirstArg(toks, next),
+						FirstArg:    resolveArgN(toks, next, 0),
+						SecondArg:   resolveArgN(toks, next, 1),
 					})
 					i = next // resume at '(' so nested-arg calls are still seen
 					continue
@@ -302,15 +313,15 @@ const (
 	maxResolveDepth  = 64
 )
 
-// resolveFirstArg returns the statically-resolved first positional
-// argument of the call whose '(' is at openIdx, or "" if it can't be
-// resolved without executing code.
-func resolveFirstArg(toks []Token, openIdx int) string {
+// resolveArgN returns the statically-resolved n-th (0-indexed)
+// positional argument of the call whose '(' is at openIdx, or "" if it
+// is absent or can't be resolved without executing code.
+func resolveArgN(toks []Token, openIdx, n int) string {
 	args, _, ok := splitCallArgs(toks[openIdx:])
-	if !ok || len(args) == 0 {
+	if !ok || n >= len(args) {
 		return ""
 	}
-	s, resolved := resolveExpr(args[0], 0)
+	s, resolved := resolveExpr(args[n], 0)
 	if !resolved {
 		return ""
 	}
@@ -419,13 +430,28 @@ func resolveExpr(toks []Token, depth int) (string, bool) {
 		return "", false
 	}
 	if isJoin {
+		// Partial fold: an unresolvable component (os.environ["X"],
+		// os.getenv("X"), a name) becomes "" rather than aborting the
+		// whole join. The dominant Windows-stealer shape is
+		// os.path.join(os.getenv("LOCALAPPDATA"), "Roblox",
+		// "LocalStorage", "robloxcookies.dat") — the credential-store
+		// segments are literal even when the home/appdata prefix is a
+		// runtime env lookup. Substring-based IsSensitivePath matches on
+		// those literal segments, so keeping them (and dropping the
+		// unknown prefix) is the right conservative behavior. Requires at
+		// least one resolvable part so a fully-dynamic join still reports
+		// unresolved.
 		parts := make([]string, 0, len(callArgs))
+		anyResolved := false
 		for _, a := range callArgs {
 			s, ok := resolveExpr(a, depth+1)
-			if !ok {
-				return "", false
+			if ok {
+				anyResolved = true
 			}
-			parts = append(parts, s)
+			parts = append(parts, s) // "" when unresolved
+		}
+		if !anyResolved {
+			return "", false
 		}
 		return strings.Join(parts, "/"), true
 	}

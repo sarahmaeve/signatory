@@ -121,14 +121,46 @@ func accumulate(c *astfeature.Counts, mod *Module, path string) {
 			c.DynamicEvalCalls++
 		case matchesCatalog(call.Callee, processExecCallees):
 			c.ExecCalls++
+		case matchesCatalog(call.Callee, networkCallees) && astfeature.IsCloudMetadataURL(call.FirstArg):
+			// A metadata/SSRF-pivot destination is counted distinctly
+			// from generic egress — the destination class IS the signal
+			// (near-zero false positive). Ordered before the generic
+			// network case so it wins. Mirrors the node analyzer.
+			c.CloudMetadataCalls++
 		case matchesCatalog(call.Callee, networkCallees):
 			c.NetworkCallSites++
 		case matchesCatalog(call.Callee, base64DecodeCallees):
 			c.Base64DecodeCalls++
+		case matchesCatalog(call.Callee, decryptCallees):
+			c.CredentialDecryptCalls++
+		case matchesCatalog(call.Callee, pathReadCallees) && isWriteMode(call.SecondArg) && astfeature.IsPersistencePath(call.FirstArg):
+			// Write/append open of a persistence or credential-tamper
+			// path (~/.ssh/authorized_keys, shell rc, crontab). Checked
+			// before the read case so a write to such a path is not
+			// miscounted as a read. The destination AND the write mode
+			// are both required — an unresolved mode defaults to read.
+			c.SensitivePathWrites++
 		case matchesCatalog(call.Callee, pathReadCallees) && astfeature.IsSensitivePath(call.FirstArg):
 			c.SensitivePathReads++
 		}
 	}
+}
+
+// isWriteMode reports whether a resolved open() mode string opens the
+// file for writing. Matches the write / append / exclusive-create modes
+// (w / a / x and their b/t/+ variants). The read modes ("", "r", "rb",
+// "r+") are not writes; "r+" technically permits writing but is
+// read-primary, so treating it as a read is a deliberate conservative
+// miss. An unresolved mode (the keyword `mode=` form, a variable) is ""
+// and therefore not a write — the same conservative default.
+func isWriteMode(mode string) bool {
+	for _, r := range mode {
+		switch r {
+		case 'w', 'a', 'x':
+			return true
+		}
+	}
+	return false
 }
 
 // pathReadCallees are the file-open sinks whose first argument is a
@@ -179,6 +211,14 @@ var (
 		"_pickle.loads", "_pickle.load", "marshal.loads", "marshal.load",
 		"dill.loads", "dill.load", "shelve.open", "jsonpickle.decode",
 		"yaml.load", "yaml.unsafe_load",
+	}
+	// decryptCallees are OS credential-decryption primitives — today
+	// Windows DPAPI. Matched by dotted suffix so win32crypt.*, a
+	// ctypes.windll.crypt32.* binding, and the bare from-import form
+	// all resolve to the same Win32 API. The name is distinctive enough
+	// that a suffix match carries no realistic false-positive surface.
+	decryptCallees = []string{
+		"CryptUnprotectData", "CryptUnprotectMemory",
 	}
 	base64DecodeCallees = []string{
 		"base64.b64decode", "base64.b32decode", "base64.b16decode",

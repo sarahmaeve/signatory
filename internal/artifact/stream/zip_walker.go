@@ -44,7 +44,7 @@ const gpFlagEncrypted uint16 = 0x0001
 //     symlink target capture and explicit intent matches.
 //  5. Detects the common top-level directory.
 func walkZip(ctx context.Context, src io.Reader,
-	intents []CaptureIntent, lim Limits) (*Manifest, error) {
+	intents []CaptureIntent, scanners []Scanner, lim Limits) (*Manifest, error) {
 
 	lim = resolveLimits(lim)
 
@@ -147,6 +147,7 @@ func walkZip(ctx context.Context, src io.Reader,
 	manifest := &Manifest{
 		Captured:               map[string][]byte{},
 		SkippedIntents:         map[string]string{},
+		SkippedScans:           map[string]string{},
 		ArchiveSHA256:          archiveSHA,
 		TotalUncompressedBytes: totalUncompressed,
 	}
@@ -186,6 +187,7 @@ func walkZip(ctx context.Context, src io.Reader,
 		if entry.Type != EntryFile || size == 0 {
 			continue
 		}
+		var capturedBody []byte // non-nil iff an intent claimed this body
 		for _, intent := range intents {
 			if !intent.Match(entry) {
 				continue
@@ -210,7 +212,29 @@ func walkZip(ctx context.Context, src io.Reader,
 					intent.Name, err)
 			}
 			manifest.Captured[intent.Name] = body
+			capturedBody = body
 			break
+		}
+
+		// Scanner dispatch — mirrors the tar walker. Zip entries are
+		// random-access via the central directory, so an unscanned body
+		// is simply not opened (no stream to advance past).
+		matched := matchingScanners(scanners, entry)
+		switch {
+		case capturedBody != nil:
+			if err := runScanners(manifest, matched, entry.Path, size, capturedBody); err != nil {
+				return nil, err
+			}
+		case len(matched) > 0 && anyScannerAccepts(matched, size):
+			body, err := readZipEntryBody(f, size)
+			if err != nil {
+				return nil, fmt.Errorf("stream: read body for scan of %q: %w", f.Name, err)
+			}
+			if err := runScanners(manifest, matched, entry.Path, size, body); err != nil {
+				return nil, err
+			}
+		default:
+			recordScanSkips(manifest, matched, entry.Path, size)
 		}
 	}
 

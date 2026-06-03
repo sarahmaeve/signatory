@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -283,12 +284,44 @@ func recordArtifactURL(result *signal.CollectionResult, entityID, packageName st
 	}
 
 	latest := recent[0]
-	url := fmt.Sprintf("https://static.crates.io/crates/%s/%s/download",
-		packageName, latest.version)
+
+	// The version is registry-supplied (cr.Versions[].num, copied verbatim
+	// by recentVersionsByPublishTime with no upstream guard) and flows into
+	// the static.crates.io download path. Validate it at the boundary the
+	// same way the name half is below — and the way pintable.go validates
+	// v.Num before building this identical URL — so a malformed version
+	// (path-manipulation, leading-dash) can never reach the URL. There is
+	// no safe fallback for a wrong version (it identifies the artifact), so
+	// record an absence, matching the no-versions path above.
+	if err := ValidateCrateVersion(latest.version); err != nil {
+		result.RecordAbsence(entityID, sigType, collectorSource,
+			"latest version is not a valid crate version: "+err.Error(), false, collectedAt)
+		return
+	}
+
+	// Build the download URL from the crates.io-canonical crate name
+	// (cr.Crate.Name), NOT the purl-derived packageName. The purl/entity
+	// layer normalizes `_`→`-` (so `once_cell` arrives as `once-cell`),
+	// and while crates.io's JSON API resolves either separator, the
+	// static.crates.io DOWNLOAD path is separator-sensitive and 403s on
+	// the wrong form. The API response carries the exact published name.
+	// Validate it (registry-supplied bytes flowing into a URL — npm #90)
+	// and fall back to the already-validated packageName if the response
+	// name is somehow empty or malformed.
+	crateName := packageName
+	if cr.Crate.Name != "" && ValidateCrateName(cr.Crate.Name) == nil {
+		crateName = cr.Crate.Name
+	}
+	// PathEscape both halves: a no-op on the validated grammar (none of
+	// 0-9 A-Za-z . _ + - are escaped in a path segment), but the
+	// established convention for this URL — see pintable.go and
+	// client.go — and defense-in-depth if either validator ever loosens.
+	downloadURL := fmt.Sprintf("https://static.crates.io/crates/%s/%s/download",
+		url.PathEscape(crateName), url.PathEscape(latest.version))
 
 	result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
 		map[string]any{
-			"url":       url,
+			"url":       downloadURL,
 			"version":   latest.version,
 			"integrity": latest.checksum,
 			"git_head":  "", // crates.io does not expose this; recovered post-fetch from .cargo_vcs_info.json.

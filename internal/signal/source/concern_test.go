@@ -75,6 +75,34 @@ func TestDetectConcern_BornMaliciousFires(t *testing.T) {
 	}
 }
 
+// TestDetectConcern_CredentialDecryptIsRareOnBenign pins the spadata
+// shape into the concern gate: a single version that reads a credential
+// store AND DPAPI-decrypts it fires two rare-on-benign features, which
+// is exactly the combination P0+P1 add to make the 2026-06 PyPI cookie
+// stealer trip source_evolution_concern on its only published version.
+func TestDetectConcern_CredentialDecryptIsRareOnBenign(t *testing.T) {
+	t.Parallel()
+
+	got := DetectConcern([]MatrixRow{
+		row("0.1.1", astfeature.Counts{
+			CredentialDecryptCalls: 1, // CryptUnprotectData
+			SensitivePathReads:     1, // robloxcookies.dat
+		}),
+	})
+	assert.True(t, got.ConcernPresent,
+		"read-credential-store + DPAPI-decrypt = 2 rare-on-benign features → concern fires")
+	assert.Contains(t, got.ConcerningFeatures, "credential_decrypt_calls")
+	assert.Contains(t, got.ConcerningFeatures, "sensitive_path_reads")
+
+	// Decrypt alone stays below MinConcernFeatures=2 — the conservative
+	// threshold is unchanged; one rare feature is not enough.
+	alone := DetectConcern([]MatrixRow{
+		row("0.1.1", astfeature.Counts{CredentialDecryptCalls: 1}),
+	})
+	assert.False(t, alone.ConcernPresent,
+		"a single rare-on-benign feature must not fire (MinConcernFeatures=2)")
+}
+
 // TestDetectConcern_BenignNoFire pins the no-false-positive baseline.
 // An all-zero AST (the dogfood shape for healthy crates like anyhow,
 // kong, ms across every selected row) must NOT fire the detector.
