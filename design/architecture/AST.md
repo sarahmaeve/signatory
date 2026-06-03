@@ -74,6 +74,24 @@ BlobStreamer ──filter──▶ astfeature.SourceFile stream
   between adjacent versions. Spike-based and differential — see
   caveats.
 
+### Second producer of the SourceFile stream — the published artifact
+
+The analyzer is source-agnostic: it consumes
+`iter.Seq2[astfeature.SourceFile, error]` and does not care whether the
+bytes came from git or a tarball. `BlobStreamer` is one producer (the
+clone); the **artifact-source path** (`artifactsource.go`,
+`ArtifactSourceCollector`) is a second, feeding the *published* sdist/
+tarball's source through the **same** per-language analyzer via the
+`internal/artifact/stream` walker + a source-file `stream.Scanner`.
+
+It runs `DetectConcern` on the single published version (row-wise; there
+is no artifact version history, so no anomaly) and emits
+`artifact_source_concern`. This is what catches a payload that ships in
+the registry artifact but is absent from — or differs from — the source
+repo: the clone-based matrix is blind to it because the clean/absent
+repo produces a clean matrix. Adding it was wiring, not a parser — the
+canonical illustration of "the analyzer is a leaf" in §1.
+
 ---
 
 ## 2. Adding a new ecosystem — the checklist
