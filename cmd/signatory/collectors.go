@@ -497,6 +497,33 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 				}),
 			)
 		}
+
+		// Artifact-source AST: run the source-evolution in-situ concern
+		// over the PUBLISHED artifact's source, not just the git clone.
+		// Catches a born-malicious payload that ships in the registry
+		// sdist/tarball but is absent from (or differs from) the repo —
+		// the clone-based source_evolution_concern can't see that. Reads
+		// artifact_url from the in-run accumulator (emitted by the
+		// registry collector) and re-uses the same streaming fetcher as
+		// the artifact-vs-repo collector. Gated on the ecosystems the AST
+		// analyzers support; gem self-skips (no single-pass format).
+		//
+		// Currently still inside the clone-required block, so a package
+		// with no resolvable source repo is skipped — moving it to the
+		// registry layer (it needs no clone) is the documented follow-up.
+		if entity.Ecosystem == "golang" || entity.Ecosystem == "go" ||
+			entity.Ecosystem == "pypi" || entity.Ecosystem == "npm" ||
+			entity.Ecosystem == "cargo" || entity.Ecosystem == "crates" {
+			collectors = append(collectors,
+				sourcecollector.NewArtifactSourceCollector(
+					opts.InRunResult,
+					artifactcollector.NewStreamArtifactFetcher(
+						artifactcollector.StreamFetcherOptions{
+							MaxBytes: artifactHTTPCap,
+							Timeout:  artifactHTTPBudget,
+						})),
+			)
+		}
 	}
 
 	return collectors, nil

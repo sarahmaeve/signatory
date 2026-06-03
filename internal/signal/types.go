@@ -618,6 +618,19 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"absence does not mean clean — a sleeper that does no catalog-matched I/O until exploited would produce zero rare-on-benign counts and stay quiet here; the metadata signals carry the load until source diverges",
 		},
 	},
+	"artifact_source_concern": {
+		Type:              "artifact_source_concern",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryVeryHigh,
+		Description:       "The in-situ source_evolution concern (same Counts catalogs, same rare-on-benign subset) evaluated over the PUBLISHED registry artifact's source instead of the git clone. Catches a born-malicious payload that ships in the sdist/tarball but is absent from — or has no — source repo, which the clone-based source_evolution_concern structurally cannot see. Carries the artifact's AST Counts plus the concern verdict (present/version/features). Closes the artifact-not-clone half of the CVE-2024-3094 gap for source-level (not just file-presence) analysis; the spadata 2026-06 Roblox-cookie stealer is the motivating shape.",
+		Caveats: []string{
+			"single published version → in-situ concern only; there is no cross-version artifact history, so the differential anomaly is not computed on this path",
+			"requires only the registry artifact_url, not a clone — but the current dispatch wiring still gates it behind clone resolution (a documented limitation: a package declaring NO source repo is skipped until the collector is moved to the registry layer)",
+			"gem is not covered (its two-pass outer/inner archive walk isn't handled here) — a documented gap shared with the exfil and build-script artifact scanners",
+			"reads artifact bytes as data only: streamed through the header-only walker, never written to disk, never executed; oversized source files are recorded in the walk's SkippedScans rather than analyzed",
+			"the analyzer's conservative static-resolution gaps (no data-flow, f-strings, `+` concatenation) apply identically here — a false negative is acceptable, a false anomaly is not",
+		},
+	},
 	"artifact_url": {
 		Type:              "artifact_url",
 		Group:             profile.SignalGroupPublication,
