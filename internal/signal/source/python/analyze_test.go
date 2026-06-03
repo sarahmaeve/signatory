@@ -315,6 +315,50 @@ func TestAnalyzer_Analyze_RobloxCookiePath_DocumentedGap(t *testing.T) {
 		"`+` concatenation is not folded (documented gap); os.path.join-wrapped forms ARE caught")
 }
 
+// TestAnalyzer_Analyze_CloudMetadataCalls: a network call whose
+// statically-resolved destination is a cloud instance-metadata / SSRF-
+// pivot endpoint is the credential-mint shape (TanStack/litellm IMDS
+// harvest). It must count distinctly from generic egress — the
+// destination class IS the signal. Brings Python to node's parity.
+func TestAnalyzer_Analyze_CloudMetadataCalls(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import urllib.request, requests\n" +
+		"urllib.request.urlopen('http://169.254.169.254/latest/meta-data/iam/security-credentials/')\n" + // AWS IMDS
+		"requests.get('https://metadata.google.internal/computeMetadata/v1/')\n" + // GCP metadata
+		"requests.get('https://api.example.com/v1/users')\n" // benign egress
+	c, err := NewAnalyzer().Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "m.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 2, c.CloudMetadataCalls, "AWS IMDS + GCP metadata destinations")
+	assert.Equal(t, 1, c.NetworkCallSites, "only the api.example.com call is generic egress")
+}
+
+// TestAnalyzer_Analyze_SensitivePathWrites: writing to a persistence /
+// credential-tamper location (~/.ssh/authorized_keys, shell rc) is the
+// post-exploitation step in node-ipc / bufferzonecorp. In Python the
+// write intent lives in open()'s MODE (2nd arg), so the analyzer must
+// resolve it: a write-mode open of a persistence path counts as a
+// write; a no-mode (read) open of a read-catalog path stays a read.
+func TestAnalyzer_Analyze_SensitivePathWrites(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import os\n" +
+		"open('/home/u/.bashrc', 'a').write(payload)\n" + // persistence append
+		"open(os.path.expanduser('~/.ssh/authorized_keys'), 'w')\n" + // persistence write
+		"open('/home/u/.aws/credentials')\n" + // no mode → sensitive READ, not write
+		"open('output.log', 'w')\n" // benign write — neither catalog
+	c, err := NewAnalyzer().Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "stealer.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 2, c.SensitivePathWrites,
+		"~/.bashrc append + ~/.ssh/authorized_keys write — output.log is not a persistence path")
+	assert.Equal(t, 1, c.SensitivePathReads,
+		"~/.aws/credentials opened without a write mode stays a read")
+}
+
 func TestAnalyzer_Analyze_PropagatesUpstreamStreamError(t *testing.T) {
 	t.Parallel()
 	// Same contract as golang.Analyzer: a mid-stream provider error
