@@ -63,6 +63,28 @@ func TestCatalog_SensitivePath_Membership(t *testing.T) {
 			"crypto-wallet keystore entry %q missing — Trapdoor's "+
 				"cargo build.rs payloads read these locations", want)
 	}
+
+	// Game-client credential stores added per the spadata 2026-06 PyPI
+	// Roblox cookie stealer.
+	gameStores := []string{"robloxcookies.dat", "Roblox/LocalStorage"}
+	for _, want := range gameStores {
+		assert.True(t, slices.Contains(sensitivePathPatterns, want),
+			"game-client credential store entry %q missing — spadata stole the Roblox .ROBLOSECURITY cookie", want)
+	}
+}
+
+// TestIsSensitivePath_RobloxCookieStore is the behavioral P1 check:
+// the Roblox cookie store resolves as sensitive whether referenced with
+// Windows backslashes or posix slashes, while a path that merely
+// mentions roblox does not.
+func TestIsSensitivePath_RobloxCookieStore(t *testing.T) {
+	t.Parallel()
+	assert.True(t, IsSensitivePath(`C:\Users\me\AppData\Local\Roblox\LocalStorage\robloxcookies.dat`),
+		"Windows-shaped Roblox cookie path must resolve sensitive after backslash normalization")
+	assert.True(t, IsSensitivePath("/home/u/.var/app/Roblox/LocalStorage/robloxcookies.dat"),
+		"posix-shaped Roblox cookie path must resolve sensitive")
+	assert.False(t, IsSensitivePath("/src/roblox_client.py"),
+		"ordinary source merely mentioning roblox must NOT resolve sensitive")
 }
 
 // TestCatalog_PersistencePath_Membership locks in the

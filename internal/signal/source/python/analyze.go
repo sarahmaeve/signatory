@@ -125,6 +125,8 @@ func accumulate(c *astfeature.Counts, mod *Module, path string) {
 			c.NetworkCallSites++
 		case matchesCatalog(call.Callee, base64DecodeCallees):
 			c.Base64DecodeCalls++
+		case matchesCatalog(call.Callee, decryptCallees):
+			c.CredentialDecryptCalls++
 		case matchesCatalog(call.Callee, pathReadCallees) && astfeature.IsSensitivePath(call.FirstArg):
 			c.SensitivePathReads++
 		}
@@ -179,6 +181,14 @@ var (
 		"_pickle.loads", "_pickle.load", "marshal.loads", "marshal.load",
 		"dill.loads", "dill.load", "shelve.open", "jsonpickle.decode",
 		"yaml.load", "yaml.unsafe_load",
+	}
+	// decryptCallees are OS credential-decryption primitives — today
+	// Windows DPAPI. Matched by dotted suffix so win32crypt.*, a
+	// ctypes.windll.crypt32.* binding, and the bare from-import form
+	// all resolve to the same Win32 API. The name is distinctive enough
+	// that a suffix match carries no realistic false-positive surface.
+	decryptCallees = []string{
+		"CryptUnprotectData", "CryptUnprotectMemory",
 	}
 	base64DecodeCallees = []string{
 		"base64.b64decode", "base64.b32decode", "base64.b16decode",

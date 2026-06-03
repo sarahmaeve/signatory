@@ -419,13 +419,28 @@ func resolveExpr(toks []Token, depth int) (string, bool) {
 		return "", false
 	}
 	if isJoin {
+		// Partial fold: an unresolvable component (os.environ["X"],
+		// os.getenv("X"), a name) becomes "" rather than aborting the
+		// whole join. The dominant Windows-stealer shape is
+		// os.path.join(os.getenv("LOCALAPPDATA"), "Roblox",
+		// "LocalStorage", "robloxcookies.dat") — the credential-store
+		// segments are literal even when the home/appdata prefix is a
+		// runtime env lookup. Substring-based IsSensitivePath matches on
+		// those literal segments, so keeping them (and dropping the
+		// unknown prefix) is the right conservative behavior. Requires at
+		// least one resolvable part so a fully-dynamic join still reports
+		// unresolved.
 		parts := make([]string, 0, len(callArgs))
+		anyResolved := false
 		for _, a := range callArgs {
 			s, ok := resolveExpr(a, depth+1)
-			if !ok {
-				return "", false
+			if ok {
+				anyResolved = true
 			}
-			parts = append(parts, s)
+			parts = append(parts, s) // "" when unresolved
+		}
+		if !anyResolved {
+			return "", false
 		}
 		return strings.Join(parts, "/"), true
 	}

@@ -244,6 +244,77 @@ func TestAnalyzer_Analyze_BenignOpensScoreZero(t *testing.T) {
 		"ordinary file opens must never spike SensitivePathReads")
 }
 
+// TestAnalyzer_Analyze_CredentialDecryptCalls covers the DPAPI
+// decryption primitive at the heart of every Windows browser/game
+// cookie stealer (spadata, June 2026): after locating the encrypted
+// store it calls CryptUnprotectData. win32crypt.*, the ctypes crypt32
+// binding, and the bare from-import all resolve to the same Win32 API;
+// an ordinary obj.decrypt / cipher.update must NOT count.
+func TestAnalyzer_Analyze_CredentialDecryptCalls(t *testing.T) {
+	t.Parallel()
+	src := "" +
+		"import win32crypt, ctypes\n" +
+		"from win32crypt import CryptUnprotectData\n" +
+		"win32crypt.CryptUnprotectData(blob)\n" + // qualified
+		"ctypes.windll.crypt32.CryptUnprotectData(blob)\n" + // ctypes binding
+		"CryptUnprotectData(blob)\n" + // bare from-import
+		"obj.decrypt(x)\n" + // benign method — must NOT count
+		"cipher.update(x)\n" // benign
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "stealer.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 3, counts.CredentialDecryptCalls,
+		"win32crypt.* + ctypes crypt32 + bare CryptUnprotectData — not obj.decrypt / cipher.update")
+}
+
+// TestAnalyzer_Analyze_RobloxCookiePathIdioms is the P1 idiom matrix:
+// real stealers build the cookie-store path several ways. Each must
+// resolve to a sensitive path so SensitivePathReads fires. The join+
+// environ / join+getenv rows exercise an unresolvable path prefix
+// (os.environ[...] / os.getenv(...)) folded with literal segments — the
+// dominant Windows-stealer shape.
+func TestAnalyzer_Analyze_RobloxCookiePathIdioms(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, expr string }{
+		{"literal", `open(r"C:\Users\me\AppData\Local\Roblox\LocalStorage\robloxcookies.dat")`},
+		{"expandvars", `open(os.path.expandvars(r"%USERPROFILE%\AppData\Local\Roblox\LocalStorage\robloxcookies.dat"))`},
+		{"join+expanduser", `open(os.path.join(os.path.expanduser("~"), "AppData", "Local", "Roblox", "LocalStorage", "robloxcookies.dat"))`},
+		{"join+environ", `open(os.path.join(os.environ["USERPROFILE"], "AppData", "Local", "Roblox", "LocalStorage", "robloxcookies.dat"))`},
+		{"join+getenv", `open(os.path.join(os.getenv("LOCALAPPDATA"), "Roblox", "LocalStorage", "robloxcookies.dat"))`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := NewAnalyzer()
+			counts, err := a.Analyze(t.Context(), seq(
+				fe{f: astfeature.SourceFile{Path: "stealer.py", Content: []byte("import os\n" + tc.expr + "\n")}},
+			))
+			require.NoError(t, err)
+			assert.Equal(t, 1, counts.SensitivePathReads,
+				"the Roblox cookie store must be detected via the %s idiom", tc.name)
+		})
+	}
+}
+
+// TestAnalyzer_Analyze_RobloxCookiePath_DocumentedGap pins the
+// conservative miss: `+` concatenation (and a bare subscript prefix
+// outside os.path.join) is not statically folded. Recorded so a future
+// resolver improvement that closes it updates this test rather than
+// silently changing behavior.
+func TestAnalyzer_Analyze_RobloxCookiePath_DocumentedGap(t *testing.T) {
+	t.Parallel()
+	src := "import os\n" + `open(os.environ["USERPROFILE"] + r"\Roblox\LocalStorage\robloxcookies.dat")` + "\n"
+	a := NewAnalyzer()
+	counts, err := a.Analyze(t.Context(), seq(
+		fe{f: astfeature.SourceFile{Path: "stealer.py", Content: []byte(src)}},
+	))
+	require.NoError(t, err)
+	assert.Equal(t, 0, counts.SensitivePathReads,
+		"`+` concatenation is not folded (documented gap); os.path.join-wrapped forms ARE caught")
+}
+
 func TestAnalyzer_Analyze_PropagatesUpstreamStreamError(t *testing.T) {
 	t.Parallel()
 	// Same contract as golang.Analyzer: a mid-stream provider error

@@ -50,6 +50,10 @@ var sensitivePathPatterns = []string{
 	// Solana / Aptos / Ethereum keystore / Bitcoin wallet.dat.
 	"/.sui/", "/.config/solana/", "/.aptos/",
 	"/.ethereum/keystore/", "wallet.dat",
+	// Game-client credential stores. Added 2026-06 per the spadata
+	// PyPI stealer, which decrypts the Roblox .ROBLOSECURITY session
+	// cookie out of robloxcookies.dat under Roblox/LocalStorage.
+	"robloxcookies.dat", "Roblox/LocalStorage",
 }
 
 // IsSensitivePath reports whether a statically-resolved path

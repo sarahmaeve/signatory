@@ -151,4 +151,18 @@ type Counts struct {
 	// egress) because the destination class IS the signal. Cross-
 	// language; node populates it, others leave it zero.
 	CloudMetadataCalls int `json:"cloud_metadata_calls"`
+
+	// CredentialDecryptCalls is the number of call sites invoking an OS
+	// credential-decryption primitive — today Windows DPAPI
+	// (CryptUnprotectData / CryptUnprotectMemory), reached via
+	// win32crypt / pywin32 or a ctypes crypt32 binding. Decrypting a
+	// DPAPI-protected secret is the step every Windows browser/game
+	// cookie stealer performs after locating the encrypted store (the
+	// spadata 2026-06 PyPI stealer decrypts the Roblox .ROBLOSECURITY
+	// cookie this way). Legitimate library code effectively never does
+	// it, so any non-zero count is signal-bearing — it is in the
+	// source_evolution concern's rare-on-benign subset. Cross-language
+	// by intent (a future analyzer could add macOS Keychain / libsecret
+	// primitives); only the python analyzer populates it today.
+	CredentialDecryptCalls int `json:"credential_decrypt_calls"`
 }
