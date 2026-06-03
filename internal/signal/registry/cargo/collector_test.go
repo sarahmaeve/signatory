@@ -587,6 +587,65 @@ func TestCollector_RecordsArtifactURL(t *testing.T) {
 			"recovers the SHA from .cargo_vcs_info.json inside the tarball")
 }
 
+// TestCollector_RecordsArtifactURL_UsesCanonicalCrateName reproduces the
+// once_cell 403: the purl/entity layer normalizes `_`→`-`, so the
+// collector is invoked with packageName "once-cell" while the crate's
+// canonical published name is "once_cell". crates.io's JSON API resolves
+// either separator, but the static.crates.io DOWNLOAD path is
+// separator-sensitive and 403s on the wrong form — so the emitted
+// artifact_url must use the API's canonical crate.name, not the
+// purl-derived name.
+func TestCollector_RecordsArtifactURL_UsesCanonicalCrateName(t *testing.T) {
+	t.Parallel()
+
+	resp := CrateResponse{
+		Crate: Crate{Name: "once_cell", MaxStableVer: "1.21.4"},
+		Versions: []Version{
+			{
+				Num: "1.21.4", CreatedAt: "2024-01-01T00:00:00Z", Yanked: false,
+				Checksum: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/crates/once-cell": // hyphenated lookup — crates.io resolves it
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		case "/api/v1/crates/once-cell/owners":
+			json.NewEncoder(w).Encode(OwnersResponse{
+				Users: []Owner{{Login: "matklad", Kind: "user"}},
+			}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewCollectorWithClient(NewClientWithBaseURL(srv.URL))
+	entity := &profile.Entity{
+		ID:           "test-once-cell",
+		CanonicalURI: "pkg:cargo/once-cell", // purl-normalized hyphen form
+		Ecosystem:    "cargo",
+	}
+
+	result, err := c.Collect(context.Background(), entity)
+	require.NoError(t, err)
+
+	signalMap := map[string]json.RawMessage{}
+	for _, s := range result.Signals() {
+		signalMap[s.Type] = s.Value
+	}
+	require.Contains(t, signalMap, "artifact_url")
+
+	var au map[string]any
+	require.NoError(t, json.Unmarshal(signalMap["artifact_url"], &au))
+	assert.Equal(t, "https://static.crates.io/crates/once_cell/1.21.4/download", au["url"],
+		"download URL must use the API's canonical crate.name (once_cell), not the "+
+			"purl-derived hyphenated packageName (once-cell), which 403s on static.crates.io")
+}
+
 // TestCollector_RecordsArtifactURL_AbsenceWhenNoVersions confirms the
 // absence path: a crate response with no orderable non-yanked versions
 // (e.g. all versions yanked) records an artifact_url absence rather

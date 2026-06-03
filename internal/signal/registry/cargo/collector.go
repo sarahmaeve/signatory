@@ -283,8 +283,22 @@ func recordArtifactURL(result *signal.CollectionResult, entityID, packageName st
 	}
 
 	latest := recent[0]
+
+	// Build the download URL from the crates.io-canonical crate name
+	// (cr.Crate.Name), NOT the purl-derived packageName. The purl/entity
+	// layer normalizes `_`→`-` (so `once_cell` arrives as `once-cell`),
+	// and while crates.io's JSON API resolves either separator, the
+	// static.crates.io DOWNLOAD path is separator-sensitive and 403s on
+	// the wrong form. The API response carries the exact published name.
+	// Validate it (registry-supplied bytes flowing into a URL — npm #90)
+	// and fall back to the already-validated packageName if the response
+	// name is somehow empty or malformed.
+	crateName := packageName
+	if cr.Crate.Name != "" && ValidateCrateName(cr.Crate.Name) == nil {
+		crateName = cr.Crate.Name
+	}
 	url := fmt.Sprintf("https://static.crates.io/crates/%s/%s/download",
-		packageName, latest.version)
+		crateName, latest.version)
 
 	result.RecordSignal(entityID, sigType, collectorSource, collectedAt, defaultTTL,
 		map[string]any{
