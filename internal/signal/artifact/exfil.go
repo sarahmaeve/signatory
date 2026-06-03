@@ -35,10 +35,7 @@ func classifyExfilHits(hits []exfilwatch.Hit, stripPrefix string, gitPaths []str
 	if len(hits) == 0 {
 		return nil
 	}
-	gitSet := make(map[string]struct{}, len(gitPaths))
-	for _, p := range gitPaths {
-		gitSet[p] = struct{}{}
-	}
+	gitSet := gitPathSet(gitPaths)
 	out := make([]ArtifactExfilHit, 0, len(hits))
 	for _, h := range hits {
 		path := strings.TrimPrefix(h.File, stripPrefix)
@@ -51,4 +48,16 @@ func classifyExfilHits(hits []exfilwatch.Hit, stripPrefix string, gitPaths []str
 		})
 	}
 	return out
+}
+
+// gitPathSet builds a lookup set of the git tree's file paths. Shared by
+// the exfil and build-script classifiers, both of which strip the
+// manifest top-dir from an archive path and ask "is this also in the
+// repo?" — a path absent from the repo is the CVE-2024-3094 / xz shape.
+func gitPathSet(gitPaths []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(gitPaths))
+	for _, p := range gitPaths {
+		set[p] = struct{}{}
+	}
+	return set
 }

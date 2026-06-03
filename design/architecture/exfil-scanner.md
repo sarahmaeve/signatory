@@ -14,8 +14,17 @@ The single most important thing to internalize first:
 > leaf that plugs into one or both. The substrate (walking, fetching,
 > caps, no-disk-write) already exists; do not rebuild it.**
 
-`exfilwatch` is the worked example: one literal host-list scanner,
-wired to *both* surfaces. Copy its shape.
+`exfilwatch` is the first worked example: one literal host-list
+scanner, wired to *both* surfaces. Copy its shape.
+`internal/signal/buildscript` (emitted as `build_script_concern`) is
+the second — a heuristic build-script content scanner on the artifact
+surface, built straight from §6's recipe — so the pattern is proven
+twice. It adds two reusable wrinkles worth stealing: **severity by
+co-occurrence** (a lone behaviour class is informational; two
+co-occurring — decode+exec, fetch+exec — escalate to strong, mirroring
+`source_evolution`'s rare-on-benign discipline) and a **conservative
+high-entropy literal detector** (long base64-charset runs only, never
+bare hex, so checksums don't false-positive).
 
 ---
 

@@ -658,6 +658,20 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"the host list is curated in-binary at compile time; updating membership is a code commit, not a remote pull (per ANTIPATTERNS.md no-subscription-list rule)",
 		},
 	},
+	"build_script_concern": {
+		Type:              "build_script_concern",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Heuristic content scrutiny of author-written build/install scripts (setup.py, build.rs, extconf.rb, configure.ac, hand-written *.m4) in the PUBLISHED artifact — the content follow-on to the presence-only build_script_present signals and item #2 of the CVE-2024-3094 gap analysis. Each finding names a behaviour class (decode / eval_exec / network_fetch / high_entropy_literal), a severity, and whether the path is also in the git tree.",
+		Caveats: []string{
+			"heuristic token + entropy scan, NOT a parser — language-neutral by design so it covers m4 / shell / Ruby that have no AST analyzer; obfuscation that splits tokens across constructs can evade it (the AST analyzer is the deeper, per-language complement)",
+			"generated/vendored autotools output (configure, config.status, aclocal.m4, libtool lt*.m4) is deliberately excluded — huge and legitimately full of eval/base64-shaped content; the xz payload lived in a hand-written macro, which IS scanned",
+			"severity is the load-bearing field: a single behaviour class alone (a configure.ac that merely shells out) is informational; only a high-entropy literal or two co-occurring classes (decode+exec, fetch+exec) escalate to strong — mirrors the source_evolution concern rare-on-benign discipline",
+			"path_in_repo=false on a strong finding is the strongest read (a weaponized build input present only in what was published, the xz shape); findings are descriptive evidence with a snippet, not a verdict — a Layer-2 analyst judges intent",
+			"emitted only when at least one finding is present; its absence alongside a present artifact_repo_divergence means the build scripts were scanned and nothing was flagged",
+			"coverage gaps: package.json lifecycle scripts (needs scripts-field extraction) and the gem two-pass walk (scanners not yet threaded through the inner data.tar.gz) are not scanned — documented, shared with the exfil scanner",
+		},
+	},
 
 	// ================================================================
 	// Hygiene — "Does it look like they care?"
