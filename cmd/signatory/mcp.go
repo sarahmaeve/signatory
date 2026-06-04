@@ -40,10 +40,12 @@ func (cmd *MCPCmd) Run(globals *Globals) error {
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Open the concrete SQLite store. Two resources (PostureResource,
-	// UnexaminedResource) need *store.SQLite directly — they call DB()
-	// for aggregation queries that don't fit the Store interface. The
-	// rest take the interface, which *SQLite satisfies.
+	// Open the concrete SQLite store. Every tool and resource takes a
+	// narrow store interface (PostureResource/UnexaminedResource use the
+	// aggregation reads CountPosturesByTier/PostureBoundaries/
+	// ListUnexaminedEntities; the rest the broader Store surface), all of
+	// which *SQLite satisfies — so the concrete type is confined to this
+	// wiring site.
 	dbPath, err := store.ResolvePath(globals.DBPath)
 	if err != nil {
 		return fmt.Errorf("resolve database path: %w", err)
