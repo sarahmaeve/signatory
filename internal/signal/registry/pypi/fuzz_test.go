@@ -172,6 +172,77 @@ func FuzzAttestationResponseUnmarshal(f *testing.F) {
 	})
 }
 
+// --- FuzzNormalizeDeclaredRepoURL ---
+//
+// NormalizeDeclaredRepoURL takes a free-form repository URL exactly as a
+// PyPI publisher typed it into pyproject.toml's [project.urls] (or the
+// legacy info.home_page) and converts it to a github-cloneable https URL,
+// or "" when it doesn't resolve to a first-classed forge repo. The input
+// is fully attacker-controlled and trust-load-bearing: the result is the
+// repository signatory will clone and diff the published artifact
+// against, so a malformed or surprising output here misdirects the whole
+// source-vs-artifact check.
+//
+// These invariants don't re-derive the forge-URL grammar — that lives in
+// profile.ResolveTarget, which this delegates to and which has its own
+// tests. They pin the contract NormalizeDeclaredRepoURL itself promises.
+
+func FuzzNormalizeDeclaredRepoURL(f *testing.F) {
+	// Accepted shapes (normalize.go's doc) — each should yield an https URL.
+	f.Add("https://github.com/psf/requests")
+	f.Add("https://github.com/psf/requests.git")
+	f.Add("https://github.com/psf/requests/")
+	f.Add("http://github.com/psf/requests")
+	f.Add("https://www.github.com/psf/requests")
+	f.Add("https://github.com/psf/requests#main")
+	f.Add("git+https://github.com/psf/requests.git")
+	f.Add("git+ssh://git@github.com/psf/requests.git")
+	f.Add("ssh://git@github.com/psf/requests.git")
+	f.Add("git@github.com:psf/requests.git")
+	f.Add("https://codeberg.org/forgejo/forgejo")
+	f.Add("https://github.com/PSF/Requests")
+	// Rejected shapes (normalize.go's doc) — each should yield "".
+	f.Add("")
+	f.Add("git://github.com/psf/requests")
+	f.Add("git+git://github.com/psf/requests")
+	f.Add("https://requests.readthedocs.io/")
+	f.Add("https://pypi.org/project/requests/")
+	f.Add("not a url")
+	f.Add("https://github.com/psf")
+	// Adversarial: surrounding whitespace, fragment + vcs prefix, control
+	// bytes in the path, and a pathologically long owner chain.
+	f.Add("   https://github.com/psf/requests   ")
+	f.Add("git+https://github.com/psf/requests.git#v1.0")
+	f.Add("https://github.com/psf/requests\n")
+	f.Add("https://github.com/\x00/\x00")
+	f.Add("https://github.com/" + strings.Repeat("a/", 500) + "repo")
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		out := NormalizeDeclaredRepoURL(raw)
+
+		// Invariant 1: the result is "" or an https URL. signatory only
+		// clones over https, so http://, ssh://, git://, git+, and SCP
+		// forms must all be rewritten or rejected — never passed through.
+		if out != "" && !strings.HasPrefix(out, "https://") {
+			t.Errorf("non-empty result must be an https URL, got %q (input %q)", out, raw)
+		}
+
+		// Invariant 2: idempotence. The result is already normalized, so
+		// renormalizing it must be a fixed point ("" maps to ""). A
+		// normalizer that doesn't converge in one pass is the classic
+		// source of "looks canonical but isn't" bugs.
+		if again := NormalizeDeclaredRepoURL(out); again != out {
+			t.Errorf("not idempotent: Normalize(%q)=%q but Normalize(%q)=%q",
+				raw, out, out, again)
+		}
+
+		// Invariant 3: determinism — same input, same output.
+		if out2 := NormalizeDeclaredRepoURL(raw); out2 != out {
+			t.Errorf("not deterministic: got %q then %q for input %q", out, out2, raw)
+		}
+	})
+}
+
 // --- Helpers ---
 
 // assertNoControlChars fails if s contains ASCII control characters
