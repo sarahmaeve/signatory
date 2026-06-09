@@ -667,6 +667,20 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"scans one wheel per package; a payload shipped only in a platform-specific wheel other than the one selected would be missed — the acknowledged window parallel to native_extension's already-native limitation",
 		},
 	},
+	"wheel_bundled_payload": {
+		Type:              "wheel_bundled_payload",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Non-Python payloads bundled in a PyPI wheel: content-injection findings on foreign scripts (.js/.mjs/.cjs/.ts/.sh) — the carrier for the Miasma/Hades _index.js loader and its fake-prompt-injection header aimed at LLM scanners — plus a native-extension (.so/.pyd/.dylib) inventory and a co-location flag. Opens the wheel the sdist-only artifact-vs-repo check never reaches.",
+		Caveats: []string{
+			"the fake-prompt-injection header is an attack on AI code scanners (including signatory's own analyst pipeline); the lexical/invisible-Unicode/encoded-blob primitives catch it BEFORE an LLM reads the payload — a deterministic pre-filter, not an LLM judgment",
+			"compiled native extensions are NOT content-scanned — a .so/.pyd is an opaque object at this layer; native_libs is a header-only inventory, and native_extension_present already reports native presence from registry metadata",
+			"co_located_native_and_script is the .abi3.so → _index.js trojanization SHAPE, but it is dual-use: data-science and web-asset packages legitimately ship native extensions alongside bundled JS, so it is context for the analyst, not a verdict",
+			"bundled JS is common and legitimate (Jupyter widgets, dashboards, docs assets); the content scan EXCLUDES served-asset trees (static/, assets/, frontend/, node_modules/, vendor/, dist/) where minified web bundles trip the primitives — foreign_scripts_total is the full inventory, foreign_scripts_scanned is the payload-reachable subset actually content-scanned, and scripts_with_injection is the signal-bearing field. The campaign's _index.js loader lives at an import-reachable root, never under static/, so the exclusion does not blind the detector",
+			"lexical_injection can fire on pretty-printed JS object keys named system:/user: — the analyst weights by file role; the structural primitives (invisible_unicode, bidi, tag_block, encoded_blob) are the near-zero-FP carriers",
+			"substring/heuristic based: an over-cap (>4 MiB) bundled script is recorded as skipped rather than scanned, and dynamically-constructed payloads evade content matching — the same evasion class as exfil_capture_host",
+		},
+	},
 	"artifact_repo_divergence": {
 		Type:              "artifact_repo_divergence",
 		Group:             profile.SignalGroupPublication,

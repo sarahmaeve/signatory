@@ -111,11 +111,19 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 
 	var findings []PthFileFinding
 	scanned := 0
-	scanners := []stream.Scanner{pthScanner(&findings, &scanned)}
+	var scriptInjections []ScriptInjection
+	scriptsScanned := 0
+	scanners := []stream.Scanner{
+		pthScanner(&findings, &scanned),
+		bundledScriptScanner(&scriptInjections, &scriptsScanned),
+	}
 
 	// Wheels are ZIP archives — the same FormatZip walk used for Go
-	// module proxy zips, with bounded per-entry reads.
-	if _, err := stream.WalkWithScanners(ctx, body, stream.FormatZip, nil, scanners, c.cfg.Limits); err != nil {
+	// module proxy zips, with bounded per-entry reads. One pass feeds
+	// both the .pth scan and the bundled-payload scan; the manifest's
+	// header listing supplies the native-lib inventory.
+	manifest, err := stream.WalkWithScanners(ctx, body, stream.FormatZip, nil, scanners, c.cfg.Limits)
+	if err != nil {
 		recordAbsence(result, entity.ID, fmt.Sprintf("walk wheel: %v", err), collectedAt)
 		return result, nil
 	}
@@ -136,6 +144,31 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 			"pth_files_scanned":   scanned,
 			"files_with_findings": findings,
 			"total_finding_count": total,
+		})
+
+	// Bundled-payload surface: content-injection findings on foreign
+	// scripts (the fake-prompt-injection header / obfuscated _index.js
+	// shape) plus a native-extension inventory and the co-location flag
+	// (a native .so shipped with a foreign script is the .abi3.so →
+	// _index.js trojanization fingerprint we cannot see by scanning the
+	// compiled object directly).
+	injTotal := 0
+	for _, s := range scriptInjections {
+		injTotal += len(s.Findings)
+	}
+	nativeLibs := nativeLibsFromManifest(manifest)
+	result.RecordSignal(entity.ID, "wheel_bundled_payload", CollectorName, collectedAt, defaultTTL,
+		map[string]any{
+			"wheel_url":                    info.URL,
+			"version":                      info.Version,
+			"filename":                     info.Filename,
+			"foreign_scripts_total":        foreignScriptsTotal(manifest),
+			"foreign_scripts_scanned":      scriptsScanned,
+			"scripts_with_injection":       scriptInjections,
+			"injection_finding_count":      injTotal,
+			"native_libs":                  capStrings(nativeLibs, nativeLibSampleCap),
+			"native_lib_count":             len(nativeLibs),
+			"co_located_native_and_script": len(nativeLibs) > 0 && scriptsScanned > 0,
 		})
 	return result, nil
 }
@@ -197,8 +230,13 @@ func readWheelURL(inRun *signal.CollectionResult, entityID string) (wheelURLValu
 	return wheelURLValue{}, false
 }
 
+// recordAbsence records both wheel-content signals absent against the
+// same reason: a wheel that could not be opened (no URL, unfetchable,
+// unwalkable) yields neither the .pth scan nor the bundled-payload scan,
+// so both surface the same "nothing to open" fact in the store.
 func recordAbsence(result *signal.CollectionResult, entityID, reason string, at time.Time) {
 	result.RecordAbsence(entityID, "wheel_pth_executable", CollectorName, reason, false, at)
+	result.RecordAbsence(entityID, "wheel_bundled_payload", CollectorName, reason, false, at)
 }
 
 // Ensure Collector satisfies signal.Collector at compile time.
