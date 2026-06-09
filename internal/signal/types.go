@@ -643,6 +643,30 @@ var signalTypeRegistry = map[string]SignalTypeInfo{
 			"absence is meaningful: a registry response without dist.tarball is rare in modern publishes and itself a hygiene observation",
 		},
 	},
+	"wheel_url": {
+		Type:              "wheel_url",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "URL of the latest non-yanked PyPI wheel (bdist_wheel) plus version / filename / integrity. Emitted by the registry collector; CONSUMED by the pypi-wheel content collector via the in-run accumulator to open the one artifact the sdist-only artifact-vs-repo check never reaches.",
+		Caveats: []string{
+			"collector handoff, not a standalone analyst signal — the wheel-surface parallel to artifact_url (which carries the sdist)",
+			"one wheel is selected (newest non-yanked version's first bdist_wheel); the .pth startup hook lives in the wheel's purelib/dist-info root regardless of platform, so a single wheel suffices for that scan",
+			"absence is meaningful: an sdist-only package has no wheel (and sdist_only_present already flags that install-time setup.py shape)",
+		},
+	},
+	"wheel_pth_executable": {
+		Type:              "wheel_pth_executable",
+		Group:             profile.SignalGroupPublication,
+		ForgeryResistance: profile.ForgeryHigh,
+		Description:       "Wheel-resident .pth files whose import-executed body carries dangerous primitives (exec/eval, subprocess/os.system, network egress, base64/hex decode, or a foreign-runtime bootstrap like Bun/_index.js) beyond the legitimate .pth surface of bare path additions and setuptools namespace/editable shims. Opens the wheel — the surface the sdist-only artifact-vs-repo check never reaches — for the 2026-06 Miasma/Hades .pth startup-hook vector.",
+		Caveats: []string{
+			"only lines Python's site module executes are scanned (those beginning with 'import'); bare path entries and comments are never flagged",
+			"setuptools *-nspkg.pth namespace shims and editable-install finder shims legitimately contain import code (including __import__('importlib.util')); the detector keys on dangerous primitives those shims never use, so they do not flag",
+			"substring-based: an attacker who builds the dangerous call dynamically (string concat, getattr) evades the scan — the same documented evasion class as exfil_capture_host; obfuscation defeats it by design",
+			"empty findings on a PRESENT signal is the positive observation 'the wheel was opened and its .pth surface is clean' — distinct from an absence (wheel unfetchable/unopenable, or the package is sdist-only)",
+			"scans one wheel per package; a payload shipped only in a platform-specific wheel other than the one selected would be missed — the acknowledged window parallel to native_extension's already-native limitation",
+		},
+	},
 	"artifact_repo_divergence": {
 		Type:              "artifact_repo_divergence",
 		Group:             profile.SignalGroupPublication,

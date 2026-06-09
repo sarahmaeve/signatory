@@ -24,6 +24,7 @@ import (
 	gitlabcollector "github.com/sarahmaeve/signatory/internal/signal/gitlab"
 	openssfcollector "github.com/sarahmaeve/signatory/internal/signal/openssf"
 	prcollector "github.com/sarahmaeve/signatory/internal/signal/pranalyzer"
+	pypiwheelcollector "github.com/sarahmaeve/signatory/internal/signal/pypiwheel"
 	cargocollector "github.com/sarahmaeve/signatory/internal/signal/registry/cargo"
 	gemcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gem"
 	gopublishcollector "github.com/sarahmaeve/signatory/internal/signal/registry/gopublish"
@@ -250,6 +251,23 @@ func collectorsFor(ctx context.Context, entity *profile.Entity, opts CollectOpts
 			// signal feeding the cascade resolver's pypi-registry
 			// dispatch (entity-burn1.md "Pending work #1").
 			collectors = append(collectors, pypicollector.NewCollector().WithEntityStore(opts.EntityStore))
+			// Wheel-content inspection. Opens the latest wheel — the
+			// surface the sdist-only artifact-vs-repo check never reaches
+			// — for .pth startup-hook payloads (the 2026-06 Miasma/Hades
+			// vector). Reads wheel_url from the in-run accumulator the
+			// line above populates, so it is appended immediately after
+			// the registry collector; needs NO clone, so it lives here in
+			// the registry layer rather than the clone-gated artifact
+			// block (where a no-source-repo malicious package is skipped).
+			collectors = append(collectors,
+				pypiwheelcollector.NewCollector(pypiwheelcollector.CollectorConfig{
+					InRun: opts.InRunResult,
+					Fetcher: artifactcollector.NewStreamArtifactFetcher(
+						artifactcollector.StreamFetcherOptions{
+							MaxBytes: artifactHTTPCap,
+							Timeout:  artifactHTTPBudget,
+						}),
+				}))
 		case "cargo", "crates":
 			collectors = append(collectors, cargocollector.NewCollector().WithEntityStore(opts.EntityStore))
 		case "gem":

@@ -185,6 +185,10 @@ func (c *Collector) Collect(ctx context.Context, entity *profile.Entity) (*signa
 	// ----- artifact_url (publication, handoff to artifact collector) -----
 	recordArtifactURL(result, entity.ID, proj, latestAttest, collectedAt)
 
+	// Wheel-URL handoff for the pypiwheel content collector — the
+	// wheel is the surface artifact-vs-repo (sdist-only) never opens.
+	recordWheelURL(result, entity.ID, proj, collectedAt)
+
 	// ----- attestation_consistency: Phase B (longitudinal) -----
 	// Only fires when Phase A produced a definitive answer (attested or
 	// 404). When Phase A errored we have no reliable latest state — Phase B
@@ -586,29 +590,8 @@ func recordArtifactURL(result *signal.CollectionResult, entityID string,
 	const sigType = "artifact_url"
 
 	// Walk releases newest-first; pick the first version that has a
-	// non-yanked sdist distribution. Versions whose timestamps don't
-	// parse are skipped — the same policy buildVersionFiles uses.
-	var candidates []versionRecord
-	for ver, dists := range proj.Releases {
-		if len(dists) == 0 {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, versionRecord{
-			version:     ver,
-			publishedAt: t,
-			yanked:      isYanked(dists),
-		})
-	}
-	slices.SortFunc(candidates, func(a, b versionRecord) int {
-		if a.publishedAt.Equal(b.publishedAt) {
-			return cmp.Compare(b.version, a.version)
-		}
-		return b.publishedAt.Compare(a.publishedAt)
-	})
+	// non-yanked sdist distribution.
+	candidates := candidatesNewestFirst(proj)
 
 	// Recover the publisher-stamped commit SHA from the trusted-
 	// publishing attestation when available. All artifacts in a
@@ -648,6 +631,75 @@ func recordArtifactURL(result *signal.CollectionResult, entityID string,
 	// than silently no-opping.
 	result.RecordAbsence(entityID, sigType, source,
 		"no non-yanked sdist with a download URL in pypi response", false, collectedAt)
+}
+
+// candidatesNewestFirst builds the per-version records sorted newest
+// first (publish time desc, version string desc as tiebreak), skipping
+// versions with no dists or an unparseable timestamp. Shared by the
+// sdist (artifact_url) and wheel (wheel_url) download-URL handoffs so
+// both select their distribution from the same ordered view of history.
+func candidatesNewestFirst(proj *Project) []versionRecord {
+	var candidates []versionRecord
+	for ver, dists := range proj.Releases {
+		if len(dists) == 0 {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, dists[0].UploadTimeISO)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, versionRecord{
+			version:     ver,
+			publishedAt: t,
+			yanked:      isYanked(dists),
+		})
+	}
+	slices.SortFunc(candidates, func(a, b versionRecord) int {
+		if a.publishedAt.Equal(b.publishedAt) {
+			return cmp.Compare(b.version, a.version)
+		}
+		return b.publishedAt.Compare(a.publishedAt)
+	})
+	return candidates
+}
+
+// recordWheelURL emits the wheel_url handoff the pypiwheel content
+// collector consumes from the in-run accumulator. It selects the newest
+// non-yanked version's first bdist_wheel — the wheel is the surface the
+// sdist-only artifact-vs-repo check never opens, and where the 2026-06
+// Miasma/Hades campaign hid its .pth/.so payloads. One wheel is enough
+// for the .pth startup-hook scan: the campaign ships the hook in the
+// wheel's dist-info / purelib root, present regardless of platform.
+//
+// Absence (no wheel anywhere in history — e.g. an sdist-only package)
+// is recorded so the downstream collector surfaces a definite "nothing
+// to open" rather than silently no-opping.
+func recordWheelURL(result *signal.CollectionResult, entityID string,
+	proj *Project, collectedAt time.Time) {
+
+	const sigType = "wheel_url"
+
+	for _, rec := range candidatesNewestFirst(proj) {
+		if rec.yanked {
+			continue
+		}
+		for _, d := range proj.Releases[rec.version] {
+			if d.PackageType != "bdist_wheel" || d.URL == "" {
+				continue
+			}
+			result.RecordSignal(entityID, sigType, source, collectedAt, defaultTTL,
+				map[string]any{
+					"url":       d.URL,
+					"version":   rec.version,
+					"filename":  d.Filename,
+					"integrity": d.Digests.SHA256,
+				})
+			return
+		}
+	}
+
+	result.RecordAbsence(entityID, sigType, source,
+		"no non-yanked wheel with a download URL in pypi response", false, collectedAt)
 }
 
 // recordSdistOnlyIntroduced detects whether the latest version is
