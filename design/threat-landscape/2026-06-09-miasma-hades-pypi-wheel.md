@@ -51,8 +51,12 @@ Three verified facts make the wheel invisible:
    with no real source repo, so the git / repofiles / exfilwatch paths
    have nothing to clone.
 
-The payload lives only in the wheel, and the wheel is the one place
-signatory does not look.
+The payload lives only in the wheel, and the wheel was the one place
+signatory did not look. This session closed that: a native-extension
+signal pair derived from wheel filenames (no extraction), and a dedicated
+wheel-content collector that opens the wheel for the narrow class of
+non-build-artifact shapes — both detailed under §"What this exposes as a
+gap" below, each marked LANDED.
 
 ## The campaign shape
 
@@ -170,29 +174,77 @@ scientific-Python stack (numpy, scipy, cryptography, pydantic) is
 native. The *introduced* transition is the signal-bearing axis;
 presence is context.
 
-### `.pth` and native-extension *content* in the wheel — the deferred bigger step
+### Opening the wheel — the `.pth` and bundled-payload collector (LANDED)
 
-The native-extension *presence/introduced* signal above is the
-metadata-level win that needs no wheel extraction. The
-`.abi3.so`-trojanization-of-an-already-native-package case, and the
-`.pth`-hook case generally, need *inside-the-wheel* inspection, which
-the current "wheel-vs-repo is a category error" stance excludes
-wholesale.
+The native-extension *presence/introduced* signals above are the
+metadata-level win that needs no wheel extraction. The `.pth`-hook case,
+the bundled-`_index.js` case, and the `.abi3.so`-trojanization case need
+*inside-the-wheel* inspection, which the "wheel-vs-repo is a category
+error" stance excludes wholesale.
 
 That stance is right for *diffing compiled outputs* against source — a
 regenerated `.pyc` is not signal. But it is too broad: a narrow class of
-wheel contents are **not** build artifacts and are signal-bearing
-regardless of the source tree —
+wheel contents are **not** build artifacts and are signal-bearing on
+their own, regardless of the source tree. Landed this session (branch
+`pypi-sandrider`, commits `bb5a71b` + `b21d9d0`) as a dedicated
+`internal/signal/pypiwheel` collector — *not* an extension of
+artifact-vs-repo, which keeps the "we open wheels, narrowly" policy
+visibly separate from the "we diff sdists against source" policy
+(resolving the first open question below). It reads a new `wheel_url`
+handoff from the pypi registry collector (the wheel-surface parallel to
+`artifact_url`), fetches one wheel via the shared `StreamArtifactFetcher`,
+and walks it as `FormatZip` in a single bounded pass. Wired into the
+**non-clone registry layer**, immediately after the registry collector
+— deliberately *not* the clone-gated artifact block, because the
+campaign's typosquats have no source repo and would be skipped there.
 
-- a `.pth` file whose body is `import …; exec(…)` rather than a bare
-  path addition (legitimate `.pth` files only extend `sys.path`);
-- a bundled non-Python executable payload alongside the package
-  (`_index.js`, a vendored Bun binary);
-- a native `.so` present in the wheel with no corresponding source.
+Two signals come off the one walk:
 
-A wheel-content scanner scoped to *these shapes only* (not a full
-wheel↔source diff) is a precise carve-out from the category-error rule,
-not a reversal of it. Recorded as the next step; not built here.
+**`wheel_pth_executable`** — `ScanPth` examines only the lines Python's
+`site` module actually executes (those beginning with `import`); among
+those it flags dangerous primitives (`exec`/`eval`, `subprocess`/
+`os.system`, network egress, `base64`/hex decode, foreign-runtime refs
+like `bun`/`.js`). The FP-critical decision: `__import__(` is
+**deliberately excluded**, because the setuptools `*-nspkg.pth` template
+calls `__import__('importlib.util')` as ordinary namespace machinery —
+flagging it would false-positive on the most common code-bearing `.pth`
+in the wild. Validated live against `setuptools` itself, whose
+`distutils-precedence.pth` runs
+`import os; … __import__('_distutils_hack').add_shim()` and correctly
+scans to zero findings.
+
+**`wheel_bundled_payload`** — content-injection scan of bundled foreign
+scripts (`.js`/`.mjs`/`.cjs`/`.ts`/`.sh`) plus a native-extension
+inventory and a co-location flag. This is the surface that **delivers the
+analyst-pipeline-self-defense** described in the next section: the Hades
+`_index.js` opens with a fake-prompt-injection header, and the
+content-injection primitives catch it deterministically before any LLM
+reads the payload. The compiled `.so` is **not** content-scanned — an
+object file is opaque at this layer — so `native_libs` is a header-only
+inventory and `co_located_native_and_script` surfaces the
+`.abi3.so → _index.js` trojanization *shape* (the case the registry-side
+native-extension signal structurally can't reach), flagged dual-use
+rather than as a verdict.
+
+**Dogfood earned a real correction.** A first live run scanned
+`streamlit`'s 111 bundled scripts and produced 21 content-injection
+findings — every one under `streamlit/static/static/js/`, i.e. minified
+React bundles tripping `encoded_blob` / `invisible_unicode` /
+`confusable_mixedscript` on legitimate i18n + minification, zero actual
+injection. The fix is principled, not a threshold relaxation: every
+branch of the campaign lands `_index.js` at an **import-reachable root**
+(loaded by the `.pth`/`.so`), never under a served-asset tree, so the
+content scan now excludes `static/` `_static/` `assets/` `frontend/`
+`node_modules/` `vendor/` `dist/`. `foreign_scripts_total` keeps the full
+inventory; `foreign_scripts_scanned` is the payload-reachable subset
+actually scanned. Re-dogfood: streamlit / plotly / requests /
+zope.interface / google-api-core all return zero injection findings.
+
+Honest limits, written into the caveats: one wheel is scanned per package
+(a payload in a different platform wheel is a window); a compiled `.so` is
+inventoried, not decompiled; and an over-cap (>4 MiB) or
+dynamically-constructed payload evades the content match — the same
+evasion class as `exfil_capture_host`.
 
 ### `docker.sock` is a container-escape primitive the catalogs miss
 
@@ -247,10 +299,21 @@ admittedly noisy on AI-topic prose
 on the **structural** primitives: invisible-Unicode / bidi / tag-block
 in *source-file comments* is near-zero-FP (there is no legitimate reason
 for zero-width characters in a code comment), and is exactly the carrier
-a refusal-bait header would use to hide from human review. Treat the
-lexical refusal-bait half as an analyst-layer composition gated on
-payload shape (obfuscation, exec spike, wheel-residence), not a
-standalone Layer-1 flag. Recorded as an axis; not built here.
+a refusal-bait header would use to hide from human review.
+
+**Partially LANDED.** The wheel-resident slice of this surface is now
+covered: `wheel_bundled_payload` (above) runs the content-injection
+primitives over the bundled `_index.js` payload — exactly where this
+campaign's fake header lives — so the refusal-bait is caught by a
+deterministic Layer-1 scan *before* an LLM analyst reads it. The
+`streamlit` dogfood confirmed the FP-management instinct was right: the
+lexical/structural primitives DO fire on minified web bundles, which is
+why the scan is scoped to payload-reachable scripts only. What remains
+open is the broader surface — content-injection over a dependency's own
+`.py` source comments and READMEs in the normal (non-wheel) analysis
+path — where the flood risk is real and the right gate is still
+"structural primitives plus payload-shape," not a standalone lexical
+flag.
 
 ## What this does *not* do
 
@@ -287,12 +350,21 @@ sibling, not a replacement.
 
 ## Open questions
 
-- Should the wheel-content scanner (the deferred `.pth`-with-code /
-  bundled-executable / native-`.so` carve-out) live in the
-  artifact-vs-repo collector (it already fetches sdists) or as a
-  dedicated wheel-inspection collector? The former reuses the fetch
-  machinery; the latter keeps the "we do open wheels, narrowly" policy
-  visibly separate from the "we diff sdists against source" policy.
+- **(Resolved.)** Should the wheel-content scanner live in the
+  artifact-vs-repo collector or as a dedicated wheel-inspection
+  collector? **Outcome:** dedicated `internal/signal/pypiwheel`
+  collector. It reuses the fetch + `FormatZip` walk machinery (the
+  artifact collector's `StreamArtifactFetcher` and `stream.WalkWithScanners`)
+  but stays a separate collector so the "we open wheels, narrowly" policy
+  is visibly distinct from the sdist↔source diff — and so it can wire
+  into the non-clone registry layer (a no-source-repo malicious package
+  is skipped by the clone-gated artifact block).
+- The wheel collector scans **one wheel per package** (newest non-yanked
+  version's first `bdist_wheel`). A `.pth`/`_index.js` lives in the
+  wheel root regardless of platform, so one wheel suffices for that
+  vector — but a payload shipped only in a *specific* platform wheel
+  would be missed. Is single-wheel the right cost/coverage point, or
+  should high-criticality targets scan one wheel per platform tag?
 - Where does the defense-evasion host-class corpus belong — extending
   `exfilwatch.Hosts` with a typed "intent" (exfil vs block-defense), or
   a sibling collector? The match mechanics are identical (literal host
@@ -318,8 +390,18 @@ sibling, not a replacement.
   ports to PyPI.
 - `internal/signal/registry/pypi/collector.go` — `wheelPlatformTag`,
   `nativeWheelSummary`, `recordNativeExtensionPresent`,
-  `recordNativeExtensionIntroduced`; `recordArtifactURL` (~502-507) sdist-only
-  rationale; `recordReleaseSignals` wiring site.
+  `recordNativeExtensionIntroduced`; `recordWheelURL` +
+  `candidatesNewestFirst` (the wheel-content handoff);
+  `recordArtifactURL` (~502-507) sdist-only rationale;
+  `recordReleaseSignals` wiring site.
+- `internal/signal/pypiwheel/` — the wheel-content collector.
+  `pth.go` (`ScanPth`, the `import`-line danger-primitive scan with the
+  `__import__` nspkg carve-out); `bundled.go` (content-injection over
+  payload-reachable foreign scripts, the `static/`-tree exclusion,
+  native-lib inventory); `collector.go` (the `wheel_url` consumer
+  emitting `wheel_pth_executable` + `wheel_bundled_payload`);
+  `live_test.go` (the `setuptools` / `streamlit` dogfood fixtures).
+  Wired in `cmd/signatory/collectors.go` in the non-clone registry layer.
 - `internal/signal/registry/pypi/wire.go` — `Distribution.Filename` /
   `PackageType`, the metadata the native-extension signals parse.
 - `internal/signal/registry/gem/collector.go` (~437-487) /
