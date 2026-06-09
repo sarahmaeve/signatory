@@ -950,6 +950,72 @@ func TestCollectorsFor_PypiPackage_NoURL_GetsPypiCollector(t *testing.T) {
 		"pypi entity must dispatch the pypi-registry collector even without a resolved github URL — the maintainer_count signal feeds the cascade resolver and publisher entities mint regardless of repo presence")
 }
 
+// TestCollectorsFor_PypiEntity_IncludesWheelCollector pins the wiring
+// of the pypi-wheel content collector: every pypi entity must dispatch
+// it so the .pth / bundled-payload wheel scan actually runs (the
+// 2026-06 Miasma/Hades vector). Without this pin, deleting the append
+// block in collectorsFor leaves the entire wheel-inspection feature
+// silently un-dispatched with a green suite — the same regression class
+// the Go-ecosystem source-evolution tests guard. Asserts on collector
+// Name() to stay decoupled from the construction shape (InRun/Fetcher
+// wiring), the same idiom the forgejo/adoption dispatch pins use.
+func TestCollectorsFor_PypiEntity_IncludesWheelCollector(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:pypi/requests",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		URL:          "",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		names = append(names, c.Name())
+	}
+	assert.Contains(t, names, "pypi-wheel",
+		"pypi entity must dispatch the pypi-wheel collector — without it, the .pth startup-hook and bundled-payload wheel scan never runs and the wheel-resident payload vector goes uninspected")
+}
+
+// TestCollectorsFor_PypiEntity_WheelCollectorAfterRegistry pins the
+// dispatch ORDER: pypi-wheel must run AFTER pypi-registry in the same
+// run, because the wheel collector reads the wheel_url handoff the
+// registry collector emits into the in-run accumulator. A regression
+// that appends pypi-wheel before pypi-registry would make every wheel
+// scan record a no-wheel_url absence — silently, with a green suite.
+// Symmetric to
+// TestCollectorsFor_GoModuleEntity_SourceEvolutionAfterGoPublish.
+func TestCollectorsFor_PypiEntity_WheelCollectorAfterRegistry(t *testing.T) {
+	t.Parallel()
+
+	entity := &profile.Entity{
+		ID:           "e1",
+		CanonicalURI: "pkg:pypi/requests",
+		Type:         profile.EntityPackage,
+		Ecosystem:    "pypi",
+		URL:          "",
+	}
+	collectors, err := collectorsFor(context.Background(), entity, CollectOpts{})
+	require.NoError(t, err)
+
+	registryIdx, wheelIdx := -1, -1
+	for i, c := range collectors {
+		switch c.Name() {
+		case "pypi-registry":
+			registryIdx = i
+		case "pypi-wheel":
+			wheelIdx = i
+		}
+	}
+	require.NotEqual(t, -1, registryIdx, "pypi-registry must be in dispatch")
+	require.NotEqual(t, -1, wheelIdx, "pypi-wheel must be in dispatch")
+	assert.Less(t, registryIdx, wheelIdx,
+		"pypi-wheel must run AFTER pypi-registry so the in-run accumulator holds wheel_url by the time pypiwheel.Collect reads it")
+}
+
 // TestCollectorsFor_UnwiredEcosystemPackage_NoCollectors guards the
 // safe-skip behaviour for ecosystems signatory doesn't yet collect
 // against. v0.1 wires npm + pypi + golang + cargo + gem; nuget,

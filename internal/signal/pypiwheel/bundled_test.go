@@ -1,7 +1,6 @@
 package pypiwheel
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,7 +39,7 @@ func TestCollect_BundledScriptInjection_Flagged(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b1"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b1"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b1"))
 	require.NoError(t, err)
 
 	v, ok := signalValue(t, res, "wheel_bundled_payload")
@@ -67,7 +66,7 @@ func TestCollect_BundledScriptInvisibleUnicode_Flagged(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b2"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b2"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b2"))
 	require.NoError(t, err)
 
 	v, _ := signalValue(t, res, "wheel_bundled_payload")
@@ -89,7 +88,7 @@ func TestCollect_CleanRootJS_ScannedNotFlagged(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b3"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b3"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b3"))
 	require.NoError(t, err)
 
 	v, ok := signalValue(t, res, "wheel_bundled_payload")
@@ -115,7 +114,7 @@ func TestCollect_WebAssetJS_InventoriedNotContentScanned(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b6"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b6"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b6"))
 	require.NoError(t, err)
 
 	v, _ := signalValue(t, res, "wheel_bundled_payload")
@@ -142,7 +141,7 @@ func TestCollect_NativeLibInventoryAndColocation(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b4"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b4"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b4"))
 	require.NoError(t, err)
 
 	v, _ := signalValue(t, res, "wheel_bundled_payload")
@@ -166,7 +165,7 @@ func TestCollect_NativeOnly_NoColocation(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-b5"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-b5"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-b5"))
 	require.NoError(t, err)
 
 	v, _ := signalValue(t, res, "wheel_bundled_payload")

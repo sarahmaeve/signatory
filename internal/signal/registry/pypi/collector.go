@@ -730,9 +730,9 @@ func recordSdistOnlyIntroduced(result *signal.CollectionResult, entityID string,
 	introducedAtVersion := ""
 	if introduced {
 		// Walk oldest→newest to find the first version that is sdist-only.
-		for i := len(recent) - 1; i >= 0; i-- {
-			if recent[i].sdistOnly {
-				introducedAtVersion = recent[i].version
+		for _, r := range slices.Backward(recent) {
+			if r.sdistOnly {
+				introducedAtVersion = r.version
 				break
 			}
 		}
@@ -810,9 +810,9 @@ func recordNativeExtensionIntroduced(result *signal.CollectionResult, entityID s
 	introducedAtVersion := ""
 	if introduced {
 		// Walk oldest→newest to find the first native version.
-		for i := len(recent) - 1; i >= 0; i-- {
-			if recent[i].nativeExt {
-				introducedAtVersion = recent[i].version
+		for _, r := range slices.Backward(recent) {
+			if r.nativeExt {
+				introducedAtVersion = r.version
 				break
 			}
 		}

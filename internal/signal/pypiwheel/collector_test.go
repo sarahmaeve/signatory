@@ -97,7 +97,7 @@ func TestCollect_MaliciousPth_Flagged(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-1"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-1"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-1"))
 	require.NoError(t, err)
 
 	v, ok := signalValue(t, res, "wheel_pth_executable")
@@ -129,7 +129,7 @@ func TestCollect_CleanWheel_EmptyPositive(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-2"),
 		Fetcher: fakeFetcher{data: wheel},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-2"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-2"))
 	require.NoError(t, err)
 
 	v, ok := signalValue(t, res, "wheel_pth_executable")
@@ -146,7 +146,7 @@ func TestCollect_NoWheelURL_Absence(t *testing.T) {
 		InRun:   &signal.CollectionResult{}, // no wheel_url recorded
 		Fetcher: fakeFetcher{data: nil},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-3"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-3"))
 	require.NoError(t, err)
 	assert.True(t, hasAbsence(res, "wheel_pth_executable"),
 		"missing wheel_url (e.g. sdist-only package) records an absence")
@@ -160,7 +160,7 @@ func TestCollect_FetchError_Absence(t *testing.T) {
 		InRun:   inRunWithWheelURL("e-4"),
 		Fetcher: fakeFetcher{err: errors.New("boom")},
 	})
-	res, err := c.Collect(context.Background(), pypiEntity("e-4"))
+	res, err := c.Collect(t.Context(), pypiEntity("e-4"))
 	require.NoError(t, err)
 	assert.True(t, hasAbsence(res, "wheel_pth_executable"),
 		"a fetch failure records an absence, never a returned error")
