@@ -285,11 +285,14 @@ func normalizePEP503(name string) string {
 // operate over. Built once from proj.Releases and iterated by multiple
 // signal emitters.
 type versionRecord struct {
-	version     string
-	publishedAt time.Time
-	sdistOnly   bool // true when ALL dists for this version are sdist (no wheels)
-	yanked      bool // true when ANY dist for this version is yanked
-	hasSig      bool // true when ANY dist for this version has has_sig=true
+	version          string
+	publishedAt      time.Time
+	sdistOnly        bool     // true when ALL dists for this version are sdist (no wheels)
+	yanked           bool     // true when ANY dist for this version is yanked
+	hasSig           bool     // true when ANY dist for this version has has_sig=true
+	nativeExt        bool     // true when ANY wheel carries a non-"any" PEP 425 platform tag
+	nativeWheelCount int      // count of native-extension wheel files in this version
+	nativePlatTags   []string // deduped non-"any" platform tags, first-seen order
 }
 
 // recordVersionCount emits the total number of published versions.
@@ -340,6 +343,59 @@ func isSdistOnly(dists []Distribution) bool {
 	return true
 }
 
+// wheelPlatformTag extracts the PEP 425 platform tag — the final
+// hyphen-delimited component — from a wheel filename. ok is false for
+// any non-wheel filename and for one too short to be a valid wheel
+// (name-version-python-abi-platform is the 5-component minimum; an
+// optional build tag makes 6). The distribution name has its hyphens
+// normalized to underscores by the wheel spec and the version carries
+// no hyphen, so the last "-"-split token is unambiguously the platform
+// tag regardless of how many components precede it.
+func wheelPlatformTag(filename string) (tag string, ok bool) {
+	base, isWheel := strings.CutSuffix(filename, ".whl")
+	if !isWheel {
+		return "", false
+	}
+	parts := strings.Split(base, "-")
+	if len(parts) < 5 {
+		return "", false
+	}
+	return parts[len(parts)-1], true
+}
+
+// isNativeWheelFilename reports whether a wheel filename carries a
+// compiled extension: a concrete platform tag rather than the
+// pure-Python "any". Non-wheel filenames are not native.
+func isNativeWheelFilename(filename string) bool {
+	tag, ok := wheelPlatformTag(filename)
+	return ok && tag != "any"
+}
+
+// nativeWheelSummary walks a version's distributions and reports its
+// native-extension wheels. A wheel is a native extension when its PEP
+// 425 platform tag is concrete (manylinux / macosx / win / musllinux …)
+// rather than the pure-Python "any" — so py3-none-any and
+// py2.py3-none-any both resolve to "any" and are not native. present is
+// true when at least one such wheel ships; count is how many native
+// wheel files there are; tags is the deduped platform-tag set in
+// first-seen order. Zero additional HTTP: derived entirely from the
+// Filename field already in the parsed registry response.
+func nativeWheelSummary(dists []Distribution) (present bool, count int, tags []string) {
+	seen := make(map[string]struct{})
+	for _, d := range dists {
+		tag, ok := wheelPlatformTag(d.Filename)
+		if !ok || tag == "any" {
+			continue
+		}
+		count++
+		if _, dup := seen[tag]; !dup {
+			seen[tag] = struct{}{}
+			tags = append(tags, tag)
+		}
+	}
+	return count > 0, count, tags
+}
+
 // isYanked returns true when any distribution in the version is
 // marked yanked.
 func isYanked(dists []Distribution) bool {
@@ -387,6 +443,10 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 			"no releases in PyPI response", false, collectedAt)
 		result.RecordAbsence(entityID, "sdist_only_introduced", source,
 			"no releases in PyPI response", false, collectedAt)
+		result.RecordAbsence(entityID, "native_extension_present", source,
+			"no releases in PyPI response", false, collectedAt)
+		result.RecordAbsence(entityID, "native_extension_introduced", source,
+			"no releases in PyPI response", false, collectedAt)
 		return
 	}
 
@@ -400,12 +460,16 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 		if err != nil {
 			continue
 		}
+		nativeExt, nativeCount, nativeTags := nativeWheelSummary(dists)
 		records = append(records, versionRecord{
-			version:     ver,
-			publishedAt: t,
-			sdistOnly:   isSdistOnly(dists),
-			yanked:      isYanked(dists),
-			hasSig:      hasGPGSig(dists),
+			version:          ver,
+			publishedAt:      t,
+			sdistOnly:        isSdistOnly(dists),
+			yanked:           isYanked(dists),
+			hasSig:           hasGPGSig(dists),
+			nativeExt:        nativeExt,
+			nativeWheelCount: nativeCount,
+			nativePlatTags:   nativeTags,
 		})
 	}
 
@@ -416,6 +480,10 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 		result.RecordAbsence(entityID, "sdist_only_present", source,
 			"no parseable releases", false, collectedAt)
 		result.RecordAbsence(entityID, "sdist_only_introduced", source,
+			"no parseable releases", false, collectedAt)
+		result.RecordAbsence(entityID, "native_extension_present", source,
+			"no parseable releases", false, collectedAt)
+		result.RecordAbsence(entityID, "native_extension_introduced", source,
 			"no parseable releases", false, collectedAt)
 		return
 	}
@@ -455,6 +523,8 @@ func recordReleaseSignals(result *signal.CollectionResult, entityID string,
 	window := records[:min(len(records), crossVersionWindow)]
 
 	recordSdistOnlyIntroduced(result, entityID, window, collectedAt)
+	recordNativeExtensionPresent(result, entityID, window, collectedAt)
+	recordNativeExtensionIntroduced(result, entityID, window, collectedAt)
 
 	if len(window) < 2 {
 		result.RecordSignal(entityID, "version_publish_burst", source, collectedAt, defaultTTL,
@@ -619,6 +689,86 @@ func recordSdistOnlyIntroduced(result *signal.CollectionResult, entityID string,
 	result.RecordSignal(entityID, "sdist_only_introduced", source, collectedAt, defaultTTL,
 		map[string]any{
 			"present_in_latest":      latestSdistOnly,
+			"introduced_recently":    introduced,
+			"introduced_at_version":  introducedAtVersion,
+			"prior_versions_without": priorWithout,
+			"versions_checked":       len(recent),
+		})
+}
+
+// platformTagSampleCap bounds the platform_tags sample on the
+// native_extension_present signal. A wide-matrix native package (numpy
+// ships 30+ wheels per release) would otherwise emit an unbounded tag
+// list; the count is authoritative, the sample is illustrative.
+const platformTagSampleCap = 8
+
+// recordNativeExtensionPresent emits whether the latest version ships a
+// compiled extension — a wheel carrying a concrete PEP 425 platform tag
+// rather than the pure-Python "any". The PyPI analog of gem's
+// native_extension_present (platform != "ruby"). Native extensions run
+// arbitrary code at install/import time, the surface the 2026-06
+// Miasma/Hades campaign abused with trojanized .abi3.so files.
+//
+// Presence alone is not negative — the entire scientific-Python stack
+// is legitimately native. The signal-bearing companion is the
+// introduced transition below.
+func recordNativeExtensionPresent(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	latest := recent[0]
+	tags := latest.nativePlatTags
+	if len(tags) > platformTagSampleCap {
+		tags = tags[:platformTagSampleCap]
+	}
+
+	result.RecordSignal(entityID, "native_extension_present", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present":            latest.nativeExt,
+			"version_checked":    latest.version,
+			"versions_checked":   len(recent),
+			"native_wheel_count": latest.nativeWheelCount,
+			"platform_tags":      tags,
+		})
+}
+
+// recordNativeExtensionIntroduced detects a native extension appearing
+// in the latest version where prior versions in the window were
+// pure-Python — the PyPI analog of gem's native_extension_introduced
+// and the wheel-side parallel to sdist_only_introduced. This is the
+// MCP-themed/typosquat masquerade shape (a "pure-Python" package that
+// suddenly compiles a .so). It deliberately does NOT fire on an
+// already-native package (the embiggen/ensmallen bioinformatics
+// cluster), where the .so is expected — catching a trojanized native
+// package requires opening the wheel, which signatory does not do.
+func recordNativeExtensionIntroduced(result *signal.CollectionResult, entityID string,
+	recent []versionRecord, collectedAt time.Time) {
+
+	latestNative := recent[0].nativeExt
+
+	// Count older versions that were pure-Python (no native wheel).
+	priorWithout := 0
+	for i := 1; i < len(recent); i++ {
+		if !recent[i].nativeExt {
+			priorWithout++
+		}
+	}
+
+	introduced := latestNative && priorWithout > 0
+
+	introducedAtVersion := ""
+	if introduced {
+		// Walk oldest→newest to find the first native version.
+		for i := len(recent) - 1; i >= 0; i-- {
+			if recent[i].nativeExt {
+				introducedAtVersion = recent[i].version
+				break
+			}
+		}
+	}
+
+	result.RecordSignal(entityID, "native_extension_introduced", source, collectedAt, defaultTTL,
+		map[string]any{
+			"present_in_latest":      latestNative,
 			"introduced_recently":    introduced,
 			"introduced_at_version":  introducedAtVersion,
 			"prior_versions_without": priorWithout,
