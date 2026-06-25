@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -318,27 +319,36 @@ func TestAnalysisList_EmptyStore(t *testing.T) {
 }
 
 func TestAnalysisList_RendersSessionsNewestFirst(t *testing.T) {
+	// newTestGlobals only records paths; each command Run below opens AND
+	// closes its own store, so no database/sql opener goroutine outlives
+	// the bubble. started_at comes from time.Now() (analysis.go), so the
+	// fake-clock advance gives the two sessions distinct second-
+	// granularity timestamps with no real sleep.
 	g := newTestGlobals(t)
-	_ = beginSessionViaCmd(t, g, "pkg:npm/list-older")
-	// Sleep one second so the second session has a distinct
-	// started_at (RFC3339 granularity is one second).
-	time.Sleep(1100 * time.Millisecond)
-	newerID := beginSessionViaCmd(t, g, "pkg:npm/list-newer")
 
-	var stdout bytes.Buffer
-	cmd := &AnalysisListCmd{Stdout: &stdout}
-	require.NoError(t, cmd.Run(g))
+	synctest.Test(t, func(t *testing.T) {
+		_ = beginSessionViaCmd(t, g, "pkg:npm/list-older")
+		// Advance the fake clock past a one-second boundary so the second
+		// session has a distinct started_at (RFC3339 granularity is one
+		// second). Instant under synctest.
+		time.Sleep(1100 * time.Millisecond)
+		newerID := beginSessionViaCmd(t, g, "pkg:npm/list-newer")
 
-	out := stdout.String()
-	assert.Contains(t, out, "pkg:npm/list-older")
-	assert.Contains(t, out, "pkg:npm/list-newer")
+		var stdout bytes.Buffer
+		cmd := &AnalysisListCmd{Stdout: &stdout}
+		require.NoError(t, cmd.Run(g))
 
-	// Assert ordering: newer appears before older in the output.
-	newerIdx := strings.Index(out, newerID[:8])
-	olderIdx := strings.Index(out, "list-older")
-	require.GreaterOrEqual(t, newerIdx, 0)
-	require.GreaterOrEqual(t, olderIdx, 0)
-	assert.Less(t, newerIdx, olderIdx, "newer session must render first")
+		out := stdout.String()
+		assert.Contains(t, out, "pkg:npm/list-older")
+		assert.Contains(t, out, "pkg:npm/list-newer")
+
+		// Assert ordering: newer appears before older in the output.
+		newerIdx := strings.Index(out, newerID[:8])
+		olderIdx := strings.Index(out, "list-older")
+		require.GreaterOrEqual(t, newerIdx, 0)
+		require.GreaterOrEqual(t, olderIdx, 0)
+		assert.Less(t, newerIdx, olderIdx, "newer session must render first")
+	})
 }
 
 func TestAnalysisList_FilterByStatus(t *testing.T) {
@@ -454,7 +464,7 @@ func TestAnalysisList_SinceBogusInputIsUsageError(t *testing.T) {
 
 func TestAnalysisList_Limit(t *testing.T) {
 	g := newTestGlobals(t)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		_ = beginSessionViaCmd(t, g, "pkg:npm/limit-"+string(rune('a'+i)))
 	}
 
@@ -564,22 +574,28 @@ func TestAnalysisShow_JSONOutput(t *testing.T) {
 
 func TestAnalysisShow_ClosedRendersWallClock(t *testing.T) {
 	g := newTestGlobals(t)
-	sessionID := beginSessionViaCmd(t, g, "pkg:npm/show-wall")
-	time.Sleep(1100 * time.Millisecond)
-	require.NoError(t, (&AnalysisEndCmd{
-		SessionID: sessionID,
-		Status:    "completed",
-		Stdout:    &bytes.Buffer{},
-	}).Run(g))
 
-	var stdout bytes.Buffer
-	cmd := &AnalysisShowCmd{SessionID: sessionID, Stdout: &stdout}
-	require.NoError(t, cmd.Run(g))
+	synctest.Test(t, func(t *testing.T) {
+		sessionID := beginSessionViaCmd(t, g, "pkg:npm/show-wall")
+		// Advance the fake clock so ended_at - started_at is a non-zero
+		// wall-clock duration at one-second granularity. Both timestamps
+		// come from time.Now() (analysis.go); instant under synctest.
+		time.Sleep(1100 * time.Millisecond)
+		require.NoError(t, (&AnalysisEndCmd{
+			SessionID: sessionID,
+			Status:    "completed",
+			Stdout:    &bytes.Buffer{},
+		}).Run(g))
 
-	out := stdout.String()
-	assert.Contains(t, out, "wall=",
-		"closed session must show a wall-clock duration")
-	assert.Contains(t, out, "[completed]")
+		var stdout bytes.Buffer
+		cmd := &AnalysisShowCmd{SessionID: sessionID, Stdout: &stdout}
+		require.NoError(t, cmd.Run(g))
+
+		out := stdout.String()
+		assert.Contains(t, out, "wall=",
+			"closed session must show a wall-clock duration")
+		assert.Contains(t, out, "[completed]")
+	})
 }
 
 // --- test helpers ----------------------------------------------------------

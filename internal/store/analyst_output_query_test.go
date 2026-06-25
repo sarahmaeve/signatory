@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -382,44 +383,58 @@ func assertConclusionsEquivalent(t *testing.T, want, got []exchange.Conclusion) 
 //  3. Empty entity ID → ErrNilInput, matching the contract every
 //     other store method that takes an ID has.
 func TestGetLatestSynthesisForEntity_LatestRoundWins(t *testing.T) {
+	// The DB is opened OUTSIDE the synctest bubble on purpose:
+	// database/sql starts a connection-opener goroutine at open time,
+	// and a bubbled goroutine that outlives the bubble body would make
+	// synctest.Test block at bubble exit. Opened here, it stays outside.
+	//
+	// The body runs INSIDE the bubble so the store's time.Now()-derived
+	// ingested_at (analyst_output.go) follows synctest's fake clock. The
+	// 1100ms advance below costs no real wall time yet still crosses a
+	// one-second RFC3339 boundary — exactly the second-precision-stable
+	// ordering this test needs, minus the real sleep.
 	s := newTestDB(t)
-	ctx := context.Background()
 
-	input := synthesisTestInput()
-	sess := newSessionFixture(t, s, input.Target)
-	require.NoError(t, s.CreateAnalysisSession(ctx, sess))
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
 
-	// First synthesis round: ingest with one summary, then bump the
-	// supplement to make a different content_hash and ingest a second
-	// round. The second has a later ingested_at and is the "latest"
-	// the helper must surface.
-	first, err := s.IngestAnalystOutput(ctx, input, "round-1",
-		WithAnalysisSession(sess.ID))
-	require.NoError(t, err)
+		input := synthesisTestInput()
+		sess := newSessionFixture(t, s, input.Target)
+		require.NoError(t, s.CreateAnalysisSession(ctx, sess))
 
-	// Brief pause so ingested_at differs second-precision-stably.
-	time.Sleep(1100 * time.Millisecond)
+		// First synthesis round: ingest with one summary, then bump the
+		// supplement to make a different content_hash and ingest a second
+		// round. The second has a later ingested_at and is the "latest"
+		// the helper must surface.
+		first, err := s.IngestAnalystOutput(ctx, input, "round-1",
+			WithAnalysisSession(sess.ID))
+		require.NoError(t, err)
 
-	input2 := synthesisTestInput()
-	input2.SynthesisSupplement.Summary = "second-round summary, supersedes first"
-	input2.Attribution.Round = 2
-	second, err := s.IngestAnalystOutput(ctx, input2, "round-2",
-		WithAnalysisSession(sess.ID))
-	require.NoError(t, err)
-	require.NotEqual(t, first.OutputID, second.OutputID,
-		"second ingest must produce a distinct row (changed Summary changes content_hash)")
+		// Advance the fake clock past a one-second boundary so ingested_at
+		// differs second-precision-stably. Instant under synctest.
+		time.Sleep(1100 * time.Millisecond)
 
-	gotID, got, err := s.GetLatestSynthesisForEntity(ctx, first.EntityID)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	require.NotNil(t, got.SynthesisSupplement,
-		"GetLatestSynthesisForEntity must return a fully-hydrated AnalystOutput including SynthesisSupplement")
-	assert.Equal(t, second.OutputID, gotID,
-		"the output_id of the round-2 row must surface so MCP callers can navigate to that specific row")
-	assert.Equal(t, "second-round summary, supersedes first",
-		got.SynthesisSupplement.Summary,
-		"newest by ingested_at wins")
-	assert.Equal(t, 2, got.Attribution.Round)
+		input2 := synthesisTestInput()
+		input2.SynthesisSupplement.Summary = "second-round summary, supersedes first"
+		input2.Attribution.Round = 2
+		second, err := s.IngestAnalystOutput(ctx, input2, "round-2",
+			WithAnalysisSession(sess.ID))
+		require.NoError(t, err)
+		require.NotEqual(t, first.OutputID, second.OutputID,
+			"second ingest must produce a distinct row (changed Summary changes content_hash)")
+
+		gotID, got, err := s.GetLatestSynthesisForEntity(ctx, first.EntityID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.NotNil(t, got.SynthesisSupplement,
+			"GetLatestSynthesisForEntity must return a fully-hydrated AnalystOutput including SynthesisSupplement")
+		assert.Equal(t, second.OutputID, gotID,
+			"the output_id of the round-2 row must surface so MCP callers can navigate to that specific row")
+		assert.Equal(t, "second-round summary, supersedes first",
+			got.SynthesisSupplement.Summary,
+			"newest by ingested_at wins")
+		assert.Equal(t, 2, got.Attribution.Round)
+	})
 }
 
 func TestGetLatestSynthesisForEntity_EntityWithoutSynthesis(t *testing.T) {
@@ -449,7 +464,7 @@ func TestGetLatestSynthesisForEntity_EntityWithoutSynthesis(t *testing.T) {
 				Severity: exchange.Severity{Default: exchange.SeverityLow},
 				Category: "c",
 				Citations: []exchange.Citation{
-					{Path: "src/x.go", LineStart: ptrInt(1)},
+					{Path: "src/x.go", LineStart: new(1)},
 				},
 			},
 		},
@@ -469,10 +484,6 @@ func TestGetLatestSynthesisForEntity_EmptyEntityID(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNilInput,
 		"empty entityID is malformed; surface ErrNilInput consistently with other ID-taking methods")
 }
-
-// ptrInt returns a *int holding v. Local helper because conclusion
-// citations use *int for line numbers.
-func ptrInt(v int) *int { return &v }
 
 func derefStringPtr(s *string) string {
 	if s == nil {
